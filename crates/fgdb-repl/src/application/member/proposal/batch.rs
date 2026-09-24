@@ -7,11 +7,11 @@
 
 use std::future::Future;
 
-use super::{AppliedReplica, AppliedReplicaOutput, Application, ApplicationStateError};
+use super::{Application, ApplicationStateError, AppliedReplica, AppliedReplicaOutput};
 use crate::availability::proposal::ProposalPosition;
 use crate::availability::{
-    AvailabilityError, AvailabilityInput, AvailabilityLimits, StorageSets,
-    SystematicAssessment, assess_systematic,
+    AvailabilityError, AvailabilityInput, AvailabilityLimits, StorageSets, SystematicAssessment,
+    assess_systematic,
 };
 use crate::driver::RaftPublisher;
 use crate::replica::ReplicaError;
@@ -32,8 +32,12 @@ pub struct BatchProposalLimits {
 impl Default for BatchProposalLimits {
     fn default() -> Self {
         let per_command = AvailabilityLimits::default();
-        Self { max_commands: 128, max_work: per_command.max_work,
-            max_failure_cases: per_command.max_failure_cases, per_command }
+        Self {
+            max_commands: 128,
+            max_work: per_command.max_work,
+            max_failure_cases: per_command.max_failure_cases,
+            per_command,
+        }
     }
 }
 
@@ -45,12 +49,23 @@ pub struct ProposalRange {
     count: usize,
 }
 impl ProposalRange {
-    pub fn first(&self) -> ProposalPosition { self.first }
-    pub fn len(&self) -> usize { self.count }
-    pub fn is_empty(&self) -> bool { self.count == 0 }
+    pub fn first(&self) -> ProposalPosition {
+        self.first
+    }
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
     pub fn position(&self, offset: usize) -> Option<ProposalPosition> {
-        if offset >= self.count { return None; }
-        Some(ProposalPosition { index: self.first.index + offset as u64, ..self.first })
+        if offset >= self.count {
+            return None;
+        }
+        Some(ProposalPosition {
+            index: self.first.index + offset as u64,
+            ..self.first
+        })
     }
 }
 
@@ -62,12 +77,25 @@ pub struct AssessedBatch<'a, C> {
     range: ProposalRange,
 }
 impl<'a, C> AssessedBatch<'a, C> {
-    pub fn range(&self) -> ProposalRange { self.range }
-    pub fn entries(&self) -> impl ExactSizeIterator<Item = (ProposalPosition, &C, &SystematicAssessment<'a>)> {
+    pub fn range(&self) -> ProposalRange {
+        self.range
+    }
+    pub fn entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (ProposalPosition, &C, &SystematicAssessment<'a>)> {
         let first = self.range.first;
-        self.commands.iter().zip(self.assessments).enumerate().map(move |(offset, (command, assessment))| {
-            (ProposalPosition { index: first.index + offset as u64, ..first }, command, assessment)
-        })
+        self.commands.iter().zip(self.assessments).enumerate().map(
+            move |(offset, (command, assessment))| {
+                (
+                    ProposalPosition {
+                        index: first.index + offset as u64,
+                        ..first
+                    },
+                    command,
+                    assessment,
+                )
+            },
+        )
     }
 }
 
@@ -92,7 +120,9 @@ impl<'a, C> AssessedBatch<'a, C> {
 /// implementation of signatures, writer fencing or durable closure construction.
 pub trait PayloadBatchAuthority<C> {
     type Error;
-    type Permit<'a>: RaftPublisher<C, Error = Self::Error> where Self: 'a;
+    type Permit<'a>: RaftPublisher<C, Error = Self::Error>
+    where
+        Self: 'a;
 
     fn acquire_batch<'a>(
         &'a mut self,
@@ -108,9 +138,16 @@ pub enum BatchProposalError<A, I> {
     CommandBudget,
     InputCount,
     AllocationFailed,
-    WrongBasis { offset: usize },
-    WrongStorageForm { offset: usize },
-    Availability { offset: usize, error: AvailabilityError<I> },
+    WrongBasis {
+        offset: usize,
+    },
+    WrongStorageForm {
+        offset: usize,
+    },
+    Availability {
+        offset: usize,
+        error: AvailabilityError<I>,
+    },
     WorkBudget,
     FailureCaseBudget,
     Authority(A),
@@ -152,45 +189,81 @@ where
         inputs: &[AvailabilityInput],
         limits: BatchProposalLimits,
         checkpoint: &mut F,
-    ) -> Result<MemberBatchProposalOutput<C>, BatchProposalError<<A as PayloadBatchAuthority<C>>::Error, I>>
-    where F: FnMut() -> Result<(), I>,
+    ) -> Result<
+        MemberBatchProposalOutput<C>,
+        BatchProposalError<<A as PayloadBatchAuthority<C>>::Error, I>,
+    >
+    where
+        F: FnMut() -> Result<(), I>,
     {
         self.available().map_err(BatchProposalError::State)?;
-        self.replica.check_proposal_count(commands.len()).map_err(BatchProposalError::Raft)?;
-        if limits.max_commands == 0 || limits.max_commands > 1024
-            || limits.max_work == 0 || limits.max_failure_cases == 0
+        self.replica
+            .check_proposal_count(commands.len())
+            .map_err(BatchProposalError::Raft)?;
+        if limits.max_commands == 0
+            || limits.max_commands > 1024
+            || limits.max_work == 0
+            || limits.max_failure_cases == 0
         {
             return Err(BatchProposalError::InvalidLimits);
         }
-        if commands.len() > limits.max_commands { return Err(BatchProposalError::CommandBudget); }
-        if commands.len() != inputs.len() { return Err(BatchProposalError::InputCount); }
-        let state = self.replica.durable_state().map_err(BatchProposalError::Raft)?;
+        if commands.len() > limits.max_commands {
+            return Err(BatchProposalError::CommandBudget);
+        }
+        if commands.len() != inputs.len() {
+            return Err(BatchProposalError::InputCount);
+        }
+        let state = self
+            .replica
+            .durable_state()
+            .map_err(BatchProposalError::Raft)?;
         let config = state.configuration();
-        let first_index = state.snapshot().map_or(0, |cut| cut.index())
-            .checked_add(u64::try_from(state.entries().len()).map_err(|_| BatchProposalError::Raft(RaftError::CounterExhausted))?)
+        let first_index = state
+            .snapshot()
+            .map_or(0, |cut| cut.index())
+            .checked_add(
+                u64::try_from(state.entries().len())
+                    .map_err(|_| BatchProposalError::Raft(RaftError::CounterExhausted))?,
+            )
             .and_then(|last| last.checked_add(1))
             .ok_or(BatchProposalError::Raft(RaftError::CounterExhausted))?;
-        let positions = ProposalRange { first: ProposalPosition {
-            member: self.replica.id(), domain: config.domain(), configuration: config.identity(),
-            term: state.term(), index: first_index,
-        }, count: commands.len() };
+        let positions = ProposalRange {
+            first: ProposalPosition {
+                member: self.replica.id(),
+                domain: config.domain(),
+                configuration: config.identity(),
+                term: state.term(),
+                index: first_index,
+            },
+            count: commands.len(),
+        };
         // Inspect every basis before any potentially expensive assessment.
         for (offset, input) in inputs.iter().enumerate() {
             checkpoint().map_err(BatchProposalError::Interrupted)?;
             if input.policy.basis.domain != config.domain()
                 || input.policy.basis.configuration != config.identity()
-            { return Err(BatchProposalError::WrongBasis { offset }); }
-            if matches!(&input.policy.storage_sets, StorageSets::Joint { .. }) != config.joint_voters().is_some() {
+            {
+                return Err(BatchProposalError::WrongBasis { offset });
+            }
+            if matches!(&input.policy.storage_sets, StorageSets::Joint { .. })
+                != config.joint_voters().is_some()
+            {
                 return Err(BatchProposalError::WrongStorageForm { offset });
             }
         }
         let mut assessments = Vec::new();
-        assessments.try_reserve_exact(commands.len()).map_err(|_| BatchProposalError::AllocationFailed)?;
+        assessments
+            .try_reserve_exact(commands.len())
+            .map_err(|_| BatchProposalError::AllocationFailed)?;
         let mut work = limits.max_work;
         let mut cases = limits.max_failure_cases;
         for (offset, input) in inputs.iter().enumerate() {
-            if work == 0 { return Err(BatchProposalError::WorkBudget); }
-            if cases == 0 { return Err(BatchProposalError::FailureCaseBudget); }
+            if work == 0 {
+                return Err(BatchProposalError::WorkBudget);
+            }
+            if cases == 0 {
+                return Err(BatchProposalError::FailureCaseBudget);
+            }
             let individual = AvailabilityLimits {
                 max_work: limits.per_command.max_work.min(work),
                 max_failure_cases: limits.per_command.max_failure_cases.min(cases),
@@ -198,16 +271,29 @@ where
             };
             let assessment = assess_systematic(input, individual, checkpoint)
                 .map_err(|error| BatchProposalError::Availability { offset, error })?;
-            work = work.checked_sub(assessment.work()).ok_or(BatchProposalError::WorkBudget)?;
-            cases = cases.checked_sub(assessment.checked_failure_cases()).ok_or(BatchProposalError::FailureCaseBudget)?;
+            work = work
+                .checked_sub(assessment.work())
+                .ok_or(BatchProposalError::WorkBudget)?;
+            cases = cases
+                .checked_sub(assessment.checked_failure_cases())
+                .ok_or(BatchProposalError::FailureCaseBudget)?;
             assessments.push(assessment);
         }
         let output = {
-            let mut permit = self.application.application.acquire_batch(AssessedBatch {
-                commands: &commands, assessments: &assessments, range: positions,
-            }).await.map_err(BatchProposalError::Authority)?;
+            let mut permit = self
+                .application
+                .application
+                .acquire_batch(AssessedBatch {
+                    commands: &commands,
+                    assessments: &assessments,
+                    range: positions,
+                })
+                .await
+                .map_err(BatchProposalError::Authority)?;
             checkpoint().map_err(BatchProposalError::Interrupted)?;
-            self.replica.step(&mut permit, Event::ProposeBatch(commands)).await
+            self.replica
+                .step(&mut permit, Event::ProposeBatch(commands))
+                .await
                 .map_err(BatchProposalError::Replica)?
         };
         // Permit custody has ended only after publication. Preserve the same

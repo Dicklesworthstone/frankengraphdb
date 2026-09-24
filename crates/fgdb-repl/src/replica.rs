@@ -190,7 +190,9 @@ impl<C: Clone + Eq> Replica<C> {
     /// Observe the handoff started with step(TransferLeadership). Its exact ID
     /// may be used with AbortLeadershipTransfer for a local deadline. Continue
     /// heartbeat/liveness delivery; a missing attempt is not election success.
-    pub fn leadership_transfer(&self) -> Result<Option<&fgdb_order::LeadershipTransfer>, RaftError> {
+    pub fn leadership_transfer(
+        &self,
+    ) -> Result<Option<&fgdb_order::LeadershipTransfer>, RaftError> {
         self.raft.leadership_transfer()
     }
 
@@ -307,8 +309,12 @@ impl<C: Clone + Eq> Replica<C> {
             return None;
         };
         let Message::Appended {
-            term, request, success, ..
-        } = &envelope.message else {
+            term,
+            request,
+            success,
+            ..
+        } = &envelope.message
+        else {
             return None;
         };
         // The kernel owns the whole bounded window and its retirement rules.

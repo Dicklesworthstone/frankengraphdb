@@ -10,21 +10,24 @@ use std::sync::Arc;
 
 use fgdb_order::{PersistentState, Role};
 
-use super::{AppliedReplica, Application, ApplicationProgress, ApplicationStateError, position_at};
-use super::proposal::{MemberProposalError, MemberProposalOutput};
 use super::proposal::batch::{
     BatchProposalError, BatchProposalLimits, MemberBatchProposalOutput, PayloadBatchAuthority,
     ProposalRange,
 };
+use super::proposal::{MemberProposalError, MemberProposalOutput};
+use super::{Application, ApplicationProgress, ApplicationStateError, AppliedReplica, position_at};
 use crate::application::AppliedPosition;
-use crate::availability::{AvailabilityInput, AvailabilityLimits};
 use crate::availability::proposal::{PayloadProposalAuthority, ProposalPosition};
+use crate::availability::{AvailabilityInput, AvailabilityLimits};
 use crate::driver::RaftPublisher;
 
 /// Local invocation identity. Retaining it prevents address reuse after restart
 /// from making an old invocation valid in a newly recovered member.
 #[derive(Clone, Debug)]
-pub struct WriteId { incarnation: Arc<()>, serial: u64 }
+pub struct WriteId {
+    incarnation: Arc<()>,
+    serial: u64,
+}
 
 impl PartialEq for WriteId {
     fn eq(&self, other: &Self) -> bool {
@@ -64,7 +67,10 @@ impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error for SubmitErro
 
 /// Dispatch the output before waiting. This is not a client commit receipt.
 #[derive(Debug)]
-pub struct WriteSubmission<C> { pub id: WriteId, pub output: MemberProposalOutput<C> }
+pub struct WriteSubmission<C> {
+    pub id: WriteId,
+    pub output: MemberProposalOutput<C>,
+}
 
 /// One invocation per command, in the same order as the locally published
 /// group. Use ordinary try_write/cancel_write for each ID; there is deliberately
@@ -88,15 +94,26 @@ impl<A: core::fmt::Debug, I: core::fmt::Debug> core::fmt::Display for BatchSubmi
 impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error for BatchSubmitError<A, I> {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnknownReason { LeadershipLost, RecoveryRequired, HistoryUnavailable }
+pub enum UnknownReason {
+    LeadershipLost,
+    RecoveryRequired,
+    HistoryUnavailable,
+}
 
 /// No negative transaction conclusion follows from this result. Resolve the
 /// original operation through the canonical authorized outcome/idempotency path.
 #[derive(Debug)]
-pub struct UnknownWrite { id: WriteId, reason: UnknownReason }
+pub struct UnknownWrite {
+    id: WriteId,
+    reason: UnknownReason,
+}
 impl UnknownWrite {
-    pub fn id(&self) -> &WriteId { &self.id }
-    pub fn reason(&self) -> UnknownReason { self.reason }
+    pub fn id(&self) -> &WriteId {
+        &self.id
+    }
+    pub fn reason(&self) -> UnknownReason {
+        self.reason
+    }
 }
 
 /// One consumed invocation's verified progress floor, NOT a read view, lease,
@@ -108,9 +125,15 @@ pub struct VisibleWrite {
     progress: ApplicationProgress,
 }
 impl VisibleWrite {
-    pub fn id(&self) -> &WriteId { &self.id }
-    pub fn position(&self) -> ProposalPosition { self.position }
-    pub fn progress(&self) -> ApplicationProgress { self.progress }
+    pub fn id(&self) -> &WriteId {
+        &self.id
+    }
+    pub fn position(&self) -> ProposalPosition {
+        self.position
+    }
+    pub fn progress(&self) -> ApplicationProgress {
+        self.progress
+    }
 }
 
 #[derive(Debug)]
@@ -137,39 +160,84 @@ pub(super) struct WriteTracker {
 }
 impl WriteTracker {
     pub(super) fn new() -> Self {
-        Self { incarnation: Arc::new(()), serial: 0, limit: 1024, pending: Vec::new() }
+        Self {
+            incarnation: Arc::new(()),
+            serial: 0,
+            limit: 1024,
+            pending: Vec::new(),
+        }
     }
     fn find(&self, id: &WriteId) -> Option<usize> {
-        if !Arc::ptr_eq(&self.incarnation, &id.incarnation) { return None; }
+        if !Arc::ptr_eq(&self.incarnation, &id.incarnation) {
+            return None;
+        }
         self.pending.iter().position(|write| write.id == *id)
     }
     fn reserve(&mut self) -> Result<WriteId, WriteError> {
-        if self.pending.len() >= self.limit { return Err(WriteError::Backpressure); }
-        let serial = self.serial.checked_add(1).ok_or(WriteError::CounterExhausted)?;
-        self.pending.try_reserve(1).map_err(|_| WriteError::AllocationFailed)?;
-        let id = WriteId { incarnation: Arc::clone(&self.incarnation), serial };
+        if self.pending.len() >= self.limit {
+            return Err(WriteError::Backpressure);
+        }
+        let serial = self
+            .serial
+            .checked_add(1)
+            .ok_or(WriteError::CounterExhausted)?;
+        self.pending
+            .try_reserve(1)
+            .map_err(|_| WriteError::AllocationFailed)?;
+        let id = WriteId {
+            incarnation: Arc::clone(&self.incarnation),
+            serial,
+        };
         self.serial = serial;
-        self.pending.push(PendingWrite { id: id.clone(), position: None, committed: false, lost: false });
+        self.pending.push(PendingWrite {
+            id: id.clone(),
+            position: None,
+            committed: false,
+            lost: false,
+        });
         Ok(id)
     }
     fn remove(&mut self, id: &WriteId) -> bool {
-        if let Some(index) = self.find(id) { self.pending.remove(index); true } else { false }
+        if let Some(index) = self.find(id) {
+            self.pending.remove(index);
+            true
+        } else {
+            false
+        }
     }
     fn reserve_group(&mut self, count: usize) -> Result<Vec<WriteId>, WriteError> {
-        if count == 0 { return Err(WriteError::InvalidLimit); }
-        if count > self.limit.saturating_sub(self.pending.len()) { return Err(WriteError::Backpressure); }
+        if count == 0 {
+            return Err(WriteError::InvalidLimit);
+        }
+        if count > self.limit.saturating_sub(self.pending.len()) {
+            return Err(WriteError::Backpressure);
+        }
         let count_u64 = u64::try_from(count).map_err(|_| WriteError::CounterExhausted)?;
-        let last = self.serial.checked_add(count_u64).ok_or(WriteError::CounterExhausted)?;
+        let last = self
+            .serial
+            .checked_add(count_u64)
+            .ok_or(WriteError::CounterExhausted)?;
         // Reserve BOTH output IDs and tracker slots before consuming a serial
         // or installing any waiter. Nothing below allocates or calls user code.
         let mut ids = Vec::new();
-        ids.try_reserve_exact(count).map_err(|_| WriteError::AllocationFailed)?;
-        self.pending.try_reserve(count).map_err(|_| WriteError::AllocationFailed)?;
+        ids.try_reserve_exact(count)
+            .map_err(|_| WriteError::AllocationFailed)?;
+        self.pending
+            .try_reserve(count)
+            .map_err(|_| WriteError::AllocationFailed)?;
         let previous = self.serial;
         self.serial = last;
         for offset in 1..=count_u64 {
-            let id = WriteId { incarnation: Arc::clone(&self.incarnation), serial: previous + offset };
-            self.pending.push(PendingWrite { id: id.clone(), position: None, committed: false, lost: false });
+            let id = WriteId {
+                incarnation: Arc::clone(&self.incarnation),
+                serial: previous + offset,
+            };
+            self.pending.push(PendingWrite {
+                id: id.clone(),
+                position: None,
+                committed: false,
+                lost: false,
+            });
             ids.push(id);
         }
         Ok(ids)
@@ -177,28 +245,51 @@ impl WriteTracker {
     // Only GroupAdmission's complete, ordered reserve_group result reaches
     // this helper. Remove its exact contiguous serial interval in one pass.
     fn remove_group(&mut self, ids: &[WriteId]) {
-        let (Some(first), Some(last)) = (ids.first(), ids.last()) else { return };
-        if !Arc::ptr_eq(&first.incarnation, &self.incarnation) { return; }
-        self.pending.retain(|write| write.id.serial < first.serial || write.id.serial > last.serial);
+        let (Some(first), Some(last)) = (ids.first(), ids.last()) else {
+            return;
+        };
+        if !Arc::ptr_eq(&first.incarnation, &self.incarnation) {
+            return;
+        }
+        self.pending
+            .retain(|write| write.id.serial < first.serial || write.id.serial > last.serial);
     }
     fn bind_group(&mut self, ids: &[WriteId], positions: ProposalRange) -> Result<(), WriteError> {
-        if ids.len() != positions.len() { return Err(WriteError::HistoryMismatch); }
+        if ids.len() != positions.len() {
+            return Err(WriteError::HistoryMismatch);
+        }
         let first = ids.first().ok_or(WriteError::HistoryMismatch)?;
         let start = self.find(first).ok_or(WriteError::HistoryMismatch)?;
-        let end = start.checked_add(ids.len()).ok_or(WriteError::HistoryMismatch)?;
-        let slots = self.pending.get_mut(start..end).ok_or(WriteError::HistoryMismatch)?;
-        if slots.iter().zip(ids).any(|(slot, id)| slot.id != *id || slot.position.is_some()) {
+        let end = start
+            .checked_add(ids.len())
+            .ok_or(WriteError::HistoryMismatch)?;
+        let slots = self
+            .pending
+            .get_mut(start..end)
+            .ok_or(WriteError::HistoryMismatch)?;
+        if slots
+            .iter()
+            .zip(ids)
+            .any(|(slot, id)| slot.id != *id || slot.position.is_some())
+        {
             return Err(WriteError::HistoryMismatch);
         }
         for (offset, slot) in slots.iter_mut().enumerate() {
-            slot.position = Some(positions.position(offset).ok_or(WriteError::HistoryMismatch)?);
+            slot.position = Some(
+                positions
+                    .position(offset)
+                    .ok_or(WriteError::HistoryMismatch)?,
+            );
         }
         Ok(())
     }
     pub(super) fn observe<C>(&mut self, state: &PersistentState<C>, role: Role) {
         for write in &mut self.pending {
-            let Some(position) = write.position else { continue; };
-            if role != Role::Leader || position.term != state.term()
+            let Some(position) = write.position else {
+                continue;
+            };
+            if role != Role::Leader
+                || position.term != state.term()
                 || position.domain != state.configuration().domain()
                 || position.configuration != state.configuration().identity()
             {
@@ -207,15 +298,24 @@ impl WriteTracker {
             // Capture exact durable commitment BEFORE any later compaction.
             // A saved index alone, or a newly installed higher snapshot, is not
             // evidence that this invocation's entry was ever committed.
-            if !write.lost && !write.committed && state.commit_index() >= position.index
-                && position_at(state, position.index) == Some(AppliedPosition { index: position.index, term: position.term })
+            if !write.lost
+                && !write.committed
+                && state.commit_index() >= position.index
+                && position_at(state, position.index)
+                    == Some(AppliedPosition {
+                        index: position.index,
+                        term: position.term,
+                    })
             {
                 write.committed = true;
             }
         }
     }
     fn unknown(&mut self, index: usize, reason: UnknownReason) -> WriteState {
-        WriteState::Unknown(UnknownWrite { id: self.pending.remove(index).id, reason })
+        WriteState::Unknown(UnknownWrite {
+            id: self.pending.remove(index).id,
+            reason,
+        })
     }
 }
 
@@ -224,16 +324,24 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
     /// and unconsumed Unknown results. Read admission has its own independent
     /// bound. Lowering a limit may not evict invocations already admitted.
     pub fn set_write_limit(&mut self, maximum: usize) -> Result<(), WriteError> {
-        if maximum == 0 || maximum > 1024 { return Err(WriteError::InvalidLimit); }
-        if maximum < self.writes.pending.len() { return Err(WriteError::Backpressure); }
+        if maximum == 0 || maximum > 1024 {
+            return Err(WriteError::InvalidLimit);
+        }
+        if maximum < self.writes.pending.len() {
+            return Err(WriteError::Backpressure);
+        }
         self.writes.limit = maximum;
         Ok(())
     }
-    pub fn pending_writes(&self) -> usize { self.writes.pending.len() }
+    pub fn pending_writes(&self) -> usize {
+        self.writes.pending.len()
+    }
 
     /// Cancel only the local waiter. The command may still commit and apply.
     /// Spent serials and durable prepared ownership are never reset or refunded.
-    pub fn cancel_write(&mut self, id: &WriteId) -> bool { self.writes.remove(id) }
+    pub fn cancel_write(&mut self, id: &WriteId) -> bool {
+        self.writes.remove(id)
+    }
 
     /// Poll an original invocation without I/O, cloning payloads, or waiting
     /// inside consensus. Pending states keep their admission slot. Visible and
@@ -249,26 +357,54 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         if self.available().is_err() {
             return Ok(self.writes.unknown(index, UnknownReason::RecoveryRequired));
         }
-        let state = self.replica.durable_state().map_err(|error| WriteError::Member(ApplicationStateError::Raft(error)))?;
-        let role = self.replica.role().map_err(|error| WriteError::Member(ApplicationStateError::Raft(error)))?;
+        let state = self
+            .replica
+            .durable_state()
+            .map_err(|error| WriteError::Member(ApplicationStateError::Raft(error)))?;
+        let role = self
+            .replica
+            .role()
+            .map_err(|error| WriteError::Member(ApplicationStateError::Raft(error)))?;
         self.writes.observe(state, role);
         let write = &self.writes.pending[index];
-        if write.lost { return Ok(self.writes.unknown(index, UnknownReason::LeadershipLost)); }
+        if write.lost {
+            return Ok(self.writes.unknown(index, UnknownReason::LeadershipLost));
+        }
         let position = write.position.ok_or(WriteError::HistoryMismatch)?;
         if !write.committed {
-            if position_at(state, position.index) != Some(AppliedPosition { index: position.index, term: position.term }) {
-                return Ok(self.writes.unknown(index, UnknownReason::HistoryUnavailable));
+            if position_at(state, position.index)
+                != Some(AppliedPosition {
+                    index: position.index,
+                    term: position.term,
+                })
+            {
+                return Ok(self
+                    .writes
+                    .unknown(index, UnknownReason::HistoryUnavailable));
             }
-            return Ok(WriteState::PendingCommit { required: position.index, committed: state.commit_index() });
+            return Ok(WriteState::PendingCommit {
+                required: position.index,
+                committed: state.commit_index(),
+            });
         }
         let progress = self.application.progress;
         if progress.applied.index < position.index {
-            return Ok(WriteState::PendingApplication { required: position.index, applied: progress.applied.index });
+            return Ok(WriteState::PendingApplication {
+                required: position.index,
+                applied: progress.applied.index,
+            });
         }
         if progress.visible_index < position.index {
-            return Ok(WriteState::PendingAudit { required: position.index, visible: progress.visible_index });
+            return Ok(WriteState::PendingAudit {
+                required: position.index,
+                visible: progress.visible_index,
+            });
         }
-        Ok(WriteState::Visible(VisibleWrite { id: self.writes.pending.remove(index).id, position, progress }))
+        Ok(WriteState::Visible(VisibleWrite {
+            id: self.writes.pending.remove(index).id,
+            position,
+            progress,
+        }))
     }
 }
 
@@ -289,28 +425,50 @@ where
         limits: AvailabilityLimits,
         checkpoint: &mut F,
     ) -> Result<WriteSubmission<C>, SubmitError<<A as PayloadProposalAuthority<C>>::Error, I>>
-    where F: FnMut() -> Result<(), I>,
+    where
+        F: FnMut() -> Result<(), I>,
     {
-        self.available().map_err(|error| SubmitError::Admission(WriteError::Member(error)))?;
+        self.available()
+            .map_err(|error| SubmitError::Admission(WriteError::Member(error)))?;
         let id = self.writes.reserve().map_err(SubmitError::Admission)?;
-        let mut admission = Admission { member: self, id: id.clone(), armed: true };
-        let output = admission.member.propose_available(command, input, limits, checkpoint).await
+        let mut admission = Admission {
+            member: self,
+            id: id.clone(),
+            armed: true,
+        };
+        let output = admission
+            .member
+            .propose_available(command, input, limits, checkpoint)
+            .await
             .map_err(SubmitError::Proposal)?;
-        let index = admission.member.writes.find(&id)
+        let index = admission
+            .member
+            .writes
+            .find(&id)
             .ok_or(SubmitError::Admission(WriteError::HistoryMismatch))?;
         admission.member.writes.pending[index].position = Some(output.position);
-        let state = admission.member.replica.durable_state()
-            .map_err(|error| SubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error))))?;
-        admission.member.writes.observe(state, output.member.consensus.role);
+        let state = admission.member.replica.durable_state().map_err(|error| {
+            SubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
+        })?;
+        admission
+            .member
+            .writes
+            .observe(state, output.member.consensus.role);
         admission.armed = false;
         Ok(WriteSubmission { id, output })
     }
 }
 
-struct Admission<'a, C, A> { member: &'a mut AppliedReplica<C, A>, id: WriteId, armed: bool }
+struct Admission<'a, C, A> {
+    member: &'a mut AppliedReplica<C, A>,
+    id: WriteId,
+    armed: bool,
+}
 impl<C, A> Drop for Admission<'_, C, A> {
     fn drop(&mut self) {
-        if self.armed { self.member.writes.remove(&self.id); }
+        if self.armed {
+            self.member.writes.remove(&self.id);
+        }
     }
 }
 
@@ -334,17 +492,35 @@ where
         limits: BatchProposalLimits,
         checkpoint: &mut F,
     ) -> Result<WriteBatchSubmission<C>, BatchSubmitError<<A as PayloadBatchAuthority<C>>::Error, I>>
-    where F: FnMut() -> Result<(), I>,
+    where
+        F: FnMut() -> Result<(), I>,
     {
-        self.available().map_err(|error| BatchSubmitError::Admission(WriteError::Member(error)))?;
-        self.replica.check_proposal_count(commands.len()).map_err(|error| {
-            BatchSubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
-        })?;
-        let ids = self.writes.reserve_group(commands.len()).map_err(BatchSubmitError::Admission)?;
-        let mut admission = GroupAdmission { member: self, ids, armed: true };
-        let output = admission.member.propose_batch_available(commands, inputs, limits, checkpoint)
-            .await.map_err(BatchSubmitError::Proposal)?;
-        if let Err(error) = admission.member.writes.bind_group(&admission.ids, output.positions) {
+        self.available()
+            .map_err(|error| BatchSubmitError::Admission(WriteError::Member(error)))?;
+        self.replica
+            .check_proposal_count(commands.len())
+            .map_err(|error| {
+                BatchSubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
+            })?;
+        let ids = self
+            .writes
+            .reserve_group(commands.len())
+            .map_err(BatchSubmitError::Admission)?;
+        let mut admission = GroupAdmission {
+            member: self,
+            ids,
+            armed: true,
+        };
+        let output = admission
+            .member
+            .propose_batch_available(commands, inputs, limits, checkpoint)
+            .await
+            .map_err(BatchSubmitError::Proposal)?;
+        if let Err(error) = admission
+            .member
+            .writes
+            .bind_group(&admission.ids, output.positions)
+        {
             // The append has already happened. An inconsistent output history
             // cannot be retried as a known pre-publication refusal.
             admission.member.application.poisoned = true;
@@ -353,9 +529,15 @@ where
         let state = admission.member.replica.durable_state().map_err(|error| {
             BatchSubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
         })?;
-        admission.member.writes.observe(state, output.member.consensus.role);
+        admission
+            .member
+            .writes
+            .observe(state, output.member.consensus.role);
         admission.armed = false;
-        Ok(WriteBatchSubmission { ids: std::mem::take(&mut admission.ids), output })
+        Ok(WriteBatchSubmission {
+            ids: std::mem::take(&mut admission.ids),
+            output,
+        })
     }
 }
 
@@ -366,7 +548,9 @@ struct GroupAdmission<'a, C, A> {
 }
 impl<C, A> Drop for GroupAdmission<'_, C, A> {
     fn drop(&mut self) {
-        if self.armed { self.member.writes.remove_group(&self.ids); }
+        if self.armed {
+            self.member.writes.remove_group(&self.ids);
+        }
     }
 }
 

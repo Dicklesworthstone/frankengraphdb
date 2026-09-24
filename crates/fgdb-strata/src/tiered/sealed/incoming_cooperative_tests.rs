@@ -1,12 +1,12 @@
 //! Actual future/poll boundaries over a private admitted storage-unit fixture.
 //! This is not production filesystem, transport or capability-verifier evidence.
 
-use super::*;
 use super::super::{SealedLimits, SealedScope, image};
-use crate::{AdjacencyEntry, PartitionRootVersion};
+use super::*;
 use crate::compact::Compaction;
-use asupersync::{Budget, runtime::RuntimeBuilder};
+use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::runtime::yield_now::yield_now;
+use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb_types::{BranchId, EId, GraphId, ObjectId, PurposeContexts};
 use std::cell::Cell;
 use std::future::Future;
@@ -15,32 +15,63 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 fn source(count: usize, one_group: bool) -> SealedPartition {
-    let mut entries: Vec<_> = (0..count).map(|i| AdjacencyEntry {
-        src: VId(if one_group { 1 } else { (i % 13) as u128 }),
-        dst: VId(if one_group { 7 } else { u128::MAX - (i % 7) as u128 }),
-        relation: RelationId(if one_group { 1 } else { 1 + (i % 3) as u64 }),
-        eid: EId(u128::MAX - i as u128),
-        created_at: CommitSeq(1), retired_at: (i % 4 == 0).then_some(CommitSeq(3)),
-    }).collect();
+    let mut entries: Vec<_> = (0..count)
+        .map(|i| AdjacencyEntry {
+            src: VId(if one_group { 1 } else { (i % 13) as u128 }),
+            dst: VId(if one_group {
+                7
+            } else {
+                u128::MAX - (i % 7) as u128
+            }),
+            relation: RelationId(if one_group { 1 } else { 1 + (i % 3) as u64 }),
+            eid: EId(u128::MAX - i as u128),
+            created_at: CommitSeq(1),
+            retired_at: (i % 4 == 0).then_some(CommitSeq(3)),
+        })
+        .collect();
     entries.sort_by_key(|e| (e.src, e.relation, e.dst, e.eid, e.created_at));
-    let blocks: Vec<_> = entries.chunks(120).map(<[AdjacencyEntry]>::to_vec).collect();
+    let blocks: Vec<_> = entries
+        .chunks(120)
+        .map(<[AdjacencyEntry]>::to_vec)
+        .collect();
     let block_props = (0..blocks.len()).map(|_| None).collect();
     let limits = SealedLimits::default();
-    let image = image::build(Compaction {
-        blocks, block_props, dropped: 0, superseded: 0,
-    }, limits, &mut || Ok(())).unwrap();
-    SealedPartition::finish(SealedScope {
-        source_root: PartitionRootVersion(ObjectId([0x47; 32])),
-        graph: GraphId(1), branch: BranchId(1), partition: 1,
-        floor: CommitSeq(1), publication: CommitSeq(10),
-    }, image, limits, &mut || Ok(())).unwrap()
+    let image = image::build(
+        Compaction {
+            blocks,
+            block_props,
+            dropped: 0,
+            superseded: 0,
+        },
+        limits,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    SealedPartition::finish(
+        SealedScope {
+            source_root: PartitionRootVersion(ObjectId([0x47; 32])),
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 1,
+            floor: CommitSeq(1),
+            publication: CommitSeq(10),
+        },
+        image,
+        limits,
+        &mut || Ok(()),
+    )
+    .unwrap()
 }
 
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 impl Wake for Wakes {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::Relaxed); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::Relaxed); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 fn drive<F: Future>(future: F, guards: &Cell<usize>, quantum: usize) -> (F::Output, usize) {
     let wakes = Arc::new(Wakes::default());
@@ -51,7 +82,10 @@ fn drive<F: Future>(future: F, guards: &Cell<usize>, quantum: usize) -> (F::Outp
     loop {
         let before = guards.get();
         let result = future.as_mut().poll(&mut task);
-        assert!(guards.get() - before <= quantum + 2, "unbounded checkpoint work in a poll");
+        assert!(
+            guards.get() - before <= quantum + 2,
+            "unbounded checkpoint work in a poll"
+        );
         match result {
             Poll::Ready(result) => {
                 assert_eq!(wakes.0.load(Ordering::Relaxed), pending);
@@ -65,7 +99,9 @@ fn drive<F: Future>(future: F, guards: &Cell<usize>, quantum: usize) -> (F::Outp
         }
     }
 }
-fn quantum(n: usize) -> NonZeroUsize { NonZeroUsize::new(n).unwrap() }
+fn quantum(n: usize) -> NonZeroUsize {
+    NonZeroUsize::new(n).unwrap()
+}
 
 // Independent canonical permutation oracle, not the synchronous builder.
 fn expected(source: &SealedPartition) -> Vec<(VId, RelationId, u64)> {
@@ -105,15 +141,27 @@ fn cooperative_build_preserves_canonical_locators_exact_stats_and_source_ownersh
         for one_group in [false, true] {
             let source = source(count, one_group);
             let expected = expected(&source);
-            let sync = source.incoming_index(&cx, IncomingIndexLimits::default()).unwrap();
+            let sync = source
+                .incoming_index(&cx, IncomingIndexLimits::default())
+                .unwrap();
             assert_eq!(actual(&sync), expected);
             let mut steps = None;
             for q in [1, 3, 7, 257] {
                 let guards = Cell::new(0);
-                let (result, pending) = drive(source.incoming_index_cooperative_with_checkpoint(
-                    &cx, IncomingIndexLimits::default(), quantum(q), yield_now,
-                    || { guards.set(guards.get() + 1); Ok::<(), SealedError>(()) },
-                ), &guards, q);
+                let (result, pending) = drive(
+                    source.incoming_index_cooperative_with_checkpoint(
+                        &cx,
+                        IncomingIndexLimits::default(),
+                        quantum(q),
+                        yield_now,
+                        || {
+                            guards.set(guards.get() + 1);
+                            Ok::<(), SealedError>(())
+                        },
+                    ),
+                    &guards,
+                    q,
+                );
                 let built = result.unwrap();
                 assert_eq!(actual(&built), expected);
                 assert_eq!(built.stats(), sync.stats());
@@ -124,10 +172,16 @@ fn cooperative_build_preserves_canonical_locators_exact_stats_and_source_ownersh
                 // do not hide restart/rescan work in construction checkpoints.
                 let work = guards.get() - pending;
                 assert_eq!(*steps.get_or_insert(work), work);
-                if count > 1 && q == 1 { assert!(pending > count); }
+                if count > 1 && q == 1 {
+                    assert!(pending > count);
+                }
                 for row in &built.index.rows {
-                    let mut a = built.row(&cx, row.destination, row.relation, CommitSeq(5)).unwrap();
-                    let mut b = sync.row(&cx, row.destination, row.relation, CommitSeq(5)).unwrap();
+                    let mut a = built
+                        .row(&cx, row.destination, row.relation, CommitSeq(5))
+                        .unwrap();
+                    let mut b = sync
+                        .row(&cx, row.destination, row.relation, CommitSeq(5))
+                        .unwrap();
                     loop {
                         let left = a.next(&cx).unwrap();
                         let right = b.next(&cx).unwrap();
@@ -148,9 +202,14 @@ fn cooperative_build_preserves_canonical_locators_exact_stats_and_source_ownersh
 }
 
 #[derive(Debug)]
-enum Refusal { Source(SealedError), Guard(usize) }
+enum Refusal {
+    Source(SealedError),
+    Guard(usize),
+}
 impl From<SealedError> for Refusal {
-    fn from(error: SealedError) -> Self { Self::Source(error) }
+    fn from(error: SealedError) -> Self {
+        Self::Source(error)
+    }
 }
 
 #[test]
@@ -162,20 +221,41 @@ fn all_live_refusal_cuts_and_suspended_revocations_abandon_without_an_index() {
     let source = source(24, false);
     let anchor = source.anchor();
     let guards = Cell::new(0);
-    let (expected, pauses) = drive(source.incoming_index_cooperative_with_checkpoint(
-        &cx, IncomingIndexLimits::default(), quantum(3), yield_now,
-        || { guards.set(guards.get() + 1); Ok::<(), Refusal>(()) },
-    ), &guards, 3);
+    let (expected, pauses) = drive(
+        source.incoming_index_cooperative_with_checkpoint(
+            &cx,
+            IncomingIndexLimits::default(),
+            quantum(3),
+            yield_now,
+            || {
+                guards.set(guards.get() + 1);
+                Ok::<(), Refusal>(())
+            },
+        ),
+        &guards,
+        3,
+    );
     let expected = expected.unwrap();
     for stop in 1..=guards.get() {
         let seen = Cell::new(0);
-        let (result, _) = drive(source.incoming_index_cooperative_with_checkpoint(
-            &cx, IncomingIndexLimits::default(), quantum(3), yield_now,
-            || {
-                seen.set(seen.get() + 1);
-                if seen.get() == stop { Err(Refusal::Guard(stop)) } else { Ok(()) }
-            },
-        ), &seen, 3);
+        let (result, _) = drive(
+            source.incoming_index_cooperative_with_checkpoint(
+                &cx,
+                IncomingIndexLimits::default(),
+                quantum(3),
+                yield_now,
+                || {
+                    seen.set(seen.get() + 1);
+                    if seen.get() == stop {
+                        Err(Refusal::Guard(stop))
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            &seen,
+            3,
+        );
         assert!(matches!(result, Err(Refusal::Guard(at)) if at == stop));
         assert_eq!(seen.get(), stop);
         assert_eq!(source.anchor(), anchor);
@@ -186,13 +266,22 @@ fn all_live_refusal_cuts_and_suspended_revocations_abandon_without_an_index() {
         let waker = Waker::from(Arc::new(Wakes::default()));
         let mut task = Context::from_waker(&waker);
         let mut future = Box::pin(source.incoming_index_cooperative_with_checkpoint(
-            &cx, IncomingIndexLimits::default(), quantum(3), yield_now,
+            &cx,
+            IncomingIndexLimits::default(),
+            quantum(3),
+            yield_now,
             || {
                 seen.set(seen.get() + 1);
-                if revoked.get() { Err(Refusal::Guard(stop)) } else { Ok(()) }
+                if revoked.get() {
+                    Err(Refusal::Guard(stop))
+                } else {
+                    Ok(())
+                }
             },
         ));
-        for _ in 0..stop { assert!(future.as_mut().poll(&mut task).is_pending()); }
+        for _ in 0..stop {
+            assert!(future.as_mut().poll(&mut task).is_pending());
+        }
         let before = seen.get();
         revoked.set(true);
         let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
@@ -203,16 +292,26 @@ fn all_live_refusal_cuts_and_suspended_revocations_abandon_without_an_index() {
         drop(future);
         // Separately test plain drop at the same stage, without driving to EOF.
         let mut abandoned = Box::pin(source.incoming_index_cooperative(
-            &cx, IncomingIndexLimits::default(), quantum(3), yield_now,
+            &cx,
+            IncomingIndexLimits::default(),
+            quantum(3),
+            yield_now,
         ));
-        for _ in 0..stop { assert!(abandoned.as_mut().poll(&mut task).is_pending()); }
+        for _ in 0..stop {
+            assert!(abandoned.as_mut().poll(&mut task).is_pending());
+        }
         drop(abandoned);
         assert_eq!(source.anchor(), anchor);
         assert_eq!(contexts.outstanding_obligations(), 0);
     }
-    let retry = runtime.block_on(source.incoming_index_cooperative(
-        &cx, IncomingIndexLimits::default(), quantum(7), yield_now,
-    )).unwrap();
+    let retry = runtime
+        .block_on(source.incoming_index_cooperative(
+            &cx,
+            IncomingIndexLimits::default(),
+            quantum(7),
+            yield_now,
+        ))
+        .unwrap();
     assert_eq!(actual(&retry), actual(&expected));
     assert_eq!(retry.stats(), expected.stats());
 }
@@ -224,35 +323,83 @@ fn native_allocation_admission_and_typed_source_errors_do_not_reset_on_resume() 
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
     let source = source(40, false);
-    let sync = source.incoming_index(&cx, IncomingIndexLimits::default()).unwrap();
+    let sync = source
+        .incoming_index(&cx, IncomingIndexLimits::default())
+        .unwrap();
     let exact = IncomingIndexLimits {
         max_rows: sync.stats().rows,
         max_incidences: sync.stats().incidences,
         max_workspace_bytes: sync.stats().charged_workspace_bytes,
     };
     for q in [1, 17] {
-        let built = runtime.block_on(source.incoming_index_cooperative(
-            &cx, exact, quantum(q), yield_now,
-        )).unwrap();
+        let built = runtime
+            .block_on(source.incoming_index_cooperative(&cx, exact, quantum(q), yield_now))
+            .unwrap();
         assert_eq!(built.stats(), sync.stats());
         for (resource, limits) in [
-            ("incoming incidences", IncomingIndexLimits { max_incidences: exact.max_incidences - 1, ..exact }),
-            ("incoming rows", IncomingIndexLimits { max_rows: exact.max_rows - 1, ..exact }),
-            ("incoming workspace bytes", IncomingIndexLimits { max_workspace_bytes: exact.max_workspace_bytes - 1, ..exact }),
-            ("incoming workspace bytes", IncomingIndexLimits { max_workspace_bytes: 0, ..exact }),
+            (
+                "incoming incidences",
+                IncomingIndexLimits {
+                    max_incidences: exact.max_incidences - 1,
+                    ..exact
+                },
+            ),
+            (
+                "incoming rows",
+                IncomingIndexLimits {
+                    max_rows: exact.max_rows - 1,
+                    ..exact
+                },
+            ),
+            (
+                "incoming workspace bytes",
+                IncomingIndexLimits {
+                    max_workspace_bytes: exact.max_workspace_bytes - 1,
+                    ..exact
+                },
+            ),
+            (
+                "incoming workspace bytes",
+                IncomingIndexLimits {
+                    max_workspace_bytes: 0,
+                    ..exact
+                },
+            ),
         ] {
             let result = runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
-                &cx, limits, quantum(q), yield_now, || Ok::<(), Refusal>(()),
+                &cx,
+                limits,
+                quantum(q),
+                yield_now,
+                || Ok::<(), Refusal>(()),
             ));
-            assert!(matches!(result, Err(Refusal::Source(SealedError::Limit { resource: actual, .. })) if actual == resource));
+            assert!(
+                matches!(result, Err(Refusal::Source(SealedError::Limit { resource: actual, .. })) if actual == resource)
+            );
             assert!(source.incoming_index(&cx, limits).is_err());
         }
     }
     let mut checks = 0;
-    assert!(matches!(runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
-        &cx, IncomingIndexLimits { max_incidences: 0, ..exact }, quantum(1),
-        || -> std::future::Ready<()> { panic!("source preflight must precede first scheduling yield") },
-        || { checks += 1; Ok::<(), Refusal>(()) },
-    )), Err(Refusal::Source(SealedError::Limit { resource: "incoming incidences", .. }))));
+    assert!(matches!(
+        runtime.block_on(source.incoming_index_cooperative_with_checkpoint(
+            &cx,
+            IncomingIndexLimits {
+                max_incidences: 0,
+                ..exact
+            },
+            quantum(1),
+            || -> std::future::Ready<()> {
+                panic!("source preflight must precede first scheduling yield")
+            },
+            || {
+                checks += 1;
+                Ok::<(), Refusal>(())
+            },
+        )),
+        Err(Refusal::Source(SealedError::Limit {
+            resource: "incoming incidences",
+            ..
+        }))
+    ));
     assert_eq!(checks, 1);
 }

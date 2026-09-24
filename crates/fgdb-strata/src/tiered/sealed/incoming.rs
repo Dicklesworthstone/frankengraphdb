@@ -180,9 +180,10 @@ impl SealedPartition {
         Y: FnMut() -> F,
         F: std::future::Future<Output = ()>,
     {
-        self.incoming_index_cooperative_with_checkpoint(
-            cx, limits, quantum, yield_now, || Ok::<(), SealedError>(()),
-        ).await
+        self.incoming_index_cooperative_with_checkpoint(cx, limits, quantum, yield_now, || {
+            Ok::<(), SealedError>(())
+        })
+        .await
     }
 
     /// Keep QueryCx-first typed live checks across every build stage and both
@@ -204,13 +205,16 @@ impl SealedPartition {
     {
         cx.with_restriction_async(async {
             let mut control = construction::Cooperative {
-                cx, fuel: SealedScanBudget::new(quantum.get()), quantum,
-                yield_now, guard: checkpoint,
+                cx,
+                fuel: SealedScanBudget::new(quantum.get()),
+                quantum,
+                yield_now,
+                guard: checkpoint,
             };
             construction::build(self, limits, &mut control).await
-        }).await
+        })
+        .await
     }
-
 }
 
 impl SealedIncomingIndex {
@@ -515,7 +519,9 @@ mod construction {
         G: FnMut() -> Result<(), E>,
     {
         type Error = E;
-        async fn check(&mut self) -> Result<(), E> { (self.0)() }
+        async fn check(&mut self) -> Result<(), E> {
+            (self.0)()
+        }
     }
 
     pub(super) struct Cooperative<'a, Y, G> {
@@ -555,7 +561,10 @@ mod construction {
         future: impl Future<Output = Result<T, E>>,
     ) -> Result<T, E> {
         let mut future = std::pin::pin!(future);
-        match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
             Poll::Ready(result) => result,
             Poll::Pending => Err(SealedError::NonCanonical.into()),
         }

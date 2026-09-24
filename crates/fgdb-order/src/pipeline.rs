@@ -84,8 +84,15 @@ impl<C: Clone + Eq> Raft<C> {
             }
         }
         loop {
-            let progress = self.progress.get(&peer).ok_or(Error::InvalidRecoveryState)?;
-            let capacity = if progress.probing { 1 } else { self.append_window };
+            let progress = self
+                .progress
+                .get(&peer)
+                .ok_or(Error::InvalidRecoveryState)?;
+            let capacity = if progress.probing {
+                1
+            } else {
+                self.append_window
+            };
             if progress.in_flight.len() >= capacity
                 || matches!(progress.in_flight.front(), Some(InFlight::Snapshot { .. }))
                 || (progress.next > self.last_index() && !progress.in_flight.is_empty())
@@ -97,16 +104,28 @@ impl<C: Clone + Eq> Raft<C> {
             let flight = if next <= self.state.base_index() {
                 InFlight::Snapshot {
                     request: self.request,
-                    snapshot: self.state.snapshot.clone().ok_or(Error::InvalidRecoveryState)?,
+                    snapshot: self
+                        .state
+                        .snapshot
+                        .clone()
+                        .ok_or(Error::InvalidRecoveryState)?,
                 }
             } else {
                 let prev = next - 1;
-                let last = self.last_index()
+                let last = self
+                    .last_index()
                     .min(prev.saturating_add(self.limits.max_append_entries as u64));
-                InFlight::Append { request: self.request, prev, last }
+                InFlight::Append {
+                    request: self.request,
+                    prev,
+                    last,
+                }
             };
             self.emit_flight(peer, &flight, output)?;
-            let progress = self.progress.get_mut(&peer).ok_or(Error::InvalidRecoveryState)?;
+            let progress = self
+                .progress
+                .get_mut(&peer)
+                .ok_or(Error::InvalidRecoveryState)?;
             if let InFlight::Append { last, .. } = &flight {
                 // This is only the next UNSENT position. Neither matched nor
                 // commit_index advances until an exact acknowledgement arrives.
@@ -125,14 +144,21 @@ impl<C: Clone + Eq> Raft<C> {
         output: &mut Output<C>,
     ) -> Result<(), Error> {
         let message = match flight {
-            InFlight::Append { request, prev, last } => {
+            InFlight::Append {
+                request,
+                prev,
+                last,
+            } => {
                 let prev_term = self.term_at(*prev).ok_or(Error::InvalidRecoveryState)?;
                 let base = self.state.base_index();
                 let start = prev.checked_sub(base).ok_or(Error::InvalidRecoveryState)?;
                 let end = last.checked_sub(base).ok_or(Error::InvalidRecoveryState)?;
-                let entries = self.state.entries
+                let entries = self
+                    .state
+                    .entries
                     .get(start as usize..end as usize)
-                    .ok_or(Error::InvalidRecoveryState)?.to_vec();
+                    .ok_or(Error::InvalidRecoveryState)?
+                    .to_vec();
                 Message::Append {
                     term: self.state.term,
                     request: *request,

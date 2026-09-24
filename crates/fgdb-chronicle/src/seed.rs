@@ -201,7 +201,11 @@ impl SeedPlan {
     /// their transitive closures are still the canonical verifier's obligation.
     /// Without this projection the plan declares a fully visible applied cut.
     pub fn with_authenticated_audit_cut(mut self, cut: SeedAuditCut) -> Result<Self, SeedError> {
-        cut.validate_at(self.anchor.raft_index, self.anchor.raft_term, self.anchor.state_root)?;
+        cut.validate_at(
+            self.anchor.raft_index,
+            self.anchor.raft_term,
+            self.anchor.state_root,
+        )?;
         for root in [cut.visible_state_root, cut.audit_state_root] {
             if !self.inventory.contains_key(&root.0) {
                 return Err(SeedError::MissingRoot);
@@ -366,7 +370,8 @@ impl ReplicaSeed {
         if self.installing.is_some() {
             return Err(SeedError::InstallPending);
         }
-        if self.plan.anchor == plan.anchor && self.plan.inventory == plan.inventory
+        if self.plan.anchor == plan.anchor
+            && self.plan.inventory == plan.inventory
             && self.plan.audit_cut == plan.audit_cut
         {
             return Ok(());
@@ -381,7 +386,8 @@ impl ReplicaSeed {
         let mut source = self.plan.anchor.clone();
         source.publication_root = plan.anchor.publication_root;
         source.publication_generation = plan.anchor.publication_generation;
-        if source != plan.anchor || self.plan.audit_cut != plan.audit_cut
+        if source != plan.anchor
+            || self.plan.audit_cut != plan.audit_cut
             || plan.anchor.publication_generation <= self.plan.anchor.publication_generation
         {
             return Err(SeedError::InvalidAnchor);
@@ -398,7 +404,8 @@ impl ReplicaSeed {
                 }
             }
         }
-        self.published.retain(|oid, _| plan.inventory.contains_key(oid));
+        self.published
+            .retain(|oid, _| plan.inventory.contains_key(oid));
         self.plan = plan;
         Ok(())
     }

@@ -13,8 +13,8 @@
 
 use super::{
     ComplexityWitness, Cursor, ExecutionError, FnxAlgorithm, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result, ResultAdmission,
-    Rows, SealedGraphView, SealedRows, add, admit, checkpoint, finish, mul, reserve,
+    FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
+    SealedGraphView, SealedRows, add, admit, checkpoint, finish, mul, reserve,
 };
 use crate::sealed_control::Control;
 use std::mem::size_of;
@@ -30,13 +30,21 @@ pub(super) fn execute(
     let coefficients = matches!(call.algorithm(), FnxAlgorithm::ClusteringCoefficient);
     let workspace = workspace(graph.node_count(), coefficients)?;
     admission.rows(graph.node_count())?;
-    admit("kernel workspace bytes", workspace, memory.max_kernel_workspace_bytes)?;
+    admit(
+        "kernel workspace bytes",
+        workspace,
+        memory.max_kernel_workspace_bytes,
+    )?;
     let rows = SealedRows { cx, graph };
     let mut control = || checkpoint(cx);
     let plan = prepare(
         &rows,
         graph.scan_incidence_bound(),
-        |source| graph.retained_row_incidence_bound(source).map_err(Into::into),
+        |source| {
+            graph
+                .retained_row_incidence_bound(source)
+                .map_err(Into::into)
+        },
         coefficients,
         limits.max_estimated_work,
         &mut control,
@@ -48,19 +56,33 @@ pub(super) fn execute(
     } else {
         "fgdb-prism/sealed-triangles-retained-cost-v1"
     };
-    finish(call, graph, output, kernel, estimated_work, workspace, admission, &mut control)
+    finish(
+        call,
+        graph,
+        output,
+        kernel,
+        estimated_work,
+        workspace,
+        admission,
+        &mut control,
+    )
 }
 
 fn workspace(n: usize, coefficients: bool) -> Result<usize> {
     // Counts alone retain costs + marks + u64 counts. Coefficients also retain
     // loop-free degrees. Drop costs/marks before allocating the score vector.
-    let counting = mul(n, add(
-        mul(if coefficients { 3 } else { 2 }, size_of::<usize>())?,
-        size_of::<u64>(),
-    )?)?;
+    let counting = mul(
+        n,
+        add(
+            mul(if coefficients { 3 } else { 2 }, size_of::<usize>())?,
+            size_of::<u64>(),
+        )?,
+    )?;
     let conversion = if coefficients {
         mul(n, size_of::<usize>() + size_of::<u64>() + size_of::<f64>())?
-    } else { 0 };
+    } else {
+        0
+    };
     Ok(counting.max(conversion))
 }
 
@@ -80,7 +102,10 @@ fn row_work(n: usize, history: usize, incidences: usize) -> Result<usize> {
     // source population, not the reduced degree. Property decoding happened at
     // source admission; numeric property lookup uses the existing row adapter.
     let search = mul(4, bits(history))?;
-    add(add(16, search)?, mul(incidences, add(32, add(search, mul(2, bits(n))?)?)?)?)
+    add(
+        add(16, search)?,
+        mul(incidences, add(32, add(search, mul(2, bits(n))?)?)?)?,
+    )
 }
 
 fn charge(work: &mut usize, amount: usize, limit: usize) -> Result<()> {
@@ -99,7 +124,9 @@ fn next_neighbor(
     n: usize,
     previous: &mut Option<usize>,
 ) -> Result<Option<usize>> {
-    let Some((target, _)) = row.next()? else { return Ok(None); };
+    let Some((target, _)) = row.next()? else {
+        return Ok(None);
+    };
     // The production adapter already guarantees this contract. Check it at the
     // shared kernel seam as well; malformed test/future sources must not index
     // outside the workspace or duplicate a triangle silently.
@@ -153,10 +180,16 @@ fn prepare(
         if graph.degree(source) != Some(seen) {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
-        if coefficients { degrees.push(degree); }
+        if coefficients {
+            degrees.push(degree);
+        }
     }
     control()?;
-    Ok(Plan { costs, degrees, work })
+    Ok(Plan {
+        costs,
+        degrees,
+        work,
+    })
 }
 
 fn run(
@@ -179,7 +212,8 @@ fn run(
     }
     let mut witness = ComplexityWitness {
         algorithm: "triangles_retained_cost_oriented_rows".to_owned(),
-        complexity_claim: "O(V + sum_v c(v) + sum_edges min(c(u),c(v))); c = retained row scan model".to_owned(),
+        complexity_claim:
+            "O(V + sum_v c(v) + sum_edges min(c(u),c(v))); c = retained row scan model".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
         queue_peak: 0,
@@ -193,7 +227,9 @@ fn run(
             while let Some(target) = next_neighbor(&mut row, n, &mut previous)? {
                 control()?;
                 witness.edges_scanned = add(witness.edges_scanned, 1)?;
-                if lower(&costs, target, source) { marked[target] = source; }
+                if lower(&costs, target, source) {
+                    marked[target] = source;
+                }
             }
         }
         let mut row = graph.open(source)?;
@@ -201,7 +237,9 @@ fn run(
         while let Some(target) = next_neighbor(&mut row, n, &mut previous)? {
             control()?;
             witness.edges_scanned = add(witness.edges_scanned, 1)?;
-            if !lower(&costs, target, source) { continue; }
+            if !lower(&costs, target, source) {
+                continue;
+            }
             let mut other = graph.open(target)?;
             let mut previous = None;
             while let Some(third) = next_neighbor(&mut other, n, &mut previous)? {
@@ -210,7 +248,8 @@ fn run(
                 if lower(&costs, third, target) && marked[third] == source {
                     // Total orientation makes source, target and third distinct.
                     for vertex in [source, target, third] {
-                        counts[vertex] = counts[vertex].checked_add(1)
+                        counts[vertex] = counts[vertex]
+                            .checked_add(1)
                             .ok_or(ExecutionError::SizeOverflow)?;
                     }
                 }
@@ -225,10 +264,13 @@ fn run(
             control()?;
             let degree = degree as u128;
             let score = if degree < 2 {
-                if count != 0 { return Err(ExecutionError::InvalidUpstreamResult.into()); }
+                if count != 0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
                 0.0
             } else {
-                let denominator = degree.checked_mul(degree - 1)
+                let denominator = degree
+                    .checked_mul(degree - 1)
                     .ok_or(ExecutionError::SizeOverflow)?;
                 let numerator = u128::from(count) * 2;
                 if numerator > denominator {
@@ -244,7 +286,11 @@ fn run(
         KernelValues::Counts(counts)
     };
     control()?;
-    Ok(KernelOutput { values, row_count: n, witness })
+    Ok(KernelOutput {
+        values,
+        row_count: n,
+        witness,
+    })
 }
 
 #[cfg(test)]

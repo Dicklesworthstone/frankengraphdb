@@ -65,8 +65,12 @@ impl<'a> Ranked<'a> {
             while at < self.rows.len() / 2 {
                 let mut child = 2 * at + 1;
                 if child + 1 < self.rows.len()
-                    && compare_rows(&self.rows[child], &self.rows[child + 1], self.order, control)?
-                        == Ordering::Less
+                    && compare_rows(
+                        &self.rows[child],
+                        &self.rows[child + 1],
+                        self.order,
+                        control,
+                    )? == Ordering::Less
                 {
                     child += 1;
                 }
@@ -94,7 +98,10 @@ impl<'a> Ranked<'a> {
         merge::sort(&mut self.rows, control, &mut |a, b, control| {
             compare_rows(a, b, order, control)
         })?;
-        let mut selection = Selection { skip: offset, remaining: count };
+        let mut selection = Selection {
+            skip: offset,
+            remaining: count,
+        };
         let selected = selection.range(self.rows.len());
         let mut output = Vec::new();
         for (at, row) in self.rows.into_iter().enumerate() {

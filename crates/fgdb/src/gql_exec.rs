@@ -554,7 +554,9 @@ pub(crate) fn snapshot_record_budget<E>(
     let mut records = 0_u64;
     move |event| {
         if event == SourceEvent::SnapshotRecord {
-            let next = records.checked_add(1).expect("source record count fits u64");
+            let next = records
+                .checked_add(1)
+                .expect("source record count fits u64");
             budget
                 .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, next)
                 .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
@@ -669,7 +671,11 @@ mod admission_meter_tests {
     fn row_only_admission_ignores_work_and_does_not_charge_a_refused_record() {
         use fgdb_gql::{BudgetedGqlError, GqlBudgetDimension, GqlExecutionBudget};
         let mut control = snapshot_record_budget::<()>(GqlExecutionBudget::new(1, 0));
-        for event in [SourceEvent::Work, SourceEvent::ScratchEntry, SourceEvent::SnapshotRecord] {
+        for event in [
+            SourceEvent::Work,
+            SourceEvent::ScratchEntry,
+            SourceEvent::SnapshotRecord,
+        ] {
             control(event).unwrap();
         }
         for _ in 0..2 {
@@ -683,7 +689,9 @@ mod admission_meter_tests {
     #[test]
     fn budgeted_snapshot_admission_stops_at_the_first_excess_record() {
         use asupersync::lab::run_async_under_lab;
-        use fgdb_gql::{BudgetedGqlError, GqlBudgetDimension, GqlExecutionBudget, PreparedGqlQuery};
+        use fgdb_gql::{
+            BudgetedGqlError, GqlBudgetDimension, GqlExecutionBudget, PreparedGqlQuery,
+        };
         use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
         let ((), report) = run_async_under_lab(0xb0d6_0001, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -698,9 +706,9 @@ mod admission_meter_tests {
                 .with_label("L", LabelId(1))
                 .with_relation("R", RelationId(1));
             let nodes = PreparedGqlQuery::prepare("MATCH (a:L) RETURN a", &bind).unwrap();
-            let empty = db.execute_prepared_query_budgeted(
-                &nodes, GqlExecutionBudget::new(0, 0),
-            ).unwrap();
+            let empty = db
+                .execute_prepared_query_budgeted(&nodes, GqlExecutionBudget::new(0, 0))
+                .unwrap();
             assert!(empty.value.is_empty());
             assert_eq!(empty.stats.snapshot_records, 0);
 
@@ -720,7 +728,9 @@ mod admission_meter_tests {
             // The historical and pinned cuts retain six vertices/five edges;
             // the live cut has five vertices/four edges after the cascade.
             let cuts: [(&dyn GqlSnapshotReader, CommitSeq, u64, u64); 3] = [
-                (&db, basis, 6, 5), (&pinned, basis, 6, 5), (&db, live, 5, 4),
+                (&db, basis, 6, 5),
+                (&pinned, basis, 6, 5),
+                (&db, live, 5, 4),
             ];
             for (reader, as_of, vertex_count, edge_count) in cuts {
                 for (statement, source_count) in [
@@ -735,15 +745,20 @@ mod admission_meter_tests {
                             .execute_budgeted(GqlExecutionBudget::new(limit, 100));
                         // An after-materialization check reports source_count,
                         // not limit + 1. This exercises the real source owner.
-                        assert!(matches!(refused, Err(BudgetedGqlError::Budget(error))
+                        assert!(
+                            matches!(refused, Err(BudgetedGqlError::Budget(error))
                             if error.dimension == GqlBudgetDimension::SnapshotRecords
                                 && error.limit == limit && error.observed == limit + 1),
-                            "{statement} at {as_of:?}, limit {limit}");
+                            "{statement} at {as_of:?}, limit {limit}"
+                        );
                     }
                     let expected = execute_at(query.plan(), reader, as_of).unwrap();
                     let exact = AdmittedGqlSnapshot::admit(query.plan(), reader, as_of)
                         .unwrap()
-                        .execute_budgeted(GqlExecutionBudget::new(source_count, expected.len() as u64))
+                        .execute_budgeted(GqlExecutionBudget::new(
+                            source_count,
+                            expected.len() as u64,
+                        ))
                         .unwrap();
                     assert_eq!(exact.value, expected);
                     assert_eq!(exact.stats.snapshot_records, source_count);
@@ -762,23 +777,31 @@ mod admission_meter_tests {
                     if error.dimension == GqlBudgetDimension::SnapshotRecords
                         && error.limit == 1 && error.observed == 2));
             }
-            let result_limited = db.execute_prepared_query_budgeted(
-                &nodes, GqlExecutionBudget::new(5, 1),
-            );
-            assert!(matches!(result_limited, Err(BudgetedGqlError::Budget(error))
+            let result_limited =
+                db.execute_prepared_query_budgeted(&nodes, GqlExecutionBudget::new(5, 1));
+            assert!(
+                matches!(result_limited, Err(BudgetedGqlError::Budget(error))
                 if error.dimension == GqlBudgetDimension::ResultRows
-                    && error.limit == 1 && error.observed == 5));
+                    && error.limit == 1 && error.observed == 5)
+            );
             for result in [
                 db.execute_prepared_query_budgeted_at(
-                    &nodes, CommitSeq(live.0 + 1), GqlExecutionBudget::new(0, 0),
+                    &nodes,
+                    CommitSeq(live.0 + 1),
+                    GqlExecutionBudget::new(0, 0),
                 ),
                 pinned.execute_prepared_query_budgeted_at(
-                    &nodes, live, GqlExecutionBudget::new(0, 0),
+                    &nodes,
+                    live,
+                    GqlExecutionBudget::new(0, 0),
                 ),
             ] {
-                assert!(matches!(result, Err(BudgetedGqlError::Execution(
-                    GqlError::Read(ReadError::BeyondFrontier { .. })
-                ))));
+                assert!(matches!(
+                    result,
+                    Err(BudgetedGqlError::Execution(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
             }
             assert_eq!(db.frontier().unwrap(), live);
             assert_eq!(pinned.frontier(), basis);

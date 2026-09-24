@@ -79,8 +79,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod bounded_read;
-pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 use bounded_read::RootReadEvent;
+pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 
 type ResolvedBlocks = Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>;
 
@@ -1194,9 +1194,10 @@ impl<V: Vfs> BlockStore<V> {
         partition: u64,
         reference: &crate::root::BlockRef,
     ) -> Result<ResolvedBlock, StoreError> {
-        self.resolve_root_block_observed(
-            cx, at, partition, reference, &mut |_| Ok::<(), StoreError>(()),
-        ).await
+        self.resolve_root_block_observed(cx, at, partition, reference, &mut |_| {
+            Ok::<(), StoreError>(())
+        })
+        .await
     }
 
     async fn resolve_root_block_observed<E: From<StoreError>>(
@@ -1244,7 +1245,8 @@ impl<V: Vfs> BlockStore<V> {
                     root_partition: partition,
                     block_partition,
                 },
-            ).into());
+            )
+            .into());
         }
         let props = if let Some((patch_id, locators)) = patch {
             observe(RootReadEvent::ObjectStart)?;
@@ -1273,12 +1275,13 @@ impl<V: Vfs> BlockStore<V> {
             let recomputed =
                 crate::block_logical_digest(&entries, &per_entry).map_err(StoreError::Malformed)?;
             if recomputed != declared_digest {
-                return Err(StoreError::Malformed(
-                    crate::BlockError::LogicalDigestMismatch {
+                return Err(
+                    StoreError::Malformed(crate::BlockError::LogicalDigestMismatch {
                         declared: declared_digest,
                         recomputed,
-                    },
-                ).into());
+                    })
+                    .into(),
+                );
             }
             Some(BlockProps { locators, rows })
         } else {
@@ -1303,9 +1306,8 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
     ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
-        self.inspect_root_blocks_observed(
-            cx, root, retain, &mut |_| Ok::<(), StoreError>(()),
-        ).await
+        self.inspect_root_blocks_observed(cx, root, retain, &mut |_| Ok::<(), StoreError>(()))
+            .await
     }
 
     async fn inspect_root_blocks_observed<E: From<StoreError>>(
@@ -1341,7 +1343,8 @@ impl<V: Vfs> BlockStore<V> {
                             declared: predecessor.map(|link| link.0),
                             expected,
                         },
-                    ).into());
+                    )
+                    .into());
                 }
                 chain_heads.insert(family, reference.block_id);
             }
@@ -1349,9 +1352,12 @@ impl<V: Vfs> BlockStore<V> {
                 .observe_block(at, &entries)
                 .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
-                blocks.try_reserve(1).map_err(|_| StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::OutOfMemory, "root block collection allocation failed",
-                )))?;
+                blocks.try_reserve(1).map_err(|_| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "root block collection allocation failed",
+                    ))
+                })?;
                 blocks.push((entries, props));
             }
         }
@@ -1374,9 +1380,8 @@ impl<V: Vfs> BlockStore<V> {
         at: usize,
         reference: &crate::root::PatchRef,
     ) -> Result<VertexPatchRows, StoreError> {
-        self.resolve_root_patch_observed(
-            cx, at, reference, &mut |_| Ok::<(), StoreError>(()),
-        ).await
+        self.resolve_root_patch_observed(cx, at, reference, &mut |_| Ok::<(), StoreError>(()))
+            .await
     }
 
     async fn resolve_root_patch_observed<E: From<StoreError>>(
@@ -1419,9 +1424,8 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
     ) -> Result<Vec<VertexPatchRows>, StoreError> {
-        self.inspect_root_patches_observed(
-            cx, root, retain, &mut |_| Ok::<(), StoreError>(()),
-        ).await
+        self.inspect_root_patches_observed(cx, root, retain, &mut |_| Ok::<(), StoreError>(()))
+            .await
     }
 
     async fn inspect_root_patches_observed<E: From<StoreError>>(
@@ -1434,14 +1438,19 @@ impl<V: Vfs> BlockStore<V> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
         for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let rows = self.resolve_root_patch_observed(cx, at, reference, observe).await?;
+            let rows = self
+                .resolve_root_patch_observed(cx, at, reference, observe)
+                .await?;
             history
                 .observe_patch(at, &rows)
                 .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
-                patches.try_reserve(1).map_err(|_| StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::OutOfMemory, "root patch collection allocation failed",
-                )))?;
+                patches.try_reserve(1).map_err(|_| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "root patch collection allocation failed",
+                    ))
+                })?;
                 patches.push(rows);
             }
         }

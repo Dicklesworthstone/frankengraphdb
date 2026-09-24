@@ -7,6 +7,7 @@
 //! The selected vertex directory is supplied by the
 //! trusted host after snapshot/label/security admission, not authorized here.
 
+use crate::sealed_control::Control;
 use crate::{
     Directedness, FnxSelection, FnxWeightError, ParallelEdgePolicy, ProjectionError,
     ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding,
@@ -17,7 +18,6 @@ use fgdb_strata::tiered::sealed::{
     SealedPartition, SealedScanBudget, SealedScanStep,
 };
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
-use crate::sealed_control::Control;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -60,7 +60,10 @@ pub enum SealedProjectionError {
     Guard(Box<dyn std::error::Error + Send + Sync>),
     Read(SealedError),
     Projection(ProjectionError),
-    Weight { edge: EId, reason: FnxWeightError },
+    Weight {
+        edge: EId,
+        reason: FnxWeightError,
+    },
     RelationRequired,
     UnsupportedDirectedness(Directedness),
     NonCanonicalVertices,
@@ -187,8 +190,13 @@ impl SealedGraphView {
         limits: ProjectionLimits,
     ) -> Result<Self, SealedProjectionError> {
         Self::build_with_checkpoint(
-            cx, partition, vertices, config, SealedProjectionMask::UNMASKED,
-            limits, || Ok(()),
+            cx,
+            partition,
+            vertices,
+            config,
+            SealedProjectionMask::UNMASKED,
+            limits,
+            || Ok(()),
         )
     }
 
@@ -258,26 +266,29 @@ impl SealedGraphView {
             owned_vertices.push(vertex);
             previous = Some(vertex);
         }
-        let incoming = if !mask.relation_visible
-            || config.projection.directedness == Directedness::Directed
-        {
-            None
-        } else {
-            let index = partition.incoming_index_with_checkpoint(
-                cx.query,
-                IncomingIndexLimits {
-                    max_incidences: limits.max_input_edges,
-                    // This indexes the whole admitted image, including other
-                    // relations and unselected endpoints, not merely n vertices.
-                    max_rows: limits.max_input_edges,
-                    max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
-                },
-                || cx.guard(),
-            )?;
-            workspace_bytes = add(workspace_bytes, index.stats().charged_workspace_bytes)?;
-            admit("workspace bytes", workspace_bytes, limits.max_workspace_bytes)?;
-            Some(index)
-        };
+        let incoming =
+            if !mask.relation_visible || config.projection.directedness == Directedness::Directed {
+                None
+            } else {
+                let index = partition.incoming_index_with_checkpoint(
+                    cx.query,
+                    IncomingIndexLimits {
+                        max_incidences: limits.max_input_edges,
+                        // This indexes the whole admitted image, including other
+                        // relations and unselected endpoints, not merely n vertices.
+                        max_rows: limits.max_input_edges,
+                        max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
+                    },
+                    || cx.guard(),
+                )?;
+                workspace_bytes = add(workspace_bytes, index.stats().charged_workspace_bytes)?;
+                admit(
+                    "workspace bytes",
+                    workspace_bytes,
+                    limits.max_workspace_bytes,
+                )?;
+                Some(index)
+            };
         let binding = SnapshotBinding {
             root: scope.source_root.0,
             as_of: config.as_of,
@@ -308,7 +319,14 @@ impl SealedGraphView {
             hash.update(&[0]);
             hash.update(&owned_vertices[source].0.to_le_bytes());
             let mut cursor = SealedNeighborCursor::open(
-                cx, partition, incoming.as_ref(), &owned_vertices, &config, mask, source, None,
+                cx,
+                partition,
+                incoming.as_ref(),
+                &owned_vertices,
+                &config,
+                mask,
+                source,
+                None,
             )?;
             let mut degree = 0usize;
             {
@@ -341,8 +359,14 @@ impl SealedGraphView {
                 while let Some((target, _)) = cursor.next_observed(cx, &mut observe)? {
                     degree = add(degree, 1)?;
                     adjacency_entries = add(adjacency_entries, 1)?;
-                    admit("adjacency entries", adjacency_entries, limits.max_adjacency_entries)?;
-                    if config.projection.directedness != Directedness::Undirected || source <= target {
+                    admit(
+                        "adjacency entries",
+                        adjacency_entries,
+                        limits.max_adjacency_entries,
+                    )?;
+                    if config.projection.directedness != Directedness::Undirected
+                        || source <= target
+                    {
                         edges = add(edges, 1)?;
                     }
                 }
@@ -427,19 +451,30 @@ impl SealedGraphView {
         &self,
         ordinal: usize,
     ) -> Result<usize, SealedProjectionError> {
-        let vertex = self.vertex_id(ordinal)
+        let vertex = self
+            .vertex_id(ordinal)
             .ok_or(SealedProjectionError::UnknownOrdinal(ordinal))?;
-        let relation = self.0.config.selection.relation
+        let relation = self
+            .0
+            .config
+            .selection
+            .relation
             .ok_or(SealedProjectionError::RelationRequired)?;
         if !self.0.mask.relation_visible {
             return Ok(0);
         }
         let direction = self.0.config.projection.directedness;
-        let outgoing = if direction == Directedness::Reversed { 0 } else {
+        let outgoing = if direction == Directedness::Reversed {
+            0
+        } else {
             self.0.partition.retained_row_len(vertex, relation)
         };
-        let incoming = if direction == Directedness::Directed { 0 } else {
-            self.0.incoming.as_ref()
+        let incoming = if direction == Directedness::Directed {
+            0
+        } else {
+            self.0
+                .incoming
+                .as_ref()
                 .ok_or(SealedProjectionError::UnsupportedDirectedness(direction))?
                 .retained_row_len(vertex, relation)
         };
@@ -520,7 +555,13 @@ impl<'a> SealedNeighborCursor<'a> {
             .copied()
             .ok_or(SealedProjectionError::UnknownOrdinal(source))?;
         let raw = Incidences::open(
-            cx, partition, incoming, source, config, mask.relation_visible, lower_bound,
+            cx,
+            partition,
+            incoming,
+            source,
+            config,
+            mask.relation_visible,
+            lower_bound,
         )?;
         Ok(Self {
             raw,
@@ -552,7 +593,9 @@ impl<'a> SealedNeighborCursor<'a> {
     ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
         loop {
             match self.next_budgeted_observed(
-                cx, &mut SealedScanBudget::new(usize::MAX), observe,
+                cx,
+                &mut SealedScanBudget::new(usize::MAX),
+                observe,
             )? {
                 SealedScanStep::Item(value) => return Ok(Some(value)),
                 SealedScanStep::End => return Ok(None),
@@ -692,12 +735,15 @@ fn selected_weight(
         return Ok(Some(1.0));
     }
     let weight_spec = config.selection.weight;
-    let value = weight_spec.property_key().filter(|_| property_visible).and_then(|key| {
-        edge.properties
-            .binary_search_by_key(&key, |(key, _)| *key)
-            .ok()
-            .map(|index| &edge.properties[index].1)
-    });
+    let value = weight_spec
+        .property_key()
+        .filter(|_| property_visible)
+        .and_then(|key| {
+            edge.properties
+                .binary_search_by_key(&key, |(key, _)| *key)
+                .ok()
+                .map(|index| &edge.properties[index].1)
+        });
     weight_spec
         .resolve(value)
         .map(Some)
@@ -772,10 +818,7 @@ mod tests {
             entry: entry(VId(u128::MAX)),
             properties: &properties,
         };
-        assert_eq!(
-            selected_weight(true, &config(), &edge).unwrap(),
-            Some(17.0)
-        );
+        assert_eq!(selected_weight(true, &config(), &edge).unwrap(), Some(17.0));
         let properties = [(PropertyKeyId(2), CanonicalScalar::Int(i64::MAX))];
         let edge = SealedEdge {
             entry: entry(VId(2)),
@@ -850,15 +893,37 @@ mod tests {
     #[test]
     fn forbidden_weight_properties_are_absent_before_numeric_observation() {
         let properties = [(PropertyKeyId(2), CanonicalScalar::Bool(true))];
-        let edge = SealedEdge { entry: entry(VId(2)), properties: &properties };
+        let edge = SealedEdge {
+            entry: entry(VId(2)),
+            properties: &properties,
+        };
         let mut config = config();
-        assert!(matches!(selected_weight(true, &config, &edge),
-            Err(SealedProjectionError::Weight { reason: FnxWeightError::NotNumeric, .. })));
-        assert!(matches!(selected_weight(false, &config, &edge),
-            Err(SealedProjectionError::Weight { reason: FnxWeightError::Missing, .. })));
-        for (missing, expected) in [(MissingWeightPolicy::Unit, 1.0), (MissingWeightPolicy::Zero, 0.0)] {
-            config.selection.weight = FnxWeightSpec::Property { key: PropertyKeyId(2), missing };
-            assert_eq!(selected_weight(false, &config, &edge).unwrap(), Some(expected));
+        assert!(matches!(
+            selected_weight(true, &config, &edge),
+            Err(SealedProjectionError::Weight {
+                reason: FnxWeightError::NotNumeric,
+                ..
+            })
+        ));
+        assert!(matches!(
+            selected_weight(false, &config, &edge),
+            Err(SealedProjectionError::Weight {
+                reason: FnxWeightError::Missing,
+                ..
+            })
+        ));
+        for (missing, expected) in [
+            (MissingWeightPolicy::Unit, 1.0),
+            (MissingWeightPolicy::Zero, 0.0),
+        ] {
+            config.selection.weight = FnxWeightSpec::Property {
+                key: PropertyKeyId(2),
+                missing,
+            };
+            assert_eq!(
+                selected_weight(false, &config, &edge).unwrap(),
+                Some(expected)
+            );
         }
         config.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
         assert_eq!(selected_weight(true, &config, &edge).unwrap(), Some(1.0));

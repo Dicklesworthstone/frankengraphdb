@@ -10,11 +10,13 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use fgdb_order::{
-    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId,
-    Message, PersistentState, Role, SnapshotCut,
+    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
+    PersistentState, Role, SnapshotCut,
 };
 use fgdb_repl::driver::{RaftPublisher, SequenceError};
-use fgdb_repl::replica::{ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput};
+use fgdb_repl::replica::{
+    ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
+};
 
 struct NoopWake;
 impl Wake for NoopWake {
@@ -39,13 +41,22 @@ struct MemoryRoot {
 }
 impl RaftPublisher<u64> for MemoryRoot {
     type Error = &'static str;
-    fn publish(&mut self, state: &PersistentState<u64>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish(
+        &mut self,
+        state: &PersistentState<u64>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         // Model even an error/drop AFTER the exact new root reached storage.
         self.states.push(state.clone());
         let (fail, suspend) = (self.fail, self.suspend);
         async move {
-            if suspend { pending::<()>().await; }
-            if fail { Err("uncertain publication") } else { Ok(()) }
+            if suspend {
+                pending::<()>().await;
+            }
+            if fail {
+                Err("uncertain publication")
+            } else {
+                Ok(())
+            }
         }
     }
 }
@@ -63,28 +74,61 @@ impl Node {
 }
 type Cluster = BTreeMap<MemberId, Node>;
 fn stable(voters: u128, learners: &[u128]) -> Configuration {
-    Configuration::stable(Domain([51; 32]), [52; 32],
-        (1..=voters).map(MemberId), learners.iter().copied().map(MemberId)).unwrap()
+    Configuration::stable(
+        Domain([51; 32]),
+        [52; 32],
+        (1..=voters).map(MemberId),
+        learners.iter().copied().map(MemberId),
+    )
+    .unwrap()
 }
 fn nodes(configuration: &Configuration, window: usize) -> Cluster {
-    configuration.voters().union(configuration.learners()).map(|id| {
-        let mut replica = Replica::new(*id, configuration.clone(), Limits {
-            max_log_entries: 128, max_append_entries: 1,
-        }, 8).unwrap();
-        replica.configure_append_pipeline(window).unwrap();
-        (*id, Node { replica, root: MemoryRoot::default() })
-    }).collect()
+    configuration
+        .voters()
+        .union(configuration.learners())
+        .map(|id| {
+            let mut replica = Replica::new(
+                *id,
+                configuration.clone(),
+                Limits {
+                    max_log_entries: 128,
+                    max_append_entries: 1,
+                },
+                8,
+            )
+            .unwrap();
+            replica.configure_append_pipeline(window).unwrap();
+            (
+                *id,
+                Node {
+                    replica,
+                    root: MemoryRoot::default(),
+                },
+            )
+        })
+        .collect()
 }
-fn leader(nodes: &mut Cluster) -> &mut Node { nodes.get_mut(&MemberId(1)).unwrap() }
-fn pump(nodes: &mut Cluster, messages: Vec<Envelope<u64>>, reachable: &[u128]) -> Vec<ReadResolution> {
+fn leader(nodes: &mut Cluster) -> &mut Node {
+    nodes.get_mut(&MemberId(1)).unwrap()
+}
+fn pump(
+    nodes: &mut Cluster,
+    messages: Vec<Envelope<u64>>,
+    reachable: &[u128],
+) -> Vec<ReadResolution> {
     let mut queue: VecDeque<_> = messages.into();
     let mut reads = Vec::new();
     let mut steps = 0;
     while let Some(message) = queue.pop_front() {
         steps += 1;
         assert!(steps < 20_000, "replication must quiesce");
-        if !reachable.contains(&message.from.0) || !reachable.contains(&message.to.0) { continue; }
-        let output = nodes.get_mut(&message.to).unwrap().step(Event::Receive(message));
+        if !reachable.contains(&message.from.0) || !reachable.contains(&message.to.0) {
+            continue;
+        }
+        let output = nodes
+            .get_mut(&message.to)
+            .unwrap()
+            .step(Event::Receive(message));
         queue.extend(output.consensus.messages);
         reads.extend(output.reads);
     }
@@ -101,15 +145,25 @@ fn elect(configuration: &Configuration, window: usize) -> Cluster {
     nodes
 }
 fn requests(output: &ReplicaOutput<u64>, peer: u128) -> Vec<Envelope<u64>> {
-    output.consensus.messages.iter().filter(|m| m.to == MemberId(peer)
-        && matches!(m.message, Message::Append { .. })).cloned().collect()
+    output
+        .consensus
+        .messages
+        .iter()
+        .filter(|m| m.to == MemberId(peer) && matches!(m.message, Message::Append { .. }))
+        .cloned()
+        .collect()
 }
 fn serial(request: &Envelope<u64>) -> u64 {
-    let Message::Append { request, .. } = &request.message else { panic!("expected append") };
+    let Message::Append { request, .. } = &request.message else {
+        panic!("expected append")
+    };
     *request
 }
 fn reply(nodes: &mut Cluster, request: Envelope<u64>) -> Envelope<u64> {
-    let output = nodes.get_mut(&request.to).unwrap().step(Event::Receive(request));
+    let output = nodes
+        .get_mut(&request.to)
+        .unwrap()
+        .step(Event::Receive(request));
     assert!(output.reads.is_empty());
     assert_eq!(output.consensus.messages.len(), 1);
     output.consensus.messages.into_iter().next().unwrap()
@@ -139,7 +193,14 @@ fn earlier_fresh_reply_completes_read_while_later_append_requests_remain_in_flig
     assert_eq!(ready.index(), before.commit_index());
     assert_eq!(leader(&mut nodes).root.states.len(), writes); // read does not publish
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 0);
-    assert_eq!(leader(&mut nodes).replica.durable_state().unwrap().commit_index(), 1);
+    assert_eq!(
+        leader(&mut nodes)
+            .replica
+            .durable_state()
+            .unwrap()
+            .commit_index(),
+        1
+    );
 }
 
 #[test]
@@ -151,14 +212,26 @@ fn retransmitted_pre_read_request_is_stale_but_a_later_pipelined_append_is_fresh
     let (id, probe) = leader(&mut nodes).read();
     assert_eq!(requests(&probe, 2), vec![old]);
     let data = leader(&mut nodes).step(Event::Propose(10));
-    assert!(leader(&mut nodes).step(Event::Receive(delayed)).reads.is_empty());
+    assert!(
+        leader(&mut nodes)
+            .step(Event::Receive(delayed))
+            .reads
+            .is_empty()
+    );
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 1);
     let response = reply(&mut nodes, requests(&data, 2).remove(0));
     let output = leader(&mut nodes).step(Event::Receive(response));
     let ready = only_ready(output.reads);
     assert_eq!(ready.id(), &id);
     assert_eq!(ready.index(), 1); // floor captured before the later write
-    assert_eq!(leader(&mut nodes).replica.durable_state().unwrap().commit_index(), 2);
+    assert_eq!(
+        leader(&mut nodes)
+            .replica
+            .durable_state()
+            .unwrap()
+            .commit_index(),
+        2
+    );
 }
 
 #[test]
@@ -170,12 +243,23 @@ fn concurrent_reads_keep_distinct_watermarks_with_multiple_requests_in_each_wind
     let (second, _) = leader(&mut nodes).read(); // both probe and data already issued
     let newer = leader(&mut nodes).step(Event::Propose(11));
     let response = reply(&mut nodes, probe);
-    assert_eq!(only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(), &first);
+    assert_eq!(
+        only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(),
+        &first
+    );
     let response = reply(&mut nodes, requests(&data, 2).remove(0));
-    assert!(leader(&mut nodes).step(Event::Receive(response)).reads.is_empty());
+    assert!(
+        leader(&mut nodes)
+            .step(Event::Receive(response))
+            .reads
+            .is_empty()
+    );
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 1);
     let response = reply(&mut nodes, requests(&newer, 2).remove(0));
-    assert_eq!(only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(), &second);
+    assert_eq!(
+        only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(),
+        &second
+    );
 }
 
 #[test]
@@ -186,19 +270,33 @@ fn rejection_invalidates_even_post_read_requests_before_their_delayed_successes_
     let first = requests(&leader(&mut nodes).step(Event::Propose(10)), 2).remove(0);
     let second = requests(&leader(&mut nodes).step(Event::Propose(11)), 2).remove(0);
     let rejection = reply(&mut nodes, second.clone()); // predecessor not present
-    assert!(matches!(rejection.message, Message::Appended { success: false, .. }));
+    assert!(matches!(
+        rejection.message,
+        Message::Appended { success: false, .. }
+    ));
     let output = leader(&mut nodes).step(Event::Receive(rejection));
     assert!(output.reads.is_empty());
     let replacement = requests(&output, 2).remove(0);
     assert!(serial(&replacement) > serial(&second));
     for old in [old_probe, first, second] {
         let response = reply(&mut nodes, old);
-        assert!(matches!(response.message, Message::Appended { success: true, .. }));
-        assert!(leader(&mut nodes).step(Event::Receive(response)).reads.is_empty());
+        assert!(matches!(
+            response.message,
+            Message::Appended { success: true, .. }
+        ));
+        assert!(
+            leader(&mut nodes)
+                .step(Event::Receive(response))
+                .reads
+                .is_empty()
+        );
     }
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 1);
     let response = reply(&mut nodes, replacement);
-    assert_eq!(only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(), &id);
+    assert_eq!(
+        only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(),
+        &id
+    );
 }
 
 #[test]
@@ -210,15 +308,29 @@ fn compaction_retires_every_old_window_identity_before_read_confirmation() {
     let data = requests(&leader(&mut nodes).step(Event::Propose(10)), 2).remove(0);
     let delayed_probe = reply(&mut nodes, old_probe);
     let delayed_data = reply(&mut nodes, data);
-    let cut = SnapshotCut::from_authenticated_parts(&configuration,
-        [31; 32], [32; 32], [33; 32], 1, 1).unwrap();
-    assert!(leader(&mut nodes).step(Event::Compact(cut)).reads.is_empty());
+    let cut =
+        SnapshotCut::from_authenticated_parts(&configuration, [31; 32], [32; 32], [33; 32], 1, 1)
+            .unwrap();
+    assert!(
+        leader(&mut nodes)
+            .step(Event::Compact(cut))
+            .reads
+            .is_empty()
+    );
     for response in [delayed_probe, delayed_data] {
-        assert!(leader(&mut nodes).step(Event::Receive(response)).reads.is_empty());
+        assert!(
+            leader(&mut nodes)
+                .step(Event::Receive(response))
+                .reads
+                .is_empty()
+        );
     }
     let retry = leader(&mut nodes).step(Event::Heartbeat);
     let response = reply(&mut nodes, requests(&retry, 2).remove(0));
-    assert_eq!(only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(), &id);
+    assert_eq!(
+        only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(),
+        &id
+    );
 }
 
 #[test]
@@ -237,15 +349,23 @@ fn matching_serial_never_bypasses_domain_configuration_recipient_or_member_valid
         let node = leader(&mut nodes);
         assert!(immediate(node.replica.step(&mut node.root, Event::Receive(invalid))).is_err());
         assert_eq!(node.replica.pending_reads(), 1);
-        assert_eq!(only_ready(node.step(Event::Receive(response)).reads).id(), &id);
+        assert_eq!(
+            only_ready(node.step(Event::Receive(response)).reads).id(),
+            &id
+        );
     }
 }
 
 #[test]
 fn several_fresh_replies_from_one_voter_and_all_learners_do_not_form_a_joint_quorum() {
-    let configuration = Configuration::joint(Domain([51; 32]), [52; 32],
+    let configuration = Configuration::joint(
+        Domain([51; 32]),
+        [52; 32],
         [MemberId(1), MemberId(2), MemberId(3)],
-        [MemberId(3), MemberId(4), MemberId(5)], [MemberId(6)]).unwrap();
+        [MemberId(3), MemberId(4), MemberId(5)],
+        [MemberId(6)],
+    )
+    .unwrap();
     let mut nodes = elect(&configuration, 4);
     let (id, round) = leader(&mut nodes).read();
     let first = leader(&mut nodes).step(Event::Propose(10));
@@ -253,13 +373,26 @@ fn several_fresh_replies_from_one_voter_and_all_learners_do_not_form_a_joint_quo
     for peer in [2, 4, 6] {
         for output in [&round, &first, &second] {
             let response = reply(&mut nodes, requests(output, peer).remove(0));
-            assert!(leader(&mut nodes).step(Event::Receive(response.clone())).reads.is_empty());
-            assert!(leader(&mut nodes).step(Event::Receive(response)).reads.is_empty());
+            assert!(
+                leader(&mut nodes)
+                    .step(Event::Receive(response.clone()))
+                    .reads
+                    .is_empty()
+            );
+            assert!(
+                leader(&mut nodes)
+                    .step(Event::Receive(response))
+                    .reads
+                    .is_empty()
+            );
         }
     }
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 1);
     let response = reply(&mut nodes, requests(&round, 3).remove(0));
-    assert_eq!(only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(), &id);
+    assert_eq!(
+        only_ready(leader(&mut nodes).step(Event::Receive(response)).reads).id(),
+        &id
+    );
 }
 
 #[test]
@@ -270,7 +403,12 @@ fn failed_or_cancelled_commit_publication_releases_no_pipeline_read_evidence() {
         let old = reply(&mut nodes, requests(&old, 2).remove(0));
         let (id, _) = leader(&mut nodes).read();
         let data = leader(&mut nodes).step(Event::Propose(10));
-        assert!(leader(&mut nodes).step(Event::Receive(old)).reads.is_empty());
+        assert!(
+            leader(&mut nodes)
+                .step(Event::Receive(old))
+                .reads
+                .is_empty()
+        );
         let response = reply(&mut nodes, requests(&data, 2).remove(0));
         let node = leader(&mut nodes);
         node.root.suspend = suspend;
@@ -280,14 +418,17 @@ fn failed_or_cancelled_commit_publication_releases_no_pipeline_read_evidence() {
             assert!(poll(work.as_mut()).is_pending());
             drop(work);
         } else {
-            assert!(matches!(immediate(node.replica.step(&mut node.root, Event::Receive(response))),
-                Err(ReplicaError::Sequence(SequenceError::Publication(_)))));
+            assert!(matches!(
+                immediate(node.replica.step(&mut node.root, Event::Receive(response))),
+                Err(ReplicaError::Sequence(SequenceError::Publication(_)))
+            ));
         }
         assert_eq!(node.replica.role(), Err(RaftError::RecoveryRequired));
         assert!(immediate(node.replica.read_index(&mut node.root)).is_err());
         let recovered_root = node.root.states.last().unwrap().clone();
         assert_eq!(recovered_root.commit_index(), 2); // error need not mean rollback
-        let mut recovered = Replica::recover(MemberId(1), recovered_root, Limits::default(), 8).unwrap();
+        let mut recovered =
+            Replica::recover(MemberId(1), recovered_root, Limits::default(), 8).unwrap();
         assert_eq!(recovered.pending_reads(), 0);
         assert!(!recovered.cancel_read(&id));
         assert_eq!(recovered.append_pipeline_window(), 1);
@@ -303,14 +444,22 @@ fn leader_loss_cancels_reads_with_full_windows_and_delayed_replies_cannot_revive
         requests_to_two.extend(requests(&leader(&mut nodes).step(Event::Propose(value)), 2));
     }
     assert_eq!(requests_to_two.len(), 4);
-    let replies: Vec<_> = requests_to_two.into_iter().map(|r| reply(&mut nodes, r)).collect();
+    let replies: Vec<_> = requests_to_two
+        .into_iter()
+        .map(|r| reply(&mut nodes, r))
+        .collect();
     leader(&mut nodes).step(Event::LivenessTimeout); // initial fresh-quorum interval
     let output = leader(&mut nodes).step(Event::LivenessTimeout); // no probe replies
     assert_eq!(output.consensus.role, Role::Follower);
     assert_eq!(output.reads.len(), 1);
     assert!(matches!(&output.reads[0], ReadResolution::LeadershipLost(lost) if lost == &id));
     for response in replies {
-        assert!(leader(&mut nodes).step(Event::Receive(response)).reads.is_empty());
+        assert!(
+            leader(&mut nodes)
+                .step(Event::Receive(response))
+                .reads
+                .is_empty()
+        );
     }
     assert_eq!(leader(&mut nodes).replica.pending_reads(), 0);
 }
@@ -321,16 +470,25 @@ fn pipeline_setting_is_follower_only_and_cannot_bypass_replica_publication_fence
         replica: Replica::new(MemberId(1), stable(1, &[]), Limits::default(), 8).unwrap(),
         root: MemoryRoot::default(),
     };
-    assert_eq!(node.replica.configure_append_pipeline(65), Err(RaftError::InvalidLimits));
+    assert_eq!(
+        node.replica.configure_append_pipeline(65),
+        Err(RaftError::InvalidLimits)
+    );
     node.replica.configure_append_pipeline(4).unwrap();
     assert_eq!(node.replica.append_pipeline_window(), 4);
     node.step(Event::ElectionTimeout);
-    assert_eq!(node.replica.configure_append_pipeline(2), Err(RaftError::PipelineConfigurationBusy));
+    assert_eq!(
+        node.replica.configure_append_pipeline(2),
+        Err(RaftError::PipelineConfigurationBusy)
+    );
     let (id, output) = node.read();
     assert_eq!(only_ready(output.reads).id(), &id); // quorum one needs no peer flight
     node.root.fail = true;
     assert!(immediate(node.replica.step(&mut node.root, Event::Propose(9))).is_err());
-    assert_eq!(node.replica.configure_append_pipeline(2), Err(RaftError::RecoveryRequired));
+    assert_eq!(
+        node.replica.configure_append_pipeline(2),
+        Err(RaftError::RecoveryRequired)
+    );
 }
 
 #[path = "pipelined_reads/application.rs"]

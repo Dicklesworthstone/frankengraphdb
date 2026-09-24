@@ -190,15 +190,22 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
     /// Handoff stays on the ordinary step/publication/output path. Inspect its
     /// bounded local attempt without exposing mutable consensus or application
     /// state. Completion does not imply membership retirement or write success.
-    pub fn leadership_transfer(&self) -> Result<Option<&fgdb_order::LeadershipTransfer>, ApplicationStateError> {
+    pub fn leadership_transfer(
+        &self,
+    ) -> Result<Option<&fgdb_order::LeadershipTransfer>, ApplicationStateError> {
         self.available()?;
-        self.replica.leadership_transfer().map_err(ApplicationStateError::Raft)
+        self.replica
+            .leadership_transfer()
+            .map_err(ApplicationStateError::Raft)
     }
 
     /// Configure the consensus append bound without exposing mutable Raft or
     /// application state. Only a healthy follower can change this volatile
     /// setting; applying or installing still uses the same publication backend.
-    pub fn configure_append_pipeline(&mut self, maximum: usize) -> Result<(), ApplicationStateError> {
+    pub fn configure_append_pipeline(
+        &mut self,
+        maximum: usize,
+    ) -> Result<(), ApplicationStateError> {
         self.available()?;
         self.replica
             .configure_append_pipeline(maximum)
@@ -343,7 +350,9 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         output: ReplicaOutput<C>,
     ) -> Result<AppliedReplicaOutput<C>, ApplicationStateError> {
         self.writes.observe(
-            self.replica.durable_state().map_err(ApplicationStateError::Raft)?,
+            self.replica
+                .durable_state()
+                .map_err(ApplicationStateError::Raft)?,
             output.consensus.role,
         );
         let mut leadership_lost = Vec::new();

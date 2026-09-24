@@ -71,12 +71,20 @@ pub(super) fn validate_event<C: Clone + Eq>(raft: &Raft<C>, event: &Event<C>) ->
             if raft.state.term == u64::MAX {
                 return Err(Error::CounterExhausted);
             }
-            if raft.handoff.as_ref().is_some_and(|pending| pending.target != *target) {
+            if raft
+                .handoff
+                .as_ref()
+                .is_some_and(|pending| pending.target != *target)
+            {
                 return Err(Error::LeadershipTransferInProgress);
             }
         }
         Event::AbortLeadershipTransfer(id) => {
-            if !raft.handoff.as_ref().is_some_and(|pending| &pending.id == id) {
+            if !raft
+                .handoff
+                .as_ref()
+                .is_some_and(|pending| &pending.id == id)
+            {
                 return Err(Error::StaleLeadershipTransfer);
             }
         }
@@ -86,9 +94,19 @@ pub(super) fn validate_event<C: Clone + Eq>(raft: &Raft<C>, event: &Event<C>) ->
 }
 
 pub(super) fn validate_message<C>(message: &Message<C>) -> Result<(), Error> {
-    if let Message::TimeoutNow { term, round, last_index, last_term } = message {
-        if *term == 0 || *term == u64::MAX || *round == 0 || *last_index == u64::MAX
-            || (*last_index == 0) != (*last_term == 0) || last_term > term
+    if let Message::TimeoutNow {
+        term,
+        round,
+        last_index,
+        last_term,
+    } = message
+    {
+        if *term == 0
+            || *term == u64::MAX
+            || *round == 0
+            || *last_index == u64::MAX
+            || (*last_index == 0) != (*last_term == 0)
+            || last_term > term
         {
             return Err(Error::InvalidMessage);
         }
@@ -104,7 +122,11 @@ impl<C: Clone + Eq> Raft<C> {
         Ok(self.handoff.as_ref())
     }
 
-    pub(super) fn start_handoff(&mut self, target: MemberId, output: &mut Output<C>) -> Result<(), Error> {
+    pub(super) fn start_handoff(
+        &mut self,
+        target: MemberId,
+        output: &mut Output<C>,
+    ) -> Result<(), Error> {
         if self.handoff.is_none() {
             self.handoff = Some(LeadershipTransfer {
                 id: LeadershipTransferId(PersistenceId {
@@ -123,18 +145,26 @@ impl<C: Clone + Eq> Raft<C> {
         }
         // A snapshot offer is still only an offer. send_append retains the
         // existing peer window and cannot turn issued bytes into match evidence.
-        if self.progress.get(&target).is_some_and(|progress| progress.matched < self.last_index()) {
+        if self
+            .progress
+            .get(&target)
+            .is_some_and(|progress| progress.matched < self.last_index())
+        {
             self.send_append(target, output, true)?;
         }
         Ok(())
     }
 
     pub(super) fn drive_handoff(&mut self, output: &mut Output<C>, retry: bool) {
-        let Some(pending) = self.handoff.as_ref() else { return };
+        let Some(pending) = self.handoff.as_ref() else {
+            return;
+        };
         if self.role != Role::Leader || self.state.term != pending.term {
             return;
         }
-        let caught_up = self.progress.get(&pending.target)
+        let caught_up = self
+            .progress
+            .get(&pending.target)
             .is_some_and(|progress| progress.matched >= pending.last_index);
         if !caught_up || (!retry && pending.phase == LeadershipTransferPhase::ElectionRequested) {
             return;
@@ -166,7 +196,8 @@ impl<C: Clone + Eq> Raft<C> {
         // A higher-term request has already cleared the old leader, so cannot
         // manufacture an immediate campaign. A delayed duplicate after campaign
         // is stale by term; recent traffic from a DIFFERENT leader cannot help.
-        if self.role != Role::Follower || term != self.state.term
+        if self.role != Role::Follower
+            || term != self.state.term
             || self.leader != Some(from)
             || !self.state.configuration.voters.contains(&self.id)
             || self.incoming_snapshot.is_some()

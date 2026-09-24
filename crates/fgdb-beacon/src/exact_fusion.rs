@@ -35,12 +35,19 @@ impl ExactRrfProfile {
         vector_weight: u16,
         text_weight: u16,
     ) -> Result<Self, BeaconError> {
-        let rank_constant = NonZeroU32::new(rank_constant)
-            .ok_or(BeaconError::InvalidQuery("RRF rank constant must be positive"))?;
+        let rank_constant = NonZeroU32::new(rank_constant).ok_or(BeaconError::InvalidQuery(
+            "RRF rank constant must be positive",
+        ))?;
         if vector_weight == 0 && text_weight == 0 {
-            return Err(BeaconError::InvalidQuery("at least one RRF weight must be positive"));
+            return Err(BeaconError::InvalidQuery(
+                "at least one RRF weight must be positive",
+            ));
         }
-        Ok(Self { rank_constant, vector_weight, text_weight })
+        Ok(Self {
+            rank_constant,
+            vector_weight,
+            text_weight,
+        })
     }
 
     #[must_use]
@@ -101,7 +108,10 @@ impl ExactRrfScore {
         while b != 0 {
             (a, b) = (b, a % b);
         }
-        Self { numerator: numerator / a, denominator: denominator / a }
+        Self {
+            numerator: numerator / a,
+            denominator: denominator / a,
+        }
     }
 
     #[must_use]
@@ -122,8 +132,7 @@ impl ExactRrfScore {
         let quotient = scaled / self.denominator;
         let remainder = scaled % self.denominator;
         let twice = remainder * 2;
-        let round_up = twice > self.denominator
-            || (twice == self.denominator && quotient % 2 != 0);
+        let round_up = twice > self.denominator || (twice == self.denominator && quotient % 2 != 0);
         let coefficient = i128::try_from(quotient + u128::from(round_up))
             .map_err(|_| BeaconError::Invariant("bounded RRF decimal coefficient"))?;
         CanonicalDecimal::from_coefficient(coefficient)
@@ -170,10 +179,13 @@ impl ExactHybridQuery<'_> {
         };
         let vector = depth(self.profile.vector_weight, self.vector_candidates)?;
         let text = depth(self.profile.text_weight, self.text_candidates)?;
-        let total = vector.checked_add(text)
+        let total = vector
+            .checked_add(text)
             .ok_or(BeaconError::InvalidQuery("RRF candidate sum exceeds usize"))?;
         if self.k > total {
-            return Err(BeaconError::InvalidQuery("RRF k exceeds active candidate depths"));
+            return Err(BeaconError::InvalidQuery(
+                "RRF k exceeds active candidate depths",
+            ));
         }
         Ok((vector, text))
     }
@@ -207,7 +219,10 @@ struct Ranked {
 impl Ord for Ranked {
     fn cmp(&self, other: &Self) -> Ordering {
         // Smaller means better. BinaryHeap keeps the worst retained hit on top.
-        other.score.cmp(&self.score).then_with(|| self.id.cmp(&other.id))
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.id.cmp(&other.id))
     }
 }
 
@@ -218,9 +233,13 @@ impl PartialOrd for Ranked {
 }
 
 fn rank(offset: usize) -> Result<NonZeroU32, BeaconError> {
-    u32::try_from(offset).ok().and_then(|n| n.checked_add(1))
+    u32::try_from(offset)
+        .ok()
+        .and_then(|n| n.checked_add(1))
         .and_then(NonZeroU32::new)
-        .ok_or(BeaconError::Invariant("source exceeded admitted RRF rank domain"))
+        .ok_or(BeaconError::Invariant(
+            "source exceeded admitted RRF rank domain",
+        ))
 }
 
 impl IndexSnapshot {
@@ -246,7 +265,13 @@ impl IndexSnapshot {
         }
         let mut fused = BTreeMap::<VId, Evidence>::new();
         if vector_depth != 0 {
-            let hits = self.knn(query.vector, vector_depth, query.vector_mode, &eligible, work)?;
+            let hits = self.knn(
+                query.vector,
+                vector_depth,
+                query.vector_mode,
+                &eligible,
+                work,
+            )?;
             for (offset, hit) in hits.into_iter().enumerate() {
                 work.charge(1)?;
                 let row = fused.entry(hit.id).or_default();
@@ -255,7 +280,8 @@ impl IndexSnapshot {
             }
         }
         if text_depth != 0 {
-            let hits = self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?;
+            let hits =
+                self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?;
             for (offset, hit) in hits.into_iter().enumerate() {
                 work.charge(1)?;
                 let row = fused.entry(hit.id).or_default();
@@ -271,7 +297,9 @@ impl IndexSnapshot {
             let candidate = Ranked {
                 id,
                 score: ExactRrfScore::from_ranks(
-                    query.profile, evidence.vector_rank, evidence.text_rank,
+                    query.profile,
+                    evidence.vector_rank,
+                    evidence.text_rank,
                 ),
             };
             if best.len() < query.k {
@@ -284,8 +312,11 @@ impl IndexSnapshot {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(1 + best.len().checked_ilog2().unwrap_or(0) as usize)?;
-            let hit = best.pop().ok_or(BeaconError::Invariant("RRF heap disappeared"))?;
-            let evidence = fused.remove(&hit.id)
+            let hit = best
+                .pop()
+                .ok_or(BeaconError::Invariant("RRF heap disappeared"))?;
+            let evidence = fused
+                .remove(&hit.id)
                 .ok_or(BeaconError::Invariant("RRF evidence disappeared"))?;
             rows.push(ExactHybridHit {
                 id: hit.id,

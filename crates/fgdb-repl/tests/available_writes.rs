@@ -331,19 +331,44 @@ struct Node {
     state: Rc<RefCell<State>>,
 }
 fn nodes(config: &Configuration) -> Vec<Node> {
-    config.voters().iter().map(|id| {
-        let state = Rc::new(RefCell::new(State {
-            root: None,
-            progress: ApplicationProgress { domain: config.domain(), configuration: config.identity(),
-                applied: AppliedPosition { index: 0, term: 0 }, visible_index: 0,
-                state_root: oid(1, 42), publication_root: oid(1, 41), publication_generation: 1 },
-            generation: 1, expected: availability(config), batch_commands: Vec::new(), acquire: Mode::Ready, publish: Mode::Ready,
-            apply: Mode::Ready, active_permits: 0, acquires: 0, trace: Vec::new(), effects: Vec::new(), hide: false,
-        }));
-        let replica = Replica::new(*id, config.clone(), Limits::default(), 16).unwrap();
-        let member = immediate(AppliedReplica::recover(replica, Backend(Rc::clone(&state)), 1, 16)).unwrap();
-        Node { member, state }
-    }).collect()
+    config
+        .voters()
+        .iter()
+        .map(|id| {
+            let state = Rc::new(RefCell::new(State {
+                root: None,
+                progress: ApplicationProgress {
+                    domain: config.domain(),
+                    configuration: config.identity(),
+                    applied: AppliedPosition { index: 0, term: 0 },
+                    visible_index: 0,
+                    state_root: oid(1, 42),
+                    publication_root: oid(1, 41),
+                    publication_generation: 1,
+                },
+                generation: 1,
+                expected: availability(config),
+                batch_commands: Vec::new(),
+                acquire: Mode::Ready,
+                publish: Mode::Ready,
+                apply: Mode::Ready,
+                active_permits: 0,
+                acquires: 0,
+                trace: Vec::new(),
+                effects: Vec::new(),
+                hide: false,
+            }));
+            let replica = Replica::new(*id, config.clone(), Limits::default(), 16).unwrap();
+            let member = immediate(AppliedReplica::recover(
+                replica,
+                Backend(Rc::clone(&state)),
+                1,
+                16,
+            ))
+            .unwrap();
+            Node { member, state }
+        })
+        .collect()
 }
 fn pump(nodes: &mut [Node], messages: Vec<Envelope<u64>>, reachable: &[u128]) {
     let mut messages: VecDeque<_> = messages.into();

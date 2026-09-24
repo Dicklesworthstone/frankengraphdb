@@ -5,9 +5,8 @@
 use super::*;
 use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
 use fgdb_gql::stream::{
-    VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent,
-    VertexScanPlan, VertexScanRecord, VertexScanRow, VertexScanSource,
-    VertexScanSourceError, VertexScanState,
+    VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
+    VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
 };
 use std::iter::FusedIterator;
 use std::rc::Rc;
@@ -55,16 +54,24 @@ pub struct AuthorizedRowCursor<'q> {
     state: VertexScanState,
 }
 impl AuthorizedRowCursor<'_> {
-    pub fn columns(&self) -> &[String] { &self.columns }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.snapshot_seq }
-    pub fn state(&self) -> VertexScanState { self.state }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.snapshot_seq
+    }
+    pub fn state(&self) -> VertexScanState {
+        self.state
+    }
 
     /// Release this cursor without draining it. A normal close preserves the
     /// session; a previously unwound poll keeps its terminal session fence.
     pub fn close(&mut self) {
         if self.state == VertexScanState::Open {
             self.state = VertexScanState::Closed;
-            if let Some(guard) = &mut self.guard { guard.armed = false; }
+            if let Some(guard) = &mut self.guard {
+                guard.armed = false;
+            }
         }
         self.driver.take();
         self.guard.take();
@@ -73,13 +80,22 @@ impl AuthorizedRowCursor<'_> {
 impl Iterator for AuthorizedRowCursor<'_> {
     type Item = Result<GraphValueRow, QueryError>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.state != VertexScanState::Open { return None; }
+        if self.state != VertexScanState::Open {
+            return None;
+        }
         self.state = VertexScanState::Failed;
-        if let Some(guard) = &mut self.guard { guard.armed = true; }
-        let mut driver = self.driver.take().expect("open authorized cursor owns its driver");
+        if let Some(guard) = &mut self.guard {
+            guard.armed = true;
+        }
+        let mut driver = self
+            .driver
+            .take()
+            .expect("open authorized cursor owns its driver");
         match driver() {
             Ok((value, finished)) => {
-                if let Some(guard) = &mut self.guard { guard.armed = false; }
+                if let Some(guard) = &mut self.guard {
+                    guard.armed = false;
+                }
                 if finished || value.is_none() {
                     self.state = VertexScanState::Exhausted;
                     self.guard.take();
@@ -91,7 +107,9 @@ impl Iterator for AuthorizedRowCursor<'_> {
             }
             Err(error) => {
                 let result = Err(error);
-                if let Some(guard) = &mut self.guard { guard.armed = terminal(&result); }
+                if let Some(guard) = &mut self.guard {
+                    guard.armed = terminal(&result);
+                }
                 self.guard.take();
                 Some(result)
             }
@@ -115,87 +133,141 @@ struct ScopedSource<'q, S> {
     inner: S,
     execution: Shared<'q>,
 }
-fn source_error<C>(error: VertexScanSourceError<ReadError, C>) -> VertexScanSourceError<QueryError, C> {
+fn source_error<C>(
+    error: VertexScanSourceError<ReadError, C>,
+) -> VertexScanSourceError<QueryError, C> {
     match error {
-        VertexScanSourceError::Source(error) => VertexScanSourceError::Source(QueryError::Read(error)),
+        VertexScanSourceError::Source(error) => {
+            VertexScanSourceError::Source(QueryError::Read(error))
+        }
         VertexScanSourceError::Control(error) => VertexScanSourceError::Control(error),
     }
 }
 impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'_, S> {
     type Error = QueryError;
-    fn snapshot_seq(&self) -> CommitSeq { self.inner.snapshot_seq() }
-    fn next_vertex<C>(&mut self, control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>)
-        -> Result<Option<VId>, VertexScanSourceError<QueryError, C>>
-    {
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.inner.snapshot_seq()
+    }
+    fn next_vertex<C>(
+        &mut self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, VertexScanSourceError<QueryError, C>> {
         self.inner.next_vertex(control).map_err(source_error)
     }
-    fn vertex<'a, C>(&'a self, _: VId, _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>)
-        -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<QueryError, C>>
-    {
+    fn vertex<'a, C>(
+        &'a self,
+        _: VId,
+        _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<QueryError, C>> {
         // This adapter cannot lend a raw, unmasked record. Probe plans are
         // rejected at opening; optional probe access also refuses by default.
         Err(VertexScanSourceError::Source(QueryError::Unsupported {
             diagnostics: vec!["authorized root source requires owned masked records".to_owned()],
         }))
     }
-    fn vertex_record<'a, C>(&'a self, vid: VId, control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>)
-        -> Result<Option<VertexScanRecord<'a>>, VertexScanSourceError<QueryError, C>>
-    {
+    fn vertex_record<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRecord<'a>>, VertexScanSourceError<QueryError, C>> {
         // The existing history index selects the winner BEFORE scope. A hidden
         // successor never resurrects an older, allowed label/property image.
-        let Some(row) = self.inner.vertex(vid, control).map_err(source_error)? else { return Ok(None); };
+        let Some(row) = self.inner.vertex(vid, control).map_err(source_error)? else {
+            return Ok(None);
+        };
         control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
         for _ in row.labels {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
         }
-        if !self.execution.borrow().permit.predicates().allows_vertex(row.labels) {
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_vertex(row.labels)
+        {
             return Ok(None);
         }
-        self.execution.borrow_mut().node().map_err(VertexScanSourceError::Source)?;
+        self.execution
+            .borrow_mut()
+            .node()
+            .map_err(VertexScanSourceError::Source)?;
         VertexScanRecord::copy_masked(
             row,
-            |label| self.execution.borrow().permit.predicates().allows_label(label),
-            |key| self.execution.borrow().permit.predicates().allows_property(key),
+            |label| {
+                self.execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_label(label)
+            },
+            |key| {
+                self.execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_property(key)
+            },
             control,
-        ).map(Some).map_err(VertexScanSourceError::Control)
+        )
+        .map(Some)
+        .map_err(VertexScanSourceError::Control)
     }
 }
 
 fn plan_error(error: VertexScanBuildError) -> QueryError {
     QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(error)))
 }
-fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<VertexScanPlan<GraphValueRow>, QueryError> {
+fn compile(
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+) -> Result<VertexScanPlan<GraphValueRow>, QueryError> {
     // Root record ownership does not automatically authorize probe sources.
     // Refuse before reading anything, even with LIMIT 0 or an empty graph.
-    if let Some(operator) = pattern.plan().operators().iter().position(|operator| {
-        matches!(operator, GlaOperator::Probe { .. })
-    }) {
+    if let Some(operator) = pattern
+        .plan()
+        .operators()
+        .iter()
+        .position(|operator| matches!(operator, GlaOperator::Probe { .. }))
+    {
         return Err(plan_error(VertexScanBuildError { operator }));
     }
     VertexScanPlan::compile(pattern.plan()).map_err(plan_error)
 }
 fn bind(
-    prepared: &PreparedNativeRead, params: &GqlParameters, default: CommitSeq,
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    default: CommitSeq,
 ) -> Result<(VertexScanPlan<GraphValueRow>, CommitSeq, Vec<String>), QueryError> {
     match prepared {
         PreparedNativeRead::Pattern(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?;
             Ok((compile(&query)?, default, query.columns().to_vec()))
         }
         PreparedNativeRead::TemporalPattern(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
-            Ok((compile(query.pattern())?, query.as_of(), query.pattern().columns().to_vec()))
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
+            Ok((
+                compile(query.pattern())?,
+                query.as_of(),
+                query.pattern().columns().to_vec(),
+            ))
         }
-        _ => Err(QueryError::StreamingUnsupported { facade: prepared.facade_class() }),
+        _ => Err(QueryError::StreamingUnsupported {
+            facade: prepared.facade_class(),
+        }),
     }
 }
 fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> QueryError {
     match error {
-        GqlQueryError::Interrupted(error) | GqlQueryError::Source(VertexScanError::Source(error)) => error,
+        GqlQueryError::Interrupted(error)
+        | GqlQueryError::Source(VertexScanError::Source(error)) => error,
         GqlQueryError::Source(VertexScanError::Plan(error)) => plan_error(error),
-        GqlQueryError::Source(VertexScanError::NonIncreasingIdentity) => {
-            QueryError::Stream(GqlQueryError::Source(VertexScanError::NonIncreasingIdentity))
-        }
+        GqlQueryError::Source(VertexScanError::NonIncreasingIdentity) => QueryError::Stream(
+            GqlQueryError::Source(VertexScanError::NonIncreasingIdentity),
+        ),
         GqlQueryError::Source(VertexScanError::CounterExhausted) => {
             QueryError::Stream(GqlQueryError::Source(VertexScanError::CounterExhausted))
         }
@@ -204,7 +276,9 @@ fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> 
         },
         GqlQueryError::Rows(error) => QueryError::Stream(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Stream(GqlQueryError::Evaluator(error)),
-        GqlQueryError::IdentifiedEdgesRequired => QueryError::Stream(GqlQueryError::IdentifiedEdgesRequired),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            QueryError::Stream(GqlQueryError::IdentifiedEdgesRequired)
+        }
     }
 }
 
@@ -223,10 +297,14 @@ fn open<'q, C: FnMut() -> u64>(
 ) -> Result<AuthorizedRowCursor<'q>, QueryError> {
     let now = clock();
     if now < *last_now_ms {
-        return Err(QueryError::Authorization(AuthorizationError::ClockWentBackwards));
+        return Err(QueryError::Authorization(
+            AuthorizationError::ClockWentBackwards,
+        ));
     }
     *last_now_ms = now;
-    let permit = capability.begin_read_at(branch, now).map_err(QueryError::Authorization)?;
+    let permit = capability
+        .begin_read_at(branch, now)
+        .map_err(QueryError::Authorization)?;
     let tracked_clock: Box<dyn FnMut() -> u64 + 'q> = Box::new(move || {
         let now = clock();
         *last_now_ms = (*last_now_ms).max(now);
@@ -236,18 +314,28 @@ fn open<'q, C: FnMut() -> u64>(
     execution.borrow_mut().checkpoint()?;
     let selected = (|| {
         if !Arc::ptr_eq(owner, &prepared.owner) {
-            return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
+            return Err(QueryError::Authorization(
+                AuthorizationError::WrongAuthority,
+            ));
         }
-        let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+        let selected = prepared
+            .selector
+            .bind_parameters(params)
+            .map_err(selector_error)?;
         check_branch(&selected, branch)?;
         bind(&prepared.native, selected.parameters(), view.frontier())
     })();
     execution.borrow_mut().checkpoint()?;
     let (plan, at, columns) = selected?;
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
-    let source = ScopedSource { inner, execution: Rc::clone(&execution) };
+    let source = ScopedSource {
+        inner,
+        execution: Rc::clone(&execution),
+    };
     let control = Rc::clone(&execution);
-    let mut cursor = VertexScanCursor::new(source, plan, policy, move || control.borrow_mut().checkpoint());
+    let mut cursor = VertexScanCursor::new(source, plan, policy, move || {
+        control.borrow_mut().checkpoint()
+    });
     execution.borrow_mut().checkpoint()?;
     let driver = Box::new(move || {
         let row = cursor.next().transpose().map_err(scan_error)?;
@@ -257,7 +345,13 @@ fn open<'q, C: FnMut() -> u64>(
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
     });
-    Ok(AuthorizedRowCursor { driver: Some(driver), guard: None, columns, snapshot_seq: at, state: VertexScanState::Open })
+    Ok(AuthorizedRowCursor {
+        driver: Some(driver),
+        guard: None,
+        columns,
+        snapshot_seq: at,
+        state: VertexScanState::Open,
+    })
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -274,15 +368,41 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// The writer remains independent, but this borrows the session until the
     /// cursor is dropped so its trusted clock and capability cannot be replaced.
     pub fn stream<'q>(
-        &'q mut self, cx: &'q QueryCx, prepared: &AuthorizedPreparedRead, params: &GqlParameters,
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
     ) -> Result<AuthorizedRowCursor<'q>, QueryError> {
         let owner = &self.owner;
-        let state = self.state.as_mut().ok_or(QueryError::Authorization(AuthorizationError::ExecutionStopped))?;
-        let State { view, capability, branch, policy, clock, last_now_ms, .. } = state;
-        let mut guard = PinGuard { pin: view, armed: true };
+        let state = self.state.as_mut().ok_or(QueryError::Authorization(
+            AuthorizationError::ExecutionStopped,
+        ))?;
+        let State {
+            view,
+            capability,
+            branch,
+            policy,
+            clock,
+            last_now_ms,
+            ..
+        } = state;
+        let mut guard = PinGuard {
+            pin: view,
+            armed: true,
+        };
         let result = open(
-            guard.pin.as_ref().ok_or(QueryError::Authorization(AuthorizationError::ExecutionStopped))?,
-            capability, clock, last_now_ms, cx, branch, owner, prepared, params, *policy,
+            guard.pin.as_ref().ok_or(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ))?,
+            capability,
+            clock,
+            last_now_ms,
+            cx,
+            branch,
+            owner,
+            prepared,
+            params,
+            *policy,
         );
         match result {
             Ok(mut cursor) => {

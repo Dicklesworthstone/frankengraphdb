@@ -3,8 +3,8 @@ use std::num::NonZeroU32;
 
 use fgdb_beacon::{
     BeaconError, BeaconIndex, Bm25Config, DistanceMetric, ExactHybridQuery, ExactRrfProfile,
-    ExactRrfScore, HnswConfig, IndexConfig, IndexDocument, IndexMutation, TextMatch,
-    VectorSearch, WorkBudget, WorkControl,
+    ExactRrfScore, HnswConfig, IndexConfig, IndexDocument, IndexMutation, TextMatch, VectorSearch,
+    WorkBudget, WorkControl,
 };
 use fgdb_types::VId;
 
@@ -28,12 +28,25 @@ fn index() -> BeaconIndex {
     BeaconIndex::build(
         config(),
         [
-            IndexDocument { id: VId(1), vector: Some(vec![10.0]), text: Some("red".into()) },
-            IndexDocument { id: VId(2), vector: Some(vec![20.0]), text: Some("red red".into()) },
-            IndexDocument { id: VId(3), vector: Some(vec![0.0]), text: Some("blue".into()) },
+            IndexDocument {
+                id: VId(1),
+                vector: Some(vec![10.0]),
+                text: Some("red".into()),
+            },
+            IndexDocument {
+                id: VId(2),
+                vector: Some(vec![20.0]),
+                text: Some("red red".into()),
+            },
+            IndexDocument {
+                id: VId(3),
+                vector: Some(vec![0.0]),
+                text: Some("blue".into()),
+            },
         ],
         &mut budget(),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn query() -> ExactHybridQuery<'static> {
@@ -86,19 +99,24 @@ fn exact_order_survives_float_and_display_score_collisions() {
 #[test]
 fn canonical_decimal_rounds_once_with_half_even_ties() {
     // 10^18 / 2^19 = 1907348632812.5; three times that is 5722045898437.5.
-    let even = ExactRrfScore::from_ranks(
-        ExactRrfProfile::new(524_287, 1, 0).unwrap(), rank(1), None,
-    );
-    let odd = ExactRrfScore::from_ranks(
-        ExactRrfProfile::new(524_287, 3, 0).unwrap(), rank(1), None,
-    );
+    let even =
+        ExactRrfScore::from_ranks(ExactRrfProfile::new(524_287, 1, 0).unwrap(), rank(1), None);
+    let odd =
+        ExactRrfScore::from_ranks(ExactRrfProfile::new(524_287, 3, 0).unwrap(), rank(1), None);
     assert_eq!(even.decimal().unwrap().coefficient(), 1_907_348_632_812);
     assert_eq!(odd.decimal().unwrap().coefficient(), 5_722_045_898_438);
 }
 
 #[test]
 fn full_admitted_domain_keeps_cross_products_and_decimal_scaling_in_range() {
-    let ranks = [None, rank(1), rank(2), rank(31), rank(u32::MAX - 1), rank(u32::MAX)];
+    let ranks = [
+        None,
+        rank(1),
+        rank(2),
+        rank(31),
+        rank(u32::MAX - 1),
+        rank(u32::MAX),
+    ];
     let mut scores = Vec::new();
     for k0 in [1, 60, u32::MAX] {
         for (vector, text) in [(1, 0), (0, 1), (1, 1), (u16::MAX, u16::MAX)] {
@@ -123,19 +141,30 @@ fn full_admitted_domain_keeps_cross_products_and_decimal_scaling_in_range() {
         }
     }
     let max = ExactRrfScore::from_ranks(
-        ExactRrfProfile::new(1, u16::MAX, u16::MAX).unwrap(), rank(1), rank(1),
+        ExactRrfProfile::new(1, u16::MAX, u16::MAX).unwrap(),
+        rank(1),
+        rank(1),
     );
-    assert_eq!(max.decimal().unwrap().coefficient(), 65_535_000_000_000_000_000_000);
+    assert_eq!(
+        max.decimal().unwrap().coefficient(),
+        65_535_000_000_000_000_000_000
+    );
 }
 
 #[test]
 fn separate_depths_union_evidence_and_canonical_top_k_use_the_native_lanes() {
     let snapshot = index().snapshot();
     let q = query();
-    let hits = snapshot.hybrid_search_exact_fusion(q, |_| true, &mut budget()).unwrap();
+    let hits = snapshot
+        .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+        .unwrap();
     assert_eq!(hits.len(), 3);
-    let vector = snapshot.knn(q.vector, 1, VectorSearch::Exact, |_| true, &mut budget()).unwrap();
-    let text = snapshot.text_search(q.text, 2, TextMatch::Any, |_| true, &mut budget()).unwrap();
+    let vector = snapshot
+        .knn(q.vector, 1, VectorSearch::Exact, |_| true, &mut budget())
+        .unwrap();
+    let text = snapshot
+        .text_search(q.text, 2, TextMatch::Any, |_| true, &mut budget())
+        .unwrap();
     for hit in &hits {
         let vr = vector.iter().position(|entry| entry.id == hit.id);
         let tr = text.iter().position(|entry| entry.id == hit.id);
@@ -151,20 +180,36 @@ fn separate_depths_union_evidence_and_canonical_top_k_use_the_native_lanes() {
     for k in 0..=3 {
         let smaller = ExactHybridQuery { k, ..q };
         assert_eq!(
-            snapshot.hybrid_search_exact_fusion(smaller, |_| true, &mut budget()).unwrap(),
+            snapshot
+                .hybrid_search_exact_fusion(smaller, |_| true, &mut budget())
+                .unwrap(),
             hits[..k],
         );
     }
-    let filtered = snapshot.hybrid_search_exact_fusion(q, |id| id != VId(3), &mut budget()).unwrap();
+    let filtered = snapshot
+        .hybrid_search_exact_fusion(q, |id| id != VId(3), &mut budget())
+        .unwrap();
     assert!(filtered.iter().all(|hit| hit.id != VId(3)));
-    assert_eq!(filtered.iter().find(|hit| hit.id == VId(1)).unwrap().vector_rank, rank(1));
+    assert_eq!(
+        filtered
+            .iter()
+            .find(|hit| hit.id == VId(1))
+            .unwrap()
+            .vector_rank,
+        rank(1)
+    );
 }
 
 #[test]
 fn duplicate_modalities_fuse_once_and_zero_weight_does_not_open_a_disabled_lane() {
     let snapshot = index().snapshot();
-    let q = ExactHybridQuery { vector_candidates: 3, ..query() };
-    let hits = snapshot.hybrid_search_exact_fusion(q, |_| true, &mut budget()).unwrap();
+    let q = ExactHybridQuery {
+        vector_candidates: 3,
+        ..query()
+    };
+    let hits = snapshot
+        .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+        .unwrap();
     assert_eq!(hits.len(), 3);
     for id in [VId(1), VId(2)] {
         let hit = hits.iter().find(|hit| hit.id == id).unwrap();
@@ -172,9 +217,14 @@ fn duplicate_modalities_fuse_once_and_zero_weight_does_not_open_a_disabled_lane(
     }
     let text_only = BeaconIndex::build(
         IndexConfig::default(),
-        [IndexDocument { id: VId(9), vector: None, text: Some("red".into()) }],
+        [IndexDocument {
+            id: VId(9),
+            vector: None,
+            text: Some("red".into()),
+        }],
         &mut budget(),
-    ).unwrap();
+    )
+    .unwrap();
     let q = ExactHybridQuery {
         vector: &[f32::NAN],
         vector_mode: VectorSearch::Approximate { ef_search: 0 },
@@ -182,38 +232,80 @@ fn duplicate_modalities_fuse_once_and_zero_weight_does_not_open_a_disabled_lane(
         k: 1,
         ..query()
     };
-    let hits = text_only.snapshot().hybrid_search_exact_fusion(q, |_| true, &mut budget()).unwrap();
+    let hits = text_only
+        .snapshot()
+        .hybrid_search_exact_fusion(q, |_| true, &mut budget())
+        .unwrap();
     assert_eq!(hits[0].id, VId(9));
     assert_eq!(hits[0].vector_rank, None);
-    assert_eq!((hits[0].score.numerator(), hits[0].score.denominator()), (2, 61));
+    assert_eq!(
+        (hits[0].score.numerator(), hits[0].score.denominator()),
+        (2, 61)
+    );
 }
 
 #[test]
 fn invalid_shape_and_native_source_failures_are_not_hidden() {
     let snapshot = index().snapshot();
     let invalid = ExactHybridQuery { k: 4, ..query() };
-    assert!(matches!(snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
-        Err(BeaconError::InvalidQuery(_))));
-    let invalid = ExactHybridQuery { vector: &[], ..query() };
-    assert!(matches!(snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
-        Err(BeaconError::Dimension { expected: 1, actual: 0 })));
-    let invalid = ExactHybridQuery { vector_mode: VectorSearch::Approximate { ef_search: 0 }, ..query() };
-    assert!(matches!(snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
-        Err(BeaconError::InvalidQuery(_))));
+    assert!(matches!(
+        snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
+        Err(BeaconError::InvalidQuery(_))
+    ));
+    let invalid = ExactHybridQuery {
+        vector: &[],
+        ..query()
+    };
+    assert!(matches!(
+        snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
+        Err(BeaconError::Dimension {
+            expected: 1,
+            actual: 0
+        })
+    ));
+    let invalid = ExactHybridQuery {
+        vector_mode: VectorSearch::Approximate { ef_search: 0 },
+        ..query()
+    };
+    assert!(matches!(
+        snapshot.hybrid_search_exact_fusion(invalid, |_| true, &mut budget()),
+        Err(BeaconError::InvalidQuery(_))
+    ));
 }
 
 #[test]
 fn pinned_fusion_survives_writer_updates_and_compaction() {
     let mut index = index();
     let old = index.snapshot();
-    let expected = old.hybrid_search_exact_fusion(query(), |_| true, &mut budget()).unwrap();
-    index.apply_batch([
-        IndexMutation::Delete(VId(3)),
-        IndexMutation::Upsert(IndexDocument { id: VId(2), vector: Some(vec![0.0]), text: Some("blue".into()) }),
-    ], &mut budget()).unwrap();
+    let expected = old
+        .hybrid_search_exact_fusion(query(), |_| true, &mut budget())
+        .unwrap();
+    index
+        .apply_batch(
+            [
+                IndexMutation::Delete(VId(3)),
+                IndexMutation::Upsert(IndexDocument {
+                    id: VId(2),
+                    vector: Some(vec![0.0]),
+                    text: Some("blue".into()),
+                }),
+            ],
+            &mut budget(),
+        )
+        .unwrap();
     index.compact(&mut budget()).unwrap();
-    assert_eq!(old.hybrid_search_exact_fusion(query(), |_| true, &mut budget()).unwrap(), expected);
-    assert_ne!(index.snapshot().hybrid_search_exact_fusion(query(), |_| true, &mut budget()).unwrap(), expected);
+    assert_eq!(
+        old.hybrid_search_exact_fusion(query(), |_| true, &mut budget())
+            .unwrap(),
+        expected
+    );
+    assert_ne!(
+        index
+            .snapshot()
+            .hybrid_search_exact_fusion(query(), |_| true, &mut budget())
+            .unwrap(),
+        expected
+    );
 }
 
 #[derive(Default)]
@@ -237,7 +329,11 @@ impl WorkControl for RefuseAt {
     fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
         let current = self.call;
         self.call += 1;
-        if current == self.at { Err(BeaconError::Cancelled) } else { Ok(()) }
+        if current == self.at {
+            Err(BeaconError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -245,12 +341,29 @@ impl WorkControl for RefuseAt {
 fn every_checkpoint_including_final_publication_can_refuse_without_partial_success() {
     let snapshot = index().snapshot();
     let mut count = Count::default();
-    let expected = snapshot.hybrid_search_exact_fusion(query(), |_| true, &mut count).unwrap();
+    let expected = snapshot
+        .hybrid_search_exact_fusion(query(), |_| true, &mut count)
+        .unwrap();
     assert!(count.calls > 10);
     for at in 0..count.calls {
         let mut work = RefuseAt { call: 0, at };
-        assert_eq!(snapshot.hybrid_search_exact_fusion(query(), |_| true, &mut work), Err(BeaconError::Cancelled));
+        assert_eq!(
+            snapshot.hybrid_search_exact_fusion(query(), |_| true, &mut work),
+            Err(BeaconError::Cancelled)
+        );
     }
-    assert_eq!(snapshot.hybrid_search_exact_fusion(query(), |_| true, &mut WorkBudget::new(count.units)).unwrap(), expected);
-    assert_eq!(snapshot.hybrid_search_exact_fusion(query(), |_| true, &mut WorkBudget::new(count.units - 1)), Err(BeaconError::WorkBudgetExceeded));
+    assert_eq!(
+        snapshot
+            .hybrid_search_exact_fusion(query(), |_| true, &mut WorkBudget::new(count.units))
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        snapshot.hybrid_search_exact_fusion(
+            query(),
+            |_| true,
+            &mut WorkBudget::new(count.units - 1)
+        ),
+        Err(BeaconError::WorkBudgetExceeded)
+    );
 }

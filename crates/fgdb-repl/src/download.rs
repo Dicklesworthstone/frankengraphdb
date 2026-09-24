@@ -7,7 +7,10 @@
 
 use core::convert::Infallible;
 
-use fgdb_chronicle::seed::{ObjectPublication, ReplicaSeed, SeedAnchor, SeedAuditCut, SeedError, SeedObjectSpec, SeedPlan, SeedPublicationId};
+use fgdb_chronicle::seed::{
+    ObjectPublication, ReplicaSeed, SeedAnchor, SeedAuditCut, SeedError, SeedObjectSpec, SeedPlan,
+    SeedPublicationId,
+};
 use fgdb_chronicle::transfer::VerifiedObject;
 use fgdb_order::{Event, Output, Raft, SnapshotTransfer, SnapshotTransferId};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
@@ -79,18 +82,30 @@ impl SnapshotDownload {
         plan: SeedPlan,
     ) -> Result<Self, CatchupError> {
         validate(raft, namespace, &transfer, &plan)?;
-        Ok(Self { namespace, transfer, seed: ReplicaSeed::new(plan) })
+        Ok(Self {
+            namespace,
+            transfer,
+            seed: ReplicaSeed::new(plan),
+        })
     }
 
-    pub fn transfer_id(&self) -> SnapshotTransferId { self.transfer.id() }
-    pub fn anchor(&self) -> &SeedAnchor { self.seed.plan().anchor() }
+    pub fn transfer_id(&self) -> SnapshotTransferId {
+        self.transfer.id()
+    }
+    pub fn anchor(&self) -> &SeedAnchor {
+        self.seed.plan().anchor()
+    }
     /// The verifier-bound visible sub-prefix and complete audit-pipeline root.
     /// None declares the ordinary fully-visible applied-cut profile.
-    pub fn audit_cut(&self) -> Option<SeedAuditCut> { self.seed.plan().audit_cut() }
+    pub fn audit_cut(&self) -> Option<SeedAuditCut> {
+        self.seed.plan().audit_cut()
+    }
     pub fn missing_objects(&self) -> impl Iterator<Item = &SeedObjectSpec> {
         self.seed.missing_objects()
     }
-    pub fn published_count(&self) -> usize { self.seed.published_count() }
+    pub fn published_count(&self) -> usize {
+        self.seed.published_count()
+    }
 
     /// Rebind a completed download to a freshly verified destination closure
     /// after intervening local publications. Preserve the exact source cut and
@@ -130,12 +145,18 @@ impl SnapshotDownload {
             Err(SeedError::StalePublication) => {}
             Err(error) => return Err(SeedDriveError::Catchup(CatchupError::Seed(error))),
         }
-        let Some(spec) = self.seed.missing_objects().next().copied() else { return Ok(None) };
+        let Some(spec) = self.seed.missing_objects().next().copied() else {
+            return Ok(None);
+        };
         let object = source.recover(spec).await.map_err(SeedDriveError::Source)?;
         if object.object_id() != spec.object_id {
-            return Err(SeedDriveError::Catchup(CatchupError::Seed(SeedError::UnexpectedObject)));
+            return Err(SeedDriveError::Catchup(CatchupError::Seed(
+                SeedError::UnexpectedObject,
+            )));
         }
-        let publication = self.seed.stage(object)
+        let publication = self
+            .seed
+            .stage(object)
             .map_err(|error| SeedDriveError::Catchup(CatchupError::Seed(error)))?;
         Ok(Some(publication.object().object_id()))
     }
@@ -147,11 +168,17 @@ impl SnapshotDownload {
         &mut self,
         publisher: &mut P,
     ) -> Result<ObjectId, SeedDriveError<Infallible, P::Error>> {
-        let publication = self.seed.pending_publication()
+        let publication = self
+            .seed
+            .pending_publication()
             .map_err(|error| SeedDriveError::Catchup(CatchupError::Seed(error)))?;
         let id = publication.id();
-        publisher.publish_object(publication).await.map_err(SeedDriveError::Publication)?;
-        self.seed.object_published(id)
+        publisher
+            .publish_object(publication)
+            .await
+            .map_err(SeedDriveError::Publication)?;
+        self.seed
+            .object_published(id)
             .map_err(|error| SeedDriveError::Catchup(CatchupError::Seed(error)))
     }
 
@@ -175,8 +202,12 @@ impl SnapshotDownload {
         // Arm before the transition and before cloning C: a synchronous panic
         // in a command clone must not leave a reusable speculative voter.
         let mut catchup = SnapshotCatchup {
-            raft, transfer: self.transfer, seed: self.seed,
-            phase: CatchupPhase::Publishing, publication: None, consensus: None,
+            raft,
+            transfer: self.transfer,
+            seed: self.seed,
+            phase: CatchupPhase::Publishing,
+            publication: None,
+            consensus: None,
         };
         let pending = match catchup.raft.step(Event::SnapshotReady(transfer_id)) {
             Ok(pending) => pending,
@@ -187,7 +218,10 @@ impl SnapshotDownload {
                 return Err(CatchupError::Raft(error));
             }
         };
-        catchup.publication = Some(CatchupPublicationId { seed: seed_id, consensus: pending.id() });
+        catchup.publication = Some(CatchupPublicationId {
+            seed: seed_id,
+            consensus: pending.id(),
+        });
         catchup.consensus = Some(pending.state().clone());
         Ok(catchup)
     }
@@ -198,8 +232,10 @@ impl SnapshotDownload {
         raft: &mut Raft<C>,
         publisher: &mut P,
     ) -> Result<Output<C>, SeedDriveError<Infallible, P::Error>> {
-        self.prepare(raft).map_err(SeedDriveError::Catchup)?
-            .publish_ready(publisher).await
+        self.prepare(raft)
+            .map_err(SeedDriveError::Catchup)?
+            .publish_ready(publisher)
+            .await
     }
 }
 
@@ -211,11 +247,15 @@ impl<C: Clone + Eq> SnapshotCatchup<'_, C> {
         mut self,
         publisher: &mut P,
     ) -> Result<Output<C>, SeedDriveError<Infallible, P::Error>> {
-        self.require(CatchupPhase::Publishing).map_err(SeedDriveError::Catchup)?;
+        self.require(CatchupPhase::Publishing)
+            .map_err(SeedDriveError::Catchup)?;
         let publication = self.begin_publication().map_err(SeedDriveError::Catchup)?;
         let id = publication.id();
-        let evidence = publisher.publish_snapshot(publication).await
+        let evidence = publisher
+            .publish_snapshot(publication)
+            .await
             .map_err(SeedDriveError::Publication)?;
-        self.published(id, &evidence).map_err(SeedDriveError::Catchup)
+        self.published(id, &evidence)
+            .map_err(SeedDriveError::Catchup)
     }
 }

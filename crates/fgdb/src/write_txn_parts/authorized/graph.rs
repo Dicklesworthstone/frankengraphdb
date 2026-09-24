@@ -19,8 +19,14 @@ impl Edge {
         EdgeWriteImage {
             id: self.record.entry.eid,
             relation: self.record.entry.relation,
-            source: WriteEndpoint { id: self.source.vid, labels: &self.source.labels },
-            destination: WriteEndpoint { id: self.destination.vid, labels: &self.destination.labels },
+            source: WriteEndpoint {
+                id: self.source.vid,
+                labels: &self.source.labels,
+            },
+            destination: WriteEndpoint {
+                id: self.destination.vid,
+                labels: &self.destination.labels,
+            },
             properties: &self.record.props,
         }
     }
@@ -28,16 +34,31 @@ impl Edge {
 
 impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
     fn endpoint<V: Vfs + Clone>(
-        &mut self, transaction: &WriteTxn, database: &Database<V>, vid: VId,
+        &mut self,
+        transaction: &WriteTxn,
+        database: &Database<V>,
+        vid: VId,
     ) -> Result<VertexRow, WriteTxnError> {
-        let row = self.vertex(transaction, database, vid)?.ok_or_else(denied)?;
+        let row = self
+            .vertex(transaction, database, vid)?
+            .ok_or_else(denied)?;
         // Endpoints are admitted, not mutated. Preserve all original fields.
-        self.check_vertex(Some(&row), Some(&row), &Fields { labels: vec![], properties: vec![] })?;
+        self.check_vertex(
+            Some(&row),
+            Some(&row),
+            &Fields {
+                labels: vec![],
+                properties: vec![],
+            },
+        )?;
         Ok(row)
     }
 
     fn edge_record<V: Vfs + Clone>(
-        &mut self, transaction: &WriteTxn, database: &Database<V>, eid: EId,
+        &mut self,
+        transaction: &WriteTxn,
+        database: &Database<V>,
+        eid: EId,
     ) -> Result<Option<EdgeRecord>, WriteTxnError> {
         self.checkpoint()?;
         transaction.edge(database, eid).map_err(redacted)
@@ -52,16 +73,26 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
     }
 
     fn edge_from_record<V: Vfs + Clone>(
-        &mut self, transaction: &WriteTxn, database: &Database<V>, record: EdgeRecord,
+        &mut self,
+        transaction: &WriteTxn,
+        database: &Database<V>,
+        record: EdgeRecord,
     ) -> Result<Edge, WriteTxnError> {
         self.relation(record.entry.relation)?;
         let source = self.endpoint(transaction, database, record.entry.src)?;
         let destination = self.endpoint(transaction, database, record.entry.dst)?;
-        Ok(Edge { record, source, destination })
+        Ok(Edge {
+            record,
+            source,
+            destination,
+        })
     }
 
     fn edge<V: Vfs + Clone>(
-        &mut self, transaction: &WriteTxn, database: &Database<V>, eid: EId,
+        &mut self,
+        transaction: &WriteTxn,
+        database: &Database<V>,
+        eid: EId,
     ) -> Result<Option<Edge>, WriteTxnError> {
         self.edge_record(transaction, database, eid)?
             .map(|record| self.edge_from_record(transaction, database, record))
@@ -69,17 +100,27 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
     }
 
     fn check_edge(
-        &mut self, before: Option<&Edge>, after: Option<&Edge>, properties: &[PropertyKeyId],
+        &mut self,
+        before: Option<&Edge>,
+        after: Option<&Edge>,
+        properties: &[PropertyKeyId],
     ) -> Result<(), WriteTxnError> {
         self.checkpoint()?;
-        self.permit.check_edge_write_at(
-            (self.clock)(), before.map(Edge::image), after.map(Edge::image), properties,
-        ).map_err(WriteTxnError::Authorization)
+        self.permit
+            .check_edge_write_at(
+                (self.clock)(),
+                before.map(Edge::image),
+                after.map(Edge::image),
+                properties,
+            )
+            .map_err(WriteTxnError::Authorization)
     }
 }
 
 fn incident_candidates<V: Vfs + Clone, Clock: FnMut() -> u64>(
-    transaction: &WriteTxn, database: &Database<V>, vid: VId,
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vid: VId,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<BTreeSet<EId>, WriteTxnError> {
     execution.checkpoint()?;
@@ -105,11 +146,20 @@ fn incident_candidates<V: Vfs + Clone, Clock: FnMut() -> u64>(
 }
 
 pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
-    transaction: &mut WriteTxn, database: &mut Database<V>, relation: RelationId,
-    row: PendingRow, execution: &mut Execution<'_, '_, Clock>,
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    relation: RelationId,
+    row: PendingRow,
+    execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
     let (eid, creates, deletes, mut fields) = match &row {
-        PendingRow::Edge { eid, src, dst, props, ensure } => {
+        PendingRow::Edge {
+            eid,
+            src,
+            dst,
+            props,
+            ensure,
+        } => {
             execution.relation(relation)?;
             let fields = execution.fields([], props.iter().map(|(key, _)| *key))?;
             execution.endpoint(transaction, database, *src)?;
@@ -132,13 +182,13 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }
             (target, true, false, fields)
         }
-        PendingRow::DeleteEdge { eid, .. } => (
-            *eid, false, true, execution.fields([], [])?,
-        ),
+        PendingRow::DeleteEdge { eid, .. } => (*eid, false, true, execution.fields([], [])?),
         PendingRow::SetEdgeProperty { eid, key, .. }
-        | PendingRow::CompareAndSet { elem: ElementId::Edge(eid), key, .. } => (
-            *eid, false, false, execution.fields([], [*key])?,
-        ),
+        | PendingRow::CompareAndSet {
+            elem: ElementId::Edge(eid),
+            key,
+            ..
+        } => (*eid, false, false, execution.fields([], [*key])?),
         _ => return Err(WriteTxnError::AuthorizedMutationRefused),
     };
     let before = execution.edge(transaction, database, eid)?;
@@ -156,16 +206,22 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
 }
 
 pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
-    transaction: &mut WriteTxn, database: &mut Database<V>, relation: RelationId,
-    row: PendingRow, execution: &mut Execution<'_, '_, Clock>,
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    relation: RelationId,
+    row: PendingRow,
+    execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
     let PendingRow::DeleteVertex { vid, .. } = &row else {
         return Err(WriteTxnError::AuthorizedMutationRefused);
     };
     let vid = *vid;
-    let before = execution.vertex(transaction, database, vid)?.ok_or_else(denied)?;
+    let before = execution
+        .vertex(transaction, database, vid)?
+        .ok_or_else(denied)?;
     let fields = execution.fields(
-        before.labels.iter().copied(), before.props.iter().map(|(key, _)| *key),
+        before.labels.iter().copied(),
+        before.props.iter().map(|(key, _)| *key),
     )?;
     execution.check_vertex(Some(&before), None, &fields)?;
     let mut cascades = Vec::new();

@@ -31,11 +31,16 @@ impl Layout {
         let descriptor = encoding.descriptor();
         let symbol_size = usize::from(descriptor.symbol_size);
         let blocks = usize::from(descriptor.source_block_count);
-        if bytes == 0 || symbol_size == 0 || blocks == 0 || blocks > MAX_SOURCE_BLOCKS
+        if bytes == 0
+            || symbol_size == 0
+            || blocks == 0
+            || blocks > MAX_SOURCE_BLOCKS
             || u64::try_from(bytes).ok() != Some(descriptor.transfer_length)
-            || encoding.cipher_descriptor().compressed_len.checked_add(
-                u64::from(encoding.cipher_descriptor().object_tag_len),
-            ) != Some(descriptor.transfer_length)
+            || encoding
+                .cipher_descriptor()
+                .compressed_len
+                .checked_add(u64::from(encoding.cipher_descriptor().object_tag_len))
+                != Some(descriptor.transfer_length)
         {
             return Err(SymbolizeError::InvalidParameters);
         }
@@ -58,17 +63,28 @@ impl Layout {
                 || (common >> 16) & 0xff != 0
                 || common & 0xffff != u64::from(descriptor.symbol_size)
                 || (scheme >> 24) as usize != blocks
-                || al == 0 || symbol_size % al != 0
-                || n == 0 || n > symbol_size / al
+                || al == 0
+                || symbol_size % al != 0
+                || n == 0
+                || n > symbol_size / al
             {
                 return Err(SymbolizeError::InvalidParameters);
             }
             (n, al)
         };
-        Ok(Self { bytes, symbol_size, blocks, total_symbols, sub_blocks, alignment })
+        Ok(Self {
+            bytes,
+            symbol_size,
+            blocks,
+            total_symbols,
+            sub_blocks,
+            alignment,
+        })
     }
 
-    pub(crate) fn blocks(self) -> usize { self.blocks }
+    pub(crate) fn blocks(self) -> usize {
+        self.blocks
+    }
 
     pub(crate) fn source_symbols(self, block: u32) -> Option<usize> {
         let block = usize::try_from(block).ok()?;
@@ -86,17 +102,25 @@ impl Layout {
         esi: u32,
         output: &mut [u8],
     ) -> Result<(), SymbolizeError> {
-        self.block(block)?.copy_source_symbol(protected, esi as usize, output)
+        self.block(block)?
+            .copy_source_symbol(protected, esi as usize, output)
     }
 
     fn block(self, number: u32) -> Result<Block, SymbolizeError> {
-        let symbols = self.source_symbols(number).ok_or(SymbolizeError::InvalidParameters)?;
+        let symbols = self
+            .source_symbols(number)
+            .ok_or(SymbolizeError::InvalidParameters)?;
         let number = number as usize;
         let first = number * (self.total_symbols / self.blocks)
             + number.min(self.total_symbols % self.blocks);
         let start = first * self.symbol_size;
         let end = (start + symbols * self.symbol_size).min(self.bytes);
-        Ok(Block { layout: self, symbols, start, end })
+        Ok(Block {
+            layout: self,
+            symbols,
+            start,
+            end,
+        })
     }
 }
 
@@ -130,7 +154,8 @@ impl Block {
         if esi >= self.symbols || symbol.len() != self.layout.symbol_size {
             return Err(SymbolizeError::InvalidParameters);
         }
-        let source_bytes = protected.get(self.start..self.end)
+        let source_bytes = protected
+            .get(self.start..self.end)
             .ok_or(SymbolizeError::InvalidParameters)?;
         symbol.fill(0);
         for n in 0..self.layout.sub_blocks {
@@ -138,7 +163,8 @@ impl Block {
             let begin = offset * self.symbols + esi * width;
             if begin < source_bytes.len() {
                 let length = width.min(source_bytes.len() - begin);
-                symbol[offset..offset + length].copy_from_slice(&source_bytes[begin..begin + length]);
+                symbol[offset..offset + length]
+                    .copy_from_slice(&source_bytes[begin..begin + length]);
             }
         }
         Ok(())
@@ -146,10 +172,13 @@ impl Block {
 
     fn materialize(self, protected: &[u8]) -> Result<Vec<Vec<u8>>, SymbolizeError> {
         let mut source = Vec::new();
-        source.try_reserve_exact(self.symbols).map_err(|_| SymbolizeError::AllocationFailed)?;
+        source
+            .try_reserve_exact(self.symbols)
+            .map_err(|_| SymbolizeError::AllocationFailed)?;
         for esi in 0..self.symbols {
             let mut symbol = Vec::new();
-            symbol.try_reserve_exact(self.layout.symbol_size)
+            symbol
+                .try_reserve_exact(self.layout.symbol_size)
                 .map_err(|_| SymbolizeError::AllocationFailed)?;
             symbol.resize(self.layout.symbol_size, 0);
             self.copy_source_symbol(protected, esi, &mut symbol)?;
@@ -160,7 +189,10 @@ impl Block {
 
     fn restore(self, source: &[Vec<u8>], protected: &mut [u8]) -> Result<(), SymbolizeError> {
         if source.len() < self.symbols
-            || source.iter().take(self.symbols).any(|symbol| symbol.len() != self.layout.symbol_size)
+            || source
+                .iter()
+                .take(self.symbols)
+                .any(|symbol| symbol.len() != self.layout.symbol_size)
         {
             return Err(SymbolizeError::DecodeFailed);
         }
@@ -181,7 +213,9 @@ impl Block {
         if esi >= self.symbols || symbol.len() != self.layout.symbol_size {
             return Err(SymbolizeError::DecodeFailed);
         }
-        let target = protected.get_mut(self.start..self.end).ok_or(SymbolizeError::DecodeFailed)?;
+        let target = protected
+            .get_mut(self.start..self.end)
+            .ok_or(SymbolizeError::DecodeFailed)?;
         for n in 0..self.layout.sub_blocks {
             let (offset, width) = self.sub_symbol(n);
             let begin = offset * self.symbols + esi * width;
@@ -191,7 +225,10 @@ impl Block {
             }
             // Padding is part of the encoded source block, not arbitrary data
             // to discard merely because the object AEAD does not cover it.
-            if symbol[offset + length..offset + width].iter().any(|byte| *byte != 0) {
+            if symbol[offset + length..offset + width]
+                .iter()
+                .any(|byte| *byte != 0)
+            {
                 return Err(SymbolizeError::DecodeFailed);
             }
         }
@@ -206,8 +243,10 @@ pub(crate) fn repair_encoder(
     source: &[Vec<u8>],
 ) -> Result<SystematicEncoder, SymbolizeError> {
     let size = usize::from(encoding.descriptor().symbol_size);
-    if source.is_empty() || source.len() > MAX_SOURCE_SYMBOLS_PER_BLOCK
-        || size == 0 || source.iter().any(|symbol| symbol.len() != size)
+    if source.is_empty()
+        || source.len() > MAX_SOURCE_SYMBOLS_PER_BLOCK
+        || size == 0
+        || source.iter().any(|symbol| symbol.len() != size)
     {
         return Err(SymbolizeError::InvalidParameters);
     }
@@ -224,24 +263,36 @@ pub(super) fn encode_block(
 ) -> Result<Vec<Vec<u8>>, SymbolizeError> {
     let block = Layout::new(encoding, protected.len())?.block(number)?;
     let k = block.symbols as u32;
-    let count = k.checked_add(repair_symbols).filter(|count| *count <= MAX_ESI + 1)
+    let count = k
+        .checked_add(repair_symbols)
+        .filter(|count| *count <= MAX_ESI + 1)
         .ok_or(SymbolizeError::InvalidParameters)?;
     // Validate ESI and partition limits before materializing symbols or invoking
     // the foundation encoder, whose systematic table has a finite K ceiling.
     let source = block.materialize(protected)?;
-    let encoder = if repair_symbols == 0 { None } else {
+    let encoder = if repair_symbols == 0 {
+        None
+    } else {
         Some(repair_encoder(encoding, &source)?)
     };
     let mut records = Vec::new();
-    records.try_reserve_exact(count as usize).map_err(|_| SymbolizeError::AllocationFailed)?;
+    records
+        .try_reserve_exact(count as usize)
+        .map_err(|_| SymbolizeError::AllocationFailed)?;
     let key = encoding.symbol_auth_key(dek);
     for (esi, symbol) in source.iter().enumerate() {
-        records.push(SymbolRecord::for_encoding(encoding, number, esi as u32, 0, symbol.clone()).serialize(&key));
+        records.push(
+            SymbolRecord::for_encoding(encoding, number, esi as u32, 0, symbol.clone())
+                .serialize(&key),
+        );
     }
     if let Some(encoder) = encoder {
         for esi in k..count {
-            let symbol = encoder.try_repair_symbol(esi).map_err(|_| SymbolizeError::InvalidParameters)?;
-            records.push(SymbolRecord::for_encoding(encoding, number, esi, 0, symbol).serialize(&key));
+            let symbol = encoder
+                .try_repair_symbol(esi)
+                .map_err(|_| SymbolizeError::InvalidParameters)?;
+            records
+                .push(SymbolRecord::for_encoding(encoding, number, esi, 0, symbol).serialize(&key));
         }
     }
     Ok(records)
@@ -271,11 +322,14 @@ fn decode_protected_observed(
 ) -> Result<Vec<u8>, SymbolizeError> {
     let layout = Layout::new(encoding, bytes)?;
     let mut groups = Vec::new();
-    groups.try_reserve_exact(layout.blocks()).map_err(|_| SymbolizeError::AllocationFailed)?;
+    groups
+        .try_reserve_exact(layout.blocks())
+        .map_err(|_| SymbolizeError::AllocationFailed)?;
     for _ in 0..layout.blocks() {
         groups.push(BTreeMap::<u32, (usize, Vec<u8>)>::new());
     }
-    let record_len = usize::from(HEADER_LEN_V1) + layout.symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
+    let record_len =
+        usize::from(HEADER_LEN_V1) + layout.symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
     // Authenticate ALL supplied records before decoding ANY block, even when
     // another block is missing. Duplicate equations do not increase rank.
     for (index, raw) in serialized.iter().enumerate() {
@@ -286,7 +340,8 @@ fn decode_protected_observed(
         if record.esi > MAX_ESI {
             return Err(SymbolizeError::InvalidParameters);
         }
-        let group = groups.get_mut(record.source_block as usize)
+        let group = groups
+            .get_mut(record.source_block as usize)
             .ok_or(SymbolizeError::InvalidParameters)?;
         if let Some((previous, _)) = group.get(&record.esi) {
             if serialized[*previous] != *raw {
@@ -302,7 +357,9 @@ fn decode_protected_observed(
         }
     }
     let mut protected = Vec::new();
-    protected.try_reserve_exact(bytes).map_err(|_| SymbolizeError::AllocationFailed)?;
+    protected
+        .try_reserve_exact(bytes)
+        .map_err(|_| SymbolizeError::AllocationFailed)?;
     protected.resize(bytes, 0);
     for (number, group) in groups.into_iter().enumerate() {
         let block = layout.block(number as u32)?;
@@ -330,10 +387,13 @@ pub(crate) fn recover_indexed_block(
 ) -> Result<(), SymbolizeError> {
     let layout = Layout::new(encoding, protected.len())?;
     let block = layout.block(number)?;
-    let record_len = usize::from(HEADER_LEN_V1) + layout.symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
+    let record_len =
+        usize::from(HEADER_LEN_V1) + layout.symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
     let mut group = BTreeMap::new();
     for (&(source_block, esi), &index) in coordinates.range((number, 0)..=(number, MAX_ESI)) {
-        let raw = serialized.get(index).ok_or(SymbolizeError::InvalidParameters)?;
+        let raw = serialized
+            .get(index)
+            .ok_or(SymbolizeError::InvalidParameters)?;
         if raw.len() != record_len {
             return Err(SymbolizeError::Symbol(SymbolError::InconsistentLengths));
         }
@@ -370,23 +430,28 @@ fn restore_group(
         return Ok(());
     }
     before_erasure_decode();
-    let decoder = InactivationDecoder::try_new(block.symbols, block.layout.symbol_size, code_seed(encoding))
-        .map_err(|_| SymbolizeError::InvalidParameters)?;
+    let decoder =
+        InactivationDecoder::try_new(block.symbols, block.layout.symbol_size, code_seed(encoding))
+            .map_err(|_| SymbolizeError::InvalidParameters)?;
     let mut received = decoder.constraint_symbols();
-    received.try_reserve_exact(group.len()).map_err(|_| SymbolizeError::AllocationFailed)?;
+    received
+        .try_reserve_exact(group.len())
+        .map_err(|_| SymbolizeError::AllocationFailed)?;
     for (esi, (_, payload)) in group {
         if (esi as usize) < block.symbols {
             received.push(ReceivedSymbol::source(esi, payload));
         } else {
-            let (columns, coefficients) = decoder.repair_equation(esi)
+            let (columns, coefficients) = decoder
+                .repair_equation(esi)
                 .map_err(|_| SymbolizeError::InvalidParameters)?;
             received.push(ReceivedSymbol::repair(esi, columns, coefficients, payload));
         }
     }
     // ubs:ignore -- foundation erasure decoder, not JWT/signature decoding.
     let decoded = decoder.decode(&received).map_err(|error| match error {
-        DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } =>
-            SymbolizeError::InsufficientSymbols,
+        DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } => {
+            SymbolizeError::InsufficientSymbols
+        }
         _ => SymbolizeError::DecodeFailed,
     })?;
     block.restore(&decoded.source, protected)
@@ -394,7 +459,10 @@ fn restore_group(
 
 fn complete_systematic(group: &BTreeMap<u32, (usize, Vec<u8>)>, sources: usize) -> bool {
     group.len() == sources
-        && group.keys().enumerate().all(|(index, esi)| *esi as usize == index)
+        && group
+            .keys()
+            .enumerate()
+            .all(|(index, esi)| *esi as usize == index)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -414,8 +482,14 @@ mod tests {
                     for symbols in 2..24 {
                         for blocks in 2..=symbols.min(5) {
                             let bytes = symbols * size - 3;
-                            let layout = Layout { bytes, symbol_size: size, blocks,
-                                total_symbols: symbols, sub_blocks, alignment };
+                            let layout = Layout {
+                                bytes,
+                                symbol_size: size,
+                                blocks,
+                                total_symbols: symbols,
+                                sub_blocks,
+                                alignment,
+                            };
                             let input: Vec<u8> = (0..bytes).map(|i| (i % 251) as u8).collect();
                             let mut restored = vec![0; bytes];
                             let mut consumed = 0;
@@ -427,10 +501,15 @@ mod tests {
                                 let mut cursor = block.start;
                                 let mut symbol_offset = 0;
                                 for sub in 0..sub_blocks {
-                                    let width = (units / sub_blocks + usize::from(sub < units % sub_blocks)) * alignment;
+                                    let width = (units / sub_blocks
+                                        + usize::from(sub < units % sub_blocks))
+                                        * alignment;
                                     for symbol in &source {
                                         for value in &symbol[symbol_offset..symbol_offset + width] {
-                                            assert_eq!(*value, input.get(cursor).copied().unwrap_or(0));
+                                            assert_eq!(
+                                                *value,
+                                                input.get(cursor).copied().unwrap_or(0)
+                                            );
                                             cursor += 1;
                                         }
                                     }

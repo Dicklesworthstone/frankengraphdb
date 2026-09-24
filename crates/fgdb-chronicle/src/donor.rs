@@ -149,7 +149,8 @@ impl<'a> BondedDonor<'a> {
         mut checkpoint: impl FnMut() -> Result<(), E>,
     ) -> Result<Self, DonorError<E>> {
         checkpoint().map_err(DonorError::Control)?;
-        if limits.max_protected_bytes == 0 || limits.max_esi > MAX_ESI
+        if limits.max_protected_bytes == 0
+            || limits.max_esi > MAX_ESI
             || limits.max_repair_source_symbols > MAX_SOURCE_SYMBOLS_PER_BLOCK
         {
             return Err(DonorError::InvalidLimits);
@@ -170,21 +171,37 @@ impl<'a> BondedDonor<'a> {
         if unique.len() != donor_ids.len() || unique.contains(&DonorId(0)) {
             return Err(DonorError::InvalidDonors);
         }
-        let slot = donor_ids.iter().position(|id| *id == donor).ok_or(DonorError::InvalidDonors)?;
+        let slot = donor_ids
+            .iter()
+            .position(|id| *id == donor)
+            .ok_or(DonorError::InvalidDonors)?;
         checkpoint().map_err(DonorError::Control)?;
-        let plaintext = encoding.open_recovered(protected, dek, verification).map_err(|error| {
-            DonorError::Encoding(match error {
-                RecoveredObjectError::AuthenticationFailed => SymbolizeError::AuthenticationFailed,
-                RecoveredObjectError::CiphertextIdentityMismatch => SymbolizeError::CiphertextIdentityMismatch,
-            })
-        })?;
+        let plaintext = encoding
+            .open_recovered(protected, dek, verification)
+            .map_err(|error| {
+                DonorError::Encoding(match error {
+                    RecoveredObjectError::AuthenticationFailed => {
+                        SymbolizeError::AuthenticationFailed
+                    }
+                    RecoveredObjectError::CiphertextIdentityMismatch => {
+                        SymbolizeError::CiphertextIdentityMismatch
+                    }
+                })
+            })?;
         checkpoint().map_err(DonorError::Control)?;
-        let length = target.canonical_header.len().checked_add(2).ok_or(DonorError::ObjectBudget)?;
+        let length = target
+            .canonical_header
+            .len()
+            .checked_add(2)
+            .ok_or(DonorError::ObjectBudget)?;
         let mut header = Vec::new();
-        header.try_reserve_exact(length).map_err(|_| DonorError::AllocationFailed)?;
+        header
+            .try_reserve_exact(length)
+            .map_err(|_| DonorError::AllocationFailed)?;
         header.extend_from_slice(&encoding.cipher_descriptor().object_kind.to_le_bytes());
         header.extend_from_slice(target.canonical_header);
-        let identity = fgdb_crypto::logical_object_id(target.k_oid, &target.namespace.0, &header, &plaintext);
+        let identity =
+            fgdb_crypto::logical_object_id(target.k_oid, &target.namespace.0, &header, &plaintext);
         if ObjectId(identity.0) != target.object_id {
             return Err(DonorError::Encoding(SymbolizeError::IdentityMismatch));
         }
@@ -193,19 +210,36 @@ impl<'a> BondedDonor<'a> {
         let mut cache = Vec::new();
         // At most one encoder per block. The fixed metadata population is
         // bounded by the already checked RFC block count, independent of ESI.
-        cache.try_reserve_exact(layout.blocks()).map_err(|_| DonorError::AllocationFailed)?;
+        cache
+            .try_reserve_exact(layout.blocks())
+            .map_err(|_| DonorError::AllocationFailed)?;
         Ok(Self {
-            encoding, protected, dek, namespace: target.namespace, donor,
-            slot: slot as u32, donor_count: donor_ids.len() as u32,
-            layout, limits, usage: DonorUsage::default(), cache,
+            encoding,
+            protected,
+            dek,
+            namespace: target.namespace,
+            donor,
+            slot: slot as u32,
+            donor_count: donor_ids.len() as u32,
+            layout,
+            limits,
+            usage: DonorUsage::default(),
+            cache,
         })
     }
 
-    pub fn usage(&self) -> DonorUsage { self.usage }
-    pub fn namespace(&self) -> DatabaseSecurityNamespaceId { self.namespace }
-    pub fn donor(&self) -> DonorId { self.donor }
+    pub fn usage(&self) -> DonorUsage {
+        self.usage
+    }
+    pub fn namespace(&self) -> DatabaseSecurityNamespaceId {
+        self.namespace
+    }
+    pub fn donor(&self) -> DonorId {
+        self.donor
+    }
     pub fn record_len(&self) -> usize {
-        usize::from(HEADER_LEN_V1) + usize::from(self.encoding.descriptor().symbol_size)
+        usize::from(HEADER_LEN_V1)
+            + usize::from(self.encoding.descriptor().symbol_size)
             + usize::from(SYMBOL_MAC_LEN_V1)
     }
 
@@ -236,7 +270,8 @@ impl<'a> BondedDonor<'a> {
         }
         self.usage.requests += 1;
         checkpoint().map_err(DonorError::Control)?;
-        if request.donor != self.donor || request.object_id != self.encoding.object_id()
+        if request.donor != self.donor
+            || request.object_id != self.encoding.object_id()
             || request.encoding_id != self.encoding.encoding_id()
             || self.layout.source_symbols(request.source_block).is_none()
             || request.esi > self.limits.max_esi
@@ -246,26 +281,44 @@ impl<'a> BondedDonor<'a> {
         if !owns_esi(self.slot, self.donor_count, request.esi) {
             return Err(DonorError::UnownedEsi);
         }
-        let charged = self.usage.charged_wire_bytes.checked_add(self.record_len() as u64)
-            .filter(|bytes| *bytes <= self.limits.max_wire_bytes).ok_or(DonorError::WireBudget)?;
+        let charged = self
+            .usage
+            .charged_wire_bytes
+            .checked_add(self.record_len() as u64)
+            .filter(|bytes| *bytes <= self.limits.max_wire_bytes)
+            .ok_or(DonorError::WireBudget)?;
         self.usage.charged_wire_bytes = charged;
         checkpoint().map_err(DonorError::Control)?;
         let size = usize::from(self.encoding.descriptor().symbol_size);
         let mut symbol = Vec::new();
-        symbol.try_reserve_exact(size).map_err(|_| DonorError::AllocationFailed)?;
+        symbol
+            .try_reserve_exact(size)
+            .map_err(|_| DonorError::AllocationFailed)?;
         symbol.resize(size, 0);
-        let sources = self.layout.source_symbols(request.source_block).ok_or(DonorError::ForeignRequest)?;
+        let sources = self
+            .layout
+            .source_symbols(request.source_block)
+            .ok_or(DonorError::ForeignRequest)?;
         if (request.esi as usize) < sources {
-            self.layout.copy_source_symbol(self.protected, request.source_block, request.esi, &mut symbol)
+            self.layout
+                .copy_source_symbol(
+                    self.protected,
+                    request.source_block,
+                    request.esi,
+                    &mut symbol,
+                )
                 .map_err(DonorError::Encoding)?;
         } else {
             let position = self.ensure_encoder(request.source_block, &mut checkpoint)?;
-            self.cache[position].encoder.try_repair_symbol_into(request.esi, &mut symbol)
+            self.cache[position]
+                .encoder
+                .try_repair_symbol_into(request.esi, &mut symbol)
                 .map_err(|_| DonorError::Encoding(SymbolizeError::InvalidParameters))?;
         }
         checkpoint().map_err(DonorError::Control)?;
-        let record = SymbolRecord::for_encoding(self.encoding, request.source_block, request.esi, 0, symbol)
-            .serialize(&self.encoding.symbol_auth_key(self.dek));
+        let record =
+            SymbolRecord::for_encoding(self.encoding, request.source_block, request.esi, 0, symbol)
+                .serialize(&self.encoding.symbol_auth_key(self.dek));
         checkpoint().map_err(DonorError::Control)?;
         Ok(record)
     }
@@ -278,22 +331,36 @@ impl<'a> BondedDonor<'a> {
         if let Some(position) = self.cache.iter().position(|entry| entry.block == block) {
             return Ok(position);
         }
-        let k = self.layout.source_symbols(block).ok_or(DonorError::ForeignRequest)?;
+        let k = self
+            .layout
+            .source_symbols(block)
+            .ok_or(DonorError::ForeignRequest)?;
         let size = usize::from(self.encoding.descriptor().symbol_size);
         if k > self.limits.max_repair_source_symbols {
             return Err(DonorError::EncoderShapeBudget);
         }
         let params = SystematicParams::try_for_source_block(k, size)
             .map_err(|_| DonorError::Encoding(SymbolizeError::InvalidParameters))?;
-        let cells = params.l.checked_mul(params.l).ok_or(DonorError::EncoderShapeBudget)?;
+        let cells = params
+            .l
+            .checked_mul(params.l)
+            .ok_or(DonorError::EncoderShapeBudget)?;
         if cells > self.limits.max_matrix_cells {
             return Err(DonorError::EncoderShapeBudget);
         }
-        let bytes = params.l.checked_add(k)
-            .and_then(|count| size.checked_add(size_of::<Vec<u8>>()).and_then(|width| count.checked_mul(width)))
+        let bytes = params
+            .l
+            .checked_add(k)
+            .and_then(|count| {
+                size.checked_add(size_of::<Vec<u8>>())
+                    .and_then(|width| count.checked_mul(width))
+            })
             .and_then(|bytes| bytes.checked_add(size_of::<SystematicEncoder>()))
             .ok_or(DonorError::EncoderCacheBudget)?;
-        let cached = self.usage.cached_encoder_bytes.checked_add(bytes)
+        let cached = self
+            .usage
+            .cached_encoder_bytes
+            .checked_add(bytes)
             .filter(|sum| *sum <= self.limits.max_cached_encoder_bytes)
             .ok_or(DonorError::EncoderCacheBudget)?;
         if self.usage.encoder_builds >= self.limits.max_encoder_builds {
@@ -304,13 +371,18 @@ impl<'a> BondedDonor<'a> {
         self.usage.encoder_builds += 1;
         checkpoint().map_err(DonorError::Control)?;
         let mut source = Vec::new();
-        source.try_reserve_exact(k).map_err(|_| DonorError::AllocationFailed)?;
+        source
+            .try_reserve_exact(k)
+            .map_err(|_| DonorError::AllocationFailed)?;
         for esi in 0..k {
             checkpoint().map_err(DonorError::Control)?;
             let mut symbol = Vec::new();
-            symbol.try_reserve_exact(size).map_err(|_| DonorError::AllocationFailed)?;
+            symbol
+                .try_reserve_exact(size)
+                .map_err(|_| DonorError::AllocationFailed)?;
             symbol.resize(size, 0);
-            self.layout.copy_source_symbol(self.protected, block, esi as u32, &mut symbol)
+            self.layout
+                .copy_source_symbol(self.protected, block, esi as u32, &mut symbol)
                 .map_err(DonorError::Encoding)?;
             source.push(symbol);
         }
@@ -319,7 +391,11 @@ impl<'a> BondedDonor<'a> {
         drop(source);
         checkpoint().map_err(DonorError::Control)?;
         let position = self.cache.len();
-        self.cache.push(CachedBlock { block, bytes, encoder });
+        self.cache.push(CachedBlock {
+            block,
+            bytes,
+            encoder,
+        });
         self.usage.cached_encoder_bytes = cached;
         self.usage.cached_blocks += 1;
         Ok(position)

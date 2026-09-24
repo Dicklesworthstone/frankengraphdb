@@ -9,10 +9,8 @@
 
 use crate::identity::{CryptoVerificationSink, EncodedObject};
 use crate::symbol::{HEADER_LEN_V1, SYMBOL_MAC_LEN_V1, SymbolError, SymbolRecord};
-use crate::symbolize::{
-    MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError,
-};
 use crate::symbolize::blocks::{Layout, MAX_SOURCE_BLOCKS};
+use crate::symbolize::{MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError};
 use asupersync::net::atp::channel_bonding::{DonorEsiStream, MAX_STATIC_RESIDUE_DONORS, owns_esi};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
@@ -268,10 +266,18 @@ impl<'a> BondedPull<'a> {
         }
         let mut block_sources = Vec::new();
         let mut block_received = Vec::new();
-        block_sources.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
-        block_received.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
+        block_sources
+            .try_reserve_exact(layout.blocks())
+            .map_err(|_| PullError::AllocationFailed)?;
+        block_received
+            .try_reserve_exact(layout.blocks())
+            .map_err(|_| PullError::AllocationFailed)?;
         for block in 0..layout.blocks() {
-            block_sources.push(layout.source_symbols(block as u32).ok_or(PullError::InvalidTarget)?);
+            block_sources.push(
+                layout
+                    .source_symbols(block as u32)
+                    .ok_or(PullError::InvalidTarget)?,
+            );
             block_received.push(0);
         }
         let mut donors = Vec::new();
@@ -280,10 +286,14 @@ impl<'a> BondedPull<'a> {
             .map_err(|_| PullError::AllocationFailed)?;
         for (index, id) in donor_ids.iter().enumerate() {
             let mut streams = Vec::new();
-            streams.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
+            streams
+                .try_reserve_exact(layout.blocks())
+                .map_err(|_| PullError::AllocationFailed)?;
             for _ in 0..layout.blocks() {
-                streams.push(Some(DonorEsiStream::new(index as u32, donor_ids.len() as u32)
-                    .map_err(|_| PullError::InvalidDonors)?));
+                streams.push(Some(
+                    DonorEsiStream::new(index as u32, donor_ids.len() as u32)
+                        .map_err(|_| PullError::InvalidDonors)?,
+                ));
             }
             donors.push(Donor {
                 id: *id,
@@ -344,10 +354,15 @@ impl<'a> BondedPull<'a> {
 
     fn block_targets(&self) -> Result<Vec<usize>, PullError> {
         let mut targets = Vec::new();
-        targets.try_reserve_exact(self.block_sources.len()).map_err(|_| PullError::AllocationFailed)?;
+        targets
+            .try_reserve_exact(self.block_sources.len())
+            .map_err(|_| PullError::AllocationFailed)?;
         for (block, sources) in self.block_sources.iter().enumerate() {
-            targets.push(self.recovery.target(block, *sources, self.block_received[block])
-                .ok_or(PullError::DecodeBudget)?);
+            targets.push(
+                self.recovery
+                    .target(block, *sources, self.block_received[block])
+                    .ok_or(PullError::DecodeBudget)?,
+            );
         }
         Ok(targets)
     }
@@ -399,7 +414,13 @@ impl<'a> BondedPull<'a> {
         self.open()?;
         let multiple = self.block_sources.len() > 1;
         let targets = self.block_targets()?;
-        if multiple && self.block_received.iter().zip(&targets).all(|(count, target)| count >= target) {
+        if multiple
+            && self
+                .block_received
+                .iter()
+                .zip(&targets)
+                .all(|(count, target)| count >= target)
+        {
             // Give the caller a chance to decode before spending its remaining
             // object-wide storage on already satisfied blocks.
             return Ok(Vec::new());
@@ -441,7 +462,9 @@ impl<'a> BondedPull<'a> {
         // from pending during admission, expiration or donor quarantine.
         let mut outstanding = BTreeMap::<DonorId, usize>::new();
         let mut reserved = Vec::new();
-        reserved.try_reserve_exact(self.block_received.len()).map_err(|_| PullError::AllocationFailed)?;
+        reserved
+            .try_reserve_exact(self.block_received.len())
+            .map_err(|_| PullError::AllocationFailed)?;
         reserved.extend_from_slice(&self.block_received);
         for ((block, _), donor) in &self.pending {
             *outstanding.entry(*donor).or_default() += 1;
@@ -471,7 +494,11 @@ impl<'a> BondedPull<'a> {
             // consume the exact total-K storage budget with extra equations.
             // Once deficits are reserved, healthy donors MAY replace pending
             // equations from silent donors. Pending bytes are not received bytes.
-            let deficit = multiple && reserved.iter().zip(&targets).any(|(count, target)| count < target);
+            let deficit = multiple
+                && reserved
+                    .iter()
+                    .zip(&targets)
+                    .any(|(count, target)| count < target);
             'select: for offset in 0..self.donors.len() {
                 let slot = (self.next_donor + offset) % self.donors.len();
                 let donor = &mut self.donors[slot];
@@ -485,24 +512,31 @@ impl<'a> BondedPull<'a> {
                 }
                 for offset in 0..donor.streams.len() {
                     let block = (donor.next_block + offset) % donor.streams.len();
-                    let needs_equation = !multiple || if deficit {
-                        reserved[block] < targets[block]
-                    } else {
-                        self.block_received[block] < targets[block]
-                    };
-                    if !needs_equation { continue; }
+                    let needs_equation = !multiple
+                        || if deficit {
+                            reserved[block] < targets[block]
+                        } else {
+                            self.block_received[block] < targets[block]
+                        };
+                    if !needs_equation {
+                        continue;
+                    }
                     // Peek via the foundation's small Clone value; only the
                     // selected stream advances. Prefer original source symbols
                     // when their owners have credit, but never wait for a silent
                     // donor merely because it owns a lower source ESI.
-                    let next = donor.streams[block].as_ref().and_then(|stream| stream.clone().next());
+                    let next = donor.streams[block]
+                        .as_ref()
+                        .and_then(|stream| stream.clone().next());
                     match next {
                         Some(esi) if esi <= self.limits.max_esi => {
                             if !multiple || (esi as usize) < self.block_sources[block] {
                                 selected = Some((slot, block, esi));
                                 break 'select;
                             }
-                            if selected.is_none() { selected = Some((slot, block, esi)); }
+                            if selected.is_none() {
+                                selected = Some((slot, block, esi));
+                            }
                         }
                         _ => donor.streams[block] = None,
                     }
@@ -610,7 +644,12 @@ impl<'a> BondedPull<'a> {
         {
             return Err(PullError::UnrequestedSymbol);
         }
-        self.accept_inner(request.donor, Some((request.source_block, request.esi)), bytes, verification)
+        self.accept_inner(
+            request.donor,
+            Some((request.source_block, request.esi)),
+            bytes,
+            verification,
+        )
     }
 
     fn accept_inner(

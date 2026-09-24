@@ -37,9 +37,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+mod leadership;
 mod liveness;
 mod pipeline;
-mod leadership;
 
 pub use leadership::{LeadershipTransfer, LeadershipTransferId, LeadershipTransferPhase};
 
@@ -1126,7 +1126,12 @@ impl<C: Clone + Eq> Raft<C> {
         if count > self.limits.max_append_entries {
             return Err(Error::AppendTooLarge);
         }
-        if count > self.limits.max_log_entries.saturating_sub(self.state.entries.len()) {
+        if count
+            > self
+                .limits
+                .max_log_entries
+                .saturating_sub(self.state.entries.len())
+        {
             return Err(Error::LogFull);
         }
         let count = u64::try_from(count).map_err(|_| Error::CounterExhausted)?;
@@ -1148,10 +1153,12 @@ impl<C: Clone + Eq> Raft<C> {
     ) -> Result<(), Error> {
         self.log_changed = true;
         let term = self.state.term;
-        self.state.entries.extend(commands.into_iter().map(|command| Entry {
-            term,
-            command: Some(command),
-        }));
+        self.state
+            .entries
+            .extend(commands.into_iter().map(|command| Entry {
+                term,
+                command: Some(command),
+            }));
         self.advance_commit();
         self.broadcast(output, false)
     }
@@ -1486,7 +1493,11 @@ impl<C: Clone + Eq> Raft<C> {
             Message::QuorumReply { round, .. } => {
                 self.quorum_reply(from, term, round);
             }
-            Message::TimeoutNow { last_index, last_term, .. } => {
+            Message::TimeoutNow {
+                last_index,
+                last_term,
+                ..
+            } => {
                 self.timeout_now(from, term, last_index, last_term, output)?;
             }
             Message::RequestVote {
@@ -1610,11 +1621,8 @@ impl<C: Clone + Eq> Raft<C> {
                 if term != self.state.term || self.role != Role::Leader {
                     return Ok(());
                 }
-                let Some(InFlight::Append {
-                    prev,
-                    last,
-                    ..
-                }) = self.pending_append(from, request).cloned()
+                let Some(InFlight::Append { prev, last, .. }) =
+                    self.pending_append(from, request).cloned()
                 else {
                     return Ok(());
                 };

@@ -12,11 +12,14 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-    query.execute_with_source_governed(
-        policy,
-        |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
-        || execution.borrow_mut().checkpoint(),
-    ).map(|result| result.value).map_err(aggregate_error)
+    query
+        .execute_with_source_governed(
+            policy,
+            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+            || execution.borrow_mut().checkpoint(),
+        )
+        .map(|result| result.value)
+        .map_err(aggregate_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -37,13 +40,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// are materialized under native work/scratch limits; this is not streaming.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_aggregate_authorized(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphAggregate, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphAggregate,
+        policy: GqlQueryPolicy,
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            graph_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| {
+                graph_at(snapshot, at, query, scope, execution, policy)
+            },
+        )
     }
 
     /// Apply current authorization to this aggregate at one exact historical
@@ -52,12 +69,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// recheck credential validity even for empty input or an empty group page.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_aggregate_authorized_at(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphAggregate, as_of: CommitSeq,
-        policy: GqlQueryPolicy, clock: impl FnMut() -> u64,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphAggregate,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, Some(as_of), clock, |snapshot, at, scope, execution| {
-            graph_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            Some(as_of),
+            clock,
+            |snapshot, at, scope, execution| {
+                graph_at(snapshot, at, query, scope, execution, policy)
+            },
+        )
     }
 }

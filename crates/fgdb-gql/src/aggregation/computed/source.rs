@@ -67,31 +67,50 @@ fn admit_input<E, C>(
             GraphSetExecutionError::InvalidSourceStatistics { operand: 0 },
         )));
     }
-    policy.rows.check(GqlBudgetDimension::SnapshotRecords, input.rows.snapshot_records)
+    policy
+        .rows
+        .check(
+            GqlBudgetDimension::SnapshotRecords,
+            input.rows.snapshot_records,
+        )
         .map_err(GqlQueryError::Rows)?;
     // Reject over-reported source usage before any cumulative addition. This
     // also covers empty sources whose group output would otherwise hide it.
     for (used, limit, dimension) in [
-        (input.evaluator.work_units, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-        (input.evaluator.scratch_entries, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+        (
+            input.evaluator.work_units,
+            policy.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            input.evaluator.scratch_entries,
+            policy.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
     ] {
         if used > limit {
             return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                dimension, limit, observed: u128::from(used),
+                dimension,
+                limit,
+                observed: u128::from(used),
             }));
         }
     }
     let mut control = || {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
-        input.evaluator.charge_event(policy.evaluator, GlaExecutionEvent::Work)
+        input
+            .evaluator
+            .charge_event(policy.evaluator, GlaExecutionEvent::Work)
             .map_err(GqlQueryError::Evaluator)
     };
     control()?;
     for row in &input.value {
         control()?;
-        let invalid = || GqlQueryError::Source(GraphAggregateError::InputRelation(
-            GraphSetExecutionError::InputSchema { operand: 0 },
-        ));
+        let invalid = || {
+            GqlQueryError::Source(GraphAggregateError::InputRelation(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ))
+        };
         if row.len() != pattern.value_columns().len() {
             return Err(invalid());
         }

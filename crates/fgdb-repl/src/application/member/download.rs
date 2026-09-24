@@ -7,8 +7,8 @@ use fgdb_order::SnapshotTransfer;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 use super::{AppliedReplica, AppliedReplicaOutput, MemberSeedError};
-use crate::application::{Application, ApplicationError, ApplicationStateError, validate_progress};
 use crate::application::snapshot::validate_restoration;
+use crate::application::{Application, ApplicationError, ApplicationStateError, validate_progress};
 use crate::download::SnapshotDownload;
 use crate::driver::{RaftPublisher, SeedDriveError, SeedPublisher};
 use crate::replica::ReplicaOutput;
@@ -22,16 +22,28 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> App
         namespace: DatabaseSecurityNamespaceId,
         transfer: SnapshotTransfer,
         plan: SeedPlan,
-    ) -> Result<SnapshotDownload, MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>> {
-        self.available().map_err(|error| MemberSeedError::Application(error.into()))?;
-        if plan.anchor().publication_generation <= self.application.progress.publication_generation {
-            return Err(MemberSeedError::Application(ApplicationStateError::InvalidPublication.into()));
+    ) -> Result<
+        SnapshotDownload,
+        MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>,
+    > {
+        self.available()
+            .map_err(|error| MemberSeedError::Application(error.into()))?;
+        if plan.anchor().publication_generation <= self.application.progress.publication_generation
+        {
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::InvalidPublication.into(),
+            ));
         }
-        let visible = plan.audit_cut().map_or(plan.anchor().raft_index, |cut| cut.visible_index);
+        let visible = plan
+            .audit_cut()
+            .map_or(plan.anchor().raft_index, |cut| cut.visible_index);
         if visible < self.application.progress.visible_index {
-            return Err(MemberSeedError::Application(ApplicationStateError::VisibilityRegression.into()));
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::VisibilityRegression.into(),
+            ));
         }
-        self.replica.begin_snapshot_download(namespace, transfer, plan)
+        self.replica
+            .begin_snapshot_download(namespace, transfer, plan)
             .map_err(|error| MemberSeedError::Seed(SeedDriveError::Catchup(error)))
     }
 
@@ -41,11 +53,18 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> App
     pub async fn publish_download_object(
         &mut self,
         download: &mut SnapshotDownload,
-    ) -> Result<ObjectId, MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>> {
-        self.available().map_err(|error| MemberSeedError::Application(error.into()))?;
-        self.replica.validate_download(download)
+    ) -> Result<
+        ObjectId,
+        MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>,
+    > {
+        self.available()
+            .map_err(|error| MemberSeedError::Application(error.into()))?;
+        self.replica
+            .validate_download(download)
             .map_err(|error| MemberSeedError::Seed(SeedDriveError::Catchup(error)))?;
-        download.publish_next::<C, A>(&mut self.application.application).await
+        download
+            .publish_next::<C, A>(&mut self.application.application)
+            .await
             .map_err(MemberSeedError::Seed)
     }
 
@@ -60,8 +79,12 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> App
     pub async fn install_download(
         &mut self,
         download: SnapshotDownload,
-    ) -> Result<AppliedReplicaOutput<C>, MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>> {
-        self.available().map_err(|error| MemberSeedError::Application(error.into()))?;
+    ) -> Result<
+        AppliedReplicaOutput<C>,
+        MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>,
+    > {
+        self.available()
+            .map_err(|error| MemberSeedError::Application(error.into()))?;
         let expected_root = download.anchor().publication_root;
         let expected_generation = download.anchor().publication_generation;
         let expected_audit = download.audit_cut();
@@ -69,15 +92,23 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> App
         // Live application may have advanced while downloading. Recheck here,
         // not just at admission: a later applied cut cannot roll visibility back.
         if visible < self.application.progress.visible_index {
-            return Err(MemberSeedError::Application(ApplicationStateError::VisibilityRegression.into()));
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::VisibilityRegression.into(),
+            ));
         }
         if expected_generation <= self.application.progress.publication_generation {
-            return Err(MemberSeedError::Application(ApplicationStateError::InvalidPublication.into()));
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::InvalidPublication.into(),
+            ));
         }
-        let output = self.replica.install_download(download, &mut self.application.application)
-            .await.map_err(MemberSeedError::Seed)?;
+        let output = self
+            .replica
+            .install_download(download, &mut self.application.application)
+            .await
+            .map_err(MemberSeedError::Seed)?;
         self.complete_snapshot(output, expected_root, expected_generation, expected_audit)
-            .await.map_err(MemberSeedError::Application)
+            .await
+            .map_err(MemberSeedError::Application)
     }
 }
 
@@ -94,9 +125,17 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         // The atomic root may already be current. Fence BEFORE invoking load,
         // including synchronous panic and cancellation of the reload future.
         self.application.poisoned = true;
-        let progress = self.application.application.load().await.map_err(ApplicationError::Backend)?;
+        let progress = self
+            .application
+            .application
+            .load()
+            .await
+            .map_err(ApplicationError::Backend)?;
         let restored = self.application.application.restored_snapshot();
-        let state = self.replica.durable_state().map_err(ApplicationStateError::Raft)?;
+        let state = self
+            .replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)?;
         validate_restoration(state, restored.as_ref())?;
         if restored.as_ref().map(|snapshot| snapshot.audit_cut()) != expected_audit {
             return Err(ApplicationStateError::SnapshotAuditMismatch.into());

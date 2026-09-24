@@ -13,14 +13,13 @@
 
 use super::{
     ComplexityWitness, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues,
-    PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView,
-    SealedNeighborCursor, add, admit, checkpoint, directional_pass_work,
-    finish_encoded, mul, reserve,
+    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, PageRankOptions,
+    QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
+    checkpoint, directional_pass_work, finish_encoded, mul, reserve,
 };
-use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
-use crate::sealed_control::Control;
 use crate::SealedProjectionError;
+use crate::sealed_control::Control;
+use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
 use std::mem::size_of;
@@ -74,8 +73,10 @@ impl FnxCallSpec {
     /// Whether this registered call has an explicitly cooperative compressed
     /// kernel. An unsupported request must not silently run synchronously.
     pub fn supports_cooperative_sealed_execution(&self) -> bool {
-        matches!(self.algorithm(), FnxAlgorithm::PageRank(_)
-            | FnxAlgorithm::SingleSourceShortestPathLength { .. })
+        matches!(
+            self.algorithm(),
+            FnxAlgorithm::PageRank(_) | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+        )
     }
 
     /// Execute an already admitted projection with a shared scheduling quantum.
@@ -103,8 +104,15 @@ impl FnxCallSpec {
         YieldFuture: Future<Output = ()>,
     {
         self.execute_sealed_cooperative_with_checkpoint(
-            cx, graph, limits, memory, quantum, yield_now, || Ok(()),
-        ).await
+            cx,
+            graph,
+            limits,
+            memory,
+            quantum,
+            yield_now,
+            || Ok(()),
+        )
+        .await
     }
 
     /// Cooperatively execute under an additional live guard. The guard spans
@@ -145,7 +153,8 @@ impl FnxCallSpec {
             self.validate_sealed_projection(graph.spec().directedness)?;
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;
-            let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
+            let pass =
+                directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
             let (kernel, estimated_work, workspace, source) = match self.algorithm() {
                 FnxAlgorithm::PageRank(options) => {
                     admit("iterations", options.max_iter(), limits.max_iterations)?;
@@ -158,7 +167,8 @@ impl FnxCallSpec {
                     )
                 }
                 FnxAlgorithm::SingleSourceShortestPathLength { source, .. } => {
-                    let ordinal = graph.vertex_ordinal(source)
+                    let ordinal = graph
+                        .vertex_ordinal(source)
                         .ok_or(ExecutionError::UnknownSource(source))?;
                     admission.rows(1)?;
                     (
@@ -171,16 +181,29 @@ impl FnxCallSpec {
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             admit("estimated work", estimated_work, limits.max_estimated_work)?;
-            admit("kernel workspace bytes", workspace, memory.max_kernel_workspace_bytes)?;
+            admit(
+                "kernel workspace bytes",
+                workspace,
+                memory.max_kernel_workspace_bytes,
+            )?;
             let mut control = Cooperate {
-                cx, fuel: SealedScanBudget::new(quantum.get()), quantum, yield_now,
+                cx,
+                fuel: SealedScanBudget::new(quantum.get()),
+                quantum,
+                yield_now,
             };
             let output = match self.algorithm() {
                 FnxAlgorithm::PageRank(options) => pagerank(graph, options, &mut control).await?,
-                FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => bfs(
-                    graph, source.ok_or(ExecutionError::InvalidUpstreamResult)?,
-                    cutoff, &admission, &mut control,
-                ).await?,
+                FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
+                    bfs(
+                        graph,
+                        source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                        cutoff,
+                        &admission,
+                        &mut control,
+                    )
+                    .await?
+                }
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             control.tick().await?;
@@ -190,9 +213,18 @@ impl FnxCallSpec {
                 encoded.push(self, graph, &output.values, index, &mut || checkpoint(cx))?;
             }
             control.tick().await?;
-            finish_encoded(self, graph, encoded, output.witness, kernel,
-                estimated_work, workspace, &mut || checkpoint(cx))
-        }).await
+            finish_encoded(
+                self,
+                graph,
+                encoded,
+                output.witness,
+                kernel,
+                estimated_work,
+                workspace,
+                &mut || checkpoint(cx),
+            )
+        })
+        .await
     }
 }
 
@@ -214,13 +246,17 @@ where
         control.tick().await?;
         distances.push(None);
     }
-    *distances.get_mut(source).ok_or(ExecutionError::InvalidUpstreamResult)? = Some(0usize);
+    *distances
+        .get_mut(source)
+        .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(0usize);
     queue.push(source);
     let mut head = 0usize;
     let mut witness = ComplexityWitness {
         algorithm: "single_source_shortest_path_length_bfs".to_owned(),
         complexity_claim: "O(|V| log(1+H) + H log(1+|V|)) compressed row visits".to_owned(),
-        nodes_touched: 0, edges_scanned: 0, queue_peak: 1,
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 1,
     };
     while head < queue.len() {
         control.tick().await?;
@@ -228,13 +264,17 @@ where
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let depth = distances[vertex].ok_or(ExecutionError::InvalidUpstreamResult)?;
-        if cutoff.is_some_and(|limit| depth >= limit) { continue; }
+        if cutoff.is_some_and(|limit| depth >= limit) {
+            continue;
+        }
         let next_depth = add(depth, 1)?;
         let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
         while let Some((neighbor, _)) = control.next(&mut row).await? {
             control.tick().await?;
             witness.edges_scanned = add(witness.edges_scanned, 1)?;
-            let distance = distances.get_mut(neighbor).ok_or(ExecutionError::InvalidUpstreamResult)?;
+            let distance = distances
+                .get_mut(neighbor)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
             if distance.is_none() {
                 admission.rows(add(queue.len(), 1)?)?;
                 *distance = Some(next_depth);
@@ -243,7 +283,11 @@ where
             }
         }
     }
-    Ok(KernelOutput { values: KernelValues::Distances(distances), row_count: queue.len(), witness })
+    Ok(KernelOutput {
+        values: KernelValues::Distances(distances),
+        row_count: queue.len(),
+        witness,
+    })
 }
 
 async fn pagerank<Yield, YieldFuture>(
@@ -259,10 +303,16 @@ where
     let mut witness = ComplexityWitness {
         algorithm: "pagerank_power_iteration".to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
-        nodes_touched: 0, edges_scanned: 0, queue_peak: 0,
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
     };
     if n == 0 {
-        return Ok(KernelOutput { values: KernelValues::Scores(Vec::new()), row_count: 0, witness });
+        return Ok(KernelOutput {
+            values: KernelValues::Scores(Vec::new()),
+            row_count: 0,
+            witness,
+        });
     }
     let mut sums = reserve(n)?;
     let mut ranks = reserve(n)?;
@@ -275,12 +325,18 @@ where
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((_, weight)) = control.next(&mut row).await? {
                 control.tick().await?;
-                if weight < 0.0 { return Err(ExecutionError::NegativeWeight.into()); }
+                if weight < 0.0 {
+                    return Err(ExecutionError::NegativeWeight.into());
+                }
                 sum += weight;
-                if !sum.is_finite() { return Err(ExecutionError::NonFiniteWeightSum.into()); }
+                if !sum.is_finite() {
+                    return Err(ExecutionError::NonFiniteWeightSum.into());
+                }
             }
         } else {
-            sum = graph.degree(source).ok_or(ExecutionError::InvalidUpstreamResult)? as f64;
+            sum = graph
+                .degree(source)
+                .ok_or(ExecutionError::InvalidUpstreamResult)? as f64;
         }
         sums.push(sum);
         ranks.push(1.0 / population);
@@ -292,7 +348,9 @@ where
         let mut dangling_mass = 0.0;
         for source in 0..n {
             control.tick().await?;
-            if sums[source] == 0.0 { dangling_mass += ranks[source]; }
+            if sums[source] == 0.0 {
+                dangling_mass += ranks[source];
+            }
         }
         let initial = base + options.alpha() * dangling_mass / population;
         for value in &mut next {
@@ -310,8 +368,14 @@ where
                 // divide before multiply, ascending targets and ordered sums.
                 let share = if options.weighted() {
                     if sum > 0.0 { weight / sum } else { weight }
-                } else if sum > 0.0 { 1.0 / sum } else { 0.0 };
-                let value = next.get_mut(target).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                } else if sum > 0.0 {
+                    1.0 / sum
+                } else {
+                    0.0
+                };
+                let value = next
+                    .get_mut(target)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
                 *value += push * share;
                 witness.edges_scanned = add(witness.edges_scanned, 1)?;
             }
@@ -327,8 +391,16 @@ where
         std::mem::swap(&mut ranks, &mut next);
         witness.nodes_touched = add(witness.nodes_touched, n)?;
         if delta < population * options.tolerance() {
-            return Ok(KernelOutput { values: KernelValues::Scores(ranks), row_count: n, witness });
+            return Ok(KernelOutput {
+                values: KernelValues::Scores(ranks),
+                row_count: n,
+                witness,
+            });
         }
     }
-    Err(ExecutionError::NotConverged { max_iterations: options.max_iter(), witness }.into())
+    Err(ExecutionError::NotConverged {
+        max_iterations: options.max_iter(),
+        witness,
+    }
+    .into())
 }

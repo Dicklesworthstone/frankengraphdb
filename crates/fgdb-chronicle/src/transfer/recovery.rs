@@ -46,7 +46,9 @@ enum BlockStep {
 impl Recovery {
     pub(super) fn new(blocks: usize) -> Result<Self, PullError> {
         let mut progress = Vec::new();
-        progress.try_reserve_exact(blocks).map_err(|_| PullError::AllocationFailed)?;
+        progress
+            .try_reserve_exact(blocks)
+            .map_err(|_| PullError::AllocationFailed)?;
         progress.resize(blocks, BlockProgress::default());
         Ok(Self {
             progress,
@@ -71,7 +73,9 @@ impl Recovery {
     }
 
     pub(super) fn cached_blocks(&self, counts: &[usize]) -> usize {
-        self.progress.iter().zip(counts)
+        self.progress
+            .iter()
+            .zip(counts)
             .filter(|(progress, count)| progress.decoded && progress.attempted == **count)
             .count()
     }
@@ -99,13 +103,20 @@ impl Recovery {
 
     fn begin(&mut self, counts: &[usize], bytes: usize) -> Result<(), SymbolizeError> {
         let mut snapshot = Vec::new();
-        snapshot.try_reserve_exact(counts.len()).map_err(|_| SymbolizeError::AllocationFailed)?;
+        snapshot
+            .try_reserve_exact(counts.len())
+            .map_err(|_| SymbolizeError::AllocationFailed)?;
         snapshot.extend_from_slice(counts);
         if self.protected.is_empty() {
-            self.protected.try_reserve_exact(bytes).map_err(|_| SymbolizeError::AllocationFailed)?;
+            self.protected
+                .try_reserve_exact(bytes)
+                .map_err(|_| SymbolizeError::AllocationFailed)?;
             self.protected.resize(bytes, 0);
         }
-        self.round = Some(Round { counts: snapshot, next: 0 });
+        self.round = Some(Round {
+            counts: snapshot,
+            next: 0,
+        });
         Ok(())
     }
 
@@ -117,7 +128,10 @@ impl Recovery {
         dek: &[u8; 32],
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<BlockStep, SymbolizeError> {
-        let round = self.round.as_mut().ok_or(SymbolizeError::InvalidParameters)?;
+        let round = self
+            .round
+            .as_mut()
+            .ok_or(SymbolizeError::InvalidParameters)?;
         while round.next < self.progress.len() {
             let block = round.next;
             round.next += 1;
@@ -128,12 +142,23 @@ impl Recovery {
             }
             // Publish the attempt before invoking user observation/native code.
             // The enclosing pull is fenced against unwind until this returns.
-            *progress = BlockProgress { attempted: count, decoded: false };
+            *progress = BlockProgress {
+                attempted: count,
+                decoded: false,
+            };
             #[cfg(test)]
-            { self.passes[block] += 1; }
+            {
+                self.passes[block] += 1;
+            }
             match recover_indexed_block(
-                encoding, block as u32, records, coordinates, count,
-                &mut self.protected, dek, verification,
+                encoding,
+                block as u32,
+                records,
+                coordinates,
+                count,
+                &mut self.protected,
+                dek,
+                verification,
             ) {
                 Ok(()) => progress.decoded = true,
                 Err(SymbolizeError::InsufficientSymbols) => {}
@@ -160,7 +185,10 @@ impl BondedPull<'_> {
         self.open()?;
         let starting = self.recovery.round.is_none();
         if starting {
-            if !self.recovery.ready(&self.block_sources, &self.block_received) {
+            if !self
+                .recovery
+                .ready(&self.block_sources, &self.block_received)
+            {
                 return Ok(Advance::AwaitingSymbols);
             }
             if self.decode_attempts >= self.limits.max_decode_attempts {
@@ -172,19 +200,30 @@ impl BondedPull<'_> {
         // the object or recording evidence cannot reactivate partial state.
         self.closed = true;
         let begun = if starting {
-            self.recovery.begin(&self.block_received, self.target.protected_len)
+            self.recovery
+                .begin(&self.block_received, self.target.protected_len)
         } else {
             Ok(())
         };
-        let result = match begun.and_then(|()| self.recovery.advance(
-            self.encoding, &self.records, &self.seen, self.dek, verification,
-        )) {
+        let result = match begun.and_then(|()| {
+            self.recovery.advance(
+                self.encoding,
+                &self.records,
+                &self.seen,
+                self.dek,
+                verification,
+            )
+        }) {
             Ok(BlockStep::Progress) => {
                 self.closed = false;
                 return Ok(Advance::Progress);
             }
             Ok(BlockStep::Complete) => verify_recovered_protected(
-                self.encoding, &self.recovery.protected, self.target, self.dek, verification,
+                self.encoding,
+                &self.recovery.protected,
+                self.target,
+                self.dek,
+                verification,
             ),
             Ok(BlockStep::Deficient) => Err(SymbolizeError::InsufficientSymbols),
             Err(error) => Err(error),

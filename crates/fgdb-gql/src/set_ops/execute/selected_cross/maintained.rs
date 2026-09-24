@@ -89,10 +89,15 @@ impl PreparedGraphSet {
             }
             rebound.push(op);
         }
-        let Ok(spec) = spec.with_predicate(&rebound) else { return Ok(None) };
+        let Ok(spec) = spec.with_predicate(&rebound) else {
+            return Ok(None);
+        };
         for name in &self.columns {
             control(GlaExecutionEvent::Work)?;
-            for _ in 0..=name.len().div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            for _ in 0..=name
+                .len()
+                .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+            {
                 control(GlaExecutionEvent::ScratchEntry)?;
             }
         }

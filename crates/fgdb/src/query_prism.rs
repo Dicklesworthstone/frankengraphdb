@@ -8,10 +8,10 @@ use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits,
-    ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits,
-    ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy,
-    SnapshotBinding, SnapshotGraphView,
+    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, ParallelEdgePolicy,
+    ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
+    SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
+    SnapshotGraphView,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -62,7 +62,8 @@ impl<V: Vfs + Clone> Database<V> {
         memory: FnxMemoryLimits,
         sealing: SealedLimits,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, None).await
+        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, None)
+            .await
     }
 
     /// Opt into cooperative compressed BFS/PageRank execution. Binding still
@@ -81,7 +82,8 @@ impl<V: Vfs + Clone> Database<V> {
         quantum: NonZeroUsize,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
         let call = FnxCallSpec::bind(text, parameters).map_err(Error::Bind)?;
-        self.execute_fnx_sealed_cooperative(cx, &call, options, memory, sealing, quantum).await
+        self.execute_fnx_sealed_cooperative(cx, &call, options, memory, sealing, quantum)
+            .await
     }
 
     /// Use the pinned runtime's yield primitive between bounded kernel/scalar
@@ -101,7 +103,8 @@ impl<V: Vfs + Clone> Database<V> {
         sealing: SealedLimits,
         quantum: NonZeroUsize,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, Some(quantum)).await
+        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, Some(quantum))
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -134,10 +137,17 @@ impl<V: Vfs + Clone> Database<V> {
                 )
                 .await?;
             if let Some(quantum) = quantum {
-                let result = call.execute_sealed_cooperative(
-                    cx, &graph, options.execution_limits, memory, quantum,
-                    asupersync::runtime::yield_now::yield_now,
-                ).await.map_err(SealedReadError::Execution)?;
+                let result = call
+                    .execute_sealed_cooperative(
+                        cx,
+                        &graph,
+                        options.execution_limits,
+                        memory,
+                        quantum,
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await
+                    .map_err(SealedReadError::Execution)?;
                 Ok(FnxReadResult::bind_selection(result, options.selection))
             } else {
                 finish_sealed_read(cx, call, &graph, options, memory)
@@ -542,8 +552,12 @@ impl EmbeddedReadView {
     }
 }
 
-fn supported_sealed_call(call: &FnxCallSpec, direction: Directedness) -> Result<(), SealedReadError> {
-    call.validate_sealed_projection(direction).map_err(SealedReadError::Execution)
+fn supported_sealed_call(
+    call: &FnxCallSpec,
+    direction: Directedness,
+) -> Result<(), SealedReadError> {
+    call.validate_sealed_projection(direction)
+        .map_err(SealedReadError::Execution)
 }
 
 fn finish_sealed_read(

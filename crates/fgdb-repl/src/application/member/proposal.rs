@@ -5,7 +5,7 @@
 //! This closes the composition gap without making the assessment itself a
 //! certificate or treating a locally appended command as a completed write.
 
-use super::{AppliedReplica, AppliedReplicaOutput, Application, ApplicationStateError};
+use super::{Application, ApplicationStateError, AppliedReplica, AppliedReplicaOutput};
 use crate::availability::proposal::{
     PayloadProposalAuthority, ProposalError, ProposalPosition, propose,
 };
@@ -20,18 +20,13 @@ pub enum MemberProposalError<A, I> {
     Proposal(ProposalError<A, I>),
 }
 
-impl<A: core::fmt::Debug, I: core::fmt::Debug> core::fmt::Display
-    for MemberProposalError<A, I>
-{
+impl<A: core::fmt::Debug, I: core::fmt::Debug> core::fmt::Display for MemberProposalError<A, I> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Aegis applied proposal: {self:?}")
     }
 }
 
-impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error
-    for MemberProposalError<A, I>
-{
-}
+impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error for MemberProposalError<A, I> {}
 
 /// A local durable append, with the owning member's complete output history.
 /// The position is internal. Neither it nor this value is a public write result,
@@ -69,7 +64,10 @@ where
         input: &AvailabilityInput,
         limits: AvailabilityLimits,
         checkpoint: &mut F,
-    ) -> Result<MemberProposalOutput<C>, MemberProposalError<<A as PayloadProposalAuthority<C>>::Error, I>>
+    ) -> Result<
+        MemberProposalOutput<C>,
+        MemberProposalError<<A as PayloadProposalAuthority<C>>::Error, I>,
+    >
     where
         F: FnMut() -> Result<(), I>,
     {
@@ -77,7 +75,11 @@ where
         // Do not spend payload-assessment work or acquire a publication permit
         // for a proposal the frozen handoff endpoint cannot admit. The kernel
         // also enforces this for privileged direct scalar/batch callers.
-        if self.leadership_transfer().map_err(MemberProposalError::State)?.is_some() {
+        if self
+            .leadership_transfer()
+            .map_err(MemberProposalError::State)?
+            .is_some()
+        {
             return Err(MemberProposalError::Proposal(ProposalError::Raft(
                 fgdb_order::Error::LeadershipTransferInProgress,
             )));
@@ -92,7 +94,12 @@ where
         )
         .await
         .map_err(MemberProposalError::Proposal)?;
-        let member = self.absorb(output.replica).map_err(MemberProposalError::State)?;
-        Ok(MemberProposalOutput { position: output.position, member })
+        let member = self
+            .absorb(output.replica)
+            .map_err(MemberProposalError::State)?;
+        Ok(MemberProposalOutput {
+            position: output.position,
+            member,
+        })
     }
 }

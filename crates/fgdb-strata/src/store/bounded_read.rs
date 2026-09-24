@@ -71,13 +71,21 @@ impl core::fmt::Display for RootReadError {
         match self {
             Self::Store(error) => error.fmt(f),
             Self::Interrupted(_) => f.write_str("root source traversal interrupted"),
-            Self::Limit { resource, requested, limit } => write!(
+            Self::Limit {
+                resource,
+                requested,
+                limit,
+            } => write!(
                 f,
                 "ResourceExhausted: {resource} needs at least {requested}, limit {limit}"
             ),
-            Self::BeyondPublication { requested, publication } => write!(
+            Self::BeyondPublication {
+                requested,
+                publication,
+            } => write!(
                 f,
-                "root source cut {} exceeds publication {}", requested.0, publication.0
+                "root source cut {} exceeds publication {}",
+                requested.0, publication.0
             ),
             Self::SizeOverflow => f.write_str("root source accounting overflow"),
             Self::AllocationFailed => f.write_str("root source collection allocation failed"),
@@ -116,38 +124,72 @@ struct Admission {
 
 fn admit(resource: &'static str, requested: usize, limit: usize) -> Result<(), RootReadError> {
     if requested > limit {
-        Err(RootReadError::Limit { resource, requested, limit })
+        Err(RootReadError::Limit {
+            resource,
+            requested,
+            limit,
+        })
     } else {
         Ok(())
     }
 }
 
 impl Admission {
-    fn new(limits: RootReadLimits, root: &crate::root::PartitionRoot) -> Result<Self, RootReadError> {
+    fn new(
+        limits: RootReadLimits,
+        root: &crate::root::PartitionRoot,
+    ) -> Result<Self, RootReadError> {
         // The root has already been structurally decoded/authenticated. These
         // ceilings apply before ANY referenced block or vertex patch is opened.
         admit("source blocks", root.blocks.len(), limits.max_blocks)?;
-        admit("source vertex patches", root.vertex_patches.len(), limits.max_vertex_patches)?;
-        Ok(Self { limits, bytes: 0, incidences: 0, vertex_versions: 0 })
+        admit(
+            "source vertex patches",
+            root.vertex_patches.len(),
+            limits.max_vertex_patches,
+        )?;
+        Ok(Self {
+            limits,
+            bytes: 0,
+            incidences: 0,
+            vertex_versions: 0,
+        })
     }
 
     fn observe(&mut self, event: RootReadEvent) -> Result<(), RootReadError> {
         let (counter, increment, maximum, resource) = match event {
             RootReadEvent::ObjectStart => {
-                let minimum = self.bytes.checked_add(1).ok_or(RootReadError::SizeOverflow)?;
-                return admit("source encoded bytes", minimum, self.limits.max_source_bytes);
+                let minimum = self
+                    .bytes
+                    .checked_add(1)
+                    .ok_or(RootReadError::SizeOverflow)?;
+                return admit(
+                    "source encoded bytes",
+                    minimum,
+                    self.limits.max_source_bytes,
+                );
             }
             RootReadEvent::SourceBytes(bytes) => (
-                &mut self.bytes, bytes, self.limits.max_source_bytes, "source encoded bytes"
+                &mut self.bytes,
+                bytes,
+                self.limits.max_source_bytes,
+                "source encoded bytes",
             ),
             RootReadEvent::Incidences(rows) => (
-                &mut self.incidences, rows, self.limits.max_incidences, "source incidences"
+                &mut self.incidences,
+                rows,
+                self.limits.max_incidences,
+                "source incidences",
             ),
             RootReadEvent::VertexVersions(rows) => (
-                &mut self.vertex_versions, rows, self.limits.max_vertex_versions, "source vertex versions"
+                &mut self.vertex_versions,
+                rows,
+                self.limits.max_vertex_versions,
+                "source vertex versions",
             ),
         };
-        let next = counter.checked_add(increment).ok_or(RootReadError::SizeOverflow)?;
+        let next = counter
+            .checked_add(increment)
+            .ok_or(RootReadError::SizeOverflow)?;
         admit(resource, next, maximum)?;
         *counter = next;
         Ok(())
@@ -197,7 +239,9 @@ impl<V: Vfs> BlockStore<V> {
         limits: RootReadLimits,
     ) -> Result<ReopenedAdjacency, RootReadError> {
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
-        let root = self.get_root_with_byte_limit(cx, id, limits.max_root_bytes).await?;
+        let root = self
+            .get_root_with_byte_limit(cx, id, limits.max_root_bytes)
+            .await?;
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
         if requested_cut > root.published_at {
             return Err(RootReadError::BeyondPublication {
@@ -215,12 +259,18 @@ impl<V: Vfs> BlockStore<V> {
             .await?;
         // Still validate the complete vertex history. The validator retains its
         // existing owned version records, but no second patch collection is kept.
-        drop(self.inspect_root_patches_observed(cx, &root, |_, _| false, &mut observe)
-            .await?);
+        drop(
+            self.inspect_root_patches_observed(cx, &root, |_, _| false, &mut observe)
+                .await?,
+        );
         let mut blocks = Vec::new();
         let mut properties = Vec::new();
-        blocks.try_reserve_exact(resolved.len()).map_err(|_| RootReadError::AllocationFailed)?;
-        properties.try_reserve_exact(resolved.len()).map_err(|_| RootReadError::AllocationFailed)?;
+        blocks
+            .try_reserve_exact(resolved.len())
+            .map_err(|_| RootReadError::AllocationFailed)?;
+        properties
+            .try_reserve_exact(resolved.len())
+            .map_err(|_| RootReadError::AllocationFailed)?;
         for (entries, props) in resolved {
             cx.checkpoint().map_err(RootReadError::Interrupted)?;
             blocks.push(entries);

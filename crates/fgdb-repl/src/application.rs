@@ -342,7 +342,8 @@ fn validate_progress<C>(
     let base = state.snapshot().map_or(0, |cut| cut.index());
     // A snapshot owns all applied planes, not only its visible sub-prefix.
     // An older cached projection cannot authorize a newly compacted cut.
-    let audit = restored.filter(|restored| state.snapshot() == Some(restored.snapshot()))
+    let audit = restored
+        .filter(|restored| state.snapshot() == Some(restored.snapshot()))
         .map(RestoredSnapshot::audit_cut);
     let visible_floor = audit.map_or(base, |cut| cut.visible_index);
     if progress.applied.index < base || progress.visible_index < visible_floor {

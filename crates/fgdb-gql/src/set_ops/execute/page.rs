@@ -63,9 +63,12 @@ where
             meter.event(GlaExecutionEvent::Work)?;
             for at in selection.range(right.len()) {
                 meter.event(GlaExecutionEvent::Work)?;
-                rows.push(selected_cross::copy_pair(left, &right[at], None, &mut |event| {
-                    meter.event(event)
-                })?);
+                rows.push(selected_cross::copy_pair(
+                    left,
+                    &right[at],
+                    None,
+                    &mut |event| meter.event(event),
+                )?);
             }
         }
     } else if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {

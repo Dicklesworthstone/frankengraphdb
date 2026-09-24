@@ -5,24 +5,24 @@
 use crate::execute::{KernelOutput, KernelValues};
 use crate::sealed_control::Control;
 use crate::{
-    AdapterPath, ComplexityWitness, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION,
-    FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
-    Directedness, FnxGraphKind, FnxOutput, FnxParameters, FnxResult, FnxValue, PageRankOptions, SealedGraphView,
-    SealedNeighborCursor, SealedProjectionError,
+    AdapterPath, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
+    FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
+    FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxOutput, FnxParameters, FnxResult,
+    FnxValue, PageRankOptions, SealedGraphView, SealedNeighborCursor, SealedProjectionError,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::SealedError;
 use fgdb_types::QueryCx;
-use std::convert::Infallible;
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::mem::size_of;
 
 #[path = "sealed_clustering.rs"]
 mod clustering;
-#[path = "sealed_cooperative.rs"]
-mod cooperative;
 #[path = "sealed_components.rs"]
 mod components;
+#[path = "sealed_cooperative.rs"]
+mod cooperative;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 
@@ -156,7 +156,9 @@ impl Rows for SealedRows<'_> {
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
         Ok(SealedRow {
             cx: self.cx,
-            row: self.graph.neighbor_cursor_controlled(self.cx, source, None)?,
+            row: self
+                .graph
+                .neighbor_cursor_controlled(self.cx, source, None)?,
         })
     }
 }
@@ -223,7 +225,9 @@ fn pass_work(n: usize, retained: usize) -> Result<usize> {
 // edges. H includes excluded endpoints, relations and invisible history.
 fn directional_pass_work(n: usize, retained: usize, direction: Directedness) -> Result<usize> {
     let forward = pass_work(n, retained)?;
-    if n == 0 || direction == Directedness::Directed { return Ok(forward); }
+    if n == 0 || direction == Directedness::Directed {
+        return Ok(forward);
+    }
     let height = (usize::BITS - retained.leading_zeros()) as usize;
     let incoming = add(forward, add(mul(retained, add(8, height)?)?, mul(n, 4)?)?)?;
     if direction == Directedness::Undirected {
@@ -497,10 +501,14 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
-        if matches!(self.algorithm(), FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient) {
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
+        ) {
             return clustering::execute(self, cx, graph, limits, memory, &admission);
         }
-        let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
+        let pass =
+            directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
             FnxAlgorithm::PageRank(options) => {
                 admit("iterations", options.max_iter(), limits.max_iterations)?;
@@ -536,7 +544,8 @@ impl FnxCallSpec {
                     Some(ordinal),
                 )
             }
-            algorithm @ (FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents
+            algorithm @ (FnxAlgorithm::ConnectedComponents
+            | FnxAlgorithm::WeaklyConnectedComponents
             | FnxAlgorithm::StronglyConnectedComponents) => {
                 admission.rows(n)?;
                 let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
@@ -615,7 +624,16 @@ fn finish(
     for index in 0..graph.node_count() {
         encoded.push(call, graph, &output.values, index, checkpoint)?;
     }
-    finish_encoded(call, graph, encoded, output.witness, kernel, estimated_work, workspace, checkpoint)
+    finish_encoded(
+        call,
+        graph,
+        encoded,
+        output.witness,
+        kernel,
+        estimated_work,
+        workspace,
+        checkpoint,
+    )
 }
 
 // Shared row/hash implementation for synchronous and cooperative execution.
@@ -634,7 +652,11 @@ impl EncodedRows {
         result_hash.update(b"fgdb:prism:result-rows:v3");
         result_hash.update(&(row_count as u128).to_le_bytes());
         result_hash.update(&call.digest().0);
-        Ok(Self { rows, result_hash, row_count })
+        Ok(Self {
+            rows,
+            result_hash,
+            row_count,
+        })
     }
 
     fn push(
@@ -690,7 +712,9 @@ impl EncodedRows {
                 FnxValue::Float(distance)
             }
             KernelValues::Counts(values) => FnxValue::Integer(
-                *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?,
+                *values
+                    .get(index)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?,
             ),
         };
         let vertex = graph
@@ -749,7 +773,11 @@ fn finish_encoded(
     workspace: usize,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<FnxResult> {
-    let EncodedRows { rows, result_hash, row_count } = encoded;
+    let EncodedRows {
+        rows,
+        result_hash,
+        row_count,
+    } = encoded;
     if rows.len() != row_count {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
@@ -767,11 +795,14 @@ fn finish_encoded(
     let numeric_profile = call.numeric_profile();
     let adapter = AdapterPath::CompressedCursor;
     if graph.spec().directedness != Directedness::Directed
-        && !matches!(call.algorithm(), FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient)
+        && !matches!(
+            call.algorithm(),
+            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
+        )
     {
-        witness.complexity_claim.push_str(
-            "; plus O(p * H * log(1+H)) incoming locator work, p = graph passes",
-        );
+        witness
+            .complexity_claim
+            .push_str("; plus O(p * H * log(1+H)) incoming locator work, p = graph passes");
     }
     let mut hash = Hasher::new();
     hash.update(b"fgdb:prism:call-certificate:v3");
@@ -999,7 +1030,7 @@ mod tests {
                     )
                     .unwrap();
                     let expected = call
-                        .execute(&graph, limits(), || Ok::<(), Infallible>(() ))
+                        .execute(&graph, limits(), || Ok::<(), Infallible>(()))
                         .unwrap();
                     let KernelValues::Distances(distances) = output.values else {
                         panic!("distances");
@@ -1184,7 +1215,8 @@ mod tests {
             for history in [0, 1, 8, 10_000] {
                 let directed = directional_pass_work(n, history, Directedness::Directed).unwrap();
                 let reversed = directional_pass_work(n, history, Directedness::Reversed).unwrap();
-                let undirected = directional_pass_work(n, history, Directedness::Undirected).unwrap();
+                let undirected =
+                    directional_pass_work(n, history, Directedness::Undirected).unwrap();
                 assert_eq!(directed, pass_work(n, history).unwrap());
                 assert!(reversed >= directed);
                 assert!(undirected >= directed + reversed);
@@ -1200,20 +1232,39 @@ mod tests {
     fn compressed_calls_enforce_the_same_registered_graph_kinds_before_source_access() {
         let undirected = FnxCallSpec::connected_components();
         assert!(undirected.supports_sealed_execution());
-        for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
-            assert_eq!(undirected.validate_sealed_projection(direction).is_ok(),
-                direction == Directedness::Undirected);
-            for call in [FnxCallSpec::weakly_connected_components(), FnxCallSpec::strongly_connected_components()] {
-                assert_eq!(call.validate_sealed_projection(direction).is_ok(),
-                    direction != Directedness::Undirected);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            assert_eq!(
+                undirected.validate_sealed_projection(direction).is_ok(),
+                direction == Directedness::Undirected
+            );
+            for call in [
+                FnxCallSpec::weakly_connected_components(),
+                FnxCallSpec::strongly_connected_components(),
+            ] {
+                assert_eq!(
+                    call.validate_sealed_projection(direction).is_ok(),
+                    direction != Directedness::Undirected
+                );
             }
-            for call in [FnxCallSpec::pagerank(PageRankOptions::default()), bfs_call(VId(0), None)] {
+            for call in [
+                FnxCallSpec::pagerank(PageRankOptions::default()),
+                bfs_call(VId(0), None),
+            ] {
                 call.validate_sealed_projection(direction).unwrap();
             }
-            for call in [FnxCallSpec::triangles(), FnxCallSpec::clustering_coefficient()] {
+            for call in [
+                FnxCallSpec::triangles(),
+                FnxCallSpec::clustering_coefficient(),
+            ] {
                 assert!(call.supports_sealed_execution());
-                assert_eq!(call.validate_sealed_projection(direction).is_ok(),
-                    direction == Directedness::Undirected);
+                assert_eq!(
+                    call.validate_sealed_projection(direction).is_ok(),
+                    direction == Directedness::Undirected
+                );
             }
         }
     }

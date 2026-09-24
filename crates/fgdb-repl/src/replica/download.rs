@@ -24,7 +24,10 @@ impl<C: Clone + Eq> Replica<C> {
         SnapshotDownload::begin(&self.raft, namespace, transfer, plan)
     }
 
-    pub(crate) fn validate_download(&self, download: &SnapshotDownload) -> Result<(), CatchupError> {
+    pub(crate) fn validate_download(
+        &self,
+        download: &SnapshotDownload,
+    ) -> Result<(), CatchupError> {
         download.validate_for(&self.raft)
     }
 

@@ -26,9 +26,17 @@ impl RestoredSnapshot {
         snapshot: SnapshotCut,
         audit_cut: SeedAuditCut,
     ) -> Result<Self, ApplicationStateError> {
-        audit_cut.validate_at(snapshot.index(), snapshot.term(), ObjectId(snapshot.state_root()))
+        audit_cut
+            .validate_at(
+                snapshot.index(),
+                snapshot.term(),
+                ObjectId(snapshot.state_root()),
+            )
             .map_err(|_| ApplicationStateError::SnapshotAuditMismatch)?;
-        Ok(Self { snapshot, audit_cut })
+        Ok(Self {
+            snapshot,
+            audit_cut,
+        })
     }
 
     pub fn snapshot(&self) -> &SnapshotCut {
@@ -48,9 +56,14 @@ pub(super) fn validate_restoration<C>(
         if state.snapshot() != Some(restored.snapshot()) {
             return Err(ApplicationStateError::SnapshotAuditMismatch);
         }
-        restored.audit_cut.validate_at(
-            restored.snapshot.index(), restored.snapshot.term(), ObjectId(restored.snapshot.state_root()),
-        ).map_err(|_| ApplicationStateError::SnapshotAuditMismatch)?;
+        restored
+            .audit_cut
+            .validate_at(
+                restored.snapshot.index(),
+                restored.snapshot.term(),
+                ObjectId(restored.snapshot.state_root()),
+            )
+            .map_err(|_| ApplicationStateError::SnapshotAuditMismatch)?;
     }
     Ok(())
 }

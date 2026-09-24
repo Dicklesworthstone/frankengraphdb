@@ -231,19 +231,41 @@ mod tests {
         other.source_block = 1;
         let requests = [request(0), other];
         let replies = [
-            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
-            PullReply { request: requests[0], outcome: ReplyOutcome::TimedOut },
+            PullReply {
+                request: other,
+                outcome: ReplyOutcome::TimedOut,
+            },
+            PullReply {
+                request: requests[0],
+                outcome: ReplyOutcome::TimedOut,
+            },
         ];
         assert!(validate_replies::<()>(&requests, &replies).is_ok());
         let duplicate = [
-            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
-            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
+            PullReply {
+                request: other,
+                outcome: ReplyOutcome::TimedOut,
+            },
+            PullReply {
+                request: other,
+                outcome: ReplyOutcome::TimedOut,
+            },
         ];
-        assert!(matches!(validate_replies::<()>(&requests, &duplicate), Err(PullDriveError::DuplicateReply)));
+        assert!(matches!(
+            validate_replies::<()>(&requests, &duplicate),
+            Err(PullDriveError::DuplicateReply)
+        ));
         other.source_block = 2;
-        assert!(matches!(validate_replies::<()>(&requests, &[PullReply {
-            request: other, outcome: ReplyOutcome::TimedOut,
-        }]), Err(PullDriveError::ForeignReply)));
+        assert!(matches!(
+            validate_replies::<()>(
+                &requests,
+                &[PullReply {
+                    request: other,
+                    outcome: ReplyOutcome::TimedOut,
+                }]
+            ),
+            Err(PullDriveError::ForeignReply)
+        ));
     }
 
     #[test]

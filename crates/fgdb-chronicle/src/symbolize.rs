@@ -380,7 +380,11 @@ fn decode_object_inner(
     // decodes independent systems, and restores RFC sub-block byte order.
     // No partial block result escapes the complete-object identity boundary.
     let protected = blocks::decode_protected(
-        encoding, serialized_symbols, target.protected_len, dek, verification,
+        encoding,
+        serialized_symbols,
+        target.protected_len,
+        dek,
+        verification,
     )?;
     verify_recovered_protected(encoding, &protected, target, dek, verification)
 }
@@ -395,7 +399,11 @@ pub(crate) fn verify_recovered_protected(
     verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, SymbolizeError> {
     let RecoveryTarget {
-        k_oid, namespace, object_id: expected_object_id, canonical_header, protected_len,
+        k_oid,
+        namespace,
+        object_id: expected_object_id,
+        canonical_header,
+        protected_len,
     } = target;
     if protected.len() != protected_len {
         return Err(SymbolizeError::InvalidParameters);

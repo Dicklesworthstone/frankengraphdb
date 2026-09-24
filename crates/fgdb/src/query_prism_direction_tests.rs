@@ -18,9 +18,15 @@ fn projected(
     opt: FnxReadOptions,
 ) -> SealedGraphView {
     view.prism_sealed_projection_at(
-        cx, image, opt.as_of.unwrap_or(view.frontier()), opt.selection,
-        opt.projection, opt.projection_limits, opt.source_limits,
-    ).unwrap()
+        cx,
+        image,
+        opt.as_of.unwrap_or(view.frontier()),
+        opt.selection,
+        opt.projection,
+        opt.projection_limits,
+        opt.source_limits,
+    )
+    .unwrap()
 }
 
 fn cursor_row(
@@ -45,27 +51,41 @@ fn assert_projection(
     opt: FnxReadOptions,
 ) -> (SealedGraphView, SnapshotGraphView) {
     let graph = projected(view, cx, image, opt);
-    let decoded = view.prism_projection_at(
-        cx, opt.as_of.unwrap_or(view.frontier()), opt.selection,
-        opt.projection, opt.projection_limits, opt.source_limits,
-    ).unwrap();
+    let decoded = view
+        .prism_projection_at(
+            cx,
+            opt.as_of.unwrap_or(view.frontier()),
+            opt.selection,
+            opt.projection,
+            opt.projection_limits,
+            opt.source_limits,
+        )
+        .unwrap();
     assert_eq!(graph.vertex_ids(), decoded.vertex_ids());
     assert_eq!(graph.edge_count(), decoded.edge_count());
     let mut arcs = 0;
     for source in 0..graph.node_count() {
         let (targets, weights) = decoded.projected_row(source).unwrap();
-        let expected: Vec<_> = targets.iter().zip(weights).map(|(&target, &weight)| {
-            (decoded.vertex_id(target).unwrap(), weight.to_bits())
-        }).collect();
-        assert_eq!(cursor_row(&graph, cx, source, None), expected,
-            "source={source} laws={:?}", opt.projection);
+        let expected: Vec<_> = targets
+            .iter()
+            .zip(weights)
+            .map(|(&target, &weight)| (decoded.vertex_id(target).unwrap(), weight.to_bits()))
+            .collect();
+        assert_eq!(
+            cursor_row(&graph, cx, source, None),
+            expected,
+            "source={source} laws={:?}",
+            opt.projection
+        );
         assert_eq!(graph.degree(source), Some(expected.len()));
         arcs += expected.len();
     }
     assert_eq!(graph.adjacency_entry_count(), arcs);
     assert!(graph.shares_storage_with(image));
-    assert_eq!(graph.incoming_index_stats().is_some(),
-        opt.projection.directedness != Directedness::Directed);
+    assert_eq!(
+        graph.incoming_index_stats().is_some(),
+        opt.projection.directedness != Directedness::Directed
+    );
     (graph, decoded)
 }
 
@@ -148,44 +168,93 @@ fn reciprocal_incidence_eid_order_and_loop_ownership_are_observable() {
     runtime.block_on(async {
         let query = contexts.query();
         let commit = contexts.commit();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let mut batch = WriteBatch::new(RelationId(1));
         for vertex in [VId(1), VId(2), VId(u128::MAX)] {
             batch.create_vertex(vertex, vec![LabelId(1)], vec![]);
         }
         let big = 9_007_199_254_740_992i64;
-        for (eid, source, target, weight) in [(1, 1, 2, big), (2, 2, 1, 1),
-            (3, 2, 1, 1), (4, 1, 1, 7)] {
-            batch.add_edge(EId(eid), VId(source), VId(target),
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(weight))]);
+        for (eid, source, target, weight) in
+            [(1, 1, 2, big), (2, 2, 1, 1), (3, 2, 1, 1), (4, 1, 1, 7)]
+        {
+            batch.add_edge(
+                EId(eid),
+                VId(source),
+                VId(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(weight))],
+            );
         }
         db.write(&commit, batch).await.unwrap();
         let view = db.read_session().unwrap();
-        let image = db.store.seal_partition(&query, view.partition_root(), view.frontier(),
-            SealedLimits::default()).await.unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
         let mut opt = options();
         opt.projection.directedness = Directedness::Undirected;
         opt.projection.parallel_edges = ParallelEdgePolicy::Sum;
         let (graph, _) = assert_projection(&view, &query, &image, opt);
         let canonical = (big as f64 + 1.0) + 1.0;
         let regrouped = big as f64 + (1.0 + 1.0);
-        assert_ne!(canonical.to_bits(), regrouped.to_bits(), "negative control is discriminating");
-        assert_eq!(cursor_row(&graph, &query, 0, None),
-            vec![(VId(1), 7.0f64.to_bits()), (VId(2), canonical.to_bits())]);
-        assert_eq!(cursor_row(&graph, &query, 1, None), vec![(VId(1), canonical.to_bits())]);
-        assert_eq!((graph.input_edge_count(), graph.edge_count(), graph.adjacency_entry_count()),
-            (4, 2, 3));
+        assert_ne!(
+            canonical.to_bits(),
+            regrouped.to_bits(),
+            "negative control is discriminating"
+        );
+        assert_eq!(
+            cursor_row(&graph, &query, 0, None),
+            vec![(VId(1), 7.0f64.to_bits()), (VId(2), canonical.to_bits())]
+        );
+        assert_eq!(
+            cursor_row(&graph, &query, 1, None),
+            vec![(VId(1), canonical.to_bits())]
+        );
+        assert_eq!(
+            (
+                graph.input_edge_count(),
+                graph.edge_count(),
+                graph.adjacency_entry_count()
+            ),
+            (4, 2, 3)
+        );
         opt.projection.self_loops = SelfLoopPolicy::Drop;
         opt.projection.directedness = Directedness::Reversed;
         let (reversed, _) = assert_projection(&view, &query, &image, opt);
-        assert_eq!(cursor_row(&reversed, &query, 0, None), vec![(VId(2), 2.0f64.to_bits())]);
-        assert_eq!(cursor_row(&reversed, &query, 1, None), vec![(VId(1), (big as f64).to_bits())]);
+        assert_eq!(
+            cursor_row(&reversed, &query, 0, None),
+            vec![(VId(2), 2.0f64.to_bits())]
+        );
+        assert_eq!(
+            cursor_row(&reversed, &query, 1, None),
+            vec![(VId(1), (big as f64).to_bits())]
+        );
         opt.projection.directedness = Directedness::Undirected;
         opt.projection.parallel_edges = ParallelEdgePolicy::Reject;
-        assert!(matches!(view.prism_sealed_projection_at(&query, &image, view.frontier(),
-            opt.selection, opt.projection, opt.projection_limits, opt.source_limits),
-            Err(SealedReadError::Projection(SealedProjectionError::Projection(
-                ProjectionError::ParallelEdge { source: VId(1), target: VId(2) })))));
+        assert!(matches!(
+            view.prism_sealed_projection_at(
+                &query,
+                &image,
+                view.frontier(),
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits
+            ),
+            Err(SealedReadError::Projection(
+                SealedProjectionError::Projection(ProjectionError::ParallelEdge {
+                    source: VId(1),
+                    target: VId(2)
+                })
+            ))
+        ));
     });
 }
 
@@ -200,36 +269,64 @@ fn every_three_vertex_simple_directed_topology_agrees_after_compressed_projectio
         let vertices = [VId(0), VId(1 << 80), VId(u128::MAX)];
         let pairs = [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)];
         for mask in 0..64 {
-            let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+            let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+                .await
+                .unwrap();
             let mut batch = WriteBatch::new(RelationId(1));
-            for vertex in vertices { batch.create_vertex(vertex, vec![LabelId(1)], vec![]); }
+            for vertex in vertices {
+                batch.create_vertex(vertex, vec![LabelId(1)], vec![]);
+            }
             for (bit, &(source, target)) in pairs.iter().enumerate() {
                 if mask & (1 << bit) != 0 {
-                    batch.add_edge(EId(bit as u128), vertices[source], vertices[target],
-                        vec![(PropertyKeyId(1), CanonicalScalar::Int((bit % 3) as i64))]);
+                    batch.add_edge(
+                        EId(bit as u128),
+                        vertices[source],
+                        vertices[target],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int((bit % 3) as i64))],
+                    );
                 }
             }
             db.write(&commit, batch).await.unwrap();
             let view = db.read_session().unwrap();
-            let image = db.store.seal_partition(&query, view.partition_root(), view.frontier(),
-                SealedLimits::default()).await.unwrap();
+            let image = db
+                .store
+                .seal_partition(
+                    &query,
+                    view.partition_root(),
+                    view.frontier(),
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
             for direction in DIRECTIONS {
                 let mut opt = options();
                 opt.projection.directedness = direction;
                 let (graph, decoded) = assert_projection(&view, &query, &image, opt);
                 for source in vertices {
                     let call = FnxCallSpec::single_source_shortest_path_length(source, None);
-                    assert_eq!(call.execute_sealed(&query, &graph, opt.execution_limits,
-                        memory()).unwrap().rows,
-                        call.execute(&decoded, opt.execution_limits,
-                            || query.checkpoint()).unwrap().rows, "mask={mask} {direction:?}");
+                    assert_eq!(
+                        call.execute_sealed(&query, &graph, opt.execution_limits, memory())
+                            .unwrap()
+                            .rows,
+                        call.execute(&decoded, opt.execution_limits, || query.checkpoint())
+                            .unwrap()
+                            .rows,
+                        "mask={mask} {direction:?}"
+                    );
                 }
                 let call = if direction == Directedness::Undirected {
                     FnxCallSpec::connected_components()
-                } else { FnxCallSpec::strongly_connected_components() };
-                assert_eq!(call.execute_sealed(&query, &graph, opt.execution_limits,
-                    memory()).unwrap().rows,
-                    call.execute(&decoded, opt.execution_limits, || query.checkpoint()).unwrap().rows);
+                } else {
+                    FnxCallSpec::strongly_connected_components()
+                };
+                assert_eq!(
+                    call.execute_sealed(&query, &graph, opt.execution_limits, memory())
+                        .unwrap()
+                        .rows,
+                    call.execute(&decoded, opt.execution_limits, || query.checkpoint())
+                        .unwrap()
+                        .rows
+                );
             }
         }
     });
@@ -243,11 +340,17 @@ fn incoming_indices_preserve_historical_seeks_full_width_neighbors_and_owned_pin
     runtime.block_on(async {
         let query = contexts.query();
         let commit = contexts.commit();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let mut batch = small_fixture();
         batch.create_vertex(VId(u128::MAX), vec![LabelId(1)], vec![]);
-        batch.add_edge(EId(3), VId(u128::MAX), VId(2),
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(9))]);
+        batch.add_edge(
+            EId(3),
+            VId(u128::MAX),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(9))],
+        );
         db.write(&commit, batch).await.unwrap();
         let old = db.frontier().unwrap();
         let mut update = WriteBatch::new(RelationId(1));
@@ -255,11 +358,20 @@ fn incoming_indices_preserve_historical_seeks_full_width_neighbors_and_owned_pin
         update.delete_edge(EId(3));
         db.write(&commit, update).await.unwrap();
         let view = db.read_session().unwrap();
-        let image = db.store.seal_partition(&query, view.partition_root(), old,
-            SealedLimits::default()).await.unwrap();
+        let image = db
+            .store
+            .seal_partition(&query, view.partition_root(), old, SealedLimits::default())
+            .await
+            .unwrap();
         let bytes = image.encode(&query, SealedLimits::default()).unwrap();
-        let reloaded = SealedPartition::reload(&query, image.anchor(), &bytes,
-            SealedLimits::default(), None).unwrap();
+        let reloaded = SealedPartition::reload(
+            &query,
+            image.anchor(),
+            &bytes,
+            SealedLimits::default(),
+            None,
+        )
+        .unwrap();
         let mut retained = Vec::new();
         for direction in [Directedness::Reversed, Directedness::Undirected] {
             for at in [old, view.frontier()] {
@@ -270,18 +382,30 @@ fn incoming_indices_preserve_historical_seeks_full_width_neighbors_and_owned_pin
                 for source in 0..graph.node_count() {
                     let all = cursor_row(&graph, &query, source, None);
                     for lower in [VId(0), VId(2), VId(3), VId(u128::MAX)] {
-                        let expected: Vec<_> = all.iter().copied().filter(|(id, _)| *id >= lower).collect();
+                        let expected: Vec<_> =
+                            all.iter().copied().filter(|(id, _)| *id >= lower).collect();
                         assert_eq!(cursor_row(&graph, &query, source, Some(lower)), expected);
                     }
                 }
                 if direction == Directedness::Reversed {
-                    let row = cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None);
-                    assert_eq!(row, if at == old {
-                        vec![(VId(1), 2.0f64.to_bits()), (VId(u128::MAX), 9.0f64.to_bits())]
-                    } else { vec![(VId(1), 5.0f64.to_bits())] });
+                    let row =
+                        cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None);
+                    assert_eq!(
+                        row,
+                        if at == old {
+                            vec![
+                                (VId(1), 2.0f64.to_bits()),
+                                (VId(u128::MAX), 9.0f64.to_bits()),
+                            ]
+                        } else {
+                            vec![(VId(1), 5.0f64.to_bits())]
+                        }
+                    );
                 }
                 let call = FnxCallSpec::single_source_shortest_path_length(VId(2), None);
-                let expected = call.execute_sealed(&query, &graph, opt.execution_limits, memory()).unwrap();
+                let expected = call
+                    .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                    .unwrap();
                 retained.push((graph, call, opt.execution_limits, expected));
             }
         }
@@ -290,7 +414,11 @@ fn incoming_indices_preserve_historical_seeks_full_width_neighbors_and_owned_pin
         drop(image);
         drop(reloaded);
         for (graph, call, limits, expected) in retained {
-            assert_eq!(call.execute_sealed(&query, &graph.clone(), limits, memory()).unwrap(), expected);
+            assert_eq!(
+                call.execute_sealed(&query, &graph.clone(), limits, memory())
+                    .unwrap(),
+                expected
+            );
         }
     });
 }
@@ -303,64 +431,159 @@ fn direction_specific_admission_counts_construction_workspace_and_both_incidence
     runtime.block_on(async {
         let query = contexts.query();
         let commit = contexts.commit();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         db.write(&commit, small_fixture()).await.unwrap();
         let view = db.read_session().unwrap();
-        let image = db.store.seal_partition(&query, view.partition_root(), view.frontier(),
-            SealedLimits::default()).await.unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
         let mut opt = options();
-        opt.projection_limits.max_workspace_bytes = 3 * (std::mem::size_of::<VId>()
-            + std::mem::size_of::<usize>());
+        opt.projection_limits.max_workspace_bytes =
+            3 * (std::mem::size_of::<VId>() + std::mem::size_of::<usize>());
         let forward = projected(&view, &query, &image, opt);
-        assert_eq!(forward.charged_workspace_bytes(), opt.projection_limits.max_workspace_bytes);
+        assert_eq!(
+            forward.charged_workspace_bytes(),
+            opt.projection_limits.max_workspace_bytes
+        );
         opt.projection.directedness = Directedness::Reversed;
-        assert!(matches!(view.prism_sealed_projection_at(&query, &image, view.frontier(),
-            opt.selection, opt.projection, opt.projection_limits, opt.source_limits),
-            Err(SealedReadError::Projection(SealedProjectionError::Read(SealedError::Limit {
-                resource: "incoming workspace bytes", .. })))));
+        assert!(matches!(
+            view.prism_sealed_projection_at(
+                &query,
+                &image,
+                view.frontier(),
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits
+            ),
+            Err(SealedReadError::Projection(SealedProjectionError::Read(
+                SealedError::Limit {
+                    resource: "incoming workspace bytes",
+                    ..
+                }
+            )))
+        ));
         for direction in [Directedness::Reversed, Directedness::Undirected] {
             let mut opt = options();
             opt.projection.directedness = direction;
             let graph = projected(&view, &query, &image, opt);
             let index = graph.incoming_index_stats().unwrap();
-            assert_eq!(graph.charged_workspace_bytes(), forward.charged_workspace_bytes()
-                + index.charged_workspace_bytes);
+            assert_eq!(
+                graph.charged_workspace_bytes(),
+                forward.charged_workspace_bytes() + index.charged_workspace_bytes
+            );
             assert!(index.charged_workspace_bytes > index.charged_resident_bytes);
             opt.projection_limits.max_workspace_bytes = graph.charged_workspace_bytes();
             projected(&view, &query, &image, opt);
             opt.projection_limits.max_workspace_bytes -= 1;
-            assert!(view.prism_sealed_projection_at(&query, &image, view.frontier(), opt.selection,
-                opt.projection, opt.projection_limits, opt.source_limits).is_err());
+            assert!(
+                view.prism_sealed_projection_at(
+                    &query,
+                    &image,
+                    view.frontier(),
+                    opt.selection,
+                    opt.projection,
+                    opt.projection_limits,
+                    opt.source_limits
+                )
+                .is_err()
+            );
             let call = FnxCallSpec::single_source_shortest_path_length(VId(3), None);
-            let result = call.execute_sealed(&query, &graph, opt.execution_limits, memory()).unwrap();
-            let exact = FnxExecutionLimits { max_estimated_work: result.certificate.estimated_work,
-                ..opt.execution_limits };
-            assert_eq!(call.execute_sealed(&query, &graph, exact, memory()).unwrap(), result);
-            assert!(matches!(call.execute_sealed(&query, &graph, FnxExecutionLimits {
-                max_estimated_work: exact.max_estimated_work - 1, ..exact }, memory()),
-                Err(FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
-                    resource: "estimated work", .. }))));
+            let result = call
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let exact = FnxExecutionLimits {
+                max_estimated_work: result.certificate.estimated_work,
+                ..opt.execution_limits
+            };
+            assert_eq!(
+                call.execute_sealed(&query, &graph, exact, memory())
+                    .unwrap(),
+                result
+            );
+            assert!(matches!(
+                call.execute_sealed(
+                    &query,
+                    &graph,
+                    FnxExecutionLimits {
+                        max_estimated_work: exact.max_estimated_work - 1,
+                        ..exact
+                    },
+                    memory()
+                ),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        ..
+                    }
+                ))
+            ));
         }
         opt = options();
         opt.projection.directedness = Directedness::Undirected;
         opt.projection_limits.max_adjacency_entries = 3;
-        assert!(matches!(view.prism_sealed_projection_at(&query, &image, view.frontier(),
-            opt.selection, opt.projection, opt.projection_limits, opt.source_limits),
-            Err(SealedReadError::Projection(SealedProjectionError::Projection(
-                ProjectionError::LimitExceeded { resource: "adjacency entries", observed: 4, .. })))));
+        assert!(matches!(
+            view.prism_sealed_projection_at(
+                &query,
+                &image,
+                view.frontier(),
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits
+            ),
+            Err(SealedReadError::Projection(
+                SealedProjectionError::Projection(ProjectionError::LimitExceeded {
+                    resource: "adjacency entries",
+                    observed: 4,
+                    ..
+                })
+            ))
+        ));
         opt.projection_limits.max_adjacency_entries = 4;
         let graph = projected(&view, &query, &image, opt);
         assert_eq!((graph.edge_count(), graph.adjacency_entry_count()), (2, 4));
         opt.source_limits.max_work_units = 0;
-        assert!(matches!(db.execute_fnx_sealed(&query, &FnxCallSpec::strongly_connected_components(),
-            opt, memory(), SealedLimits::default()).await,
-            Err(SealedReadError::Execution(FnxSealedExecutionError::Execution(
-                FnxExecutionError::GraphKind { required: FnxGraphKind::Directed })))));
+        assert!(matches!(
+            db.execute_fnx_sealed(
+                &query,
+                &FnxCallSpec::strongly_connected_components(),
+                opt,
+                memory(),
+                SealedLimits::default()
+            )
+            .await,
+            Err(SealedReadError::Execution(
+                FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Directed
+                })
+            ))
+        ));
         opt.projection.directedness = Directedness::Reversed;
-        assert!(matches!(db.execute_fnx_sealed(&query, &FnxCallSpec::connected_components(),
-            opt, memory(), SealedLimits::default()).await,
-            Err(SealedReadError::Execution(FnxSealedExecutionError::Execution(
-                FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected })))));
+        assert!(matches!(
+            db.execute_fnx_sealed(
+                &query,
+                &FnxCallSpec::connected_components(),
+                opt,
+                memory(),
+                SealedLimits::default()
+            )
+            .await,
+            Err(SealedReadError::Execution(
+                FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Undirected
+                })
+            ))
+        ));
     });
 }
 
@@ -372,37 +595,84 @@ fn incoming_endpoint_masks_and_loop_discard_precede_weight_observation() {
     runtime.block_on(async {
         let query = contexts.query();
         let commit = contexts.commit();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let mut batch = small_fixture();
         batch.create_vertex(VId(99), vec![LabelId(2)], vec![]);
-        batch.add_edge(EId(3), VId(99), VId(2),
-            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))]);
+        batch.add_edge(
+            EId(3),
+            VId(99),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
         batch.add_edge(EId(4), VId(2), VId(2), vec![]);
         db.write(&commit, batch).await.unwrap();
         for direction in [Directedness::Reversed, Directedness::Undirected] {
             let mut opt = options();
             opt.projection.directedness = direction;
             opt.projection.self_loops = SelfLoopPolicy::Drop;
-            let graph = db.prism_sealed_projection_at(&query, None, opt.selection,
-                opt.projection, opt.projection_limits, opt.source_limits,
-                SealedLimits::default()).await.unwrap();
-            assert!(!cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None).is_empty());
+            let graph = db
+                .prism_sealed_projection_at(
+                    &query,
+                    None,
+                    opt.selection,
+                    opt.projection,
+                    opt.projection_limits,
+                    opt.source_limits,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !cursor_row(&graph, &query, graph.vertex_ordinal(VId(2)).unwrap(), None).is_empty()
+            );
             opt.selection.vertex_label = None;
-            assert!(matches!(db.prism_sealed_projection_at(&query, None, opt.selection,
-                opt.projection, opt.projection_limits, opt.source_limits,
-                SealedLimits::default()).await,
+            assert!(matches!(
+                db.prism_sealed_projection_at(
+                    &query,
+                    None,
+                    opt.selection,
+                    opt.projection,
+                    opt.projection_limits,
+                    opt.source_limits,
+                    SealedLimits::default()
+                )
+                .await,
                 Err(SealedReadError::Projection(SealedProjectionError::Weight {
-                    edge: EId(3), reason: FnxWeightError::NotNumeric }))));
+                    edge: EId(3),
+                    reason: FnxWeightError::NotNumeric
+                }))
+            ));
             opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
             opt.projection.self_loops = SelfLoopPolicy::Keep;
-            db.prism_sealed_projection_at(&query, None, opt.selection, opt.projection,
-                opt.projection_limits, opt.source_limits, SealedLimits::default()).await.unwrap();
+            db.prism_sealed_projection_at(
+                &query,
+                None,
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits,
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
             opt.projection.self_loops = SelfLoopPolicy::Reject;
-            assert!(matches!(db.prism_sealed_projection_at(&query, None, opt.selection,
-                opt.projection, opt.projection_limits, opt.source_limits,
-                SealedLimits::default()).await,
-                Err(SealedReadError::Projection(SealedProjectionError::Projection(
-                    ProjectionError::SelfLoop(EId(4)))))));
+            assert!(matches!(
+                db.prism_sealed_projection_at(
+                    &query,
+                    None,
+                    opt.selection,
+                    opt.projection,
+                    opt.projection_limits,
+                    opt.source_limits,
+                    SealedLimits::default()
+                )
+                .await,
+                Err(SealedReadError::Projection(
+                    SealedProjectionError::Projection(ProjectionError::SelfLoop(EId(4)))
+                ))
+            ));
         }
     });
 }
@@ -415,14 +685,28 @@ fn every_direction_build_cursor_and_connected_call_checkpoint_is_terminal() {
     runtime.block_on(async {
         let query = contexts.query();
         let commit = contexts.commit();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let mut batch = small_fixture();
-        batch.add_edge(EId(3), VId(3), VId(1),
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(4))]);
+        batch.add_edge(
+            EId(3),
+            VId(3),
+            VId(1),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(4))],
+        );
         db.write(&commit, batch).await.unwrap();
         let view = db.read_session().unwrap();
-        let image = db.store.seal_partition(&query, view.partition_root(), view.frontier(),
-            SealedLimits::default()).await.unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                view.frontier(),
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
         for direction in [Directedness::Reversed, Directedness::Undirected] {
             let mut opt = options();
             opt.projection.directedness = direction;
@@ -434,8 +718,18 @@ fn every_direction_build_cursor_and_connected_call_checkpoint_is_terminal() {
             for stop in 1..=count {
                 let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(view.prism_sealed_projection_at(&controlled, &image, view.frontier(),
-                    opt.selection, opt.projection, opt.projection_limits, opt.source_limits).is_err());
+                assert!(
+                    view.prism_sealed_projection_at(
+                        &controlled,
+                        &image,
+                        view.frontier(),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits
+                    )
+                    .is_err()
+                );
                 assert_eq!(probe.calls(), stop);
             }
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
@@ -452,24 +746,37 @@ fn every_direction_build_cursor_and_connected_call_checkpoint_is_terminal() {
                             Ok(None) => panic!("interruption became clean EOF at {stop}"),
                         }
                     }
-                    assert!(cursor.next(&query).unwrap().is_none(), "a failed cursor cannot resume");
+                    assert!(
+                        cursor.next(&query).unwrap().is_none(),
+                        "a failed cursor cannot resume"
+                    );
                 }
                 assert_eq!(probe.calls(), stop);
             }
             let call = if direction == Directedness::Undirected {
                 FnxCallSpec::connected_components()
-            } else { FnxCallSpec::strongly_connected_components() };
+            } else {
+                FnxCallSpec::strongly_connected_components()
+            };
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-            let expected = call.execute_sealed(&observed, &graph, opt.execution_limits, memory()).unwrap();
+            let expected = call
+                .execute_sealed(&observed, &graph, opt.execution_limits, memory())
+                .unwrap();
             for stop in 1..=probe.calls() {
                 let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(matches!(call.execute_sealed(&controlled, &graph, opt.execution_limits, memory()),
-                    Err(FnxSealedExecutionError::Cancelled(_))));
+                assert!(matches!(
+                    call.execute_sealed(&controlled, &graph, opt.execution_limits, memory()),
+                    Err(FnxSealedExecutionError::Cancelled(_))
+                ));
                 assert_eq!(probe.calls(), stop);
             }
-            assert_eq!(call.execute_sealed(&query, &graph, opt.execution_limits, memory()).unwrap(), expected);
+            assert_eq!(
+                call.execute_sealed(&query, &graph, opt.execution_limits, memory())
+                    .unwrap(),
+                expected
+            );
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
