@@ -1462,6 +1462,82 @@ fn fresh_receipts_fall_back_to_full_disk_admission() {
     });
 }
 
+/// The verified-root-prefix memo (fgdb-d5vo4) resumes only after a prefix that
+/// matches the last verified root reference FOR reference, span claims
+/// included. A republication that keeps every block identity but lies about a
+/// prefix block's span, or reorders the prefix, must still be refused exactly
+/// as it would be with fresh receipts; an honest republication still passes.
+#[test]
+fn a_warm_root_memo_never_admits_a_changed_or_reordered_prefix() {
+    let dir = scratch_dir("receipts-root-memo");
+    under_lab(58, move |cx| async move {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
+        writer
+            .apply(strata_keys, CommitSeq(1), &create(10, 1, 2))
+            .expect("creates");
+        writer.seal(strata_keys).expect("seals");
+        writer
+            .apply(strata_keys, CommitSeq(4), &create(11, 1, 3))
+            .expect("creates");
+        let (root, blocks, patches) = writer
+            .publish(strata_keys, CommitSeq(4))
+            .expect("publishes");
+        assert_eq!(blocks.len(), 2, "the fixture needs a two-block prefix");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let mut receipts = PublishReceipts::new();
+        for block in &blocks {
+            store
+                .put_verified(&cx, &block.bytes, None, &mut receipts)
+                .await
+                .expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(&cx, &patch.bytes)
+                .await
+                .expect("stores patch");
+        }
+        let first = store
+            .put_root_verified(&cx, &root, &mut receipts)
+            .await
+            .expect("first publication warms the memo");
+        let warm = (2, patches.len());
+        assert_eq!(receipts.verified_root_prefix(0), warm);
+
+        let mut lying = root.clone();
+        lying.blocks[0].last_seq = CommitSeq(lying.blocks[0].last_seq.0 + 1);
+        assert!(matches!(
+            store.put_root_verified(&cx, &lying, &mut receipts).await,
+            Err(StoreError::MalformedRoot(_))
+        ));
+        assert_eq!(
+            receipts.verified_root_prefix(0),
+            (0, 0),
+            "a refusal drops the memo"
+        );
+
+        let mut reordered = root.clone();
+        reordered.blocks.swap(0, 1);
+        assert!(
+            store
+                .put_root_verified(&cx, &reordered, &mut receipts)
+                .await
+                .is_err()
+        );
+
+        let again = store
+            .put_root_verified(&cx, &root, &mut receipts)
+            .await
+            .expect("an honest republication still passes");
+        assert_eq!(again, first);
+        assert_eq!(receipts.verified_root_prefix(0), warm);
+    });
+}
+
 /// The cross-block EId law survives memoisation — and fires EARLIER. The
 /// receipted path validates each block's entries as the receipt is earned, so
 /// a future block reusing a spent EId is refused at `put_verified` time,

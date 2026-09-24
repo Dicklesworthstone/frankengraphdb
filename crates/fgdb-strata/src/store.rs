@@ -1712,11 +1712,21 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
-        let mut chain_heads: std::collections::BTreeMap<
-            (fgdb_types::VId, fgdb_delta_types::RelationId),
-            ObjectId,
-        > = std::collections::BTreeMap::new();
-        for (at, reference) in root.blocks.iter().enumerate() {
+        // Resume after the prefix this handle already verified, if this root
+        // extends it exactly; otherwise verify from the first reference.
+        let memo = receipts.root_memo.take().filter(|memo| {
+            memo.partition == root.partition
+                && root.blocks.starts_with(&memo.blocks)
+                && root.vertex_patches.starts_with(&memo.patches)
+        });
+        let RootMemo {
+            blocks: mut verified_blocks,
+            mut chain_heads,
+            patches: mut verified_patches,
+            ..
+        } = memo.unwrap_or_default();
+        let (block_start, patch_start) = (verified_blocks.len(), verified_patches.len());
+        for (at, reference) in root.blocks.iter().enumerate().skip(block_start) {
             let receipted = receipts.spans.get(&reference.block_id)
                 == Some(&(reference.first_seq, reference.last_seq));
             let (family, predecessor) = if receipted {
@@ -1758,27 +1768,36 @@ impl<V: Vfs> BlockStore<V> {
                 }
                 chain_heads.insert(family, reference.block_id);
             }
+            verified_blocks.push(*reference);
         }
-        for (at, reference) in root.vertex_patches.iter().enumerate() {
+        for (at, reference) in root.vertex_patches.iter().enumerate().skip(patch_start) {
             if receipts.patch_spans.get(&reference.patch_id)
-                == Some(&(reference.first_seq, reference.last_seq))
+                != Some(&(reference.first_seq, reference.last_seq))
             {
-                continue;
+                let rows = self.resolve_root_patch(cx, at, reference).await?;
+                receipts
+                    .vertex_validator
+                    .observe_patch(at, &rows)
+                    .map_err(StoreError::MalformedRoot)?;
+                // `resolve_root_patch` proved the actual span equals the claim.
+                receipts.patch_spans.insert(
+                    reference.patch_id,
+                    (reference.first_seq, reference.last_seq),
+                );
             }
-            let rows = self.resolve_root_patch(cx, at, reference).await?;
-            receipts
-                .vertex_validator
-                .observe_patch(at, &rows)
-                .map_err(StoreError::MalformedRoot)?;
-            // `resolve_root_patch` proved the actual span equals the claim.
-            receipts.patch_spans.insert(
-                reference.patch_id,
-                (reference.first_seq, reference.last_seq),
-            );
+            verified_patches.push(*reference);
         }
-        self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
+        let published = self
+            .put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
             .await
-            .map(PartitionRootVersion)
+            .map(PartitionRootVersion)?;
+        receipts.root_memo = Some(RootMemo {
+            partition: root.partition,
+            blocks: verified_blocks,
+            chain_heads,
+            patches: verified_patches,
+        });
+        Ok(published)
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
@@ -1961,6 +1980,22 @@ pub struct PublishReceipts {
     >,
     vertex_validator: crate::root::VertexHistoryValidator,
     patch_spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+    /// The root-scope checks' state after the longest root prefix this handle
+    /// has already verified (fgdb-d5vo4). A later root that extends that
+    /// prefix, reference for reference (identities AND span claims), resumes
+    /// from here instead of re-walking every block and patch on every commit.
+    /// Taken on entry and stored back only after a successful publication, so
+    /// any refusal falls back to full verification next time.
+    root_memo: Option<RootMemo>,
+}
+
+/// See [`PublishReceipts::root_memo`].
+#[derive(Debug, Default)]
+struct RootMemo {
+    partition: u64,
+    blocks: Vec<crate::root::BlockRef>,
+    chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
+    patches: Vec<crate::root::PatchRef>,
 }
 
 impl PublishReceipts {
@@ -1998,6 +2033,16 @@ impl PublishReceipts {
     /// The vertex-patch counterpart of [`Self::holds`].
     pub fn holds_patch(&self, id: VertexPatchVersion) -> bool {
         self.patch_spans.contains_key(&id.0)
+    }
+
+    /// How many leading block and vertex-patch references of `partition`'s
+    /// last successfully published root this handle has verified. Every one of
+    /// them holds a receipt. `(0, 0)` after open, before the first publication.
+    pub fn verified_root_prefix(&self, partition: u64) -> (usize, usize) {
+        self.root_memo
+            .as_ref()
+            .filter(|memo| memo.partition == partition)
+            .map_or((0, 0), |memo| (memo.blocks.len(), memo.patches.len()))
     }
 }
 

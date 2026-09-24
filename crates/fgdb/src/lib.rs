@@ -3524,7 +3524,12 @@ impl<V: Vfs + Clone> Database<V> {
         // under its identity, so it is not re-hashed here; every other sealed
         // object, including any an earlier publish left behind, still takes
         // the full verified path.
+        // References inside the root prefix these receipts already verified
+        // hold receipts by construction (the retained writer's sealed objects
+        // extend the last published root in order), so only the rest is probed.
+        let (block_prefix, patch_prefix) = self.receipts.verified_root_prefix(PARTITION);
         let unpublished_blocks: Vec<&fgdb_strata::writer::SealedBlock> = blocks
+            [block_prefix.min(blocks.len())..]
             .iter()
             .filter(|block| {
                 !self
@@ -3533,6 +3538,7 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .collect();
         let unpublished_patches: Vec<&fgdb_strata::writer::SealedPatch> = patches
+            [patch_prefix.min(patches.len())..]
             .iter()
             .filter(|patch| {
                 !self
