@@ -273,7 +273,7 @@ impl Probe {
                         record()?;
                         // Histories may have no visible version at this cut.
                         // That is not a dangling edge and not a NULL witness.
-                        if flatten(source.vertex(vid, control))?.is_none() {
+                        if flatten(source.vertex_record(vid, control))?.is_none() {
                             continue;
                         }
                         Some(Some(vid))

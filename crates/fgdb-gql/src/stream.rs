@@ -315,10 +315,11 @@ pub trait VertexScanSource {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<Self::Error, C>>;
 
-    /// Resolve the root candidate as borrowed fields or an owned, source-masked
-    /// record. The default preserves the original zero-copy path and controls.
-    /// An owned record lives only through this candidate's predicates/projection;
-    /// it cannot silently change probe or aggregate source admission contracts.
+    /// Resolve a root or probe candidate as borrowed fields or an owned,
+    /// source-masked record. The default preserves zero-copy reads and controls.
+    /// Owned records live only through this binding's tests/projection. Sources
+    /// overriding this seam must apply the SAME policy in vertex_property;
+    /// owning metadata alone is not authority over a different lookup route.
     fn vertex_record<'a, C>(
         &'a self,
         vid: VId,
@@ -328,9 +329,29 @@ pub trait VertexScanSource {
             .map(|row| row.map(VertexScanRecord::Borrowed))
     }
 
+    /// Borrow one admitted property without cloning a complete masked record.
+    /// None means the vertex itself is absent; Some(None) means its property
+    /// is absent or masked. Probe comparisons must not confuse a missing bound
+    /// vertex with SQL NULL. Scoped sources override this route or refuse raw
+    /// vertex(), and keep authorization/visibility tied to the same source cut.
+    /// Defaults retain the original record lookup and governed binary search.
+    fn vertex_property<'a, C>(
+        &'a self,
+        vid: VId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<Self::Error, C>> {
+        let Some(row) = self.vertex(vid, control)? else {
+            return Ok(None);
+        };
+        seek(row.properties, &key, |entry| entry.0, control)
+            .map(|entry| Some(entry.map(|(_, value)| value)))
+            .map_err(VertexScanSourceError::Control)
+    }
+
     /// Strict successor for an independent probe's caller-owned VId position.
     /// Unlike next_vertex(), this never moves the outer scan. Yield candidate
-    /// histories (including isolates), resolving visibility through vertex().
+    /// histories (including isolates); vertex_record resolves their visibility.
     /// Implementations must retain the same snapshot and propagate controls.
     fn next_probe_vertex<C>(
         &self,
@@ -486,7 +507,8 @@ impl<F> Meter<F> {
 ///
 /// At most one source record (borrowed or owned) and one projected result are
 /// live in the root pull path; the source may retain an entire shared immutable
-/// database generation. Probe sources retain their separate borrowing contract.
+/// database generation. Probe records are similarly temporary; scalar callbacks
+/// borrow only fields admitted by their source's matching scope.
 /// LIMIT exhaustion does not prefetch a later candidate. Natural EOF is known
 /// on the first pull past the final result. An error is terminal, never EOF.
 pub struct VertexScanCursor<S, F, Row = VId> {

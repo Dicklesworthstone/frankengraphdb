@@ -110,6 +110,27 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
             .map_err(source_error)
     }
 
+    fn vertex_record<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRecord<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        self.0
+            .vertex_record(vid, &mut |event| control(edge_event(event)))
+            .map_err(source_error)
+    }
+
+    fn vertex_property<'a, C>(
+        &'a self,
+        vid: VId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+        self.0
+            .vertex_property(vid, key, &mut |event| control(edge_event(event)))
+            .map_err(source_error)
+    }
+
     fn next_incident_edge<C>(
         &self,
         endpoint: VId,
@@ -144,3 +165,6 @@ fn unpack<E>(error: EdgeScanError<VertexScanError<E>>) -> VertexScanError<E> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod record_tests;

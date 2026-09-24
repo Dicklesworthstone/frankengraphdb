@@ -22,7 +22,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::sync::Arc;
 
-pub use crate::stream::{VertexScanRow, VertexScanSourceError as EdgeScanSourceError};
+pub use crate::stream::{VertexScanRecord, VertexScanRow, VertexScanSourceError as EdgeScanSourceError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeScanBuildError {
@@ -229,8 +229,40 @@ pub trait EdgeScanSource {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>>;
 
+    /// Endpoint/probe metadata may be owned after source masking. Indexed
+    /// joins and probes keep the record only while testing this binding; they
+    /// never retain a graph-wide metadata cache. The default borrows unchanged.
+    /// A scoped source must enforce the same policy in vertex_property too.
+    fn vertex_record<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRecord<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        self.vertex(vid, control)
+            .map(|row| row.map(VertexScanRecord::Borrowed))
+    }
+
+    /// Borrow a source-admitted scalar without retaining a copied whole row.
+    /// None is an absent vertex; Some(None) is an absent/masked property. The
+    /// source's complete-record and field routes must share one immutable cut
+    /// and policy. A source unable to lend masked fields must refuse, never
+    /// delegate to a less restrictive source. Defaults preserve borrowed reads.
+    fn vertex_property<'a, C>(
+        &'a self,
+        vid: VId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+        let Some(row) = self.vertex(vid, control)? else {
+            return Ok(None);
+        };
+        seek(row.properties, &key, |entry| entry.0, control)
+            .map(|entry| Some(entry.map(|(_, value)| value)))
+            .map_err(EdgeScanSourceError::Control)
+    }
+
     /// Independent probe scan at snapshot_seq(). Yield candidate VIds strictly
-    /// after the caller-owned position; vertex() resolves their visibility.
+    /// after the caller-owned position; vertex_record() resolves visibility.
     /// Do not advance a root cursor, omit isolates, or allocate a candidate bag.
     /// Each probe/local scan has its own position; no result cache suppresses
     /// later fallible source reads. An unavailable index is NOT an empty graph.

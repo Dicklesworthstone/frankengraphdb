@@ -441,8 +441,8 @@ fn vertex<'a, S: EdgeScanSource, C>(
     source: &'a S,
     vid: VId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-) -> ScanResult<VertexScanRow<'a>, S::Error, C> {
-    flatten(source.vertex(vid, control))?
+) -> ScanResult<VertexScanRecord<'a>, S::Error, C> {
+    flatten(source.vertex_record(vid, control))?
         .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))
 }
 fn property<'a, S: EdgeScanSource, C>(
@@ -451,8 +451,8 @@ fn property<'a, S: EdgeScanSource, C>(
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
-    let row = vertex(source, vid, control)?;
-    seek(row.properties, &key, |entry| entry.0, control).map(|row| row.map(|(_, value)| value))
+    flatten(source.vertex_property(vid, key, control))?
+        .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))
 }
 fn edge_property<'a, S: EdgeScanSource, C>(
     source: &'a S,
@@ -527,7 +527,8 @@ fn accepts<S: EdgeScanSource, C>(
             let Some(vid) = ids[slot.ordinal() as usize] else {
                 return Ok(false);
             };
-            let row = vertex(source, vid, control)?;
+            let record = vertex(source, vid, control)?;
+            let row = record.as_row();
             for predicate in predicates {
                 control(GlaExecutionEvent::Work)?;
                 for _ in 0..predicate.comparison_work_units() {
