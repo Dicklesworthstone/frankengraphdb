@@ -39,6 +39,9 @@ use std::sync::Arc;
 
 mod liveness;
 mod pipeline;
+mod leadership;
+
+pub use leadership::{LeadershipTransfer, LeadershipTransferId, LeadershipTransferPhase};
 
 /// A member coordinate resolved inside the authenticated consensus domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -402,6 +405,14 @@ pub enum Message<C> {
         term: u64,
         round: u64,
     },
+    /// A current leader asks one caught-up voter to enter an ordinary election.
+    /// This is not a vote, append acknowledgement, or membership transition.
+    TimeoutNow {
+        term: u64,
+        round: u64,
+        last_index: u64,
+        last_term: u64,
+    },
     RequestVote {
         term: u64,
         last_index: u64,
@@ -447,6 +458,7 @@ impl<C> Message<C> {
             Self::PreVoteReply { term, .. }
             | Self::QuorumProbe { term, .. }
             | Self::QuorumReply { term, .. }
+            | Self::TimeoutNow { term, .. }
             | Self::RequestVote { term, .. }
             | Self::Vote { term, .. }
             | Self::Append { term, .. }
@@ -481,6 +493,14 @@ pub enum Event<C> {
     /// starts its initial interval; protected elections start it at election.
     LivenessTimeout,
     Heartbeat,
+    /// Freeze new proposals while one existing voter catches up, then request
+    /// its normal next-term election. Repeating the target retries without
+    /// extending the deadline. Continue heartbeat, apply and liveness work.
+    TransferLeadership(MemberId),
+    /// Stop the exact local handoff attempt. Also used for its host deadline.
+    /// This cannot recall an already released TimeoutNow: late delivery may
+    /// still start a normal election. It neither aborts writes nor retires data.
+    AbortLeadershipTransfer(LeadershipTransferId),
     Propose(C),
     /// One bounded local append publication for several separately ordered
     /// commands. Nonempty and at most `Limits::max_append_entries`; admission
@@ -521,6 +541,9 @@ pub enum Error {
     UnknownMember,
     NotVoter,
     NotLeader,
+    InvalidLeadershipTarget,
+    LeadershipTransferInProgress,
+    StaleLeadershipTransfer,
     AwaitingDurability,
     StalePersistence,
     RecoveryRequired,
@@ -684,6 +707,7 @@ pub struct Raft<C> {
     pending: Option<(PersistenceId, Output<C>)>,
     poisoned: bool,
     liveness: liveness::LivenessState,
+    handoff: Option<LeadershipTransfer>,
 }
 
 impl<C: Clone + Eq> Raft<C> {
@@ -752,6 +776,7 @@ impl<C: Clone + Eq> Raft<C> {
             pending: None,
             poisoned: false,
             liveness: liveness::LivenessState::default(),
+            handoff: None,
         })
     }
 
@@ -827,9 +852,17 @@ impl<C: Clone + Eq> Raft<C> {
         // Unexpected exhaustion after an internal transition fails closed.
         self.poisoned = true;
         self.generation = generation;
+        let retry_handoff = matches!(&event, Event::Heartbeat | Event::TransferLeadership(_));
         match event {
             Event::ElectionTimeout => self.campaign(&mut output)?,
-            Event::LivenessTimeout => self.liveness_timeout(&mut output)?,
+            Event::LivenessTimeout => {
+                // One election interval bounds proposal suppression, including
+                // a silent target. Quorum loss still steps down as usual.
+                self.handoff = None;
+                self.liveness_timeout(&mut output)?;
+            }
+            Event::TransferLeadership(target) => self.start_handoff(target, &mut output)?,
+            Event::AbortLeadershipTransfer(_) => self.handoff = None,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
                     self.broadcast(&mut output, true)?;
@@ -845,6 +878,7 @@ impl<C: Clone + Eq> Raft<C> {
             Event::SnapshotReady(_) => self.install_snapshot(&mut output)?,
             Event::SnapshotFailed(_) => self.incoming_snapshot = None,
         }
+        self.drive_handoff(&mut output, retry_handoff);
         if let Some(previous) = previous_transfer {
             if output.installed_snapshot.is_none()
                 && !self
@@ -909,6 +943,7 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     fn validate_event(&self, event: &Event<C>) -> Result<(), Error> {
+        leadership::validate_event(self, event)?;
         match event {
             Event::ElectionTimeout | Event::LivenessTimeout
                 if !self.state.configuration.voters.contains(&self.id) =>
@@ -968,6 +1003,7 @@ impl<C: Clone + Eq> Raft<C> {
                     return Err(Error::InvalidMessage);
                 }
                 liveness::validate(&envelope.message)?;
+                leadership::validate_message(&envelope.message)?;
                 match &envelope.message {
                     Message::Append {
                         term,
@@ -1071,6 +1107,11 @@ impl<C: Clone + Eq> Raft<C> {
         if self.role != Role::Leader {
             return Err(Error::NotLeader);
         }
+        // Both single and batched proposals must preserve the endpoint frozen
+        // for a handoff. Validate before any log, request or generation changes.
+        if self.handoff.is_some() {
+            return Err(Error::LeadershipTransferInProgress);
+        }
         if count == 0 {
             return Err(Error::InvalidMessage);
         }
@@ -1161,6 +1202,7 @@ impl<C: Clone + Eq> Raft<C> {
         self.votes.clear();
         self.progress.clear();
         self.liveness.reset();
+        self.handoff = None;
     }
 
     fn accept_leader(&mut self, from: MemberId, term: u64, output: &mut Output<C>) {
@@ -1435,6 +1477,9 @@ impl<C: Clone + Eq> Raft<C> {
             }
             Message::QuorumReply { round, .. } => {
                 self.quorum_reply(from, term, round);
+            }
+            Message::TimeoutNow { last_index, last_term, .. } => {
+                self.timeout_now(from, term, last_index, last_term, output)?;
             }
             Message::RequestVote {
                 last_index,
