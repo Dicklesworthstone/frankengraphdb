@@ -28,6 +28,8 @@ use std::collections::BTreeMap;
 
 #[path = "query_authorized/analytics.rs"]
 mod analytics;
+#[path = "query_authorized/beacon.rs"]
+mod beacon;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 
