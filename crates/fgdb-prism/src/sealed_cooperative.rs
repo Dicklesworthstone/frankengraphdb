@@ -1,4 +1,4 @@
-//! Cooperative BFS and PageRank over the SAME admitted compressed projection.
+//! Cooperative ranks, hop distances and connectivity on the admitted projection.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -75,7 +75,10 @@ impl FnxCallSpec {
     pub fn supports_cooperative_sealed_execution(&self) -> bool {
         matches!(
             self.algorithm(),
-            FnxAlgorithm::PageRank(_) | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+            FnxAlgorithm::PageRank(_)
+                | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::ConnectedComponents
+                | FnxAlgorithm::WeaklyConnectedComponents
         )
     }
 
@@ -178,6 +181,15 @@ impl FnxCallSpec {
                         Some(ordinal),
                     )
                 }
+                FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
+                    admission.rows(n)?;
+                    (
+                        "fgdb-prism/sealed-union-find-cooperative-v1",
+                        super::components::work(n, graph.adjacency_entry_count(), pass, false)?,
+                        super::components::workspace(n, false)?,
+                        None,
+                    )
+                }
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             admit("estimated work", estimated_work, limits.max_estimated_work)?;
@@ -204,6 +216,9 @@ impl FnxCallSpec {
                     )
                     .await?
                 }
+                FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
+                    weak(graph, &mut control).await?
+                }
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             control.tick().await?;
@@ -226,6 +241,101 @@ impl FnxCallSpec {
         })
         .await
     }
+}
+
+// Keep union-by-size, ordinal tie breaks, path halving and canonical minimum
+// labels identical to the synchronous kernel. A find is NOT an atomic step:
+// every parent-link advance shares the raw-scan/scalar scheduling allowance.
+async fn root<Yield, YieldFuture>(
+    parents: &mut [usize],
+    mut vertex: usize,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<usize>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    while parents[vertex] != vertex {
+        control.tick().await?;
+        parents[vertex] = parents[parents[vertex]];
+        vertex = parents[vertex];
+    }
+    Ok(vertex)
+}
+
+async fn weak<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    let n = graph.node_count();
+    let mut parents = reserve(n)?;
+    let mut sizes = reserve(n)?;
+    for vertex in 0..n {
+        control.tick().await?;
+        parents.push(vertex);
+        sizes.push(1usize);
+    }
+    let mut witness = ComplexityWitness {
+        algorithm: "weakly_connected_components_union_find".to_owned(),
+        complexity_claim:
+            "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
+                .to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
+    };
+    for source in 0..n {
+        control.tick().await?;
+        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+        while let Some((target, _)) = control.next(&mut row).await? {
+            control.tick().await?;
+            if target >= n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            witness.edges_scanned = add(witness.edges_scanned, 1)?;
+            let mut a = root(&mut parents, source, control).await?;
+            let mut b = root(&mut parents, target, control).await?;
+            if a == b {
+                continue;
+            }
+            if sizes[a] < sizes[b] || (sizes[a] == sizes[b] && a > b) {
+                std::mem::swap(&mut a, &mut b);
+            }
+            sizes[a] = add(sizes[a], sizes[b])?;
+            parents[b] = a;
+        }
+    }
+    // Do not replace representatives with canonical minima until the ENTIRE
+    // forest has been flattened. Each of these passes cooperates even when
+    // there are no edges, or when every vertex belongs to one component.
+    for vertex in 0..n {
+        control.tick().await?;
+        let representative = root(&mut parents, vertex, control).await?;
+        parents[vertex] = representative;
+    }
+    for size in &mut sizes {
+        control.tick().await?;
+        *size = usize::MAX;
+    }
+    for (vertex, &representative) in parents.iter().enumerate() {
+        control.tick().await?;
+        sizes[representative] = sizes[representative].min(vertex);
+    }
+    for representative in &mut parents {
+        control.tick().await?;
+        *representative = sizes[*representative];
+    }
+    control.tick().await?;
+    Ok(KernelOutput {
+        values: KernelValues::Components(parents),
+        row_count: n,
+        witness,
+    })
 }
 
 async fn bfs<Yield, YieldFuture>(
