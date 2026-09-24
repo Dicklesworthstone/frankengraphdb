@@ -11,7 +11,7 @@ use fgdb_beacon::read::{ReadError as Error, Search};
 use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CommitSeq, QueryCx};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 /// Private common path for privileged and capability-governed consumers. No
 /// caller-supplied graph or hit list can assert that it belongs to this cut.
@@ -71,19 +71,28 @@ pub(crate) fn evaluate(
     let graph_hits = if let Some(mut graph) = graph {
         // Neither an empty seed set nor a zero-hop query can consume an edge.
         // In particular include_seeds with zero hops works at a zero edge cap.
-        if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
-            let mut scratch = 0usize;
+        if expansion.max_hops != 0
+            && !expansion.seeds.is_empty()
+            && expansion.relation.is_none_or(&mut relation_allowed)
+        {
+            let scratch = Cell::new(0usize);
+            let metered = matches!(&scan, Scan::Metered);
+            let reserve = || -> Result<(), BeaconError> {
+                let count = scratch.get();
+                if count == expansion.limits.max_source_scratch {
+                    return Err(BeaconError::ResourceLimit {
+                        resource: "expansion source scratch entries",
+                        limit: expansion.limits.max_source_scratch,
+                    });
+                }
+                scratch.set(count + 1);
+                Ok(())
+            };
             let mut control = |event| match &mut scan {
                 Scan::Metered => {
                     work.borrow_mut().charge(1)?;
                     if matches!(event, SourceEvent::ScratchEntry) {
-                        if scratch == expansion.limits.max_source_scratch {
-                            return Err(BeaconError::ResourceLimit {
-                                resource: "expansion source scratch entries",
-                                limit: expansion.limits.max_source_scratch,
-                            });
-                        }
-                        scratch += 1;
+                        reserve()?;
                     }
                     Ok(())
                 }
@@ -98,6 +107,13 @@ pub(crate) fn evaluate(
                     && graph.contains(edge.src)
                     && graph.contains(edge.dst)
                 {
+                    // Scoped history is poll-only. Its observable scratch
+                    // allowance counts only admitted edge winners, after
+                    // relation and BOTH endpoint checks, never hidden history.
+                    if !metered {
+                        work.borrow_mut().charge(1)?;
+                        reserve()?;
+                    }
                     // Charges each admitted logical edge before parallel-edge
                     // collapse, and admits direction-specific arcs atomically.
                     graph.insert_edge(
@@ -181,6 +197,10 @@ impl EmbeddedReadView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "graph_tests.rs"]
+mod retrieval_tests;
 
 #[cfg(test)]
 mod tests {
