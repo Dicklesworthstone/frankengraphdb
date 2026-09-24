@@ -591,7 +591,7 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
         assert_eq!(cutoff.execute_sealed_cooperative(&cx, &graph,
             FnxExecutionLimits { max_result_rows: 1, ..opt.execution_limits }, memory(),
             quantum(1), yield_now).await.unwrap().rows.len(), 1);
-        for call in [FnxCallSpec::strongly_connected_components(), FnxCallSpec::triangles(),
+        for call in [FnxCallSpec::triangles(),
             FnxCallSpec::clustering_coefficient()] {
             assert!(!call.supports_cooperative_sealed_execution());
             let mut forbidden = opt; forbidden.source_limits.max_work_units = 0;

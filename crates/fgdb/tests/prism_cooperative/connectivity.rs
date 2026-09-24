@@ -9,6 +9,8 @@ fn modes() -> Vec<(FnxCallSpec, Directedness)> {
         (FnxCallSpec::connected_components(), Directedness::Undirected),
         (FnxCallSpec::weakly_connected_components(), Directedness::Directed),
         (FnxCallSpec::weakly_connected_components(), Directedness::Reversed),
+        (FnxCallSpec::strongly_connected_components(), Directedness::Directed),
+        (FnxCallSpec::strongly_connected_components(), Directedness::Reversed),
     ]
 }
 
@@ -266,6 +268,7 @@ fn historical_hosted_connectivity_keeps_hidden_endpoints_and_aliases_out_of_the_
             let name = match call.algorithm() {
                 FnxAlgorithm::ConnectedComponents => "connected_components",
                 FnxAlgorithm::WeaklyConnectedComponents => "weakly_connected_components",
+                FnxAlgorithm::StronglyConnectedComponents => "strongly_connected_components",
                 _ => unreachable!(),
             };
             let text = format!("CALL fnx.{name}() YIELD component AS group_id,vertex AS id");
@@ -284,6 +287,55 @@ fn historical_hosted_connectivity_keeps_hidden_endpoints_and_aliases_out_of_the_
                 for row in &prepared.rows { assert!(!row.contains(&FnxValue::Vertex(VId(99)))); }
             }
         }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_polls() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let n = 512;
+        for cycle in [false, true] {
+            let mut edges: Vec<_> = (0..n - 1).map(|i| (i, i + 1)).collect();
+            if cycle { edges.push((n - 1, 0)); }
+            let db = stored(&contexts.commit(), n, &edges).await;
+            let call = FnxCallSpec::strongly_connected_components();
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                let opt = options(direction);
+                let graph = projection(&db, &cx, opt).await;
+                let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(call.execute_sealed_cooperative(&controlled, &graph,
+                    opt.execution_limits, memory(), quantum(1), yield_now), &probe, 1);
+                let actual = actual.unwrap();
+                compare_execution(&actual, &expected);
+                assert!(pending >= 5 * n, "DFS and final-label scans must cooperate");
+                assert_eq!(actual.certificate.witness.nodes_touched, n);
+                assert_eq!(actual.certificate.witness.edges_scanned, edges.len());
+                if cycle || direction == Directedness::Directed {
+                    assert_eq!(actual.certificate.witness.queue_peak, n);
+                }
+                for (vertex, row) in actual.rows.iter().enumerate() {
+                    assert_eq!(row, &vec![FnxValue::Vertex(identity(vertex, n)),
+                        FnxValue::Vertex(identity(if cycle { 0 } else { vertex }, n))]);
+                }
+            }
+        }
+        // One-way links between completed components must not merge them.
+        let edges = [(0, 1), (1, 0), (1, 2), (2, 3), (3, 2), (3, 4), (5, 4)];
+        let db = stored(&contexts.commit(), 6, &edges).await;
+        let opt = options(Directedness::Directed);
+        let graph = projection(&db, &cx, opt).await;
+        drop(db);
+        let result = FnxCallSpec::strongly_connected_components().execute_sealed_cooperative(
+            &cx, &graph, opt.execution_limits, memory(), quantum(1), yield_now,
+        ).await.unwrap();
+        assert_eq!(result.rows, reference(6, &edges, true));
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

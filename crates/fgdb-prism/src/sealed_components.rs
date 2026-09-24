@@ -9,9 +9,11 @@ use super::{
 };
 use std::mem::size_of;
 
-struct Frame<C> {
-    vertex: usize,
-    row: C,
+// Both scheduling modes retain this exact frame, so workspace admission uses
+// the concrete compressed cursor layout rather than a second approximation.
+pub(super) struct Frame<C> {
+    pub(super) vertex: usize,
+    pub(super) row: C,
 }
 
 pub(super) fn workspace(n: usize, strong: bool) -> Result<usize> {

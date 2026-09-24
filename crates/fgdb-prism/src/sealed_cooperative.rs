@@ -79,6 +79,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
+                | FnxAlgorithm::StronglyConnectedComponents
         )
     }
 
@@ -181,12 +182,19 @@ impl FnxCallSpec {
                         Some(ordinal),
                     )
                 }
-                FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
+                algorithm @ (FnxAlgorithm::ConnectedComponents
+                | FnxAlgorithm::WeaklyConnectedComponents
+                | FnxAlgorithm::StronglyConnectedComponents) => {
                     admission.rows(n)?;
+                    let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
                     (
-                        "fgdb-prism/sealed-union-find-cooperative-v1",
-                        super::components::work(n, graph.adjacency_entry_count(), pass, false)?,
-                        super::components::workspace(n, false)?,
+                        if strong {
+                            "fgdb-prism/sealed-tarjan-cooperative-v1"
+                        } else {
+                            "fgdb-prism/sealed-union-find-cooperative-v1"
+                        },
+                        super::components::work(n, graph.adjacency_entry_count(), pass, strong)?,
+                        super::components::workspace(n, strong)?,
                         None,
                     )
                 }
@@ -219,6 +227,7 @@ impl FnxCallSpec {
                 FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
                     weak(graph, &mut control).await?
                 }
+                FnxAlgorithm::StronglyConnectedComponents => strong(graph, &mut control).await?,
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             control.tick().await?;
@@ -333,6 +342,127 @@ where
     control.tick().await?;
     Ok(KernelOutput {
         values: KernelValues::Components(parents),
+        row_count: n,
+        witness,
+    })
+}
+
+// Iterative Tarjan retains the exact synchronous frame/cursor type. Each
+// suspended frame keeps its raw history and parallel-edge reduction positions;
+// an ancestor's row is never reopened when a child finishes. SCC membership
+// discovery and both canonical-label passes share the same scheduling fuel.
+async fn strong<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    use super::components::Frame;
+    use super::SealedRow;
+
+    let n = graph.node_count();
+    let mut indices = reserve(n)?;
+    let mut lowlinks = reserve(n)?;
+    let mut on_stack = reserve(n)?;
+    let mut labels = reserve(n)?;
+    let mut members = reserve(n)?;
+    let mut frames: Vec<Frame<SealedRow<'_>>> = reserve(n)?;
+    for _ in 0..n {
+        control.tick().await?;
+        indices.push(usize::MAX);
+        lowlinks.push(usize::MAX);
+        on_stack.push(false);
+        labels.push(usize::MAX);
+    }
+    let mut next_index = 0usize;
+    let mut witness = ComplexityWitness {
+        algorithm: "strongly_connected_components_iterative_tarjan_cursor".to_owned(),
+        complexity_claim: "O(|V| * (1+log(1+H)) + H log(1+|V|)) compressed row visits".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
+    };
+    for seed in 0..n {
+        control.tick().await?;
+        if indices[seed] != usize::MAX {
+            continue;
+        }
+        let row = SealedRow {
+            cx: control.cx,
+            row: graph.neighbor_cursor_controlled(control.cx, seed, None)?,
+        };
+        indices[seed] = next_index;
+        lowlinks[seed] = next_index;
+        next_index = add(next_index, 1)?;
+        on_stack[seed] = true;
+        members.push(seed);
+        frames.push(Frame { vertex: seed, row });
+        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        witness.queue_peak = witness.queue_peak.max(frames.len());
+        while let Some(frame) = frames.last_mut() {
+            control.tick().await?;
+            let source = frame.vertex;
+            match control.next(&mut frame.row.row).await? {
+                Some((target, _)) => {
+                    control.tick().await?;
+                    let index = *indices.get(target).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                    witness.edges_scanned = add(witness.edges_scanned, 1)?;
+                    if index == usize::MAX {
+                        let row = SealedRow {
+                            cx: control.cx,
+                            row: graph.neighbor_cursor_controlled(control.cx, target, None)?,
+                        };
+                        indices[target] = next_index;
+                        lowlinks[target] = next_index;
+                        next_index = add(next_index, 1)?;
+                        on_stack[target] = true;
+                        members.push(target);
+                        frames.push(Frame { vertex: target, row });
+                        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+                        witness.queue_peak = witness.queue_peak.max(frames.len());
+                    } else if on_stack[target] {
+                        lowlinks[source] = lowlinks[source].min(index);
+                    }
+                }
+                None => {
+                    frames.pop();
+                    if lowlinks[source] == indices[source] {
+                        let mut start = members.len();
+                        let mut minimum = source;
+                        loop {
+                            control.tick().await?;
+                            start = start.checked_sub(1).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                            let member = members[start];
+                            minimum = minimum.min(member);
+                            if member == source { break; }
+                        }
+                        // A single SCC can contain the entire graph. Never
+                        // hide these walks in one unbounded "component step".
+                        for &member in &members[start..] {
+                            control.tick().await?;
+                            labels[member] = minimum;
+                            on_stack[member] = false;
+                        }
+                        members.truncate(start);
+                    }
+                    if let Some(parent) = frames.last() {
+                        lowlinks[parent.vertex] = lowlinks[parent.vertex].min(lowlinks[source]);
+                    }
+                }
+            }
+        }
+    }
+    for &label in &labels {
+        control.tick().await?;
+        if label == usize::MAX {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+    }
+    control.tick().await?;
+    Ok(KernelOutput {
+        values: KernelValues::Components(labels),
         row_count: n,
         witness,
     })
