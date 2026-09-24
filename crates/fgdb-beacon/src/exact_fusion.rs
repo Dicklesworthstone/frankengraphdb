@@ -1,8 +1,10 @@
-//! Exact two-lane RRF over explicitly bounded candidate populations.
+//! Exact bounded RRF over explicitly bounded candidate populations.
 //!
 //! This does not make ANN, truncated candidates, BM25 arithmetic, or an
 //! unauthorized input corpus exact/authorized. It replaces only the fusion
 //! comparison and score-rendering stage. There is no durable format here.
+
+pub mod graph;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -77,7 +79,7 @@ impl Default for ExactRrfProfile {
 }
 
 /// A reduced nonnegative rational. Private fields preserve the arithmetic
-/// bounds of ExactRrfProfile; equality/hash and total order agree numerically.
+/// bounds of the two/three-lane profile; equality/hash and total order agree.
 /// Decimal rendering can collapse distinct scores and is never used to rank.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExactRrfScore {
@@ -92,17 +94,35 @@ impl ExactRrfScore {
         vector_rank: Option<NonZeroU32>,
         text_rank: Option<NonZeroU32>,
     ) -> Self {
-        let term = |rank: Option<NonZeroU32>, weight: u16| match rank {
-            Some(rank) if weight != 0 => (
-                u128::from(weight),
-                u128::from(profile.rank_constant.get()) + u128::from(rank.get()),
-            ),
-            _ => (0, 1),
-        };
-        let (vn, vd) = term(vector_rank, profile.vector_weight);
-        let (tn, td) = term(text_rank, profile.text_weight);
-        let numerator = vn * td + tn * vd;
-        let denominator = vd * td;
+        Self::from_graph_ranks(profile, vector_rank, text_rank, None, 0)
+    }
+
+    /// Add an independently ranked graph lane. For THREE terms with u16
+    /// weights and u32 ranks/k0, numerator < 2^84 and denominator < 2^99.
+    /// Construction fits u128, but cross-products and scale-18 multiplication
+    /// need not. Ordering and rendering below therefore have exact bounded
+    /// overflow paths; no saturation, f64 comparison or narrowed weights.
+    #[must_use]
+    pub fn from_graph_ranks(
+        profile: ExactRrfProfile,
+        vector_rank: Option<NonZeroU32>,
+        text_rank: Option<NonZeroU32>,
+        graph_rank: Option<NonZeroU32>,
+        graph_weight: u16,
+    ) -> Self {
+        let mut numerator = 0_u128;
+        let mut denominator = 1_u128;
+        for (rank, weight) in [
+            (vector_rank, profile.vector_weight),
+            (text_rank, profile.text_weight),
+            (graph_rank, graph_weight),
+        ] {
+            if let Some(rank) = rank.filter(|_| weight != 0) {
+                let divisor = u128::from(profile.rank_constant.get()) + u128::from(rank.get());
+                numerator = numerator * divisor + u128::from(weight) * denominator;
+                denominator *= divisor;
+            }
+        }
         let mut a = numerator;
         let mut b = denominator;
         while b != 0 {
@@ -125,12 +145,24 @@ impl ExactRrfScore {
     }
 
     /// Canonical scale-18 Decimal128, rounded once, nearest/ties-to-even.
-    /// The scaled numerator needs < 110 bits and the score is <= 65535,
-    /// well inside both u128 arithmetic and the canonical decimal profile.
+    /// Two-lane scores retain the multiplication fast path. Three-lane
+    /// overflow uses 18 exact long-division digits: remainder * 10 < 2^103,
+    /// and the final coefficient fits the canonical decimal profile.
     pub fn decimal(self) -> Result<CanonicalDecimal, BeaconError> {
-        let scaled = self.numerator * 1_000_000_000_000_000_000_u128;
-        let quotient = scaled / self.denominator;
-        let remainder = scaled % self.denominator;
+        let (quotient, remainder) = if let Some(scaled) =
+            self.numerator.checked_mul(1_000_000_000_000_000_000_u128)
+        {
+            (scaled / self.denominator, scaled % self.denominator)
+        } else {
+            let mut quotient = self.numerator / self.denominator;
+            let mut remainder = self.numerator % self.denominator;
+            for _ in 0..18 {
+                remainder *= 10;
+                quotient = quotient * 10 + remainder / self.denominator;
+                remainder %= self.denominator;
+            }
+            (quotient, remainder)
+        };
         let twice = remainder * 2;
         let round_up = twice > self.denominator || (twice == self.denominator && quotient % 2 != 0);
         let coefficient = i128::try_from(quotient + u128::from(round_up))
@@ -142,7 +174,31 @@ impl ExactRrfScore {
 
 impl Ord for ExactRrfScore {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.numerator * other.denominator).cmp(&(other.numerator * self.denominator))
+        if let (Some(left), Some(right)) = (
+            self.numerator.checked_mul(other.denominator),
+            other.numerator.checked_mul(self.denominator),
+        ) {
+            return left.cmp(&right);
+        }
+        // Compare continued fractions. Equal integer parts leave reciprocals
+        // of the remainders, reversing order at each step. Euclid terminates
+        // on bounded u128 inputs, including exact integers and equal fractions.
+        let (mut a, mut b) = (self.numerator, self.denominator);
+        let (mut c, mut d) = (other.numerator, other.denominator);
+        let mut reversed = false;
+        loop {
+            let order = (a / b).cmp(&(c / d));
+            if order != Ordering::Equal {
+                return if reversed { order.reverse() } else { order };
+            }
+            let (left, right) = (a % b, c % d);
+            if left == 0 || right == 0 {
+                let order = left.cmp(&right);
+                return if reversed { order.reverse() } else { order };
+            }
+            (a, b, c, d) = (b, left, d, right);
+            reversed = !reversed;
+        }
     }
 }
 
@@ -263,32 +319,7 @@ impl IndexSnapshot {
         if query.k == 0 {
             return Ok(Vec::new());
         }
-        let mut fused = BTreeMap::<VId, Evidence>::new();
-        if vector_depth != 0 {
-            let hits = self.knn(
-                query.vector,
-                vector_depth,
-                query.vector_mode,
-                &eligible,
-                work,
-            )?;
-            for (offset, hit) in hits.into_iter().enumerate() {
-                work.charge(1)?;
-                let row = fused.entry(hit.id).or_default();
-                row.vector_rank = Some(rank(offset)?);
-                row.vector_distance = Some(hit.distance);
-            }
-        }
-        if text_depth != 0 {
-            let hits =
-                self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?;
-            for (offset, hit) in hits.into_iter().enumerate() {
-                work.charge(1)?;
-                let row = fused.entry(hit.id).or_default();
-                row.text_rank = Some(rank(offset)?);
-                row.text_score = Some(hit.score);
-            }
-        }
+        let mut fused = self.fusion_candidates(query, vector_depth, text_depth, eligible, work)?;
         let mut best = BinaryHeap::<Ranked>::new();
         for (&id, evidence) in &fused {
             // Heap maintenance has at most logarithmic work between checks;
@@ -337,5 +368,44 @@ impl IndexSnapshot {
         }
         work.charge(1)?;
         Ok(rows)
+    }
+}
+
+impl IndexSnapshot {
+    fn fusion_candidates(
+        &self,
+        query: ExactHybridQuery<'_>,
+        vector_depth: usize,
+        text_depth: usize,
+        eligible: impl Fn(VId) -> bool,
+        work: &mut dyn WorkControl,
+    ) -> Result<BTreeMap<VId, Evidence>, BeaconError> {
+        let mut fused = BTreeMap::<VId, Evidence>::new();
+        if vector_depth != 0 {
+            let hits = self.knn(
+                query.vector,
+                vector_depth,
+                query.vector_mode,
+                &eligible,
+                work,
+            )?;
+            for (offset, hit) in hits.into_iter().enumerate() {
+                work.charge(1)?;
+                let row = fused.entry(hit.id).or_default();
+                row.vector_rank = Some(rank(offset)?);
+                row.vector_distance = Some(hit.distance);
+            }
+        }
+        if text_depth != 0 {
+            let hits =
+                self.text_search(query.text, text_depth, query.text_mode, &eligible, work)?;
+            for (offset, hit) in hits.into_iter().enumerate() {
+                work.charge(1)?;
+                let row = fused.entry(hit.id).or_default();
+                row.text_rank = Some(rank(offset)?);
+                row.text_score = Some(hit.score);
+            }
+        }
+        Ok(fused)
     }
 }

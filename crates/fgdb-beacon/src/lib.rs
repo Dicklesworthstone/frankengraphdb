@@ -15,6 +15,7 @@
 mod bm25;
 mod control;
 mod exact_fusion;
+pub mod expansion;
 mod fabric;
 mod hnsw;
 mod ranking;
@@ -22,6 +23,7 @@ pub mod read;
 
 pub use bm25::{Bm25, Bm25Config, Bm25Stats, TextHit, TextMatch};
 pub use control::{BeaconError, WorkBudget, WorkControl};
+pub use exact_fusion::graph::{GraphHybridHit, GraphHybridQuery};
 pub use exact_fusion::{ExactHybridHit, ExactHybridQuery, ExactRrfProfile, ExactRrfScore};
 pub use fabric::{
     ApplyReport, BeaconIndex, HybridHit, HybridQuery, IndexConfig, IndexDocument, IndexMutation,
