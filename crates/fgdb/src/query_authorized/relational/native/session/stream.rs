@@ -1,9 +1,12 @@
-//! Lazy root scans using the existing history source and vertex cursor.
+//! Lazy root scans and probes over one scoped immutable history source.
 //! Only the source boundary masks records; user predicates/projection stay in
 //! the native physical operator. No source table or result set is collected.
 
 use super::*;
 use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
+use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanRow};
+use fgdb_gql::GlaExecutionEvent;
+use fgdb_types::EId;
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
     VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
@@ -36,11 +39,14 @@ impl Drop for PinGuard<'_> {
 ///
 /// One signed allowance and one native meter span opening and all pulls (native
 /// work/scratch begin at physical execution). Nodes count permitted vertices
-/// examined before user predicates; native snapshot records count candidate
+/// examined before user predicates, including repeated endpoint/property
+/// admissions inside probes; native snapshot records count candidate
 /// histories, including invisible/forbidden candidates. Signed rows count only
 /// delivered occurrences after SKIP/LIMIT. Private source counters are not
 /// exported. At most one masked record and one projected row are needed in the
 /// root path, outside the resident immutable generation and caller-owned rows.
+/// Fixed probes add definition-bounded frames and temporary masked records;
+/// finite variable-length probes retain governed traversal/support state.
 ///
 /// This borrows the session and QueryCx until dropped, not the database writer,
 /// token bytes or prepared template. Credential invalidation or a host callback
@@ -143,6 +149,46 @@ fn source_error<C>(
         VertexScanSourceError::Control(error) => VertexScanSourceError::Control(error),
     }
 }
+
+fn expansion_error<C>(
+    error: EdgeExpansionSourceError<ReadError, C>,
+) -> EdgeExpansionSourceError<QueryError, C> {
+    match error {
+        EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
+        EdgeExpansionSourceError::Read(error) => EdgeExpansionSourceError::Read(source_error(error)),
+    }
+}
+fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
+    match event {
+        VertexScanEvent::Work => GlaExecutionEvent::Work,
+        VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+    }
+}
+
+impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
+    // This is private source admission, not a caller-visible raw record route.
+    // Historical winner selection precedes scope on EVERY lookup. No per-probe
+    // table, cache, permit or rescan from the first candidate is introduced.
+    fn admitted_vertex<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<QueryError, C>> {
+        let Some(row) = self.inner.vertex(vid, control).map_err(source_error)? else {
+            return Ok(None);
+        };
+        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        for _ in row.labels {
+            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        }
+        let admitted = self.execution.borrow().permit.predicates().allows_vertex(row.labels);
+        if !admitted {
+            return Ok(None);
+        }
+        self.execution.borrow_mut().node().map_err(VertexScanSourceError::Source)?;
+        Ok(Some(row))
+    }
+}
 impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'_, S> {
     type Error = QueryError;
     fn snapshot_seq(&self) -> CommitSeq {
@@ -159,8 +205,8 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         _: VId,
         _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<QueryError, C>> {
-        // This adapter cannot lend a raw, unmasked record. Probe plans are
-        // rejected at opening; optional probe access also refuses by default.
+        // Both root and probe kernels use owned masked records or individually
+        // admitted scalar fields. Never lend raw metadata through this route.
         Err(VertexScanSourceError::Source(QueryError::Unsupported {
             diagnostics: vec!["authorized root source requires owned masked records".to_owned()],
         }))
@@ -170,28 +216,9 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         vid: VId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRecord<'a>>, VertexScanSourceError<QueryError, C>> {
-        // The existing history index selects the winner BEFORE scope. A hidden
-        // successor never resurrects an older, allowed label/property image.
-        let Some(row) = self.inner.vertex(vid, control).map_err(source_error)? else {
+        let Some(row) = self.admitted_vertex(vid, control)? else {
             return Ok(None);
         };
-        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        for _ in row.labels {
-            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        }
-        if !self
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_vertex(row.labels)
-        {
-            return Ok(None);
-        }
-        self.execution
-            .borrow_mut()
-            .node()
-            .map_err(VertexScanSourceError::Source)?;
         VertexScanRecord::copy_masked(
             row,
             |label| {
@@ -213,6 +240,101 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         .map(Some)
         .map_err(VertexScanSourceError::Control)
     }
+
+    fn vertex_property<'a, C>(
+        &'a self,
+        vid: VId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<QueryError, C>> {
+        let Some(row) = self.admitted_vertex(vid, control)? else {
+            return Ok(None); // Missing vertex is NOT a present vertex with SQL NULL.
+        };
+        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        if !self.execution.borrow().permit.predicates().allows_property(key) {
+            return Ok(Some(None)); // Do not inspect or copy a forbidden payload.
+        }
+        let (mut low, mut high) = (0, row.properties.len());
+        while low < high {
+            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+            let middle = low + (high - low) / 2;
+            match row.properties[middle].0.cmp(&key) {
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+                core::cmp::Ordering::Equal => return Ok(Some(Some(&row.properties[middle].1))),
+            }
+        }
+        Ok(Some(None))
+    }
+
+    fn next_probe_vertex<C>(
+        &self,
+        after: Option<VId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, EdgeExpansionSourceError<QueryError, C>> {
+        // Independent scopes get their own caller-owned position and the same
+        // immutable generation. The subsequent record lookup filters scope.
+        self.inner.next_probe_vertex(after, control).map_err(expansion_error)
+    }
+
+    fn next_probe_edge_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: RelationId,
+        direction: fgdb_gql::algebra::GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<QueryError, C>> {
+        control(GlaExecutionEvent::Work)
+            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
+        // This check precedes both endpoint resolution and incidence access.
+        // The outer control is the SAME live permit even for a denied relation.
+        if !self.execution.borrow().permit.predicates().allows_relation(relation) {
+            return Ok(None);
+        }
+        let vertex = self.admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+            .map_err(EdgeExpansionSourceError::Read)?;
+        if vertex.is_none() {
+            return Err(EdgeExpansionSourceError::Read(VertexScanSourceError::Source(
+                probe_error(EdgeScanError::DanglingEndpoint),
+            )));
+        }
+        self.inner.next_probe_edge_for_relation(endpoint, relation, direction, after, control)
+            .map_err(expansion_error)
+    }
+
+    fn probe_edge<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
+        let Some(edge) = self.inner.probe_edge(eid, control).map_err(expansion_error)? else {
+            return Ok(None);
+        };
+        control(GlaExecutionEvent::Work)
+            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
+        if !self.execution.borrow().permit.predicates().allows_relation(edge.relation) {
+            return Ok(None);
+        }
+        for endpoint in [Some(edge.source), (edge.target != edge.source).then_some(edge.target)]
+            .into_iter().flatten()
+        {
+            if self.admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+                .map_err(EdgeExpansionSourceError::Read)?.is_none()
+            {
+                return Ok(None); // A hidden transit vertex removes the edge itself.
+            }
+        }
+        // The checked profile has no captured probe edges or edge-property
+        // operands. Give it only admitted topology, not unused raw properties.
+        // compile() explicitly refuses captures even if a future kernel grows.
+        Ok(Some(EdgeScanRow {
+            source: edge.source,
+            target: edge.target,
+            relation: edge.relation,
+            properties: &[],
+        }))
+    }
 }
 
 fn plan_error(error: VertexScanBuildError) -> QueryError {
@@ -221,13 +343,14 @@ fn plan_error(error: VertexScanBuildError) -> QueryError {
 fn compile(
     pattern: &PreparedGraphPattern<GraphValueRow>,
 ) -> Result<VertexScanPlan<GraphValueRow>, QueryError> {
-    // Root record ownership does not automatically authorize probe sources.
-    // Refuse before reading anything, even with LIMIT 0 or an empty graph.
+    // This source exposes admitted probe topology, not edge payloads. Captured
+    // edge/path operands remain outside its profile even if the native probe
+    // compiler later grows them. Other admission belongs to that compiler.
     if let Some(operator) = pattern
         .plan()
         .operators()
         .iter()
-        .position(|operator| matches!(operator, GlaOperator::Probe { .. }))
+        .position(|operator| matches!(operator, GlaOperator::CapturePath { .. }))
     {
         return Err(plan_error(VertexScanBuildError { operator }));
     }
@@ -271,15 +394,26 @@ fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> 
         GqlQueryError::Source(VertexScanError::CounterExhausted) => {
             QueryError::Stream(GqlQueryError::Source(VertexScanError::CounterExhausted))
         }
-        GqlQueryError::Source(VertexScanError::Probe(_)) => QueryError::Unsupported {
-            diagnostics: vec!["authorized root stream encountered an unsupported probe".to_owned()],
-        },
+        GqlQueryError::Source(VertexScanError::Probe(error)) => probe_error(error),
         GqlQueryError::Rows(error) => QueryError::Stream(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Stream(GqlQueryError::Evaluator(error)),
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::Stream(GqlQueryError::IdentifiedEdgesRequired)
         }
     }
+}
+
+fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
+    let error = match error {
+        EdgeScanError::Source(error) => return error,
+        EdgeScanError::Plan(error) => EdgeScanError::Plan(error),
+        EdgeScanError::NonIncreasingIdentity => EdgeScanError::NonIncreasingIdentity,
+        EdgeScanError::DanglingEndpoint => EdgeScanError::DanglingEndpoint,
+        EdgeScanError::CounterExhausted => EdgeScanError::CounterExhausted,
+        EdgeScanError::ExpansionUnavailable => EdgeScanError::ExpansionUnavailable,
+        EdgeScanError::BoundEdgeUnavailable => EdgeScanError::BoundEdgeUnavailable,
+    };
+    QueryError::Stream(GqlQueryError::Source(VertexScanError::Probe(error)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -362,7 +496,15 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// exact cut, no later than the session's pin.
     ///
     /// Opening authenticates before binding/profile/source admission and scans
-    /// no candidate. Unsupported probes, edges, aggregates, compound relations
+    /// no candidate. Correlated/independent EXISTS and NOT EXISTS, with fixed
+    /// or finite variable-length anonymous hops, use the existing indexed probe
+    /// engine. Both historical endpoints must be visible at every hop, including
+    /// transit vertices; labels and properties are masked before predicates.
+    /// Denied relation types do not open incidence directories. Signed node
+    /// usage includes repeated admitted endpoint/property reads, without a new
+    /// permit per probe. Work and candidate records remain cumulative.
+    ///
+    /// Captured/nested/optional probes, root edges, aggregates, compound relations
     /// and alternate ordering refuse before source access; no eager fallback.
     /// Native candidate-history accounting differs from eager table admission.
     /// The writer remains independent, but this borrows the session until the
@@ -418,3 +560,6 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         }
     }
 }
+
+#[cfg(test)]
+mod probe_tests;

@@ -497,7 +497,6 @@ fn unsupported_shapes_and_foreign_prepared_handles_never_fall_back_to_privileged
             "MATCH (n) RETURN n AS id ORDER BY id DESC LIMIT 0",
             "MATCH (n) RETURN COUNT(*) AS n",
             "RETURN 1 AS n",
-            "MATCH (n) WHERE NOT EXISTS { MATCH (m) } RETURN n AS id LIMIT 0",
             "MATCH (n) RETURN n AS id UNION ALL MATCH (m) RETURN m AS id",
         ] {
             let prepared = session.prepare(&cx, text, &args).unwrap();
@@ -508,6 +507,12 @@ fn unsupported_shapes_and_foreign_prepared_handles_never_fall_back_to_privileged
             ));
             assert!(!session.is_closed());
         }
+        // Independent probes are now admitted, but LIMIT 0 still opens no
+        // candidate history under this session's zero-record native allowance.
+        let probe = session.prepare(
+            &cx, "MATCH (n) WHERE NOT EXISTS { MATCH (m) } RETURN n AS id LIMIT 0", &args,
+        ).unwrap();
+        assert!(session.stream(&cx, &probe, &args).unwrap().next().is_none());
         let params = GqlParameters::new().with_text("route", "main").unwrap();
         let prepared = session
             .prepare(
