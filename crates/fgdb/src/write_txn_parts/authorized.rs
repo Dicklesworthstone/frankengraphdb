@@ -54,6 +54,12 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         self.work(1)
     }
 
+    /// Cancellation only, no charge: for walking candidates the capability
+    /// may not see, so their count never reaches a signed limit (FG-INV-20).
+    fn poll(&mut self) -> Result<(), WriteTxnError> {
+        self.cx.checkpoint().map_err(WriteTxnError::Interrupted)
+    }
+
     fn fields(
         &mut self,
         labels: impl IntoIterator<Item = LabelId>,

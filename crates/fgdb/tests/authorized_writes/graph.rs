@@ -283,3 +283,79 @@ fn whole_object_deletion_cannot_erase_untouched_hidden_properties() {
         assert!(db.edge_at(EId(10), frontier).unwrap().is_some());
     });
 }
+
+/// The same visible pair 1 -> 2, optionally with a hidden neighbourhood on
+/// vertex 1: allowed-relation edges to hidden vertices and hidden-relation
+/// edges to the visible vertex 2. `alias` adds a visible R edge 1 -> 2.
+async fn ensure_fixture(
+    cx: &fgdb_types::CommitCx,
+    hidden: bool,
+    alias: bool,
+) -> Database<fgdb::MemVfs> {
+    let mut db = Database::open_memory(cx, keys()).await.unwrap();
+    let mut batch = WriteBatch::new(R);
+    batch.create_vertex(VId(1), vec![L], vec![]);
+    batch.create_vertex(VId(2), vec![L], vec![]);
+    if alias {
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+    }
+    if hidden {
+        for vid in 100..130_u128 {
+            batch.create_vertex(VId(vid), vec![HIDDEN], vec![]);
+            batch.add_edge(EId(1000 + vid), VId(1), VId(vid), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden {
+        let mut other = WriteBatch::new(RelationId(2));
+        for eid in 0..20_u128 {
+            other.add_edge(EId(3000 + eid), VId(1), VId(2), vec![]);
+        }
+        db.write(cx, other).await.unwrap();
+    }
+    db
+}
+
+/// FG-INV-20 on the write path (fgdb-4iiho). Ensuring an edge scans the
+/// source vertex's live incidence for an alias. A holder can attenuate MaxWork
+/// without the issuer key, so the smallest MaxWork at which the write commits
+/// must not move with the hidden degree of the source vertex, whether the
+/// write creates the edge or resolves an existing visible alias.
+#[test]
+fn ensure_edge_threshold_cannot_count_hidden_incident_edges() {
+    use fgdb_warden::Restriction;
+    under_lab(0xa9a1, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let authority = issuer(NAMESPACE);
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        for alias in [false, true] {
+            let mut thresholds = Vec::new();
+            for hidden in [false, true] {
+                let (mut low, mut high) = (0_u64, 100_000_u64);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let mut db = ensure_fixture(&cx, hidden, alias).await;
+                    let mut batch = WriteBatch::new(R);
+                    batch.ensure_edge_by_triple(EId(50), VId(1), VId(2), vec![]);
+                    let limited = token.attenuate(Restriction::MaxWork(middle)).unwrap();
+                    match db
+                        .write_authorized(&txn, &cx, &authority, &limited, BRANCH, batch, || NOW)
+                        .await
+                    {
+                        Ok(_) => high = middle,
+                        Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                            LimitDimension::Work,
+                        ))) => low = middle + 1,
+                        Err(other) => panic!("alias={alias} hidden={hidden} {middle}: {other:?}"),
+                    }
+                }
+                thresholds.push(low);
+            }
+            assert_eq!(
+                thresholds[0], thresholds[1],
+                "alias={alias}: MaxWork threshold moved with hidden incident edges"
+            );
+        }
+    });
+}

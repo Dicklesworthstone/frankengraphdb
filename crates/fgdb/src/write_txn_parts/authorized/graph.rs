@@ -123,18 +123,22 @@ fn incident_candidates<V: Vfs + Clone, Clock: FnMut() -> u64>(
     vid: VId,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<BTreeSet<EId>, WriteTxnError> {
-    execution.checkpoint()?;
+    // Enumeration is unmetered (FG-INV-20, fgdb-4iiho): the live incidence
+    // includes edges of relations, and to endpoints, the capability cannot
+    // see, so charging per candidate here would let a holder count them by
+    // bisecting MaxWork. Callers charge the candidates they actually process.
+    execution.poll()?;
     // The API holds the exclusive database borrow for the entire transaction,
     // so the live writer still supplies this exact pinned basis. Add original
     // staged identity candidates, but never infer that an ensure alias exists.
     let mut ids = BTreeSet::new();
     for eid in database.writer.live_incident_edges(vid) {
-        execution.checkpoint()?;
+        execution.poll()?;
         ids.insert(eid);
     }
     for batch in &transaction.staged {
         for row in &batch.rows {
-            execution.checkpoint()?;
+            execution.poll()?;
             if let PendingRow::Edge { eid, src, dst, .. } = row
                 && (*src == vid || *dst == vid)
             {
@@ -169,12 +173,19 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Native ensure-by-triple ignores the requested EId when ANY
                 // live alias satisfies the triple. Authorize that actual edge,
                 // not an invented edge under the unused requested identity.
+                // Only an alias with this exact (src, relation, dst) can be
+                // selected, and such an edge is visible: its relation and both
+                // endpoints were admitted above. Every other incident edge is
+                // resolved unmetered and skipped; only the selected alias is
+                // charged, like any record read (FG-INV-20, fgdb-4iiho).
                 for candidate in incident_candidates(transaction, database, *src, execution)? {
-                    if let Some(edge) = execution.edge_record(transaction, database, candidate)?
+                    execution.poll()?;
+                    if let Some(edge) = transaction.edge(database, candidate).map_err(redacted)?
                         && edge.entry.src == *src
                         && edge.entry.relation == relation
                         && edge.entry.dst == *dst
                     {
+                        execution.checkpoint()?;
                         target = candidate;
                         break;
                     }
