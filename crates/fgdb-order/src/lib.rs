@@ -1103,6 +1103,14 @@ impl<C: Clone + Eq> Raft<C> {
         self.state.base_index() + self.state.entries.len() as u64
     }
 
+    /// Read-only admission for an already-sized proposal group. Hosts can
+    /// refuse before expensive payload verification without reserving entries
+    /// or advancing request identities. Step rechecks the same limits.
+    pub fn check_proposal_count(&self, count: usize) -> Result<(), Error> {
+        self.available()?;
+        self.validate_proposal_count(count)
+    }
+
     fn validate_proposal_count(&self, count: usize) -> Result<(), Error> {
         if self.role != Role::Leader {
             return Err(Error::NotLeader);

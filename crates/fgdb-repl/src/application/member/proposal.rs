@@ -12,6 +12,8 @@ use crate::availability::proposal::{
 use crate::availability::{AvailabilityInput, AvailabilityLimits};
 use crate::driver::RaftPublisher;
 
+pub mod batch;
+
 #[derive(Debug)]
 pub enum MemberProposalError<A, I> {
     State(ApplicationStateError),

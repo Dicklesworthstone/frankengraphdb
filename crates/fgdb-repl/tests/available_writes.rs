@@ -29,6 +29,9 @@ mod tracked;
 #[path = "available_writes/leadership.rs"]
 mod leadership;
 
+#[path = "available_writes/batches.rs"]
+mod batches;
+
 struct NoopWake;
 impl Wake for NoopWake { fn wake(self: Arc<Self>) {} }
 fn immediate<F: Future>(future: F) -> F::Output {
@@ -80,6 +83,7 @@ struct State {
     progress: ApplicationProgress,
     generation: u64,
     expected: AvailabilityInput,
+    batch_commands: Vec<u64>,
     acquire: Mode,
     publish: Mode,
     apply: Mode,
@@ -204,7 +208,7 @@ fn nodes(config: &Configuration) -> Vec<Node> {
             progress: ApplicationProgress { domain: config.domain(), configuration: config.identity(),
                 applied: AppliedPosition { index: 0, term: 0 }, visible_index: 0,
                 state_root: oid(1, 42), publication_root: oid(1, 41), publication_generation: 1 },
-            generation: 1, expected: availability(config), acquire: Mode::Ready, publish: Mode::Ready,
+            generation: 1, expected: availability(config), batch_commands: Vec::new(), acquire: Mode::Ready, publish: Mode::Ready,
             apply: Mode::Ready, active_permits: 0, acquires: 0, trace: Vec::new(), effects: Vec::new(), hide: false,
         }));
         let replica = Replica::new(*id, config.clone(), Limits::default(), 16).unwrap();

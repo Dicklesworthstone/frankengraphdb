@@ -415,3 +415,19 @@ fn handoff_freezes_batched_and_scalar_proposals_before_any_admission_mutation() 
             [Some(10), Some(11)]);
     }
 }
+
+#[test]
+fn identical_numeric_attempts_in_distinct_incarnations_cannot_cancel_each_other() {
+    let mut left = Cluster::new(stable());
+    let mut right = Cluster::new(stable());
+    left.elect(false);
+    right.elect(false);
+    left.event(1, Event::TransferLeadership(MemberId(2)));
+    right.event(1, Event::TransferLeadership(MemberId(2)));
+    let a = left.node(1).leadership_transfer().unwrap().unwrap().id();
+    let b = right.node(1).leadership_transfer().unwrap().unwrap().id();
+    assert_eq!(a.0.generation, b.0.generation, "exercise the equal-scalar case");
+    assert_ne!(a, b);
+    assert!(matches!(right.node(1).step(Event::AbortLeadershipTransfer(a)), Err(Error::StaleLeadershipTransfer)));
+    assert_eq!(right.node(1).leadership_transfer().unwrap().unwrap().id(), b);
+}

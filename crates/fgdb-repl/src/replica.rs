@@ -181,6 +181,12 @@ impl<C: Clone + Eq> Replica<C> {
         self.reads.len()
     }
 
+    /// Preflight the entire group before payload authority acquisition. This
+    /// grants no reservation, permission or durable acknowledgement.
+    pub fn check_proposal_count(&self, count: usize) -> Result<(), RaftError> {
+        self.raft.check_proposal_count(count)
+    }
+
     /// Observe the handoff started with step(TransferLeadership). Its exact ID
     /// may be used with AbortLeadershipTransfer for a local deadline. Continue
     /// heartbeat/liveness delivery; a missing attempt is not election success.
