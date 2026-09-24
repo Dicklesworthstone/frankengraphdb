@@ -294,7 +294,7 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_beacon::{DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch};
     use fgdb_delta_types::RelationId;
-    use fgdb_types::{CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+    use fgdb_types::{CanonicalText, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
     const LABEL: LabelId = LabelId(1);
     const TEXT: PropertyKeyId = PropertyKeyId(1);
@@ -315,10 +315,14 @@ mod tests {
 
     fn props(text: &str, x: i64, y: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
         vec![
-            (TEXT, CanonicalScalar::Text(text.into())),
+            (TEXT, scalar_text(text)),
             (X, CanonicalScalar::Int(x)),
             (Y, CanonicalScalar::Int(y)),
         ]
+    }
+
+    fn scalar_text(text: &str) -> CanonicalScalar {
+        CanonicalScalar::Text(CanonicalText::new_ucs_basic(text).unwrap())
     }
 
     fn text(limit: usize) -> Search<'static> {
@@ -337,12 +341,13 @@ mod tests {
             seed.create_vertex(VId(2), vec![LABEL], props("rust removed", 0, 1));
             seed.create_vertex(VId(3), vec![], props("rust graph", 1, 1));
             seed.create_vertex(VId(4), vec![LABEL], props("rust filtered", 1, 0));
+            seed.create_vertex(VId(7), vec![LABEL], props("rust property removed", 1, 0));
             db.write(&commit, seed).await.unwrap();
             let basis = db.frontier().unwrap();
             let mut txn = db.begin(&contexts.txn()).unwrap();
             txn.savepoint(&db, "before-search").unwrap();
-            let mut changes = WriteBatch::new(RelationId(1));
-            changes.set_vertex_property(VId(1), TEXT, Some(CanonicalScalar::Text("rust systems".into())));
+            let mut changes = WriteBatch::new(RelationId(9));
+            changes.set_vertex_property(VId(1), TEXT, Some(scalar_text("rust systems")));
             changes.set_vertex_property(VId(1), X, Some(CanonicalScalar::Int(1)));
             changes.set_vertex_property(VId(1), Y, Some(CanonicalScalar::Int(0)));
             changes.delete_vertex(VId(2));
@@ -351,7 +356,13 @@ mod tests {
             changes.create_vertex(VId(5), vec![LABEL], props("rust database", 2, 1));
             changes.create_vertex(VId(6), vec![LABEL], props("erased", 1, 0));
             changes.delete_vertex(VId(6));
-            txn.write(&mut db, changes).unwrap();
+            changes.set_vertex_property(VId(7), TEXT, None);
+            changes.set_vertex_property(VId(7), X, None);
+            // Vertex and edge identity domains must never alias in projection.
+            changes.add_edge(EId(1), VId(1), VId(3), vec![(TEXT, CanonicalScalar::Int(999))]);
+            let mut dependent = WriteBatch::new(RelationId(2));
+            dependent.set_vertex_property(VId(5), X, Some(CanonicalScalar::Int(3)));
+            txn.write_ordered(&mut db, vec![changes, dependent]).unwrap();
             let opts = options();
             let queries = [
                 text(10),
@@ -372,6 +383,8 @@ mod tests {
             assert!(!txn.scanned_vertices.get());
             assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(6))));
             txn.commit(&mut db, &commit).await.unwrap();
+            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, text(1)),
+                Err(ReadError::Read(WriteTxnError::Finished))));
             for (search, expected) in queries.into_iter().zip(staged) {
                 assert_eq!(db.beacon_search(&query_cx, &opts, search).unwrap(), expected);
             }
@@ -397,7 +410,7 @@ mod tests {
             assert!(matches!(&before, Rows::Text(hits) if hits.len() == 1));
             assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(2))));
             let mut winner = WriteBatch::new(RelationId(1));
-            winner.set_vertex_property(VId(2), TEXT, Some(CanonicalScalar::Text("rust rust".into())));
+            winner.set_vertex_property(VId(2), TEXT, Some(scalar_text("rust rust")));
             db.write(&commit, winner).await.unwrap();
             assert_eq!(txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(), before);
             assert!(matches!(txn.finish(&mut db, &commit).await,
@@ -479,8 +492,44 @@ mod tests {
             assert!(matches!(txn.beacon_search(&db, &query_cx, &options(), text(1)).unwrap(),
                 Rows::Text(hits) if hits.len() == 1));
             txn.abort();
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &options(), text(1)),
-                Err(ReadError::Read(WriteTxnError::Finished))));
+            assert_eq!(contexts.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn projection_admission_follows_staged_labels_and_tombstones() {
+        let ((), report) = run_async_under_lab(0xbeac_1007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query_cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            let mut invalid = props("rust", 1, 0);
+            invalid[1].1 = scalar_text("not a coordinate");
+            seed.create_vertex(VId(1), vec![LABEL], invalid);
+            seed.create_vertex(VId(2), vec![LABEL], props(&"large ".repeat(100), 1, 0));
+            db.write(&commit, seed).await.unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.set_vertex_label(VId(1), LABEL, false);
+            changes.delete_vertex(VId(2));
+            changes.create_vertex(VId(3), vec![LABEL], props("rust", 1, 0));
+            txn.write(&mut db, changes).unwrap();
+            let mut opts = options();
+            opts.index.max_text_bytes = 8;
+            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(),
+                Rows::Text(hits) if hits.len() == 1 && hits[0].id == VId(3)));
+            let vector = Search::Vector { query: &[1.0, 0.0], k: 1, mode: VectorSearch::Exact };
+            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, vector).unwrap(),
+                Rows::Vector(hits) if hits.len() == 1 && hits[0].id == VId(3)));
+            // Removing the overlay restores the invalid/oversized base corpus.
+            // Those projected values must then be refused, not coerced or skipped.
+            txn.abort();
+            assert!(matches!(db.beacon_search(&query_cx, &opts, text(1)),
+                Err(ReadError::Index(BeaconError::ResourceLimit { .. }))));
+            assert!(matches!(db.beacon_search(&query_cx, &opts, vector),
+                Err(ReadError::Index(BeaconError::InvalidQuery(_)))));
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
