@@ -95,18 +95,32 @@ async fn admitted_image(contexts: &PurposeContexts, dir: &Path) -> SealedPartiti
     let store = BlockStore::open(&commit, dir, K_OID, NAMESPACE)
         .await
         .unwrap();
-    let bytes = encode_block(0, None, &sample_edges()).unwrap();
-    let block = store.put(&commit, &bytes).await.unwrap();
+    // A delta block holds exactly one (src, relation) family: encode_block
+    // refuses a mixed block with MixedDescriptor. One block per source here.
+    let edges = sample_edges();
+    let mut blocks = Vec::new();
+    for src in [VId(1), VId(2)] {
+        let family: Vec<_> = edges.iter().copied().filter(|e| e.src == src).collect();
+        let bytes = encode_block(0, None, &family).unwrap();
+        let block = store.put(&commit, &bytes).await.unwrap();
+        blocks.push(BlockRef {
+            block_id: block.0,
+            first_seq: family.iter().map(|e| e.created_at).min().unwrap(),
+            last_seq: family
+                .iter()
+                .map(|e| e.retired_at.unwrap_or(e.created_at))
+                .max()
+                .unwrap(),
+        });
+    }
+    // A root lists its blocks in non-decreasing last_seq (BlockOrderRegression).
+    blocks.sort_by_key(|block| block.last_seq);
     let root = PartitionRoot {
         graph: GraphId(1),
         branch: BranchId(2),
         partition: 0,
         published_at: CommitSeq(10),
-        blocks: vec![BlockRef {
-            block_id: block.0,
-            first_seq: CommitSeq(1),
-            last_seq: CommitSeq(7),
-        }],
+        blocks,
         vertex_patches: vec![],
     };
     let root_id = store.put_root(&commit, &root).await.unwrap();
