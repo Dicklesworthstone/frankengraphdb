@@ -96,6 +96,9 @@ impl UnresolvedGraphText<'_> {
             Some(GraphPathFunction::Length) => Scalar,
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
             Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
+            // Edge selects the property owner in BoundColumn::declaration;
+            // an edge property itself is a scalar, not an edge identity.
+            Some(GraphPathFunction::Edge) if column.property.is_some() => Scalar,
             Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
             Some(GraphPathFunction::Labels) => crate::GraphSetColumnType::List,
             Some(GraphPathFunction::Type) => Scalar,
@@ -349,5 +352,86 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod projection_schema_tests {
+    use super::*;
+    use crate::{GraphSetColumnType, PreparedGraphSetText};
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "cost") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    fn check(text: &str, expected: &[GraphSetColumnType]) {
+        let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.column_types(), expected, "{text}");
+        assert_eq!(
+            prepared
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .column_types(),
+            expected,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn edge_property_output_types_match_the_bound_plan_in_every_projection_form() {
+        for terminal in [
+            "RETURN e.cost AS cost",
+            "WITH e.cost AS cost RETURN cost",
+            "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+        ] {
+            check(
+                &format!("MATCH (a)-[e:R]->(b) {terminal}"),
+                &[GraphSetColumnType::Scalar],
+            );
+        }
+        check(
+            "MATCH (a)-[e:R]->(b) RETURN e AS edge, e.cost AS cost, type(e) AS relation",
+            &[
+                GraphSetColumnType::Edge,
+                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Scalar,
+            ],
+        );
+    }
+
+    #[test]
+    fn scalar_set_operations_accept_edge_and_vertex_property_arms() {
+        for operation in ["UNION ALL", "UNION DISTINCT", "INTERSECT", "EXCEPT"] {
+            check(
+                &format!(
+                    "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
+                     {operation} MATCH (n) RETURN n.cost AS value"
+                ),
+                &[GraphSetColumnType::Scalar],
+            );
+        }
+    }
+
+    #[test]
+    fn edge_identity_and_property_arms_refuse_before_catalog_resolution() {
+        let mut calls = 0;
+        let result = PreparedGraphSetText::prepare(
+            "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
+             UNION ALL MATCH (a)-[e:R]->(b) RETURN e AS value",
+            |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error.kind,
+            crate::GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::ColumnType { .. })
+        ));
+        assert_eq!(calls, 0);
     }
 }
