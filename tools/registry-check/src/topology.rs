@@ -217,6 +217,10 @@ pub struct Posture {
     pub plan_anchor: String,
     pub status: String,
     pub deferred_to: String,
+    /// Postures whose entry crate this posture's closure may contain: a thin
+    /// shell (CLI, server) over the embedded facade declares `embedded`.
+    /// Any other entry crate in the closure is still a violation.
+    pub consumes_entries: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -657,6 +661,7 @@ fn posture_from(table: &Table, index: usize) -> Result<Posture, ReadError> {
             "plan_anchor",
             "status",
             "deferred_to",
+            "consumes_entries",
         ],
         &ctx,
     )?;
@@ -668,6 +673,7 @@ fn posture_from(table: &Table, index: usize) -> Result<Posture, ReadError> {
         plan_anchor: get_str(table, "plan_anchor", &ctx)?,
         status: get_str(table, "status", &ctx)?,
         deferred_to: get_str(table, "deferred_to", &ctx)?,
+        consumes_entries: get_str_array(table, "consumes_entries", &ctx)?,
     })
 }
 
@@ -1810,6 +1816,15 @@ pub fn posture_closures(registry: &TopologyRegistry, scan: &WorkspaceScan) -> Ve
                     }
                 }
             }
+            // Entry crates this posture declared it consumes (owner ruling
+            // 2026-09-24: the CLI and server are shells over the embedded
+            // facade). Every other foreign entry crate stays illegal.
+            let consumed: BTreeSet<&str> = posture
+                .consumes_entries
+                .iter()
+                .filter_map(|id| registry.postures.iter().find(|other| other.id == *id))
+                .map(|other| other.entry_crate.as_str())
+                .collect();
             let illegal = closure
                 .iter()
                 .filter(|name| **name != posture.entry_crate)
@@ -1819,7 +1834,8 @@ pub fn posture_closures(registry: &TopologyRegistry, scan: &WorkspaceScan) -> Ve
                         .map(|row| {
                             row.posture_participation == "test_only"
                                 || row.posture_participation == "packaging_boundary"
-                                || row.posture_participation.starts_with("entry_")
+                                || (row.posture_participation.starts_with("entry_")
+                                    && !consumed.contains(name.as_str()))
                         })
                         .unwrap_or(false)
                 })
@@ -3741,6 +3757,20 @@ pub fn live_tree_violations(
                     if live { "" } else { "not " }
                 ),
             ));
+        }
+        // A consumption declaration widens the closure law, so it must name
+        // another, existing posture exactly once; a typo cannot widen it.
+        let mut seen = BTreeSet::new();
+        for id in &posture.consumes_entries {
+            let known = registry.postures.iter().any(|other| other.id == *id);
+            if !known || *id == posture.id || !seen.insert(id) {
+                violations.push(Violation::new(
+                    "posture_consumption_invalid",
+                    format!("{} consumes {id}", posture.id),
+                    "§1 constraint 5",
+                    "consumes_entries must name another existing posture, once",
+                ));
+            }
         }
     }
     violations

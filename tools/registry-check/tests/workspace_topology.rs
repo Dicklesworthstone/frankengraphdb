@@ -748,21 +748,67 @@ fn topology_posture_closure_accepts_an_engine_only_closure() {
 }
 
 #[test]
-fn topology_posture_closure_rejects_a_foreign_entry_crate() {
+fn topology_posture_closure_rejects_an_undeclared_foreign_entry_crate() {
     let registry = registry();
+    // The CLI declares only the embedded facade; the server's entry crate in
+    // its closure is still one posture's binary inside another's.
     let scan = synthetic_scan(vec![
+        synthetic_crate("fgdb-cli", &["fgdb", "fgdb-server"]),
         synthetic_crate("fgdb-server", &["fgdb"]),
         synthetic_crate("fgdb", &[]),
     ]);
-    let server = posture_closures(&registry, &scan)
+    let cli = posture_closures(&registry, &scan)
         .into_iter()
-        .find(|closure| closure.posture_id == "server")
-        .expect("server posture");
+        .find(|closure| closure.posture_id == "cli")
+        .expect("cli posture");
     assert_eq!(
-        server.illegal,
-        vec!["fgdb".to_string()],
-        "one posture's entry crate is not another posture's library"
+        cli.illegal,
+        vec!["fgdb-server".to_string()],
+        "an entry crate is legal in another closure only when declared"
     );
+}
+
+#[test]
+fn topology_posture_closure_accepts_the_declared_embedded_facade() {
+    // Owner ruling 2026-09-24: the CLI and the server are shells over the
+    // embedded facade and declare `consumes_entries = ["embedded"]`.
+    let registry = registry();
+    let scan = synthetic_scan(vec![
+        synthetic_crate("fgdb-cli", &["fgdb"]),
+        synthetic_crate("fgdb-server", &["fgdb"]),
+        synthetic_crate("fgdb", &["fgdb-types"]),
+        synthetic_crate("fgdb-types", &[]),
+    ]);
+    for posture in ["cli", "server"] {
+        let closure = posture_closures(&registry, &scan)
+            .into_iter()
+            .find(|closure| closure.posture_id == posture)
+            .expect("posture");
+        assert!(closure.illegal.is_empty(), "{posture}: {closure:?}");
+        assert!(closure.closure.contains(&"fgdb".to_string()));
+    }
+}
+
+#[test]
+fn topology_neg_posture_consumption_must_name_another_existing_posture() {
+    let cli = "status = \"live\"\ndeferred_to = \"\"\nconsumes_entries = [\"embedded\"]";
+    for (consumes, why) in [
+        ("[\"embeded\"]", "a typo names no posture"),
+        ("[\"cli\"]", "a posture cannot consume itself"),
+        (
+            "[\"embedded\", \"embedded\"]",
+            "a duplicate is a schema error",
+        ),
+    ] {
+        let mutated = cli.replace("[\"embedded\"]", consumes);
+        let codes = codes_after(cli, &mutated);
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == "posture_consumption_invalid"),
+            "{why}: {codes:?}"
+        );
+    }
 }
 
 #[test]

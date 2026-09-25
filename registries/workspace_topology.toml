@@ -1571,12 +1571,10 @@ role = "embedded API"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
 activation_status = "active"
-# fgdb-topology-seven-crates-9n8ao: the law binds the embedded posture's entry
-# crate to "entry_embedded", and the closure law bars entry_* crates from other
-# shipped closures — so the merged CLI binary (fgdb-cli) consuming THIS facade is
-# a recorded conflict: either the CLI ports onto the engine crates directly, or
-# the owner evolves the vocabulary. Tracked on the bead; gate is red by this one
-# violation until ruled.
+# The embedded posture's entry crate. The CLI (fgdb-cli) and the server consume
+# this facade by declaration (`consumes_entries = ["embedded"]` on their
+# postures): owner ruling 2026-09-24 on fgdb-duplicate-fgdb-bin-v26vj evolved
+# the closure law instead of porting the CLI onto the engine crates.
 posture_participation = "entry_embedded"
 posture_basis = "composition_entry"
 owner = "W10"
@@ -1733,6 +1731,11 @@ manifest_dir = ""
 #   deferred — the entry crate is not active yet, so there is no closure to
 #              check; the evaluator is proved against synthetic fixtures instead
 #   live     — the entry crate is active and its closure is checked
+# `consumes_entries` lists the postures whose ENTRY crate this closure may
+# contain. Owner ruling 2026-09-24 (fgdb-duplicate-fgdb-bin-v26vj): the CLI and
+# the server are thin shells over the embedded facade, so both declare
+# "embedded". Any other entry crate in a closure is still a
+# posture_closure_violation, and the list must name other existing postures.
 # -----------------------------------------------------------------------------
 
 [[posture]]
@@ -1743,6 +1746,7 @@ binary_name = ""
 plan_anchor = "§1 constraint 5(a), §13.1"
 status = "live"
 deferred_to = ""
+consumes_entries = []
 
 [[posture]]
 id = "server"
@@ -1752,6 +1756,7 @@ binary_name = "fgdbd"
 plan_anchor = "§1 constraint 5(b), §13"
 status = "deferred"
 deferred_to = "the owner bead of fgdb-server (W10 composition)"
+consumes_entries = ["embedded"]
 
 [[posture]]
 id = "cli"
@@ -1761,6 +1766,7 @@ binary_name = "fgdb"
 plan_anchor = "§1 constraint 5(c)"
 status = "live"
 deferred_to = ""
+consumes_entries = ["embedded"]
 
 # =============================================================================
 # NAMED CRATE-LEVEL EDGES
