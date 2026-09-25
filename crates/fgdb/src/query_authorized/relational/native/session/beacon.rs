@@ -15,6 +15,9 @@ use std::cell::RefCell;
 mod prepared;
 pub use prepared::AuthorizedBeaconIndex;
 
+#[path = "beacon/graph.rs"]
+mod graph;
+
 type Error = SearchError<ReadError, QueryError>;
 
 #[cfg(test)]

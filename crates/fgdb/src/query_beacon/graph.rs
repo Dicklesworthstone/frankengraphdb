@@ -26,11 +26,37 @@ pub(crate) fn evaluate(
     query: GraphHybridQuery<'_>,
     expansion: ExpansionSpec<'_, RelationId>,
     work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    relation_allowed: impl FnMut(RelationId) -> bool,
+) -> Result<Vec<GraphHybridHit>, BeaconError> {
+    evaluate_with_edge_admission(
+        snapshot, at, options, query, expansion, work, scan, admit,
+        label_allowed, property_allowed, relation_allowed, || Ok(()),
+    )
+}
+
+/// The same execution body with an admitted-edge event for a host's combined
+/// vertex/edge allowance. The callback runs AFTER historical winner selection,
+/// relation scope and BOTH selected endpoint checks, before retaining an arc.
+/// It sees no hidden candidate, raw row, identity or property. Existing native
+/// readers use the no-op callback above and retain their exact charge trace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_with_edge_admission(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    work: &RefCell<impl WorkControl>,
     mut scan: Scan<'_>,
     admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     label_allowed: impl FnMut(LabelId) -> bool,
     property_allowed: impl FnMut(PropertyKeyId) -> bool,
     mut relation_allowed: impl FnMut(RelationId) -> bool,
+    mut admit_edge: impl FnMut() -> Result<(), BeaconError>,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
     work.borrow_mut().charge(1)?;
     let config = options.config_for_graph(query)?;
@@ -109,6 +135,7 @@ pub(crate) fn evaluate(
                     && graph.contains(edge.src)
                     && graph.contains(edge.dst)
                 {
+                    admit_edge()?;
                     // Scoped history is poll-only. Its observable scratch
                     // allowance counts only admitted edge winners, after
                     // relation and BOTH endpoint checks, never hidden history.
