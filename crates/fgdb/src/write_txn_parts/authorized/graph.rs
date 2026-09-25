@@ -42,6 +42,10 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         let row = self
             .vertex(transaction, database, vid)?
             .ok_or_else(denied)?;
+        self.check_endpoint(row)
+    }
+
+    fn check_endpoint(&mut self, row: VertexRow) -> Result<VertexRow, WriteTxnError> {
         // Endpoints are admitted, not mutated. Preserve all original fields.
         self.check_vertex(
             Some(&row),
@@ -78,9 +82,38 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         database: &Database<V>,
         record: EdgeRecord,
     ) -> Result<Edge, WriteTxnError> {
+        // Resolve scope with cancellation-only polling before billing any
+        // relation or endpoint admission. Otherwise a hidden edge reaches a
+        // different work/node limit than an absent EId (FG-INV-20). These are
+        // the native pinned rows, not a synthetic or masked graph overlay.
+        self.poll()?;
+        if !self.permit.predicates().allows_relation(record.entry.relation) {
+            return Err(denied());
+        }
+        let source = transaction
+            .vertex(database, record.entry.src)
+            .map_err(redacted)?
+            .ok_or_else(denied)?;
+        self.poll()?;
+        if !self.permit.predicates().allows_vertex(&source.labels) {
+            return Err(denied());
+        }
+        let destination = transaction
+            .vertex(database, record.entry.dst)
+            .map_err(redacted)?
+            .ok_or_else(denied)?;
+        self.poll()?;
+        if !self.permit.predicates().allows_vertex(&destination.labels) {
+            return Err(denied());
+        }
+        // Charge the same admitted logical events, in the same order, as the
+        // ordinary relation + two endpoint reads. Reuse the resolved rows so
+        // admission does not add duplicate native reads or property clones.
         self.relation(record.entry.relation)?;
-        let source = self.endpoint(transaction, database, record.entry.src)?;
-        let destination = self.endpoint(transaction, database, record.entry.dst)?;
+        self.checkpoint()?;
+        let source = self.check_endpoint(source)?;
+        self.checkpoint()?;
+        let destination = self.check_endpoint(destination)?;
         Ok(Edge {
             record,
             source,

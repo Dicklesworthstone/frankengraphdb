@@ -25,6 +25,10 @@ mod graph;
 #[path = "authorized/ordered_tests.rs"]
 mod ordered_tests;
 
+#[cfg(test)]
+#[path = "authorized/target_tests.rs"]
+mod target_tests;
+
 struct Workspace(Option<WriteTxn>);
 impl Workspace {
     fn transaction(&mut self) -> &mut WriteTxn {
@@ -98,7 +102,19 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         vid: VId,
     ) -> Result<Option<VertexRow>, WriteTxnError> {
         self.checkpoint()?;
-        transaction.vertex(database, vid).map_err(redacted)
+        let row = transaction.vertex(database, vid).map_err(redacted)?;
+        // A hidden target and an absent target must reach ScopeDenied after
+        // the same signed lookup charge. Do not let image-validation work or
+        // node charges turn a caller-controlled limit into an existence probe.
+        // Keep ORIGINAL admitted rows: masking an after-image could conceal a
+        // forbidden scope escape or a change to a preserved hidden property.
+        if row
+            .as_ref()
+            .is_some_and(|row| !self.permit.predicates().allows_vertex(&row.labels))
+        {
+            return Err(denied());
+        }
+        Ok(row)
     }
 
     fn check_vertex(
