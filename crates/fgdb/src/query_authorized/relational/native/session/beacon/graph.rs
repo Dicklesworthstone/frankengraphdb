@@ -1,9 +1,9 @@
 //! Three-way retrieval on a narrowed session, using the native graph evaluator.
 
 use super::{
-    AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver,
-    Meter, Options, QueryCx, QueryError, RefCell, Scan, Search, SharedWork, WorkControl,
-    admit_query, charge, definition, finish, policy, settle,
+    AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver, Meter,
+    Options, QueryCx, QueryError, RefCell, Scan, Search, SharedWork, WorkControl, admit_query,
+    charge, definition, finish, policy, settle,
 };
 use crate::query::beacon::graph as native;
 use fgdb_beacon::expansion::ExpansionSpec;
@@ -59,9 +59,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let cap = options.policy.max_source_scratch;
                     expansion.limits.max_vertices = expansion.limits.max_vertices.min(cap);
                     expansion.limits.max_input_edges = expansion.limits.max_input_edges.min(cap);
-                    expansion.limits.max_visited_vertices = expansion.limits.max_visited_vertices.min(cap);
+                    expansion.limits.max_visited_vertices =
+                        expansion.limits.max_visited_vertices.min(cap);
                     expansion.limits.max_seed_ids = expansion.limits.max_seed_ids.min(cap);
-                    expansion.limits.max_source_scratch = expansion.limits.max_source_scratch.min(cap);
+                    expansion.limits.max_source_scratch =
+                        expansion.limits.max_source_scratch.min(cap);
                 }
                 let records = Cell::new(0_u64);
                 let record = || -> Result<(), BeaconError> {
@@ -71,9 +73,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         resource: "admitted graph records",
                         limit: usize::MAX,
                     })?;
-                    host.rows.check(GqlBudgetDimension::SnapshotRecords, next)
-                        .map_err(|error| work.borrow_mut()
-                            .refuse(QueryError::Pattern(GqlQueryError::Rows(error))))?;
+                    host.rows
+                        .check(GqlBudgetDimension::SnapshotRecords, next)
+                        .map_err(|error| {
+                            work.borrow_mut()
+                                .refuse(QueryError::Pattern(GqlQueryError::Rows(error)))
+                        })?;
                     if u128::from(used) >= options.policy.max_source_scratch as u128 {
                         return Err(BeaconError::ResourceLimit {
                             resource: "admitted graph scratch",
@@ -83,8 +88,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     records.set(next);
                     Ok(())
                 };
-                let mut poll = || execution.borrow_mut().poll()
-                    .map_err(|error| work.borrow_mut().refuse(error));
+                let mut poll = || {
+                    execution
+                        .borrow_mut()
+                        .poll()
+                        .map_err(|error| work.borrow_mut().refuse(error))
+                };
                 native::evaluate_with_edge_admission(
                     &view.snapshot,
                     at,
@@ -97,7 +106,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         if !scope.allows_vertex(&row.labels) {
                             return Ok(false);
                         }
-                        execution.borrow_mut().node()
+                        execution
+                            .borrow_mut()
+                            .node()
                             .map_err(|error| work.borrow_mut().refuse(error))?;
                         record()?;
                         Ok(true)

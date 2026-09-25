@@ -2,9 +2,9 @@
 //! An opaque handle is not an index grant: it has no standalone search method.
 
 use super::{
-    AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver,
-    Meter, Options, QueryCx, QueryError, ReadPolicy, RefCell, Rows, Search, SharedWork,
-    WardenError, WorkControl, admit_query, build, charge, definition, finish, policy, settle,
+    AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver, Meter,
+    Options, QueryCx, QueryError, ReadPolicy, RefCell, Rows, Search, SharedWork, WardenError,
+    WorkControl, admit_query, build, charge, definition, finish, policy, settle,
 };
 use fgdb_beacon::{BeaconError, IndexSnapshot};
 use fgdb_types::CommitSeq;
@@ -73,12 +73,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             ));
             let result = (|| {
                 work.borrow_mut().charge(1)?;
-                let mut frozen = definition(
-                    options,
-                    options.index.clone(),
-                    host,
-                    &mut SharedWork(&work),
-                )?;
+                let mut frozen =
+                    definition(options, options.index.clone(), host, &mut SharedWork(&work))?;
                 frozen.as_of = Some(at);
                 let (index, admitted) = build(view, at, scope, host, execution, &frozen, &work)?;
                 work.borrow_mut().charge(1)?;

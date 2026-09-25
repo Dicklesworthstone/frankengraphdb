@@ -33,8 +33,18 @@ pub(crate) fn evaluate(
     relation_allowed: impl FnMut(RelationId) -> bool,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
     evaluate_with_edge_admission(
-        snapshot, at, options, query, expansion, work, scan, admit,
-        label_allowed, property_allowed, relation_allowed, || Ok(()),
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        work,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        relation_allowed,
+        || Ok(()),
     )
 }
 

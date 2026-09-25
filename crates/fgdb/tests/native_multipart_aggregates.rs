@@ -2,10 +2,14 @@
 //! send a multi-source aggregate to the exactly-one-source iterator adapter.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryError, QueryResult, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryError, QueryResult, WriteBatch,
+};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
@@ -118,7 +122,9 @@ fn native_multipart_aggregate_reads_and_certified_replay_pin_all_sources() {
             certified
         );
         assert_eq!(
-            pinned.query(&cx, INNER, &params, symbols, policy()).unwrap(),
+            pinned
+                .query(&cx, INNER, &params, symbols, policy())
+                .unwrap(),
             certified
         );
 
@@ -166,7 +172,11 @@ fn native_optional_aggregate_preserves_null_extension_and_input_pages() {
             expected
         );
         assert_eq!(
-            summaries(&view.query(&cx, OPTIONAL, &params, symbols, policy()).unwrap()),
+            summaries(
+                &view
+                    .query(&cx, OPTIONAL, &params, symbols, policy())
+                    .unwrap()
+            ),
             expected
         );
         let text = "MATCH (owner)-[:R]->(bridge) \
@@ -197,7 +207,11 @@ fn native_optional_aggregate_preserves_null_extension_and_input_pages() {
                 expected
             );
             assert_eq!(
-                summaries(&prepared.execute_in_view(&view, &cx, &args, policy()).unwrap()),
+                summaries(
+                    &prepared
+                        .execute_in_view(&view, &cx, &args, policy())
+                        .unwrap()
+                ),
                 expected
             );
         }

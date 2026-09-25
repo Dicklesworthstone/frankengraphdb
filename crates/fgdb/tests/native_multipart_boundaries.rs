@@ -10,7 +10,9 @@ use fgdb::{
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Error, Grant, QueryLimits, Scope};
 use std::cell::Cell;
 
@@ -111,7 +113,10 @@ fn multipart_transaction_reads_staged_second_source_without_committing_or_fallin
         staged.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(13)));
         txn.write(&mut db, staged).unwrap();
         assert_eq!(
-            summary(&txn.query(&db, &cx, INNER, &params, symbols, policy()).unwrap()),
+            summary(
+                &txn.query(&db, &cx, INNER, &params, symbols, policy())
+                    .unwrap()
+            ),
             (1, Some(13), 1)
         );
         assert_eq!(
@@ -213,13 +218,30 @@ fn multipart_authorized_reads_mask_every_source_and_recheck_reused_templates() {
             let token = issuer.issue_at(&grant, 100).unwrap();
             let result = db
                 .query_authorized(
-                    &cx, &issuer, &token, BRANCH, OPTIONAL, &params, symbols, policy(), || 100,
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    OPTIONAL,
+                    &params,
+                    symbols,
+                    policy(),
+                    || 100,
                 )
                 .unwrap();
             assert_eq!(summary(&result), expected);
             assert_eq!(
                 prepared
-                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &params, policy(), || 100)
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &params,
+                        policy(),
+                        || 100
+                    )
                     .unwrap(),
                 result
             );
@@ -246,17 +268,30 @@ fn multipart_authorized_session_pins_sources_but_not_credential_lifetime() {
         let now = Cell::new(100_u64);
         let params = GqlParameters::new();
         let mut session = db
-            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || now.get())
+            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || {
+                now.get()
+            })
             .unwrap();
         let prepared = session.prepare(&cx, OPTIONAL, &params).unwrap();
-        assert_eq!(summary(&session.query(&cx, OPTIONAL, &params).unwrap()), (2, Some(7), 1));
+        assert_eq!(
+            summary(&session.query(&cx, OPTIONAL, &params).unwrap()),
+            (2, Some(7), 1)
+        );
         let mut change = WriteBatch::new(S);
         change.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(23)));
         db.write_atomic(&commit, vec![change]).await.unwrap();
         assert_eq!(
             summary(
                 &db.query_authorized(
-                    &cx, &issuer, &token, BRANCH, OPTIONAL, &params, symbols, policy(), || 100,
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    OPTIONAL,
+                    &params,
+                    symbols,
+                    policy(),
+                    || 100,
                 )
                 .unwrap()
             ),
@@ -289,7 +324,11 @@ fn source_free_and_single_source_native_aggregate_lanes_remain_usable() {
         let params = GqlParameters::new();
         for (prefix, sources, expected) in [
             ("WITH 7 AS amount", 0, (1, Some(7), 1)),
-            ("MATCH (a)-[:R]->(b) WITH b.n AS amount", 1, (2, Some(10), 1)),
+            (
+                "MATCH (a)-[:R]->(b) WITH b.n AS amount",
+                1,
+                (2, Some(10), 1),
+            ),
         ] {
             let text = format!(
                 "{prefix} RETURN COUNT(*) AS paths, SUM(amount) AS total, COUNT(amount) AS present"
@@ -302,10 +341,23 @@ fn source_free_and_single_source_native_aggregate_lanes_remain_usable() {
             assert_eq!(plan.requires_relational_input(), sources != 1);
             for result in [
                 prepared.execute(&db, &cx, &params, policy()).unwrap(),
-                prepared.execute_in_view(&view, &cx, &params, policy()).unwrap(),
-                prepared.execute_in_transaction(&txn, &db, &cx, &params, policy()).unwrap(),
                 prepared
-                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &params, policy(), || 100)
+                    .execute_in_view(&view, &cx, &params, policy())
+                    .unwrap(),
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap(),
+                prepared
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &params,
+                        policy(),
+                        || 100,
+                    )
                     .unwrap(),
             ] {
                 assert_eq!(summary(&result), expected);

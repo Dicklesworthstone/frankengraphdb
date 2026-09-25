@@ -220,12 +220,7 @@ impl ExecutionPermit<'_, WriteAccess> {
     // The caller's capability may attenuate MaxWork. Charging hidden image
     // fields there would let a holder binary-search their count or byte size.
     // Polling remains mandatory even when no observable work is charged.
-    fn charge_label_work(
-        &mut self,
-        now_ms: u64,
-        label: LabelId,
-        units: u128,
-    ) -> Result<(), Error> {
+    fn charge_label_work(&mut self, now_ms: u64, label: LabelId, units: u128) -> Result<(), Error> {
         if self.program.allows_label(label) {
             self.charge_write_work(now_ms, units)
         } else {

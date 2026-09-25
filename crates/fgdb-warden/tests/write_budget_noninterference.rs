@@ -342,7 +342,9 @@ fn deny_properties_and_deny_all_property_scope_share_the_same_accounting_law() {
         .unwrap()
         .attenuate(Restriction::Labels(Scope::only([L])))
         .unwrap()
-        .attenuate(Restriction::DenyProperties(HIDDEN_KEYS.into_iter().collect()))
+        .attenuate(Restriction::DenyProperties(
+            HIDDEN_KEYS.into_iter().collect(),
+        ))
         .unwrap();
     for kind in KINDS {
         assert_eq!(
@@ -471,9 +473,11 @@ fn visible_payloads_still_spend_real_work_and_zero_budgets_still_refuse() {
             &Image::new(63, 8192, 1),
             &Image::new(63, 8192, 2),
         );
-        assert!(failed.iter().any(|(result, _)| {
-            *result == Err(Error::LimitExceeded(LimitDimension::Work))
-        }));
+        assert!(
+            failed
+                .iter()
+                .any(|(result, _)| { *result == Err(Error::LimitExceeded(LimitDimension::Work)) })
+        );
         let zero = token.attenuate(Restriction::MaxNodes(0)).unwrap();
         assert_eq!(
             trace(
@@ -483,7 +487,7 @@ fn visible_payloads_still_spend_real_work_and_zero_budgets_still_refuse() {
                 &Image::new(0, 0, 1),
                 &Image::new(0, 0, 2),
             )[0]
-                .0,
+            .0,
             Err(Error::LimitExceeded(LimitDimension::Nodes))
         );
     }
@@ -497,7 +501,10 @@ fn expiry_retirement_and_clock_rollback_remain_terminal_with_hidden_fields() {
         let verified = issuer.verify_at(&token, "main", NOW).unwrap();
         let mut permit = verified.begin_write_at("main", NOW).unwrap();
         let image = Image::new(63, 4096, 1);
-        assert_eq!(check(&mut permit, Kind::Vertex, &image, &image, &[]), Ok(()));
+        assert_eq!(
+            check(&mut permit, Kind::Vertex, &image, &image, &[]),
+            Ok(())
+        );
         let usage = permit.usage();
         let (at, expected) = match mode {
             0 => (1000, Error::Expired),
