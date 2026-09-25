@@ -1,4 +1,4 @@
-//! Cooperative ranks, weighted/hop distances and connectivity on one projection.
+//! Cooperative ranks, weighted/hop distances, connectivity and local clustering.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -8,8 +8,8 @@
 //!
 //! The quantum bounds counted steps, not instructions or elapsed time. Individual
 //! allocations, compressed lookups, bounded alias strings and the fixed kernel
-//! source transcript remain indivisible. Sealing/projection preparation and the
-//! other procedures are NOT made cooperative by this module.
+//! source transcript remain indivisible. Sealing/projection preparation is NOT
+//! made cooperative by this module.
 
 use super::{
     ComplexityWitness, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
@@ -26,8 +26,8 @@ use std::future::Future;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 
-struct Cooperate<'cx, Yield> {
-    cx: &'cx Control<'cx>,
+pub(super) struct Cooperate<'cx, Yield> {
+    pub(super) cx: &'cx Control<'cx>,
     fuel: SealedScanBudget,
     quantum: NonZeroUsize,
     yield_now: Yield,
@@ -49,7 +49,7 @@ where
         Ok(())
     }
 
-    async fn tick(&mut self) -> Result<()> {
+    pub(super) async fn tick(&mut self) -> Result<()> {
         checkpoint(self.cx)?;
         if !self.fuel.spend() {
             self.pause().await?;
@@ -59,7 +59,10 @@ where
         Ok(())
     }
 
-    async fn next(&mut self, row: &mut SealedNeighborCursor<'_>) -> Result<Option<(usize, f64)>> {
+    pub(super) async fn next(
+        &mut self,
+        row: &mut SealedNeighborCursor<'_>,
+    ) -> Result<Option<(usize, f64)>> {
         loop {
             match row.next_budgeted_controlled(self.cx, &mut self.fuel)? {
                 SealedScanStep::Item(value) => return Ok(Some(value)),
@@ -104,6 +107,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Triangles
+                | FnxAlgorithm::ClusteringCoefficient
         )
     }
 
@@ -179,6 +184,25 @@ impl FnxCallSpec {
                 return Err(Error::UnsupportedCooperativeAlgorithm(self.algorithm()));
             }
             self.validate_sealed_projection(graph.spec().directedness)?;
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::clustering::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
+            }
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;
             let pass =
