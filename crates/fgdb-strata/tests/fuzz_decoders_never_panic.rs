@@ -16,9 +16,10 @@
 //! validated against the ACTUAL remaining byte length before any allocation
 //! (the truncation/implausible-count refusals the format suites pin). A
 //! declared `u32::MAX` count therefore cannot become an allocation: the
-//! refusal fires while the input is still tiny. The enforced per-input wall
-//! bound (50 ms) is the indirect allocation instrument — a huge allocation
-//! would have to zero/fill its memory and would blow the bound first. The
+//! refusal fires while the input is still tiny. The enforced per-input bound
+//! (50 ms of the decoding thread's CPU time, see `bounded`) is the indirect
+//! allocation instrument — a huge allocation would have to zero/fill its
+//! memory and would blow the bound first. The
 //! `header_inflation_is_refused_or_bounded` test plants maximal counts
 //! explicitly and asserts the bound holds.
 //!
@@ -45,8 +46,32 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77
 const REL: RelationId = RelationId(1);
 const HOSTED_PATCH_ID: ObjectId = ObjectId([0xab; 32]);
 
-/// Per-input wall bound; also the documented allocation guard (module doc).
+/// Per-input CPU-time bound; also the documented allocation guard (module doc).
 const PER_INPUT_BOUND: Duration = Duration::from_millis(50);
+
+/// Charge one decode against [`PER_INPUT_BOUND`] by the CPU time its thread
+/// spent, not wall time: on a shared host wall time also charges the decoder
+/// for every slice another process took, which reddened the sibling Chronicle
+/// campaign with an unchanged binary (fgdb-g79t4). A hanging, super-linear or
+/// allocation-heavy decoder burns CPU, page faults included, so it is still
+/// caught. Where the kernel has no per-thread CPU accounting, wall time.
+fn bounded<T>(decode: impl FnOnce() -> T) -> (T, Duration) {
+    let (cpu, wall) = (thread_cpu_time(), Instant::now());
+    let value = decode();
+    let spent = match (cpu, thread_cpu_time()) {
+        (Some(before), Some(after)) => after.saturating_sub(before),
+        _ => wall.elapsed(),
+    };
+    (value, spent)
+}
+
+/// This thread's on-CPU time from the scheduler's own accounting (first field
+/// of `/proc/thread-self/schedstat`, nanoseconds; current to within a tick).
+fn thread_cpu_time() -> Option<Duration> {
+    let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let nanos = stat.split_whitespace().next()?.parse().ok()?;
+    Some(Duration::from_nanos(nanos))
+}
 const CAMPAIGNS: usize = 1_400;
 const DECODERS: usize = 6;
 
@@ -368,14 +393,16 @@ impl Outcomes {
 
 /// All six decoders over `bytes`, the whole fan-out inside the bound.
 fn fan_out(bytes: &[u8], outcomes: &mut [Outcomes; DECODERS]) {
-    let started = Instant::now();
-
-    let hosted = decode_block_with_properties(bytes);
-    let vertex = decode_patch(bytes);
-    let property = decode_property_patch(bytes);
-    let root = decode_root(bytes);
-    let manifest = decode_manifest(bytes);
-    let plain = decode_block(bytes);
+    let ((hosted, vertex, property, root, manifest, plain), elapsed) = bounded(|| {
+        (
+            decode_block_with_properties(bytes),
+            decode_patch(bytes),
+            decode_property_patch(bytes),
+            decode_root(bytes),
+            decode_manifest(bytes),
+            decode_block(bytes),
+        )
+    });
 
     outcomes[0].record(&hosted);
     outcomes[1].record(&vertex);
@@ -384,7 +411,6 @@ fn fan_out(bytes: &[u8], outcomes: &mut [Outcomes; DECODERS]) {
     outcomes[4].record(&manifest);
     outcomes[5].record(&plain);
 
-    let elapsed = started.elapsed();
     assert!(
         elapsed <= PER_INPUT_BOUND,
         "decode fan-out exceeded the per-input bound: {elapsed:?}; len={}",
@@ -492,10 +518,9 @@ fn every_strict_prefix_is_a_typed_refusal_and_one_reaches_the_structure() {
         for cut in 0..seed.len() {
             let mut prefix = seed.clone();
             prefix.truncate(cut);
-            let started = Instant::now();
-            let outcome = decode_own(family, &prefix);
+            let (outcome, elapsed) = bounded(|| decode_own(family, &prefix));
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
+                elapsed <= PER_INPUT_BOUND,
                 "{name}: prefix decode exceeded the bound at cut {cut}"
             );
             assert!(
@@ -537,10 +562,9 @@ fn header_inflation_is_refused_or_bounded() {
     }
     let mut outcomes = [Outcomes::default(); DECODERS];
     for pattern in &patterns {
-        let started = Instant::now();
-        fan_out(pattern, &mut outcomes);
+        let ((), elapsed) = bounded(|| fan_out(pattern, &mut outcomes));
         assert!(
-            started.elapsed() <= PER_INPUT_BOUND,
+            elapsed <= PER_INPUT_BOUND,
             "an inflated header burst the per-input bound; len={}",
             pattern.len()
         );
@@ -571,14 +595,13 @@ fn mutated_seeds_never_panic_any_decoder() {
         for (family, name, seed) in families(&s) {
             // Pristine keepalive: the owning decoder must still accept its
             // own real-encoder seed (Ok evidence for the anti-vacuity check).
-            let started = Instant::now();
-            let pristine = decode_own(family, seed);
+            let (pristine, elapsed) = bounded(|| decode_own(family, seed));
             assert!(
                 pristine.is_ok(),
                 "{name}: the real-encoder seed must decode"
             );
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
+                elapsed <= PER_INPUT_BOUND,
                 "{name}: seed decode exceeded the bound"
             );
             outcomes[family].calls += 1;
@@ -588,10 +611,9 @@ fn mutated_seeds_never_panic_any_decoder() {
                 let Some(mutant) = fuzz::mutate(op, &mut rng, seed) else {
                     continue;
                 };
-                let started = Instant::now();
-                fan_out(&mutant, &mut outcomes);
+                let ((), elapsed) = bounded(|| fan_out(&mutant, &mut outcomes));
                 assert!(
-                    started.elapsed() <= PER_INPUT_BOUND,
+                    elapsed <= PER_INPUT_BOUND,
                     "{name} op {op}: fan-out exceeded the bound; len={}",
                     mutant.len()
                 );
