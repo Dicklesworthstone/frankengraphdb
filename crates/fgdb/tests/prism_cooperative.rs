@@ -31,6 +31,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+#[path = "prism_cooperative/clustering.rs"]
+mod clustering;
 #[path = "prism_cooperative/connectivity.rs"]
 mod connectivity;
 #[path = "prism_cooperative/dijkstra.rs"]
@@ -600,11 +602,16 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
             quantum(1), yield_now).await.unwrap().rows.len(), 1);
         for call in [FnxCallSpec::triangles(),
             FnxCallSpec::clustering_coefficient()] {
-            assert!(!call.supports_cooperative_sealed_execution());
-            let mut forbidden = opt; forbidden.source_limits.max_work_units = 0;
-            assert!(matches!(db.execute_fnx_sealed_cooperative(&cx, &call, forbidden, memory(),
-                SealedLimits { max_image_bytes: 0, ..SealedLimits::default() }, quantum(1)).await,
-                Err(FnxSealedReadError::Execution(FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(_)))));
+            assert!(call.supports_cooperative_sealed_execution());
+            // Supported kernels still reject incompatible directed projections
+            // at preflight, rather than yielding or silently changing semantics.
+            let expected = call.execute_sealed(&cx, &graph,
+                opt.execution_limits, memory()).unwrap_err();
+            let actual = call.execute_sealed_cooperative(&cx, &graph,
+                opt.execution_limits, memory(), quantum(1),
+                || -> std::future::Ready<()> { panic!("invalid projection must not yield") })
+                .await.unwrap_err();
+            assert_eq!(actual.to_string(), expected.to_string());
         }
         let absent = FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None);
         assert!(matches!(absent.execute_sealed_cooperative(&cx, &graph, opt.execution_limits, memory(),
@@ -726,12 +733,14 @@ fn every_cooperative_checkpoint_cancels_and_every_suspension_can_be_dropped_with
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, false).await;
-        let opt = options(Directedness::Directed);
+        let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
         for call in [
             FnxCallSpec::single_source_shortest_path_length(VId(0), None),
             FnxCallSpec::pagerank(PageRankOptions::default()),
+            FnxCallSpec::triangles(),
+            FnxCallSpec::clustering_coefficient(),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -821,6 +830,8 @@ fn public_cooperative_calls_share_exact_source_preparation_and_keep_old_entrypoi
             "CALL fnx.single_source_shortest_path_length($source) YIELD distance AS hops,vertex AS id",
             "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD score AS rank,vertex AS id",
             "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD distance AS cost,vertex AS id",
+            "CALL fnx.triangles() YIELD triangles AS total,vertex AS id",
+            "CALL fnx.clustering_coefficient() YIELD score AS coefficient,vertex AS id",
         ] {
             let call = FnxCallSpec::bind(text, &params).unwrap();
             let prepared = call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
@@ -896,7 +907,11 @@ fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_res
             // test ran >30 min). A loose tolerance still converges genuinely
             // and exercises every checkpoint kind, over far fewer iterations.
             let pagerank = PageRankOptions::new(0.85, 100, 0.5, true).unwrap();
-            let mut calls = vec![FnxCallSpec::pagerank(pagerank)];
+            let mut calls = vec![
+                FnxCallSpec::pagerank(pagerank),
+                FnxCallSpec::triangles(),
+                FnxCallSpec::clustering_coefficient(),
+            ];
             if n != 0 {
                 calls.push(FnxCallSpec::single_source_shortest_path_length(
                     VId(0),
@@ -992,12 +1007,14 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, false).await;
-        let opt = options(Directedness::Directed);
+        let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
         for call in [
             FnxCallSpec::single_source_shortest_path_length(VId(0), None),
             FnxCallSpec::pagerank(PageRankOptions::default()),
+            FnxCallSpec::triangles(),
+            FnxCallSpec::clustering_coefficient(),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let measured = cx.with_checkpoint_probe(Arc::clone(&probe));
