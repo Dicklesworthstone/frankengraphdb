@@ -5,11 +5,21 @@
 //! frozen NDJSON contract is asserted with a dependency-free parser.
 //! Knobs: `CLI_FUZZ_SEEDS` (default 3, >=3 asserted), `CLI_FUZZ_ITERS`
 //! (default 86 per seed/family). Nine families execute at least 2,322 cases;
-//! the campaign asserts a 600-second wall bound. Measured envelopes:
+//! the campaign asserts a 600-second budget. Measured wall envelopes:
 //! 60.4s idle @1,548 invocations (IcyPeak-095150), 252.1s under concurrent
 //! batch load @1,548 (WildLantern-113651), 353.0s under load @2,322
 //! (bg_1, local run at ad425d95); 600s is 1.7x the worst observation.
-//! Fixtures stay in /tmp.
+//!
+//! The budget is charged in CPU time, not wall time (fgdb-3xygj): the
+//! kernel's accounting of this process plus every child it waited for. Wall
+//! time measured the host, not the CLI. The same 2,322 invocations took 382s
+//! alone and 873s at load average ~70. A hanging, super-linear or
+//! allocation-heavy CLI still burns CPU and still fails. Where /proc is
+//! absent the budget falls back to wall time. The 30-second per-invocation
+//! bound stays WALL, because a deadlocked child burns no CPU and only wall
+//! time can catch it. `CLI_FUZZ_CPU_BUDGET_SECS` may only LOWER the budget,
+//! for the control run that proves the assertion is live. Fixtures stay in
+//! /tmp.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -21,6 +31,77 @@ use robot_schema::ROBOT_SCHEMA;
 
 /// Exit codes the frozen contract admits; anything else aborts the campaign.
 const FROZEN_CODES: [i32; 5] = [0, 2, 3, 4, 5];
+
+/// The campaign's CPU budget in seconds; see the module doc.
+const CAMPAIGN_BUDGET_SECS: u64 = 600;
+
+/// Linux reports /proc/<pid>/stat times in USER_HZ ticks, an ABI constant
+/// of 100 per second on every architecture Linux supports.
+const USER_HZ: u64 = 100;
+
+/// Child CPU is accounted per PROCESS, and libtest runs tests on parallel
+/// threads of one process, so the campaign and the instrument law must not
+/// overlap or each would be charged the other's children.
+static PROCESS_CPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn exclusive_process_cpu() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_CPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// CPU charged to this process and every child it has waited for: utime +
+/// stime + cutime + cstime (fields 14-17 of /proc/self/stat). `None` without
+/// /proc; the caller then falls back to wall time. The command name (field 2)
+/// may contain spaces and parentheses, so the fields are read after its LAST
+/// closing parenthesis.
+fn process_tree_cpu() -> Option<Duration> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    // `rest` starts at field 3, so field n is at index n - 3.
+    let ticks = rest
+        .split_whitespace()
+        .skip(11)
+        .take(4)
+        .map(|field| field.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if ticks.len() != 4 {
+        return None;
+    }
+    let total: u64 = ticks.iter().sum();
+    Some(Duration::from_millis(total * 1000 / USER_HZ))
+}
+
+/// The instrument the campaign budget relies on: a child that burns CPU is
+/// charged, and one that only waits is not. Linux-only, where /proc exists.
+#[cfg(target_os = "linux")]
+#[test]
+fn campaign_budget_charges_child_cpu_and_not_waiting() {
+    use std::process::Stdio;
+    let _exclusive = exclusive_process_cpu();
+    let before = process_tree_cpu().expect("/proc/self/stat is readable on Linux");
+    let status = Command::new("timeout")
+        .args(["0.5", "yes"])
+        .stdout(Stdio::null())
+        .status()
+        .expect("run coreutils timeout/yes");
+    assert!(!status.success(), "timeout ends the busy child: {status:?}");
+    let burned = process_tree_cpu().unwrap() - before;
+    assert!(
+        burned >= Duration::from_millis(50),
+        "a CPU-burning child must be charged: {burned:?}"
+    );
+    let before = process_tree_cpu().unwrap();
+    let status = Command::new("sleep")
+        .arg("0.5")
+        .status()
+        .expect("run coreutils sleep");
+    assert!(status.success());
+    let slept = process_tree_cpu().unwrap() - before;
+    assert!(
+        slept <= Duration::from_millis(20),
+        "a waiting child must not be charged: {slept:?}"
+    );
+}
 use std::path::PathBuf;
 #[derive(Debug, PartialEq, Eq)]
 enum Json {
@@ -991,7 +1072,19 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
     let iterations: usize =
         std::env::var("CLI_FUZZ_ITERS").map_or(86, |s| s.parse().expect("iteration count"));
     assert!(seeds >= 3 && iterations >= 86);
+    // A budget knob may only tighten, for the control run proving the
+    // assertion is live; it never loosens the acceptance bound.
+    let budget = Duration::from_secs(std::env::var("CLI_FUZZ_CPU_BUDGET_SECS").map_or(
+        CAMPAIGN_BUDGET_SECS,
+        |s| {
+            s.parse::<u64>()
+                .expect("budget seconds")
+                .min(CAMPAIGN_BUDGET_SECS)
+        },
+    ));
     let schema = json(ROBOT_SCHEMA);
+    let _exclusive = exclusive_process_cpu();
+    let started_cpu = process_tree_cpu();
     let started = Instant::now();
     let ws = Workspace::new();
     assert_eq!(
@@ -1139,13 +1232,14 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         assert!(modes.iter().all(|count| *count > 0), "{command}: {modes:?}");
     }
     eprintln!("subcommand coverage={commands:?}; slowest invocation={slowest:?}");
+    let wall = started.elapsed();
+    let cpu = started_cpu.and_then(|before| Some(process_tree_cpu()? - before));
     eprintln!(
-        "campaign {total} invocations, {seeds} seeds, elapsed={:?}; fixtures={}",
-        started.elapsed(),
+        "campaign {total} invocations, {seeds} seeds, elapsed={wall:?}, cpu={cpu:?}; fixtures={}",
         ws.root.display()
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(600),
-        "campaign wall budget"
-    );
+    match cpu {
+        Some(cpu) => assert!(cpu < budget, "campaign CPU budget: {cpu:?} >= {budget:?}"),
+        None => assert!(wall < budget, "campaign wall budget (no /proc): {wall:?}"),
+    }
 }
