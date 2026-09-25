@@ -140,6 +140,49 @@ compare_runs() {
   return "$rc"
 }
 
+# --- the unit-suite coverage oracle -------------------------------------------
+# Which unit-test blocks every engine crate owes is read from cargo metadata:
+# one `<target> :: unittests <src path>` per lib or bin target with a test
+# harness. Neither a pinned count nor a path convention is used. "Every crate
+# has src/lib.rs" was such a convention. It stopped being true when 744a9484
+# deleted fgdb-cli's lib, and the gate then demanded a block that no tree could
+# produce. The label is the target name, because that names the test
+# executable. So fgdb-cli's bin reports as `fgdb :: unittests src/main.rs`,
+# beside the fgdb crate's `fgdb :: unittests src/lib.rs`; the path tells them
+# apart. A package with no such target prints `-`, and the check counts it as
+# missing.
+expected_unit_blocks() {
+  cargo metadata --locked --offline --no-deps --format-version 1 | jq -r '
+    (.workspace_root + "/crates/") as $crates
+    | .packages[]
+    | select(.manifest_path | startswith($crates))
+    | (.manifest_path | rtrimstr("Cargo.toml")) as $dir
+    | .name as $package
+    | [.targets[]
+       | select(.test and (.kind | any(. == "lib" or . == "rlib" or . == "proc-macro" or . == "bin")))]
+      as $units
+    | if ($units | length) == 0 then "\($package)\t-"
+      else $units[] | "\($package)\t\(.name | gsub("-"; "_")) :: unittests \(.src_path | ltrimstr($dir))"
+      end'
+}
+
+# Fails, naming each one, when an expected block is absent from a normalized
+# .bins set. A reported block is green: the aggregate check above it already
+# refused every non-ok result line.
+unit_blocks_reported() { # expected-tsv bins-file
+  local expected="$1" bins="$2" package block missing=0
+  while IFS=$'\t' read -r package block; do
+    if [ "$block" = "-" ]; then
+      echo "ERROR: $package has no lib or bin target with a unit-test harness" >&2
+      missing=$((missing + 1))
+    elif ! grep -qxF "$block" "$bins"; then
+      echo "ERROR: $package reported no green unit-test block '$block' — it did not run" >&2
+      missing=$((missing + 1))
+    fi
+  done <"$expected"
+  [ "$missing" -eq 0 ]
+}
+
 # The measured shared-target race has two narrow compiler-driver signatures:
 # rustc says outright that an `--extern` artifact no longer exists, while
 # rustdoc reports E0463 and prints the `--extern` artifact only in its failed
@@ -367,12 +410,50 @@ FIXTURE
       fails=$((fails + 1))
     fi
   done
+  # The coverage oracle has to go red too. Cases:
+  # - "whole": a bins set holding a lib block and a bin-only package's
+  #   main.rs block;
+  # - "bin-gone": the bin-only package never ran;
+  # - "lib-for-bin": the same label arrives on the wrong path, the fgdb /
+  #   fgdb-cli collision;
+  # - "no-target": a package with no unit-test harness.
+  printf 'fgdb-bigint\tfgdb_bigint :: unittests src/lib.rs\nfgdb-cli\tfgdb :: unittests src/main.rs\n' \
+    >"$d/unit-expected.tsv"
+  printf 'fgdb :: unittests src/main.rs\nfgdb_bigint :: doctest\nfgdb_bigint :: unittests src/lib.rs\n' \
+    >"$d/unit-whole.bins"
+  grep -v '^fgdb :: ' "$d/unit-whole.bins" >"$d/unit-bin-gone.bins"
+  sed 's#^fgdb :: unittests src/main\.rs$#fgdb :: unittests src/lib.rs#' "$d/unit-whole.bins" \
+    >"$d/unit-lib-for-bin.bins"
+  cp "$d/unit-whole.bins" "$d/unit-no-target.bins"
+  local coverage_case expect_coverage got_coverage expected_file
+  for coverage_case in whole:green bin-gone:red lib-for-bin:red no-target:red; do
+    expect_coverage="${coverage_case#*:}"
+    coverage_case="${coverage_case%%:*}"
+    expected_file="$d/unit-expected.tsv"
+    if [ "$coverage_case" = no-target ]; then
+      expected_file="$d/unit-expected-no-target.tsv"
+      { cat "$d/unit-expected.tsv"; printf 'fgdb-empty\t-\n'; } >"$expected_file"
+    fi
+    if unit_blocks_reported "$expected_file" "$d/unit-$coverage_case.bins" 2>/dev/null; then
+      got_coverage=green
+    else
+      got_coverage=red
+    fi
+    if [ "$got_coverage" = "$expect_coverage" ]; then
+      printf '    %-16s expected %-6s got %-6s OK\n' \
+        "unit-$coverage_case" "$expect_coverage" "$got_coverage"
+    else
+      printf '    %-16s expected %-6s got %-6s COVERAGE MUTANT SURVIVED\n' \
+        "unit-$coverage_case" "$expect_coverage" "$got_coverage"
+      fails=$((fails + 1))
+    fi
+  done
   if [ "$fails" -ne 0 ]; then
-    echo "ERROR: $fails determinism/classification controls failed" >&2
+    echo "ERROR: $fails determinism/classification/coverage controls failed" >&2
     echo "retained self-test evidence: $d" >&2
     return 1
   fi
-  gate_pass "determinism comparator mutants and Cargo artifact-race classifier controls"
+  gate_pass "determinism comparator mutants, Cargo artifact-race classifier and unit-suite coverage controls"
   echo "    retained self-test evidence: $d"
 }
 
@@ -448,6 +529,20 @@ PIN_BEFORE="$(source_pin)"
 HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo 'not-a-git-tree')"
 echo "    HEAD=$HEAD_BEFORE source=$PIN_BEFORE"
 
+# Derived before the long runs, so an unreadable manifest fails in seconds and
+# not after two workspace suites. The package count is checked against the
+# member list, so an empty or partial metadata read cannot shrink what is owed.
+echo "==> derive the unit-test blocks every engine crate owes (cargo metadata)"
+EXPECTED_UNITS="$EVIDENCE_DIR/expected-unit-blocks.tsv"
+expected_unit_blocks >"$EXPECTED_UNITS"
+CRATE_MEMBERS="$(sed -n 's#^ *"crates/\([a-z0-9-]*\)".*#\1#p' Cargo.toml | wc -l)"
+UNIT_PACKAGES="$(cut -f1 "$EXPECTED_UNITS" | LC_ALL=C sort -u | wc -l)"
+if [ "$UNIT_PACKAGES" -ne "$CRATE_MEMBERS" ] || [ "$CRATE_MEMBERS" -eq 0 ]; then
+  echo "ERROR: cargo metadata names $UNIT_PACKAGES crates/ packages; Cargo.toml lists $CRATE_MEMBERS" >&2
+  exit 1
+fi
+echo "    $(wc -l <"$EXPECTED_UNITS") unit-test blocks across $UNIT_PACKAGES crates"
+
 echo "==> prebuild workspace test binaries"
 cargo test --no-run --locked --workspace
 
@@ -507,17 +602,9 @@ fi
 # Coverage is derived from the workspace membership, never from a pinned count:
 # a hard-coded expected total is exactly the check that goes stale and starts
 # certifying a crate whose suite stopped running.
-echo "==> assert every engine crate actually reported a green lib suite"
-MISSING=0
-while read -r crate; do
-  [ -n "$crate" ] || continue
-  underscored="${crate//-/_}"
-  if ! grep -qE "^${underscored} :: unittests src/lib\.rs$" "$EVIDENCE_DIR/n1.bins"; then
-    echo "ERROR: $crate reported no green lib test block — it did not run" >&2
-    MISSING=$((MISSING + 1))
-  fi
-done < <(sed -n 's#^ *"crates/\([a-z0-9-]*\)".*#\1#p' Cargo.toml)
-[ "$MISSING" -eq 0 ] || { echo "retained evidence: $EVIDENCE_DIR" >&2; exit 1; }
+echo "==> assert every engine crate reported each green unit-test block it owes"
+unit_blocks_reported "$EXPECTED_UNITS" "$EVIDENCE_DIR/n1.bins" \
+  || { echo "retained evidence: $EVIDENCE_DIR" >&2; exit 1; }
 
 CRATES="$(sed -n 's#^ *"crates/\([a-z0-9-]*\)".*#\1#p' Cargo.toml | wc -l)"
 BLOCKS="$(wc -l <"$EVIDENCE_DIR/n1.bins")"
