@@ -204,6 +204,9 @@ impl WriteTxn {
         use fgdb_gql::algebra::GlaDirection;
 
         self.ensure_database(database)?;
+        // Direct snapshot access must retain the health fence previously
+        // enforced by edges_at(), even for empty or entirely staged adjacency.
+        database.ensure_readable()?;
         let snapshot = &database.snapshot;
         snapshot.check_frontier(self.basis)?;
         let direction = if incoming {
@@ -582,6 +585,111 @@ mod adjacency_overlay_tests {
                 }
             }
             txn.abort();
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn indexed_adjacency_preserves_real_commit_failure_fences() {
+        use crate::{DatabaseState, DerivedPublicationStage};
+        use fgdb_chronicle::commit::CrashPoint;
+
+        let ((), report) = run_async_under_lab(0xa91c_0033, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            for (crash, publication_failure) in [
+                (Some(CrashPoint::AfterMarkerBeforeD2), None),
+                (None, Some(DerivedPublicationStage::FoldCommittedTemplate)),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(RelationId(1));
+                for vid in 1..=3 {
+                    seed.create_vertex(VId(vid), vec![], vec![]);
+                }
+                seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+                db.write(&commit, seed).await.unwrap();
+                let view = db.read_session().unwrap();
+                let mut txn = db.begin(&txcx).unwrap();
+                txn.vertex(&db, VId(2)).unwrap();
+                let mut staged = WriteBatch::new(RelationId(1));
+                staged.add_edge(EId(20), VId(2), VId(3), vec![]);
+                txn.write(&mut db, staged).unwrap();
+                let expected_template = txn.prepared.as_ref().unwrap().template.clone();
+                let expected_reads = txn.read_set.borrow().clone();
+                let expected_expansions = txn.match_expansions.borrow().clone();
+                let basis = txn.basis();
+
+                let mut winner = WriteBatch::new(RelationId(1));
+                winner.create_vertex(VId(4), vec![], vec![]);
+                let prepared = db.prepare_write(winner).unwrap();
+                // Enter actual Chronicle and derived-publication failure paths;
+                // assigning a fake health flag would not exercise these fences.
+                assert!(db.commit_template(
+                    &commit, prepared.template, crash, publication_failure, None,
+                ).await.is_err());
+                let fence = db.state();
+                let assert_fence = |error: WriteTxnError| match (fence, error) {
+                    (
+                        DatabaseState::CommitOutcomeUnknown { published_frontier },
+                        WriteTxnError::Read(ReadError::CommitOutcomeUnknown {
+                            published_frontier: observed,
+                        }),
+                    ) => {
+                        assert_eq!(published_frontier, basis);
+                        assert_eq!(observed, basis);
+                        assert!(publication_failure.is_none());
+                    }
+                    (
+                        DatabaseState::NeedsAuthoritativeRecovery(expected),
+                        WriteTxnError::Read(ReadError::RecoveryRequired(observed)),
+                    ) => {
+                        assert_eq!(observed, expected);
+                        assert_eq!(observed.published_frontier, basis);
+                        assert_eq!(observed.durable_frontier, CommitSeq(basis.0 + 1));
+                        assert!(publication_failure.is_some());
+                    }
+                    (state, error) => panic!("wrong read fence: {state:?}: {error:?}"),
+                };
+                for incoming in [false, true] {
+                    // Cover stored rows, entirely staged incidence, and absence.
+                    for anchor in [VId(1), VId(2), VId(3), VId(999)] {
+                        let mut checkpoints = 0;
+                        let result = txn.adjacency_basis(
+                            &db, anchor, RelationId(1), incoming, &mut |_| {
+                                checkpoints += 1;
+                                Err(WriteTxnError::NoPreparedWrite)
+                            },
+                        );
+                        assert_fence(result.unwrap_err());
+                        assert_eq!(checkpoints, 0, "health refusal must precede index work");
+                        let result = if incoming {
+                            txn.in_neighbours(&db, anchor, RelationId(1))
+                        } else {
+                            txn.neighbours(&db, anchor, RelationId(1))
+                        };
+                        assert_fence(result.unwrap_err());
+                    }
+                }
+                assert_eq!(*txn.read_set.borrow(), expected_reads);
+                assert_eq!(*txn.match_expansions.borrow(), expected_expansions);
+                assert!(!txn.scanned_edges.get());
+                assert!(!txn.scanned_vertices.get());
+                assert_eq!(txn.staged.len(), 1);
+                assert_eq!(txn.prepared.as_ref().unwrap().template, expected_template);
+                assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                assert_eq!(txcx.outstanding_obligations(), 1);
+                assert_eq!(db.state(), fence);
+                // A previously admitted immutable view remains independently
+                // readable; this fix must not globally poison old generations.
+                assert_eq!(view.neighbours(VId(1), RelationId(1)).unwrap(), vec![VId(2)]);
+                assert_eq!(view.in_neighbours(VId(2), RelationId(1)).unwrap(), vec![VId(1)]);
+                txn.abort();
+                assert_eq!(txcx.outstanding_obligations(), 0);
+                let recovered = db.recover_authoritatively(&commit).await.unwrap();
+                assert_eq!(recovered.neighbours(VId(1), RelationId(1)).unwrap(), vec![VId(2)]);
+                assert!(recovered.edge(EId(20)).unwrap().is_none());
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
