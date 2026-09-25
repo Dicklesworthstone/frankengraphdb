@@ -497,8 +497,11 @@ fn untouched_scalars_use_exact_canonical_equality_not_encoding_length() {
 
 #[test]
 fn exact_limits_succeed_one_below_fails_and_checks_do_not_refresh_allowances() {
+    // This test measures a visible payload's real work charge. Preserved
+    // hidden payloads must not move signed refusal thresholds; the paired
+    // image tests in write_budget_noninterference cover that separate law.
     let properties = [(
-        SECRET,
+        P,
         CanonicalScalar::ucs_basic_text(&"s".repeat(4096)).unwrap(),
     )];
     let image = vertex(&[L, HIDDEN], &properties);

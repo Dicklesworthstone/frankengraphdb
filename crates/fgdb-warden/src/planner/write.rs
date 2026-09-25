@@ -10,6 +10,15 @@
 //! Sample fresh trusted time and checkpoint the permit again before publication.
 //! This module changes no storage, performs no I/O, and claims no raw Database
 //! enforcement, durable revocation, constraint checking, or timing isolation.
+//!
+//! Signed work measures the authorized logical image, not private preservation
+//! work. Adding unchanged hidden labels/properties must not move the caller's
+//! work-limit refusal threshold. Hidden fields still undergo canonical-shape
+//! validation, exact preservation checks and live permit polling; they are NOT
+//! omitted from either image. Physical scan/compare costs remain the trusted
+//! host's resource obligation, not a promise made by this logical work budget.
+//! This law applies to valid, scope-admitted images with unchanged hidden data;
+//! it does not declassify malformed images, target existence, or write conflicts.
 
 use super::{ExecutionPermit, WriteAccess};
 use crate::{Error, LimitDimension};
@@ -173,7 +182,13 @@ impl ExecutionPermit<'_, WriteAccess> {
                 self.admit_write_vertex(now_ms, image.source.labels)?;
                 self.admit_write_vertex(now_ms, image.destination.labels)?;
                 if image.source.id == image.destination.id {
-                    self.charge_write_work(now_ms, image.source.labels.len() as u128)?;
+                    let visible = image
+                        .source
+                        .labels
+                        .iter()
+                        .filter(|label| self.program.allows_label(**label))
+                        .count();
+                    self.charge_write_work(now_ms, visible as u128)?;
                     if image.source.labels != image.destination.labels {
                         return Err(Error::InvalidWriteImage);
                     }
@@ -200,6 +215,35 @@ impl ExecutionPermit<'_, WriteAccess> {
             return Err(Error::LimitExceeded(LimitDimension::Work));
         };
         self.charge_work_at(now_ms, units)
+    }
+
+    // The caller's capability may attenuate MaxWork. Charging hidden image
+    // fields there would let a holder binary-search their count or byte size.
+    // Polling remains mandatory even when no observable work is charged.
+    fn charge_label_work(
+        &mut self,
+        now_ms: u64,
+        label: LabelId,
+        units: u128,
+    ) -> Result<(), Error> {
+        if self.program.allows_label(label) {
+            self.charge_write_work(now_ms, units)
+        } else {
+            self.checkpoint_at(now_ms)
+        }
+    }
+
+    fn charge_property_work(
+        &mut self,
+        now_ms: u64,
+        key: PropertyKeyId,
+        units: u128,
+    ) -> Result<(), Error> {
+        if self.program.allows_property(key) {
+            self.charge_write_work(now_ms, units)
+        } else {
+            self.checkpoint_at(now_ms)
+        }
     }
 
     fn admit_touched_labels(&mut self, now_ms: u64, labels: &[LabelId]) -> Result<(), Error> {
@@ -240,16 +284,19 @@ impl ExecutionPermit<'_, WriteAccess> {
         // Count every before/after endpoint admission, including self loops.
         self.charge_nodes_at(now_ms, 1)?;
         let mut previous = None;
+        let mut visible = 0_u128;
         for &label in labels {
-            self.charge_work_at(now_ms, 1)?;
+            self.charge_label_work(now_ms, label, 1)?;
             if previous.is_some_and(|old| old >= label) {
                 return Err(Error::InvalidWriteImage);
             }
+            visible += u128::from(self.program.allows_label(label));
             previous = Some(label);
         }
-        // Charge the complete bounded CNF domain BEFORE testing the labels.
+        // The original labels still decide authorization. Only the visible
+        // label domain participates in the holder-observable logical charge.
         let clauses = self.program.label_clauses.len() as u128;
-        self.charge_write_work(now_ms, 1 + clauses * (1 + labels.len() as u128))?;
+        self.charge_write_work(now_ms, 1 + clauses * (1 + visible))?;
         if !self.program.allows_vertex(labels) {
             return Err(Error::ScopeDenied);
         }
@@ -263,7 +310,7 @@ impl ExecutionPermit<'_, WriteAccess> {
     ) -> Result<(), Error> {
         let mut previous = None;
         for (key, scalar) in properties {
-            self.charge_work_at(now_ms, 1)?;
+            self.charge_property_work(now_ms, *key, 1)?;
             if previous.is_some_and(|old| old >= *key) {
                 return Err(Error::InvalidWriteImage);
             }
@@ -283,7 +330,14 @@ impl ExecutionPermit<'_, WriteAccess> {
         touched: &[LabelId],
     ) -> Result<(), Error> {
         while !before.is_empty() || !after.is_empty() {
-            self.charge_write_work(now_ms, 1 + self.program.label_clauses.len() as u128)?;
+            let label = before
+                .first()
+                .into_iter()
+                .chain(after.first())
+                .copied()
+                .min()
+                .expect("nonempty merge");
+            self.charge_label_work(now_ms, label, 1 + self.program.label_clauses.len() as u128)?;
             let changed = match (before.first(), after.first()) {
                 (Some(old), Some(new)) if old == new => {
                     before = &before[1..];
@@ -322,7 +376,14 @@ impl ExecutionPermit<'_, WriteAccess> {
         touched: &[PropertyKeyId],
     ) -> Result<(), Error> {
         while !before.is_empty() || !after.is_empty() {
-            self.charge_work_at(now_ms, 1)?;
+            let key = before
+                .first()
+                .map(|(key, _)| *key)
+                .into_iter()
+                .chain(after.first().map(|(key, _)| *key))
+                .min()
+                .expect("nonempty merge");
+            self.charge_property_work(now_ms, key, 1)?;
             match (before.first(), after.first()) {
                 (Some((old_key, old)), Some((new_key, new))) if old_key == new_key => {
                     if touched.binary_search(old_key).is_err() {
@@ -334,8 +395,9 @@ impl ExecutionPermit<'_, WriteAccess> {
                             .map_err(|_| Error::InvalidWriteImage)?;
                         let units = (old_len as u128 + new_len as u128)
                             .div_ceil(COMPARE_BYTES_PER_UNIT as u128);
-                        self.charge_write_work(now_ms, units)?;
-                        // Exact canonical equality, never a digest surrogate.
+                        self.charge_property_work(now_ms, *old_key, units)?;
+                        // Exact canonical equality, including HIDDEN values:
+                        // only accounting is masked, never the preservation law.
                         if old != new {
                             return Err(Error::InvalidWriteImage);
                         }
