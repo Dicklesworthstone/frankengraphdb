@@ -5,6 +5,9 @@ use super::{GraphSetOperation, GraphSetQuantifier};
 use crate::GlaExecutionEvent;
 use core::cmp::Ordering;
 
+mod cursor;
+pub(super) use cursor::SortedMerge;
+
 pub(super) fn sort<T, E, C, F>(rows: &mut [T], control: &mut C, compare: &mut F) -> Result<(), E>
 where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -64,8 +67,8 @@ where
 }
 
 pub(super) fn combine<T, E, C, F>(
-    mut left: Vec<T>,
-    mut right: Vec<T>,
+    left: Vec<T>,
+    right: Vec<T>,
     operation: GraphSetOperation,
     quantifier: GraphSetQuantifier,
     control: &mut C,
@@ -75,61 +78,11 @@ where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,
     F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
 {
-    sort(&mut left, control, compare)?;
-    sort(&mut right, control, compare)?;
-    if quantifier == GraphSetQuantifier::Distinct {
-        // DISTINCT EXCEPT must remove ALL occurrences of any right-side value.
-        // Deduplicating only the difference of two bags would be incorrect.
-        unique(&mut left, control, compare)?;
-        unique(&mut right, control, compare)?;
-    }
-    let mut left = left.into_iter().peekable();
-    let mut right = right.into_iter().peekable();
+    let mut merge = SortedMerge::new(left, right, operation, quantifier, control, compare)?;
     let mut result = Vec::new();
-    loop {
-        control(GlaExecutionEvent::Work)?;
-        let order = match (left.peek(), right.peek()) {
-            (None, None) => break,
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(a), Some(b)) => compare(a, b, control)?,
-        };
-        let next = match (operation, order) {
-            (GraphSetOperation::Union, Ordering::Less) => left.next(),
-            (GraphSetOperation::Union, Ordering::Greater) => right.next(),
-            (GraphSetOperation::Union, Ordering::Equal) => {
-                if quantifier == GraphSetQuantifier::Distinct {
-                    let _ = right.next();
-                }
-                left.next()
-            }
-            (GraphSetOperation::Intersect, Ordering::Equal) => {
-                let _ = right.next();
-                left.next()
-            }
-            (GraphSetOperation::Intersect, Ordering::Less) => {
-                let _ = left.next();
-                None
-            }
-            (GraphSetOperation::Intersect, Ordering::Greater) => {
-                let _ = right.next();
-                None
-            }
-            (GraphSetOperation::Except, Ordering::Less) => left.next(),
-            (GraphSetOperation::Except, Ordering::Equal) => {
-                let _ = left.next();
-                let _ = right.next();
-                None
-            }
-            (GraphSetOperation::Except, Ordering::Greater) => {
-                let _ = right.next();
-                None
-            }
-        };
-        if let Some(row) = next {
-            control(GlaExecutionEvent::ScratchEntry)?;
-            result.push(row);
-        }
+    while let Some(row) = merge.next_with_control(control, compare)? {
+        control(GlaExecutionEvent::ScratchEntry)?;
+        result.push(row);
     }
     Ok(result)
 }
