@@ -2,7 +2,7 @@
 //! No neighbor vector, new index, or per-query graph representation is built.
 
 use super::*;
-use crate::gql_exec::source::IndexMap;
+use crate::gql_exec::source::{AdjacencyIndex, IndexMap};
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
 
@@ -27,24 +27,47 @@ pub(crate) fn next_from_view<C>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
     cx.with_restriction(|| {
-        let index = &view.snapshot.adjacency_index;
-        let result = match direction {
-            GlaDirection::Forward => successor(&index.outgoing, endpoint, after, control),
-            GlaDirection::Reverse => successor(&index.incoming, endpoint, after, control),
-            GlaDirection::Undirected => (|| {
-                let left = successor(&index.outgoing, endpoint, after, control)?;
-                let right = successor(&index.incoming, endpoint, after, control)?;
+        view.snapshot
+            .adjacency_index
+            .next_incident_edge(endpoint, direction, after, control)
+            .map_err(|error| {
+                EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error))
+            })
+    })
+}
+
+impl AdjacencyIndex {
+    /// Seek the next incident identity without materializing the graph or an
+    /// incidence list. Shared by query streams and transaction overlay reads.
+    ///
+    /// These are historical candidates, not live rows. Every caller must
+    /// resolve the winning statement at its admitted cut and recheck relation
+    /// and incidence before treating the identity as an observation. This
+    /// method grants no snapshot or query authority and owns no cursor state.
+    pub(crate) fn next_incident_edge<C>(
+        &self,
+        endpoint: VId,
+        direction: GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, C> {
+        match direction {
+            GlaDirection::Forward => successor(&self.outgoing, endpoint, after, control),
+            GlaDirection::Reverse => successor(&self.incoming, endpoint, after, control),
+            GlaDirection::Undirected => {
+                let left = successor(&self.outgoing, endpoint, after, control)?;
+                let right = successor(&self.incoming, endpoint, after, control)?;
                 // Strict > after on both sides deduplicates the same EId in
                 // both faces (self loops) without suppressing parallel edges.
                 Ok(match (left, right) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 })
-            })(),
-        };
-        result.map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))
-    })
+            }
+        }
+    }
 }
+
 fn successor<C>(
     face: &IndexMap<VId, IndexMap<EId, ()>>,
     endpoint: VId,
@@ -156,5 +179,66 @@ mod tests {
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn indexed_candidates_preserve_identity_boundaries_and_skip_unrelated_graph() {
+        use fgdb_strata::AdjacencyEntry;
+
+        let entry = |eid, src, dst| AdjacencyEntry {
+            eid: EId(eid),
+            src: VId(src),
+            dst: VId(dst),
+            relation: RelationId(1),
+            created_at: CommitSeq(1),
+            retired_at: None,
+        };
+        let mut rows = vec![
+            entry(0, 0, 1),
+            entry(7, 0, 1),
+            entry(8, 2, 0),
+            entry(u128::MAX, 0, 0),
+        ];
+        for id in 100..4196 {
+            rows.push(entry(id, id, id + 1));
+        }
+        let index = AdjacencyIndex::build(&[rows]);
+        for (direction, expected) in [
+            (GlaDirection::Forward, vec![EId(0), EId(7), EId(u128::MAX)]),
+            (GlaDirection::Reverse, vec![EId(8), EId(u128::MAX)]),
+            (
+                GlaDirection::Undirected,
+                vec![EId(0), EId(7), EId(8), EId(u128::MAX)],
+            ),
+        ] {
+            let mut after = None;
+            let mut actual = Vec::new();
+            let mut work = 0;
+            loop {
+                let next = index
+                    .next_incident_edge(VId(0), direction, after, &mut |_| {
+                        work += 1;
+                        Ok::<_, core::convert::Infallible>(())
+                    })
+                    .unwrap();
+                let Some(eid) = next else { break };
+                assert!(after.is_none_or(|previous| previous < eid));
+                actual.push(eid);
+                after = Some(eid);
+            }
+            assert_eq!(actual, expected);
+            assert!(work < 256, "an incidence seek scanned unrelated rows: {work}");
+        }
+        assert_eq!(
+            index
+                .next_incident_edge(
+                    VId(u128::MAX),
+                    GlaDirection::Undirected,
+                    None,
+                    &mut |_| Ok::<_, core::convert::Infallible>(()),
+                )
+                .unwrap(),
+            None
+        );
     }
 }
