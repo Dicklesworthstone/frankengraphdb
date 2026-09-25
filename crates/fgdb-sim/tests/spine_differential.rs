@@ -1863,17 +1863,20 @@ fn root_slot_cancellation_leaves_the_borrowed_handle_fenced_and_recoverable() {
         let cx = &cx;
         create_genesis(cx, &dir).await;
 
-        // Ten durability boundaries precede derived publication for this
-        // reopened database: capsule D1, capsules directory, commit-log D2,
-        // database directory, then three BlockStore publication barriers
-        // (staging file plus blocks directory, fgdb-tvg8.1); the root-slot
-        // barrier is eleventh. The pending-path observation below
-        // independently pins that ordinal to manifest.root before the write
-        // future is dropped, so protocol drift cannot silently cancel a
-        // different operation.
+        // Nine eligible durability boundaries (a flush with dirty sectors, or
+        // a directory sync with pending dirents) precede the root slot for
+        // this reopened database: capsule D1, capsules directory, commit-log
+        // D2, database directory (Chronicle's reinforcing re-syncs find clean
+        // files and are not eligible); Strata's block batch, its staging inode
+        // plus the blocks-directory barrier (fgdb-tvg8.1); then the root and
+        // manifest published together, two staging inodes plus one
+        // blocks-directory barrier (fgdb-90i03). The root-slot barrier is
+        // tenth. The pending-path observation below independently pins that
+        // ordinal to manifest.root before the write future is dropped, so
+        // protocol drift cannot silently cancel a different operation.
         let vfs = FaultVfs::unix_with_clock(
             FaultPlan {
-                latency: Trigger::At(11),
+                latency: Trigger::At(10),
                 latency_micros: 60_000_000,
                 ..FaultPlan::faultless()
             },

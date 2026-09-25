@@ -1822,6 +1822,32 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
+        let verified = self.verify_root(cx, root, receipts).await?;
+        let published = self
+            .put_object_with_steps(
+                StoredObjectKind::Root,
+                cx,
+                &verified.bytes,
+                None,
+                || {},
+                || {},
+            )
+            .await
+            .map(PartitionRootVersion)?;
+        receipts.root_memo = Some(verified.memo);
+        Ok(published)
+    }
+
+    /// Run every root-scope admission check [`Self::put_root_verified`] runs,
+    /// without writing anything. The result can be published only through
+    /// [`Self::publish_root_and_manifest`], and the verification memo reaches
+    /// the receipts only after that publication succeeds.
+    pub async fn verify_root(
+        &self,
+        cx: &CommitCx,
+        root: &crate::root::PartitionRoot,
+        receipts: &mut PublishReceipts,
+    ) -> Result<VerifiedRoot, StoreError> {
         let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
         // Resume after the prefix this handle already verified, if this root
         // extends it exactly; otherwise verify from the first reference.
@@ -1898,17 +1924,55 @@ impl<V: Vfs> BlockStore<V> {
             }
             verified_patches.push(*reference);
         }
-        let published = self
-            .put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
-            .await
-            .map(PartitionRootVersion)?;
-        receipts.root_memo = Some(RootMemo {
-            partition: root.partition,
-            blocks: verified_blocks,
-            chain_heads,
-            patches: verified_patches,
-        });
-        Ok(published)
+        let id = StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &bytes);
+        Ok(VerifiedRoot {
+            id: PartitionRootVersion(id),
+            bytes,
+            memo: RootMemo {
+                partition: root.partition,
+                blocks: verified_blocks,
+                chain_heads,
+                patches: verified_patches,
+            },
+        })
+    }
+
+    /// Publish a verified root together with the manifest that names it: both
+    /// inodes are staged and synced with their syncs in flight together, each
+    /// one's durable bytes are read back, both are renamed, and one directory
+    /// barrier makes both names durable. That is the protection the block
+    /// batch gives its objects, in place of each object's own post-rename sync
+    /// and directory barrier (fgdb-90i03). Neither object is reachable until
+    /// the root slot names the manifest, which the caller publishes only after
+    /// this returns, so publishing them together orders nothing wrongly.
+    ///
+    /// `records` builds the manifest from the root's identity. Returns the
+    /// manifest identity and its encoded length.
+    pub async fn publish_root_and_manifest(
+        &self,
+        cx: &CommitCx,
+        root: VerifiedRoot,
+        records: &[crate::manifest::ManifestRecord],
+        receipts: &mut PublishReceipts,
+    ) -> Result<(crate::manifest::ManifestVersion, usize), StoreError> {
+        let manifest =
+            crate::manifest::encode_manifest(records).map_err(StoreError::MalformedManifest)?;
+        let manifest_id =
+            StoredObjectKind::Manifest.identity(self.k_oid.expose(), self.namespace, &manifest);
+        let VerifiedRoot { id, bytes, memo } = root;
+        let mut batch = self.publication_batch(cx, receipts, None)?;
+        batch
+            .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
+            .await?;
+        batch
+            .put_object(cx, StoredObjectKind::Manifest, manifest_id, &manifest)
+            .await?;
+        batch.finish(cx).await?;
+        receipts.root_memo = Some(memo);
+        Ok((
+            crate::manifest::ManifestVersion(manifest_id),
+            manifest.len(),
+        ))
     }
 
     /// Load the partition root named by `id`, using the root format's exact byte
@@ -2104,6 +2168,22 @@ pub struct PublishReceipts {
     /// Taken on entry and stored back only after a successful publication, so
     /// any refusal falls back to full verification next time.
     root_memo: Option<RootMemo>,
+}
+
+/// A partition root that passed every root-scope admission check and has not
+/// been written yet ([`BlockStore::verify_root`]).
+#[derive(Debug)]
+pub struct VerifiedRoot {
+    id: PartitionRootVersion,
+    bytes: Vec<u8>,
+    memo: RootMemo,
+}
+
+impl VerifiedRoot {
+    /// The identity the root will be stored under.
+    pub fn id(&self) -> PartitionRootVersion {
+        self.id
+    }
 }
 
 /// See [`PublishReceipts::root_memo`].

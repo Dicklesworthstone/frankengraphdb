@@ -3615,14 +3615,17 @@ impl<V: Vfs + Clone> Database<V> {
             })?;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishPartitionRoot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let root_id = self
+        // Every root-scope law runs here. The root itself is written below,
+        // together with the manifest that names it (fgdb-90i03).
+        let verified_root = self
             .store
-            .put_root_verified(cx, &root, &mut self.receipts)
+            .verify_root(cx, &root, &mut self.receipts)
             .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
+        let root_id = verified_root.id();
         // The manifest names the published root (fgdb-63w2) and binds it to
         // the chain commitment at this very commit (fgdb-90hw): the durable
         // path from this directory to its partition advances in the same
@@ -3633,20 +3636,21 @@ impl<V: Vfs + Clone> Database<V> {
             .expect("one root is one canonical record");
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let manifest = self
+        // Root and manifest share one concurrent inode sync, each one's
+        // durable read-back, and one directory barrier. Neither is reachable
+        // until the slot below names the manifest.
+        let (manifest, manifest_len) = self
             .store
-            .put_manifest(cx, &manifest_records)
+            .publish_root_and_manifest(cx, verified_root, &manifest_records, &mut self.receipts)
             .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
+        let manifest_len = manifest_len as u64;
         // The slot advances in the same publish (fgdb-ge6a): a crash before
         // this line leaves the slot exactly one publication behind, which is
         // the shape open() heals; there is no window where it runs ahead.
-        let manifest_len = encode_manifest(&manifest_records)
-            .map(|bytes| bytes.len() as u64)
-            .expect("records_of already proved these records canonical");
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishRootSlot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         self.slot_store
