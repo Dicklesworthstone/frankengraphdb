@@ -16,7 +16,7 @@
 //! reopens it.
 //!
 //! ```
-//! # use asupersync::{Budget, runtime::RuntimeBuilder};
+//! # use asupersync::Budget;
 //! # use fgdb::{Database, DatabaseKeys, WriteBatch};
 //! # use fgdb_delta_types::RelationId;
 //! # use fgdb_types::context::PurposeContexts;
@@ -28,7 +28,7 @@
 //! #     DatabaseSecurityNamespaceId([0x77; 32]),
 //! #     [0x3c; 32],
 //! # );
-//! # let runtime = RuntimeBuilder::new().build().expect("production runtime");
+//! # let runtime = fgdb::runtime_builder().build().expect("production runtime");
 //! # let root = runtime.request_cx_with_budget(Budget::INFINITE);
 //! # let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
 //! # let path = &path;
@@ -213,6 +213,20 @@ use std::sync::Arc;
 /// a second dependency.
 pub use fgdb_chronicle::commit::CrashPoint;
 pub use fgdb_strata::store::BlockStoreCrashPoint;
+
+/// The runtime the `fgdb` CLI and benchmarks run a database under: asupersync's
+/// default runtime plus a blocking pool for filesystem I/O.
+///
+/// A commit's Strata objects are synced with all of their syncs in flight at
+/// once (`BlockPublicationBatch::flush`), and each in-flight sync needs its own
+/// pool worker to overlap the others. A runtime without a blocking pool is
+/// equally correct, but asupersync then runs every sync inline, one at a time,
+/// on the scheduler thread; the lab runtime relies on exactly that.
+#[must_use]
+pub fn runtime_builder() -> asupersync::runtime::RuntimeBuilder {
+    asupersync::runtime::RuntimeBuilder::new()
+        .blocking_threads(0, fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT)
+}
 
 /// Object kind for a committed effect capsule.
 ///
@@ -3571,6 +3585,15 @@ impl<V: Vfs + Clone> Database<V> {
                     source: Box::new(RebuildError::from(error)),
                 })?;
         }
+        // The edge blocks and their property patches become canonical inside
+        // this stage, their inode syncs in flight together.
+        publication
+            .flush(cx)
+            .await
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::from(error)),
+            })?;
         recovery.failed_stage = DerivedPublicationStage::PublishVertexPatches;
         self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
         Self::fail_publication_if_requested(recovery, publication_failure)?;

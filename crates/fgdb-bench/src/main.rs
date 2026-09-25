@@ -2,13 +2,12 @@
 //! production runtime authority, drive the shapes, publish NDJSON.
 
 use asupersync::Budget;
-use asupersync::runtime::RuntimeBuilder;
 use fgdb_bench::{emit, run_shape};
 use fgdb_types::context::PurposeContexts;
 
 fn main() {
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
-    let runtime = RuntimeBuilder::new().build().expect("runtime builds");
+    let runtime = fgdb::runtime_builder().build().expect("runtime builds");
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let query_cx = contexts.query();

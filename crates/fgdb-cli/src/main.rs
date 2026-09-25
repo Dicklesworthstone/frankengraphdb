@@ -10,7 +10,7 @@ mod scrub;
 mod stream;
 mod transaction;
 
-use asupersync::{Budget, runtime::RuntimeBuilder};
+use asupersync::Budget;
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphPath, GraphValue};
@@ -694,7 +694,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             | "compact" | "scrub" | "import-csv"),
         ) => {
             let mut options = parse(&args[1..], command)?;
-            let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
+            let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             runtime.block_on(async {

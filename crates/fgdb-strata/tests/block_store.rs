@@ -1308,6 +1308,139 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
     });
 }
 
+/// Distinct single-entry blocks, six more than one batch flush holds.
+fn more_blocks_than_one_flush() -> (Vec<Vec<u8>>, Vec<DeltaBlockVersion>) {
+    let count = u128::try_from(fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT).expect("fits") + 6;
+    let blocks: Vec<Vec<u8>> = (0..count)
+        .map(|i| encode_block(0, None, &[entry(i + 1, i + 2, 1)]).expect("block"))
+        .collect();
+    let ids = blocks
+        .iter()
+        .map(|bytes| DeltaBlockVersion(block_id(&K_OID, NAMESPACE, bytes)))
+        .collect();
+    (blocks, ids)
+}
+
+/// **A BATCH NAMES NO OBJECT BEFORE ITS STAGED SYNCS, AND REWRITES WHAT A CRASH
+/// LEFT STAGED.** A batch writes up to `BATCH_SYNCS_IN_FLIGHT` staging inodes,
+/// syncs them together, and only then renames them to canonical names. More
+/// objects than one flush holds force a flush mid-batch; crashing that flush
+/// after its syncs but before its renames must leave every one of its objects
+/// without a canonical name, only noncanonical staging inodes. A clean retry
+/// must rewrite those leftovers, not refuse them, and leave none behind.
+#[test]
+fn a_batch_names_no_object_before_its_staged_syncs_and_rewrites_leftover_staging() {
+    use fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT;
+    let dir = scratch_dir("batch-flush-window");
+    under_lab(0x9_111, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store");
+        let staging_names = || {
+            std::fs::read_dir(dir.join(BLOCK_DIR))
+                .expect("blocks directory")
+                .map(|entry| entry.expect("entry").file_name())
+                .filter(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".block-publication.staging.")
+                })
+                .count()
+        };
+        let (blocks, ids) = more_blocks_than_one_flush();
+
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(
+                &cx,
+                &mut receipts,
+                Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
+            )
+            .expect("batch");
+        let mut crashed_at = None;
+        for (at, bytes) in blocks.iter().enumerate() {
+            if let Err(error) = batch.put_verified(&cx, bytes, None).await {
+                crashed_at = Some((at, error));
+                break;
+            }
+        }
+        let Some((at, error)) = crashed_at else {
+            panic!("more objects than one flush holds never flushed mid-batch");
+        };
+        assert_eq!(
+            at, BATCH_SYNCS_IN_FLIGHT,
+            "the full flush runs at the next put"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("complete staging inode before canonical publication"),
+            "wrong crash instant: {error}"
+        );
+        drop(batch);
+        for id in &ids {
+            assert!(
+                !store.path(id.0).exists(),
+                "a staged object was named before its flush renamed it"
+            );
+            assert!(!receipts.holds(*id));
+        }
+        assert_eq!(staging_names(), BATCH_SYNCS_IN_FLIGHT);
+
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("retry");
+        for bytes in &blocks {
+            batch
+                .put_verified(&cx, bytes, None)
+                .await
+                .expect("restaged");
+        }
+        batch.finish(&cx).await.expect("durable batch");
+        for (id, bytes) in ids.iter().zip(&blocks) {
+            assert!(receipts.holds(*id));
+            assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
+        }
+        assert_eq!(
+            staging_names(),
+            0,
+            "a flush renames every staging inode away"
+        );
+    });
+}
+
+/// The same over-full batch under a runtime with a blocking pool, where each
+/// flush's syncs are genuinely in flight together (the lab completes them
+/// inline, one per poll): every sync must be driven to completion and every
+/// object published under its receipt.
+#[test]
+fn a_batch_publishes_every_object_with_its_syncs_on_a_blocking_pool() {
+    let dir = scratch_dir("batch-blocking-pool");
+    let runtime = asupersync::runtime::RuntimeBuilder::new()
+        .blocking_threads(0, fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT)
+        .build()
+        .expect("runtime");
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    runtime.block_on(async {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("store");
+        let (blocks, ids) = more_blocks_than_one_flush();
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("batch");
+        for bytes in &blocks {
+            batch.put_verified(&cx, bytes, None).await.expect("staged");
+        }
+        batch.finish(&cx).await.expect("durable batch");
+        for (id, bytes) in ids.iter().zip(&blocks) {
+            assert!(receipts.holds(*id));
+            assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
+        }
+    });
+}
+
 /// **A receipt really is a filesystem skip, and it is scoped to what this
 /// session proved.** Damage planted over a receipted block's file makes the
 /// plain idempotent put refuse (`DamagedExisting`) — it re-reads the file —

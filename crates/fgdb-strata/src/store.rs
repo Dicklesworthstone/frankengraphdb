@@ -45,6 +45,9 @@
 //! then moves that complete inode to the content-addressed path and syncs the
 //! directory. An identical loser can therefore observe only absence or the
 //! winner's complete bytes — never the winner halfway through `write_all`.
+//! A publication batch writes all of a commit's staging inodes before it syncs
+//! any, then syncs them together, so the filesystem can retire those syncs in
+//! shared journal commits instead of one device flush per object.
 //!
 //! **READS USE THE SHARED STORAGE AUTHORITY CONTRACT.** Every synchronous read
 //! accepts `&impl StorageReadCx` and performs its filesystem work under that
@@ -92,9 +95,12 @@ pub const BLOCK_DIR: &str = "strata-blocks";
 /// instant at which a complete immutable inode gains its canonical name.
 const PUBLICATION_LOCK_FILE: &str = ".block-publication.lock";
 
-/// The sole noncanonical inode name used while holding the publication permit.
-/// A crash may leave it incomplete; the next permit owner rewrites it before it
-/// can become canonical.
+/// The noncanonical inode name a single-object publication stages under; a
+/// publication batch stages its n-th object under this name suffixed `.n`
+/// (n < [`BATCH_SYNCS_IN_FLIGHT`]). Only the permit owner touches them. A crash
+/// may leave any of them incomplete; the next permit owner to use a name
+/// rewrites it before it can become canonical, and nothing reads a staging
+/// name as an object.
 const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
 
 /// The largest persisted BLOCK, vertex patch, edge-property patch, or
@@ -130,7 +136,7 @@ pub enum BlockStoreCrashPoint {
     /// The staging inode is complete and durable, but it has not yet acquired
     /// the content-addressed canonical name.
     AfterStagingFileSyncBeforePublication,
-    /// A batch staging inode has all offered bytes, before its inode sync.
+    /// Every staged batch inode has all offered bytes, before their syncs.
     AfterBatchStagingWrite,
     /// The last batch rename completed, before the shared directory barrier.
     AfterBatchRenames,
@@ -255,6 +261,74 @@ impl StoredObjectKind {
             Self::Manifest => crate::manifest::manifest_id(k_oid, namespace, bytes),
         }
     }
+
+    /// The largest object of this family the store will write.
+    ///
+    /// fgdb-a7sz: each stored family admits against ITS OWN format ceiling.
+    /// Roots encode up to MAX_ENCODED_ROOT_BYTES (the layout's declared
+    /// MAX_ROOT_BLOCKS/MAX_ROOT_PATCHES x REF_LEN, which reads via get_root
+    /// have always admitted) -- admitting them against the block-derived
+    /// bound fenced every handle whose root reference enumeration
+    /// legitimately outgrew 16 KiB, and rebuild re-offered the same lawful
+    /// root forever: the directory admitted no recovery.
+    fn stored_limit(self) -> u64 {
+        match self {
+            Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+            _ => MAX_STORED_OBJECT_BYTES,
+        }
+    }
+}
+
+/// Objects a publication batch stages before it flushes them. It bounds the
+/// descriptors a batch holds open, and is the most inode syncs one flush has
+/// in flight at once.
+pub const BATCH_SYNCS_IN_FLIGHT: usize = 64;
+
+/// One batch object whose inode is fully written but not yet synced.
+struct StagedObject<F> {
+    file: F,
+    /// The noncanonical name of a new inode, renamed to `path` once synced;
+    /// `None` for a canonical inode that already existed and is re-synced.
+    staging: Option<PathBuf>,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    limit: u64,
+}
+
+/// Sync every file with all of the syncs in flight at once. Under a runtime
+/// with a blocking pool each sync runs on its own worker, and the filesystem
+/// retires concurrent syncs in shared journal commits; without a pool (the
+/// lab runtime) each completes inline on its first poll, in order. Every sync
+/// runs to completion before the first failure in order is reported, so none
+/// is abandoned mid-flight.
+async fn sync_files_together<'f, F: VfsFile + 'f>(
+    cx: &CommitCx,
+    files: impl Iterator<Item = &'f F>,
+) -> std::io::Result<()> {
+    let mut syncs: Vec<_> = files
+        .map(|file| (Box::pin(file.sync_all()), None))
+        .collect();
+    cx.with_restriction_async(std::future::poll_fn(|task| {
+        let mut done = true;
+        for (sync, outcome) in &mut syncs {
+            if outcome.is_none() {
+                match sync.as_mut().poll(task) {
+                    std::task::Poll::Ready(result) => *outcome = Some(result),
+                    std::task::Poll::Pending => done = false,
+                }
+            }
+        }
+        if done {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }))
+    .await;
+    syncs
+        .into_iter()
+        .filter_map(|(_, outcome)| outcome)
+        .collect()
 }
 
 /// Why an immutable Strata object could not be stored or loaded.
@@ -783,19 +857,10 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<ObjectId, StoreError> {
         before_lock();
         let permit = self.acquire_publication_permit(cx)?;
-        self.put_object_under_permit(
-            kind,
-            cx,
-            bytes,
-            crash_at,
-            after_staging_sync,
-            &permit,
-            false,
-        )
-        .await
+        self.put_object_under_permit(kind, cx, bytes, crash_at, after_staging_sync, &permit)
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn put_object_under_permit(
         &self,
         kind: StoredObjectKind,
@@ -804,125 +869,34 @@ impl<V: Vfs> BlockStore<V> {
         crash_at: Option<BlockStoreCrashPoint>,
         after_staging_sync: impl FnOnce(),
         _permit: &ObjectPublicationPermit,
-        batch: bool,
     ) -> Result<ObjectId, StoreError> {
-        let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        // fgdb-a7sz: each stored family admits against ITS OWN format
-        // ceiling. Roots encode up to MAX_ENCODED_ROOT_BYTES (the layout's
-        // declared MAX_ROOT_BLOCKS/MAX_ROOT_PATCHES x REF_LEN, which reads
-        // via get_root have always admitted) -- admitting them here against
-        // the block-derived bound fenced every handle whose root reference
-        // enumeration legitimately outgrew 16 KiB, and rebuild re-offered
-        // the same lawful root forever: the directory admitted no recovery.
-        let limit = match kind {
-            StoredObjectKind::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
-            _ => MAX_STORED_OBJECT_BYTES,
-        };
-        ensure_size_within_limit(offered_len, limit)?;
-
+        let limit = kind.stored_limit();
+        ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
         let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
 
-        // The canonical path is inspected only while publication authority is
-        // held, so a conforming writer can see either no winner or one complete
-        // winner. Equal bytes are never rewritten, but they are re-synced after
-        // reopen because visibility alone is not a durability receipt.
-        match cx
-            .with_restriction_async(self.vfs.symlink_metadata(&path))
-            .await
+        if let Some(file) = self
+            .existing_canonical(kind, cx, id, &path, bytes, limit)
+            .await?
         {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "canonical object path exists but is not a regular file",
-                    )
-                    .into());
-                }
-                let existing_opts = OpenOptions::new().read(true).write(true);
-                let file = cx
-                    .with_restriction_async(self.vfs.open(&path, &existing_opts))
-                    .await?;
-                // Re-read through a second descriptor: `read_bounded` consumes
-                // the handle it reads, while the durability re-establishment
-                // below needs one whose cursor never moved.
-                let reread = cx
-                    .with_restriction_async(self.vfs.open(&path, &existing_opts))
-                    .await?;
-                let existing = read_bounded(cx, reread, limit).await?;
-                let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
-                if actual != id {
-                    return Err(StoreError::DamagedExisting {
-                        expected: id,
-                        actual,
-                    });
-                }
-                if existing != bytes {
-                    return Err(StoreError::Collision { object_id: id });
-                }
-                if batch {
-                    cx.with_restriction_async(file.sync_all()).await?;
-                    self.verify_durable_bytes(cx, &path, bytes, limit).await?;
-                    return Ok(id);
-                }
-                sync_file_and_directory(cx, &self.vfs, &file, &self.dir, || {
-                    if crash_at
-                        == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
-                    {
-                        return Err(std::io::Error::other(
-                            "crash: strata block inode durable before directory entry",
-                        ));
-                    }
-                    Ok(())
-                })
-                .await?;
-                return Ok(id);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        // Only a permit owner may touch the one staging name. It is explicitly
-        // noncanonical, so an interrupted prior owner may leave partial bytes
-        // here and the next owner may safely rewrite them. The canonical name
-        // remains absent until this inode is complete and synced.
-        let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
-        let create_staging = OpenOptions::new().read(true).write(true).create_new(true);
-        let mut staging = match cx
-            .with_restriction_async(self.vfs.open(&staging_path, &create_staging))
-            .await
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = cx
-                    .with_restriction_async(self.vfs.symlink_metadata(&staging_path))
-                    .await?;
-                if !metadata.file_type().is_file() || !staging_inode_is_exclusive(cx, &staging_path)
+            sync_file_and_directory(cx, &self.vfs, &file, &self.dir, || {
+                if crash_at
+                    == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
                 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "object staging path is not an exclusive regular-file inode",
-                    )
-                    .into());
+                    return Err(std::io::Error::other(
+                        "crash: strata block inode durable before directory entry",
+                    ));
                 }
-                let rewrite_staging = OpenOptions::new().read(true).write(true).truncate(true);
-                cx.with_restriction_async(self.vfs.open(&staging_path, &rewrite_staging))
-                    .await?
-            }
-            Err(error) => return Err(error.into()),
-        };
+                Ok(())
+            })
+            .await?;
+            return Ok(id);
+        }
 
+        let staging_path = self.dir.join(PUBLICATION_STAGING_FILE);
+        let mut staging = self.open_staging_inode(cx, &staging_path).await?;
         staging.write_all(bytes).await?;
-        if batch && crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
-            return Err(
-                std::io::Error::other("crash: batch staging bytes before inode sync").into(),
-            );
-        }
         cx.with_restriction_async(staging.sync_all()).await?;
-        if batch {
-            self.verify_durable_bytes(cx, &staging_path, bytes, limit)
-                .await?;
-        }
         after_staging_sync();
         if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
             return Err(StoreError::Io(std::io::Error::other(
@@ -935,15 +909,6 @@ impl<V: Vfs> BlockStore<V> {
         // permit spans the absence check, staging write, and move.
         drop(staging);
         self.vfs.rename(&staging_path, &path).await?;
-        if batch {
-            if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
-                return Err(std::io::Error::other(
-                    "crash: strata block inode durable before directory entry",
-                )
-                .into());
-            }
-            return Ok(id);
-        }
 
         let published_opts = OpenOptions::new().read(true).write(true);
         let published = cx
@@ -959,6 +924,141 @@ impl<V: Vfs> BlockStore<V> {
         })
         .await?;
         Ok(id)
+    }
+
+    /// Write one batch object's inode without syncing it. The batch syncs
+    /// everything it staged together at its next flush, and only then gives a
+    /// new inode its canonical name. `slot` picks this object's noncanonical
+    /// staging name.
+    async fn stage_object_under_permit(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        bytes: &[u8],
+        slot: usize,
+        _permit: &ObjectPublicationPermit,
+    ) -> Result<StagedObject<V::File>, StoreError> {
+        let limit = kind.stored_limit();
+        ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
+        let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
+        let path = self.path(id);
+
+        if let Some(file) = self
+            .existing_canonical(kind, cx, id, &path, bytes, limit)
+            .await?
+        {
+            return Ok(StagedObject {
+                file,
+                staging: None,
+                path,
+                bytes: bytes.to_vec(),
+                limit,
+            });
+        }
+
+        let staging_path = self.dir.join(format!("{PUBLICATION_STAGING_FILE}.{slot}"));
+        let mut staging = self.open_staging_inode(cx, &staging_path).await?;
+        staging.write_all(bytes).await?;
+        Ok(StagedObject {
+            file: staging,
+            staging: Some(staging_path),
+            path,
+            bytes: bytes.to_vec(),
+            limit,
+        })
+    }
+
+    /// The canonical inode already holding exactly `bytes`, opened on a handle
+    /// whose cursor never moved; `None` when the canonical name is absent.
+    ///
+    /// The canonical path is inspected only while publication authority is
+    /// held, so a conforming writer can see either no winner or one complete
+    /// winner. Equal bytes are never rewritten, but the caller re-syncs them
+    /// because visibility alone is not a durability receipt.
+    async fn existing_canonical(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        id: ObjectId,
+        path: &Path,
+        bytes: &[u8],
+        limit: u64,
+    ) -> Result<Option<V::File>, StoreError> {
+        match cx
+            .with_restriction_async(self.vfs.symlink_metadata(path))
+            .await
+        {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "canonical object path exists but is not a regular file",
+                    )
+                    .into());
+                }
+                let existing_opts = OpenOptions::new().read(true).write(true);
+                let file = cx
+                    .with_restriction_async(self.vfs.open(path, &existing_opts))
+                    .await?;
+                // Re-read through a second descriptor: `read_bounded` consumes
+                // the handle it reads, while durability re-establishment needs
+                // one whose cursor never moved.
+                let reread = cx
+                    .with_restriction_async(self.vfs.open(path, &existing_opts))
+                    .await?;
+                let existing = read_bounded(cx, reread, limit).await?;
+                let actual = kind.identity(self.k_oid.expose(), self.namespace, &existing);
+                if actual != id {
+                    return Err(StoreError::DamagedExisting {
+                        expected: id,
+                        actual,
+                    });
+                }
+                if existing != bytes {
+                    return Err(StoreError::Collision { object_id: id });
+                }
+                Ok(Some(file))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Open a noncanonical staging name for a complete write. Only a permit
+    /// owner touches staging names, and an interrupted prior owner may have
+    /// left partial bytes, so an existing name is rewritten — but only while
+    /// it is a regular file and its inode's only link. The canonical name
+    /// stays absent until this inode is complete and synced.
+    async fn open_staging_inode(
+        &self,
+        cx: &CommitCx,
+        staging_path: &Path,
+    ) -> Result<V::File, StoreError> {
+        let create_staging = OpenOptions::new().read(true).write(true).create_new(true);
+        match cx
+            .with_restriction_async(self.vfs.open(staging_path, &create_staging))
+            .await
+        {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = cx
+                    .with_restriction_async(self.vfs.symlink_metadata(staging_path))
+                    .await?;
+                if !metadata.file_type().is_file() || !staging_inode_is_exclusive(cx, staging_path)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "object staging path is not an exclusive regular-file inode",
+                    )
+                    .into());
+                }
+                let rewrite_staging = OpenOptions::new().read(true).write(true).truncate(true);
+                Ok(cx
+                    .with_restriction_async(self.vfs.open(staging_path, &rewrite_staging))
+                    .await?)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Like Chronicle's root evidence reread, sample the VFS durable backing,
@@ -988,8 +1088,9 @@ impl<V: Vfs> BlockStore<V> {
     }
 
     /// Hold publication authority across one commit's data objects. A batch
-    /// syncs each unreceipted inode once and the directory once; roots and
-    /// manifests must be published only after `finish` succeeds.
+    /// syncs each unreceipted inode once — staged inodes together, at each
+    /// flush — and the directory once; roots and manifests must be published
+    /// only after `finish` succeeds.
     pub fn publication_batch<'a>(
         &'a self,
         cx: &CommitCx,
@@ -1001,6 +1102,7 @@ impl<V: Vfs> BlockStore<V> {
             receipts,
             permit: self.acquire_publication_permit(cx)?,
             objects: std::collections::BTreeSet::new(),
+            staged: Vec::new(),
             pending: Vec::new(),
             crash_at,
             failed: false,
@@ -2063,6 +2165,7 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
     receipts: &'a mut PublishReceipts,
     permit: ObjectPublicationPermit,
     objects: std::collections::BTreeSet<ObjectId>,
+    staged: Vec<StagedObject<V::File>>,
     pending: Vec<PendingAdmission>,
     crash_at: Option<BlockStoreCrashPoint>,
     failed: bool,
@@ -2077,12 +2180,84 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     ) -> Result<ObjectId, StoreError> {
         let id = kind.identity(self.store.k_oid.expose(), self.store.namespace, bytes);
         if !self.objects.contains(&id) {
-            self.store
-                .put_object_under_permit(kind, cx, bytes, self.crash_at, || {}, &self.permit, true)
+            if self.staged.len() == BATCH_SYNCS_IN_FLIGHT {
+                self.flush_staged(cx).await?;
+            }
+            let staged = self
+                .store
+                .stage_object_under_permit(kind, cx, bytes, self.staged.len(), &self.permit)
                 .await?;
+            self.staged.push(staged);
             self.objects.insert(id);
         }
         Ok(id)
+    }
+
+    /// The bytes of an object this batch staged but has not yet flushed: its
+    /// canonical name does not exist until the flush renames it.
+    fn staged_bytes(&self, id: ObjectId) -> Option<Vec<u8>> {
+        let path = self.store.path(id);
+        self.staged
+            .iter()
+            .find(|object| object.path == path)
+            .map(|object| object.bytes.clone())
+    }
+
+    /// Make every object staged so far canonical: sync all of their inodes
+    /// with every sync in flight at once, prove each inode's durable bytes,
+    /// then give each new inode its content-addressed name. The names become
+    /// durable only at `finish`'s directory barrier, and receipts escape only
+    /// after it. A failed or cancelled flush poisons this batch.
+    pub async fn flush(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
+        self.check_live()?;
+        self.failed = true;
+        self.flush_staged(cx).await?;
+        self.failed = false;
+        Ok(())
+    }
+
+    async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
+        let staged = std::mem::take(&mut self.staged);
+        let creates = staged.iter().any(|object| object.staging.is_some());
+        if creates && self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
+            return Err(
+                std::io::Error::other("crash: batch staging bytes before inode sync").into(),
+            );
+        }
+        sync_files_together(cx, staged.iter().map(|object| &object.file)).await?;
+        for object in &staged {
+            let durable = object.staging.as_deref().unwrap_or(&object.path);
+            self.store
+                .verify_durable_bytes(cx, durable, &object.bytes, object.limit)
+                .await?;
+        }
+        if creates
+            && self.crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication)
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash: complete staging inode before canonical publication",
+            )));
+        }
+        for object in staged {
+            // Close before rename for platforms that refuse to move an open
+            // file. Publication is atomic for conforming writers because the
+            // batch's non-clone permit spans the absence check, the staging
+            // write, and the move.
+            drop(object.file);
+            if let Some(staging) = object.staging {
+                self.store.vfs.rename(&staging, &object.path).await?;
+            }
+        }
+        if creates
+            && self.crash_at
+                == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
+        {
+            return Err(std::io::Error::other(
+                "crash: strata block inode durable before directory entry",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Stage a block and its hosted patch without exposing a receipt. A failed
@@ -2105,10 +2280,14 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             let patch_bytes = if let Some(bytes) = patch_bytes {
                 Some(bytes)
             } else if let Some((patch_id, _)) = declared_patch {
-                owned = self
-                    .store
-                    .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
-                    .await?;
+                owned = match self.staged_bytes(patch_id) {
+                    Some(bytes) => bytes,
+                    None => {
+                        self.store
+                            .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                            .await?
+                    }
+                };
                 Some(owned.as_slice())
             } else {
                 None
@@ -2168,8 +2347,9 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     /// No await follows admission: cancellation can never expose a partially
     /// durable batch. History errors clear the memoization rather than leave
     /// a partially advanced validator for a caller to reuse.
-    pub async fn finish(self, cx: &CommitCx) -> Result<(), StoreError> {
+    pub async fn finish(mut self, cx: &CommitCx) -> Result<(), StoreError> {
         self.check_live()?;
+        self.flush_staged(cx).await?;
         if !self.objects.is_empty() {
             if matches!(
                 self.crash_at,
