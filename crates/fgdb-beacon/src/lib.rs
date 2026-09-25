@@ -21,7 +21,7 @@ mod hnsw;
 mod ranking;
 pub mod read;
 
-pub use bm25::{Bm25, Bm25Config, Bm25Stats, TextHit, TextMatch};
+pub use bm25::{Bm25, Bm25Config, Bm25Stats, EditDistance, TextHit, TextMatch};
 pub use control::{BeaconError, WorkBudget, WorkControl};
 pub use exact_fusion::graph::{GraphHybridHit, GraphHybridQuery};
 pub use exact_fusion::{ExactHybridHit, ExactHybridQuery, ExactRrfProfile, ExactRrfScore};

@@ -6,6 +6,9 @@ use fgdb_types::VId;
 use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
 
+#[path = "bm25/fuzzy.rs"]
+mod fuzzy;
+
 #[cfg(test)]
 #[path = "bm25/phrase_tests.rs"]
 mod phrase_tests;
@@ -78,6 +81,16 @@ impl Bm25Config {
     }
 }
 
+/// Closed edit-distance domain. Edits operate on normalized Unicode scalar
+/// values, not UTF-8 bytes; transposition costs two edits, not one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EditDistance {
+    Zero = 0,
+    One = 1,
+    Two = 2,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextMatch {
     Any,
@@ -87,6 +100,20 @@ pub enum TextMatch {
     /// Empty analyzed queries match nothing. Matching documents retain the
     /// ordinary distinct-term BM25 score: no phrase bonus or new scorer.
     Phrase,
+    /// Match any normalized query term, or every DISTINCT query term when
+    /// require_all is true, within the selected edit distance. One vocabulary
+    /// term may satisfy several query terms but contributes BM25 only once.
+    /// Repetition does not require distinct occurrences; this is not a phrase.
+    ///
+    /// max_expansions bounds the complete UNION of matching LIVE vocabulary
+    /// terms. Exceeding it refuses, never silently truncates. Zero admits no
+    /// expansions. Scores use ordinary per-term live-corpus BM25, without edit
+    /// penalties or exact-match bonuses. Empty analyzed queries match nothing.
+    Fuzzy {
+        distance: EditDistance,
+        require_all: bool,
+        max_expansions: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -335,6 +362,25 @@ impl TextSegment {
         best: &mut BinaryHeap<Ranked>,
         work: &mut dyn WorkControl,
     ) -> Result<(), BeaconError> {
+        if let TextMatch::Fuzzy {
+            distance,
+            require_all,
+            max_expansions,
+        } = mode
+        {
+            return self.search_fuzzy_into(
+                query,
+                distance,
+                require_all,
+                max_expansions,
+                config,
+                corpus,
+                limit,
+                eligible,
+                best,
+                work,
+            );
+        }
         let terms = &query.frequencies;
         if limit == 0 || terms.is_empty() || corpus.documents == 0 || corpus.total_length == 0 {
             return Ok(());
