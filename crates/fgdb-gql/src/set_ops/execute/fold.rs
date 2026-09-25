@@ -272,10 +272,10 @@ where
                 &mut |a, b, control| compare_rows(a, b, &[], control),
             )?;
             loop {
-                let row = merge.next_with_control(
-                    &mut |event| meter.event(event),
-                    &mut |a, b, control| compare_rows(a, b, &[], control),
-                )?;
+                let row = merge
+                    .next_with_control(&mut |event| meter.event(event), &mut |a, b, control| {
+                        compare_rows(a, b, &[], control)
+                    })?;
                 let Some(row) = row else {
                     break;
                 };

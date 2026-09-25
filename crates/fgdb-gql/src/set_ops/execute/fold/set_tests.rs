@@ -98,10 +98,8 @@ const OPERATIONS: [GraphSetOperation; 3] = [
     GraphSetOperation::Intersect,
     GraphSetOperation::Except,
 ];
-const QUANTIFIERS: [GraphSetQuantifier; 2] = [
-    GraphSetQuantifier::All,
-    GraphSetQuantifier::Distinct,
-];
+const QUANTIFIERS: [GraphSetQuantifier; 2] =
+    [GraphSetQuantifier::All, GraphSetQuantifier::Distinct];
 
 #[test]
 fn set_folds_keep_null_multiplicity_child_pages_and_nested_windows() {
@@ -124,22 +122,16 @@ fn set_folds_keep_null_multiplicity_child_pages_and_nested_windows() {
                             .take(3)
                             .collect();
                         let selected_right: Vec<_> = right.iter().copied().take(4).collect();
-                        let values = expected(&selected_left, &selected_right, operation, quantifier);
+                        let values =
+                            expected(&selected_left, &selected_right, operation, quantifier);
                         let input = relation(left)
                             .with_page(inner_skip, Some(3))
-                            .combine(
-                                operation,
-                                quantifier,
-                                relation(right).with_page(0, Some(4)),
-                            )
+                            .combine(operation, quantifier, relation(right).with_page(0, Some(4)))
                             .unwrap();
                         assert!(input.has_foldable_expansion());
                         for (skip, count) in [(0, 0), (1, 2), (u64::MAX, 1)] {
-                            let query = input
-                                .clone()
-                                .nested()
-                                .unwrap()
-                                .with_page(skip, Some(count));
+                            let query =
+                                input.clone().nested().unwrap().with_page(skip, Some(count));
                             let before = query.canonical_bytes();
                             let page: Vec<_> = values
                                 .iter()
@@ -329,7 +321,8 @@ fn empty_set_pages_and_empty_left_inputs_do_not_hide_the_right_source_or_reset_a
                     )
                     .unwrap_err();
                 assert_eq!(calls, 2);
-                assert!(matches!(failure,
+                assert!(matches!(
+                    failure,
                     GqlQueryError::Rows(GqlBudgetExceeded {
                         dimension: GqlBudgetDimension::SnapshotRecords,
                         limit: 3,
@@ -368,10 +361,15 @@ fn a_late_child_expression_error_wins_before_any_set_row_reaches_the_sink() {
                 .with_page(0, Some(0));
             let mut delivered = 0;
             let error = query
-                .fold_governed(wide(), no_source, || Ok(()), |_, _| {
-                    delivered += 1;
-                    Ok(())
-                })
+                .fold_governed(
+                    wide(),
+                    no_source,
+                    || Ok(()),
+                    |_, _| {
+                        delivered += 1;
+                        Ok(())
+                    },
+                )
                 .unwrap_err();
             assert_eq!(delivered, 0);
             assert!(matches!(
@@ -426,8 +424,8 @@ fn every_set_page_checkpoint_and_resource_dimension_can_refuse_without_partial_s
                     normal.evaluator.scratch_entries - 1,
                 ),
             ] {
-                let failure = execute(&query, GqlQueryPolicy::new(0, 1, work, scratch))
-                    .unwrap_err();
+                let failure =
+                    execute(&query, GqlQueryPolicy::new(0, 1, work, scratch)).unwrap_err();
                 assert!(matches!(failure,
                     GqlQueryError::Evaluator(GlaLimitExceeded { dimension: actual, .. })
                         if actual == dimension
@@ -460,10 +458,9 @@ fn numeric_aggregates_over_sets_match_the_explicit_materialized_order_barrier() 
                     GraphAggregate::sum_int("sum", 0),
                     GraphAggregate::average_int("mean", 0),
                 ];
-                let folded = PreparedGraphSetAggregate::prepare(
-                    input.clone(), &keys, &aggregates, 0, None,
-                )
-                .unwrap();
+                let folded =
+                    PreparedGraphSetAggregate::prepare(input.clone(), &keys, &aggregates, 0, None)
+                        .unwrap();
                 // Keep the selected input page inside its own scope. An outer
                 // explicit order blocks aggregate folding, without changing
                 // this numeric summary or pushing the input page past the set.
@@ -479,12 +476,15 @@ fn numeric_aggregates_over_sets_match_the_explicit_materialized_order_barrier() 
                     .unwrap();
                 assert!(folded.input().has_foldable_expansion());
                 assert!(!barrier.has_foldable_expansion());
-                let materialized = PreparedGraphSetAggregate::prepare(
-                    barrier, &keys, &aggregates, 0, None,
-                )
-                .unwrap();
-                let a = folded.execute_governed(wide(), no_source, || Ok(())).unwrap();
-                let b = materialized.execute_governed(wide(), no_source, || Ok(())).unwrap();
+                let materialized =
+                    PreparedGraphSetAggregate::prepare(barrier, &keys, &aggregates, 0, None)
+                        .unwrap();
+                let a = folded
+                    .execute_governed(wide(), no_source, || Ok(()))
+                    .unwrap();
+                let b = materialized
+                    .execute_governed(wide(), no_source, || Ok(()))
+                    .unwrap();
                 assert_eq!(a.value, b.value);
                 assert_eq!(a.rows, b.rows);
             }
