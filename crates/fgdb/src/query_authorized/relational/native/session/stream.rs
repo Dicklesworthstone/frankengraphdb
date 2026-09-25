@@ -329,14 +329,30 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         {
             return Ok(Some(None)); // Do not inspect or copy a forbidden payload.
         }
-        let (mut low, mut high) = (0, row.properties.len());
-        while low < high {
+        // A binary search over the RAW property vector exposes its hidden
+        // length/layout through both native and signed work ceilings. Inspect
+        // only the admitted key sequence for logical accounting, as the scoped
+        // edge-property source already does. Hidden traversal polls cancellation
+        // without sampling the issuer clock or spending either allowance.
+        for (candidate, value) in row.properties {
+            self.execution
+                .borrow_mut()
+                .poll()
+                .map_err(VertexScanSourceError::Source)?;
+            if !self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_property(*candidate)
+            {
+                continue;
+            }
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-            let middle = low + (high - low) / 2;
-            match row.properties[middle].0.cmp(&key) {
-                core::cmp::Ordering::Less => low = middle + 1,
-                core::cmp::Ordering::Greater => high = middle,
-                core::cmp::Ordering::Equal => return Ok(Some(Some(&row.properties[middle].1))),
+            match candidate.cmp(&key) {
+                core::cmp::Ordering::Less => {}
+                core::cmp::Ordering::Greater => break,
+                core::cmp::Ordering::Equal => return Ok(Some(Some(value))),
             }
         }
         Ok(Some(None))
