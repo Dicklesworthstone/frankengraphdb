@@ -95,7 +95,7 @@ async fn generated(
                 if commit == 5 {
                     None
                 } else {
-                    Some(CanonicalScalar::Int(if rng.next() % 2 == 0 {
+                    Some(CanonicalScalar::Int(if rng.next().is_multiple_of(2) {
                         BOUND
                     } else {
                         2

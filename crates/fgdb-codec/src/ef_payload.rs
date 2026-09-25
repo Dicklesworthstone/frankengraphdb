@@ -176,7 +176,7 @@ fn validate_padding(
     bits: usize,
     words: usize,
 ) -> Result<(), EfPayloadError> {
-    if words != 0 && bits % 64 != 0 && word(bytes, base + words - 1) >> (bits % 64) != 0 {
+    if words != 0 && !bits.is_multiple_of(64) && word(bytes, base + words - 1) >> (bits % 64) != 0 {
         return Err(EfPayloadError::NonzeroPadding);
     }
     Ok(())

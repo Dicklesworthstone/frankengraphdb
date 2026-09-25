@@ -495,7 +495,7 @@ fn level_for(id: u128, seed: u64, m: usize) -> usize {
     let high = (id >> 64) as u64;
     let mut state = mix64(mix64(low ^ seed) ^ mix64(high ^ 0x4245_4143_4f4e_4944));
     let mut level = 0;
-    while level < MAX_LEVEL && state % m as u64 == 0 {
+    while level < MAX_LEVEL && state.is_multiple_of(m as u64) {
         level += 1;
         state = mix64(state);
     }

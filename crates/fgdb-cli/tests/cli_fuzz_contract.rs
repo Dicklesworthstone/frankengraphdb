@@ -815,7 +815,7 @@ fn generated_case(
             if index % 2 == 1 {
                 args.push(format!("unexpected{}", rng.next()));
             }
-            (args, Some(index % 2 == 0))
+            (args, Some(index.is_multiple_of(2)))
         }
         Family::Replay => {
             args = ws.args("replay", None);

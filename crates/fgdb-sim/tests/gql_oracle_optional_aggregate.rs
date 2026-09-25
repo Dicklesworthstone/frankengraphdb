@@ -74,7 +74,7 @@ async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> Commit
     for id in 100..108 {
         let mut props = vec![(
             CATEGORY,
-            CanonicalScalar::ucs_basic_text(if next(&mut random) % 2 == 0 {
+            CanonicalScalar::ucs_basic_text(if next(&mut random).is_multiple_of(2) {
                 "alpha"
             } else {
                 "beta"

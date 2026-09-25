@@ -156,7 +156,7 @@ fn staged_shortcuts_and_deletions_change_search_without_publishing() {
         let mut txn = db.begin(&txcx).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(4); 3]
@@ -164,7 +164,7 @@ fn staged_shortcuts_and_deletions_change_search_without_publishing() {
         txn.write(&mut db, shortcut()).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(4)]
@@ -181,7 +181,7 @@ fn staged_shortcuts_and_deletions_change_search_without_publishing() {
         txn.write(&mut db, remove).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(4); 3]
@@ -205,7 +205,7 @@ fn concurrent_shorter_route_invalidates_the_existing_transaction_read_witness() 
         seed(&mut db, &commit).await;
         let mut reader = db.begin(&txcx).unwrap();
         let rows = reader
-            .execute_graph_pattern_governed(&mut db, &cx, &query(), policy())
+            .execute_graph_pattern_governed(&db, &cx, &query(), policy())
             .unwrap();
         assert_eq!(ids(&rows.value), vec![VId(4); 3]);
         db.write(&commit, shortcut()).await.unwrap();

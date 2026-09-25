@@ -158,7 +158,7 @@ fn nullable_captures_and_staged_outer_values_read_the_canonical_overlay() {
         let mut txn = db.begin(&txcx).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, wide())
+                .execute_graph_pattern_governed(&db, &cx, &query, wide())
                 .unwrap()
                 .value),
             all
@@ -168,7 +168,7 @@ fn nullable_captures_and_staged_outer_values_read_the_canonical_overlay() {
         txn.write(&mut db, edge).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, wide())
+                .execute_graph_pattern_governed(&db, &cx, &query, wide())
                 .unwrap()
                 .value),
             vec![Some(VId(1)), Some(VId(2))]
@@ -177,7 +177,7 @@ fn nullable_captures_and_staged_outer_values_read_the_canonical_overlay() {
             .unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, wide())
+                .execute_graph_pattern_governed(&db, &cx, &query, wide())
                 .unwrap()
                 .value),
             vec![Some(VId(2)), Some(VId(3))]
@@ -186,7 +186,7 @@ fn nullable_captures_and_staged_outer_values_read_the_canonical_overlay() {
         txn.write(&mut db, set_p(VId(2), CanonicalScalar::Null))
             .unwrap();
         assert!(
-            txn.execute_graph_pattern_governed(&mut db, &cx, &query, wide())
+            txn.execute_graph_pattern_governed(&db, &cx, &query, wide())
                 .unwrap()
                 .value
                 .is_empty()
@@ -224,7 +224,7 @@ fn both_successful_and_empty_outer_property_joins_retain_conflict_observations()
             let query = pattern("MATCH (a) WHERE a.q=1 MATCH (b) WHERE b.q=2 AND b.p=a.p RETURN b");
             let mut reader = db.begin(&txcx).unwrap();
             let rows = reader
-                .execute_graph_pattern_governed(&mut db, &cx, &query, wide())
+                .execute_graph_pattern_governed(&db, &cx, &query, wide())
                 .unwrap();
             assert_eq!(rows.value.len(), usize::from(!initially_empty));
             db.write(

@@ -146,7 +146,7 @@ fn mixed_merge_create_and_update_steps_share_overlay_and_return_exact_identities
                 .bind_parameters(&GqlParameters::new())
                 .unwrap();
         let rows = txn
-            .execute_graph_pattern_governed(&mut db, &query, &read, query_policy())
+            .execute_graph_pattern_governed(&db, &query, &read, query_policy())
             .unwrap();
         assert_eq!(
             rows.rows.result_rows, 1,

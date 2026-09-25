@@ -636,7 +636,7 @@ fn props(n: usize, payload: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
             CanonicalScalar::ucs_basic_text(&format!("row {n}: \"quoted\" \\ newline\nUnicode λ"))
                 .unwrap(),
         ),
-        (PropertyKeyId(4), CanonicalScalar::Bool(n % 2 == 0)),
+        (PropertyKeyId(4), CanonicalScalar::Bool(n.is_multiple_of(2))),
         (PropertyKeyId(5), CanonicalScalar::Null),
     ]
 }

@@ -210,7 +210,7 @@ impl<E, F: FnMut() -> Result<(), E>> Work<'_, F> {
         if self.used >= self.limit {
             return Err(AvailabilityError::WorkBudget);
         }
-        if self.used % 128 == 0 {
+        if self.used.is_multiple_of(128) {
             (self.checkpoint)().map_err(AvailabilityError::Interrupted)?;
         }
         self.used += 1;

@@ -264,7 +264,11 @@ fn generated(
         let base = 1 + round * 10;
         for offset in 0..6 {
             let key = base + offset;
-            let labels = if rng.next() % 2 == 0 { vec![L] } else { vec![] };
+            let labels = if rng.next().is_multiple_of(2) {
+                vec![L]
+            } else {
+                vec![]
+            };
             let value = match offset % 3 {
                 0 => int((rng.next() % 100) as i64),
                 1 => CanonicalScalar::Text(

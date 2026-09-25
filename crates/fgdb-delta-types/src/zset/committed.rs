@@ -902,7 +902,7 @@ mod tests {
             let mut rows = BTreeMap::<u64, Vec<DeltaRow>>::new();
             for _ in 0..4 {
                 random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if random % 3 == 0 && !identities.is_empty() {
+                if random.is_multiple_of(3) && !identities.is_empty() {
                     let at = (random as usize) % identities.len();
                     let (&eid, &(relation, _, _)) = identities.iter().nth(at).unwrap();
                     identities.remove(&eid);

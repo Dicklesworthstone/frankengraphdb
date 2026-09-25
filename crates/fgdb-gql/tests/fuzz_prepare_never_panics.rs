@@ -489,7 +489,7 @@ fn each_new_surface_family_prepares_and_is_refused_by_the_facades() {
                 Err(detail) => {
                     counts[family].1 += 1;
                     assert!(!detail.is_empty(), "refusal must carry a typed detail");
-                    if (index / FAMILY_COUNT) % 3 == 0 {
+                    if (index / FAMILY_COUNT).is_multiple_of(3) {
                         panic!("family {family}: grammatical base refused: {stmt}: {detail}");
                     }
                 }

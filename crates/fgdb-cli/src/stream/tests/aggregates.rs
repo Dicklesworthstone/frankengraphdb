@@ -204,8 +204,7 @@ fn failed_header_flush_or_predemand_cancellation_never_drives_an_aggregate() {
                 &mut output,
                 || cx.checkpoint().map_err(Failure::query),
             )
-            .err()
-            .expect("broken output");
+            .expect_err("broken output");
             assert_eq!(error.code, 5);
             assert_eq!(pulls.get(), fail - 1);
             if fail == 1 {
@@ -243,8 +242,7 @@ fn failed_header_flush_or_predemand_cancellation_never_drives_an_aggregate() {
                 }
             },
         )
-        .err()
-        .expect("delivery cancellation");
+        .expect_err("delivery cancellation");
         assert_eq!(error.code, 3);
         assert_eq!(cursor.row_stats().snapshot_records, 0);
         assert_eq!(cursor.evaluator_stats().work_units, 0);
@@ -297,8 +295,7 @@ fn aggregate_late_data_and_quota_failures_release_no_partial_summary_or_success(
                 &mut bytes,
                 || cx.checkpoint().map_err(Failure::query),
             )
-            .err()
-            .expect("native quota refusal");
+            .expect_err("native quota refusal");
             assert_eq!(error.code, 3);
             assert_eq!(cursor.state(), VertexScanState::Failed);
             assert_eq!(cursor.row_stats().result_rows, 0);
@@ -315,9 +312,7 @@ fn aggregate_late_data_and_quota_failures_release_no_partial_summary_or_success(
         );
         db.write(&contexts.commit(), edit).await.unwrap();
         let mut bytes = Vec::new();
-        let error = run(&db, &cx, &options, true, &mut bytes)
-            .err()
-            .expect("late data error");
+        let error = run(&db, &cx, &options, true, &mut bytes).expect_err("late data error");
         assert_eq!(error.code, 3);
         assert!(!error.message.contains("secret invalid"));
         let text = String::from_utf8(bytes).unwrap();
@@ -356,9 +351,8 @@ fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
                 "{text}"
             );
             let mut bytes = Vec::new();
-            let error = run(&db, &cx, &options, true, &mut bytes)
-                .err()
-                .expect("physical/source refusal");
+            let error =
+                run(&db, &cx, &options, true, &mut bytes).expect_err("physical/source refusal");
             assert_eq!(error.code, 3, "{}", error.message);
             assert!(bytes.is_empty(), "no header before full admission: {text}");
         }

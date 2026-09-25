@@ -160,7 +160,7 @@ fn required_match_observes_staged_relationship_creation_and_deletion_without_pub
         txn.write(&mut db, complete_second_chain()).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(3); 5]
@@ -177,7 +177,7 @@ fn required_match_observes_staged_relationship_creation_and_deletion_without_pub
         txn.write(&mut db, remove).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(3); 4]
@@ -209,7 +209,7 @@ fn a_new_required_witness_conflicts_even_when_the_reader_returned_no_rows() {
             };
             let mut txn = db.begin(&txcx).unwrap();
             let rows = txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap();
             assert_eq!(rows.value.len(), if empty { 0 } else { 4 });
             db.write(&commit, complete_second_chain()).await.unwrap();

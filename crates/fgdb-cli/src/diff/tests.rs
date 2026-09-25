@@ -85,7 +85,7 @@ fn diff_flags_are_exact_required_unique_and_do_not_change_other_commands() {
             "secret",
         ] {
             let mut opts = DiffOptions::default();
-            let error = opts.set(flag, bad).err().expect("invalid decimal");
+            let error = opts.set(flag, bad).expect_err("invalid decimal");
             assert_eq!(error.code, 2);
             assert!(!error.message.contains("secret"));
         }
@@ -439,8 +439,7 @@ fn every_delivery_checkpoint_and_broken_output_is_terminal_with_an_honest_prefix
                     Ok(())
                 }
             })
-            .err()
-            .expect("injected cancellation");
+            .expect_err("injected cancellation");
             assert_eq!(visited, stop);
             assert_eq!(error.code, 3);
             assert!(expected.bytes.starts_with(&out.bytes));

@@ -568,7 +568,7 @@ impl<'a> SealedCursor<'a> {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
-            if self.position % 64 == 0 {
+            if self.position.is_multiple_of(64) {
                 if let Err(error) = checkpoint() {
                     self.finished = true;
                     return Err(error);

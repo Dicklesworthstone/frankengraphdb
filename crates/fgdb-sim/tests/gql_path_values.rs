@@ -121,7 +121,7 @@ fn temporal_edge_delete_preserves_real_path_ids_and_governed_growth() {
         txn.write(&mut db, shortcut).unwrap();
         assert_eq!(
             routes(
-                &txn.execute_graph_pattern_governed(&mut db, &query, &pattern, policy())
+                &txn.execute_graph_pattern_governed(&db, &query, &pattern, policy())
                     .unwrap()
                     .value
             ),

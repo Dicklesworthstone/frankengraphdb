@@ -185,7 +185,7 @@ fn staged_topology_changes_affect_any_search_without_publishing() {
         let mut txn = db.begin(&txcx).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(2), VId(3)]
@@ -193,7 +193,7 @@ fn staged_topology_changes_affect_any_search_without_publishing() {
         txn.write(&mut db, shortcut()).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(2), VId(3), VId(4)]
@@ -210,7 +210,7 @@ fn staged_topology_changes_affect_any_search_without_publishing() {
         txn.write(&mut db, remove).unwrap();
         assert_eq!(
             ids(&txn
-                .execute_graph_pattern_governed(&mut db, &cx, &query, policy())
+                .execute_graph_pattern_governed(&db, &cx, &query, policy())
                 .unwrap()
                 .value),
             vec![VId(2), VId(3)]
@@ -331,7 +331,7 @@ fn concurrent_shortcut_invalidates_any_search_read_close() {
         seed(&mut db, &commit).await;
         let mut reader = db.begin(&txcx).unwrap();
         let rows = reader
-            .execute_graph_pattern_governed(&mut db, &cx, &query("ANY"), policy())
+            .execute_graph_pattern_governed(&db, &cx, &query("ANY"), policy())
             .unwrap();
         assert_eq!(ids(&rows.value), vec![VId(2), VId(3)]);
         db.write(&commit, shortcut()).await.unwrap();

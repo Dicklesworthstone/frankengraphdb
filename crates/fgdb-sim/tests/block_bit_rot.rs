@@ -630,8 +630,7 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                     drop(db);
                     let error = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                         .await
-                        .err()
-                        .expect("visible corrupted bytes must refuse reopen");
+                        .expect_err("visible corrupted bytes must refuse reopen");
                     cold_refusal(case, error, target.id, "reopen-visible-before-crash");
                     vfs.crash().await.unwrap();
                     assert_eq!(
@@ -652,8 +651,7 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                     } else {
                         let error = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                             .await
-                            .err()
-                            .expect("durable one-bit corruption must refuse cold reopen");
+                            .expect_err("durable one-bit corruption must refuse cold reopen");
                         cold_refusal(case, error, target.id, "cold-reopen-after-crash");
                     }
                     drop(store);
@@ -830,8 +828,7 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                 vfs.crash().await.unwrap();
                 let error = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                     .await
-                    .err()
-                    .expect("resumed import still names damaged prefix");
+                    .expect_err("resumed import still names damaged prefix");
                 cold_refusal(
                     case,
                     error,
@@ -962,8 +959,7 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                     drop(db);
                     let error = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                         .await
-                        .err()
-                        .expect("visible corruption must gate cold bulk resume");
+                        .expect_err("visible corruption must gate cold bulk resume");
                     cold_refusal(case, error, target.id, "bulk-resume-cold-gate-before-crash");
                     vfs.crash().await.unwrap();
                     if lying {
@@ -995,8 +991,7 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                         assert_eq!(visible_bytes(&vfs, &target.path).await, damaged);
                         let error = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                             .await
-                            .err()
-                            .expect("durable corrupted prefix gates resume");
+                            .expect_err("durable corrupted prefix gates resume");
                         cold_refusal(case, error, target.id, "bulk-resume-cold-gate-after-crash");
                     }
                     drop(store);

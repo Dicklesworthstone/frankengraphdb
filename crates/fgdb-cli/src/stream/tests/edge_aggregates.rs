@@ -156,8 +156,7 @@ fn failed_delivery_or_predemand_cancellation_does_not_drive_either_aggregate_fam
                     &mut output,
                     || cx.checkpoint().map_err(Failure::query),
                 )
-                .err()
-                .expect("broken output");
+                .expect_err("broken output");
                 assert_eq!(error.code, 5);
                 assert_eq!(pulls.get(), fail - 1);
                 if fail == 1 {
@@ -232,8 +231,7 @@ fn edge_shape_refusals_precede_headers_and_late_data_refusals_emit_no_success() 
         db.write(&commit, edit).await.unwrap();
         let mut output = Vec::new();
         let error = run(&db, &cx, &edge_options(EDGE_SUMMARY), true, &mut output)
-            .err()
-            .expect("data refusal");
+            .expect_err("data refusal");
         assert_eq!(error.code, 3);
         assert!(!error.message.contains("private edge operand"));
         let output = String::from_utf8(output).unwrap();
@@ -351,8 +349,7 @@ fn cli_offpage_errors_never_emit_a_partial_group_or_success_record() {
             );
             let mut bytes = Vec::new();
             let error = run(&db, &cx, &edge_options(&text), true, &mut bytes)
-                .err()
-                .expect("off-page divide by zero");
+                .expect_err("off-page divide by zero");
             assert_eq!(error.code, 3);
             let output = String::from_utf8(bytes).unwrap();
             assert_eq!(output.lines().count(), 1);
@@ -407,7 +404,7 @@ fn output_page_flush_failure_never_demands_another_completed_group() {
                 &mut output,
                 || cx.checkpoint().map_err(Failure::query),
             );
-            let error = result.err().expect("broken output");
+            let error = result.expect_err("broken output");
             assert_eq!(error.code, 5);
             assert_eq!(pulls.get(), fail - 1);
             if fail == 1 {
@@ -521,8 +518,7 @@ fn cli_ordered_late_failures_and_backpressure_never_emit_a_success_marker() {
             );
             let mut bytes = Vec::new();
             let error = run(&db, &cx, &edge_options(&text), true, &mut bytes)
-                .err()
-                .expect("late output failure");
+                .expect_err("late output failure");
             assert_eq!(error.code, 3);
             let output = String::from_utf8(bytes).unwrap();
             assert_eq!(output.lines().count(), 1);
@@ -558,7 +554,7 @@ fn cli_ordered_late_failures_and_backpressure_never_emit_a_success_marker() {
                 &mut output,
                 || cx.checkpoint().map_err(Failure::query),
             );
-            assert_eq!(result.err().expect("broken output").code, 5);
+            assert_eq!(result.expect_err("broken output").code, 5);
             assert_eq!(pulls.get(), fail - 1);
             if fail == 1 {
                 assert_eq!(cursor.row_stats().snapshot_records, 0);

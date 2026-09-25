@@ -368,7 +368,7 @@ fn rebased_recursive_views_match_replay_and_independent_closure_through_future_d
         let mut s = Vec::new();
         for _ in 0..3 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let (relation, row) = if random % 3 == 0 && !identities.is_empty() {
+            let (relation, row) = if random.is_multiple_of(3) && !identities.is_empty() {
                 let (&id, &tuple) = identities
                     .iter()
                     .nth(random as usize % identities.len())

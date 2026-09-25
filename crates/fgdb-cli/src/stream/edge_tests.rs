@@ -212,8 +212,7 @@ fn broken_output_or_delivery_cancellation_stops_even_the_second_edge_orientation
                     }
                 },
             )
-            .err()
-            .expect("delivery must refuse");
+            .expect_err("delivery must refuse");
             let requested = if cancel { 1 } else { fail_at.unwrap() - 1 };
             assert_eq!(pulls.get(), requested);
             assert_eq!(error.code, if cancel { 3 } else { 5 });
@@ -263,8 +262,7 @@ fn edge_source_and_result_quotas_do_not_become_success_after_a_flushed_prefix() 
                 &mut bytes,
                 || cx.checkpoint().map_err(Failure::query),
             )
-            .err()
-            .expect("quota exhausted");
+            .expect_err("quota exhausted");
             assert_eq!(error.code, 3);
             assert!(error.message.starts_with(&format!(
                 "stream incomplete after {count} fully flushed row(s)"
@@ -349,8 +347,7 @@ fn native_scan_error_wrapping_preserves_transport_io_classification_after_a_row(
             &mut bytes,
             || Ok(()),
         )
-        .err()
-        .expect("injected source failure");
+        .expect_err("injected source failure");
         assert_eq!(error.code, 5);
         assert!(
             error

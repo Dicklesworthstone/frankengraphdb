@@ -89,7 +89,7 @@ fn int_property(props: &[(PropertyKeyId, CanonicalScalar)], key: PropertyKeyId) 
 fn vertex(n: usize, payload: i64) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: format!("v{n}"),
-        labels: vec![if n % 2 == 0 { PERSON } else { OTHER }],
+        labels: vec![if n.is_multiple_of(2) { PERSON } else { OTHER }],
         props: vec![
             (K, CanonicalScalar::Int(n as i64)),
             (P, CanonicalScalar::Int(payload)),

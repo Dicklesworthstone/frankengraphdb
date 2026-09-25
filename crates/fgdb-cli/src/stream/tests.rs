@@ -176,7 +176,7 @@ fn failed_header_or_row_flush_stops_demand_without_draining_the_cursor() {
                 &mut out,
                 || cx.checkpoint().map_err(Failure::query),
             );
-            let error = result.err().expect("injected output refusal");
+            let error = result.expect_err("injected output refusal");
             assert_eq!(error.code, 5);
             assert_eq!(pulls.get(), fail - 1);
             assert_eq!(cursor.row_stats().snapshot_records as usize, fail - 1);
@@ -287,8 +287,7 @@ fn cancellation_after_a_flushed_row_does_not_request_another() {
                 }
             },
         )
-        .err()
-        .expect("delivery cancellation");
+        .expect_err("delivery cancellation");
         assert_eq!(error.code, 3);
         assert_eq!(pulls.get(), 1);
         assert_eq!(cursor.row_stats().snapshot_records, 1);

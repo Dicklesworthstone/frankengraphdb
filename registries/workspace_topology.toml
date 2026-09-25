@@ -118,7 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
-lint_allowance_count = 12
+lint_allowance_count = 9
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -129,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:0e4413dacc321415"
-semantic_contract_hash = "fnv1a64:7848d5e31d54c9ab"
+id_table_hash = "fnv1a64:d9b39b484ec6d047"
+semantic_contract_hash = "fnv1a64:828179d7c2ae573a"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1972,28 +1972,10 @@ reference = "fgdb-gate-weakening-rollback-mthlh"
 basis = "Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25."
 
 [[lint_allowance]]
-lint = "clippy::err_expect"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 30 sites / 9 files at 2026-09-25."
-
-[[lint_allowance]]
-lint = "clippy::unnecessary_mut_passed"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 18 sites / 6 files at 2026-09-25."
-
-[[lint_allowance]]
 lint = "clippy::unnecessary_literal_unwrap"
 level = "allow"
 reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 15 sites / 3 files at 2026-09-25."
-
-[[lint_allowance]]
-lint = "clippy::manual_is_multiple_of"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 14 sites / 14 files at 2026-09-25."
+basis = "Measured residual from 89b49d38: 13 sites / 3 files at 2026-09-25, all Option::<T>::None.expect(msg) stand-ins for panic!; the fix moves the UBS panic-macro ratchet, so it is decided separately."
 
 [[lint_allowance]]
 lint = "clippy::too_many_arguments"

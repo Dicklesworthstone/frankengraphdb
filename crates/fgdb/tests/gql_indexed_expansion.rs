@@ -96,7 +96,7 @@ async fn generated(
                     next_eid += 1;
                     // 50% of edges touch the bound vertex, giving every commit
                     // both in- and out-degree changes on VId(0).
-                    let (src, dst) = if rng.next() % 2 == 0 {
+                    let (src, dst) = if rng.next().is_multiple_of(2) {
                         (VId(0), VId((rng.next() % 12) as u128))
                     } else {
                         (VId((rng.next() % 12) as u128), VId(0))

@@ -316,10 +316,7 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | `clippy::unusual_byte_groupings` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 44 sites / 11 files at 2026-09-25. |
 | `clippy::collapsible_if` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 38 sites / 34 files at 2026-09-25. |
 | `clippy::type_complexity` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25. |
-| `clippy::err_expect` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 30 sites / 9 files at 2026-09-25. |
-| `clippy::unnecessary_mut_passed` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 18 sites / 6 files at 2026-09-25. |
-| `clippy::unnecessary_literal_unwrap` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 15 sites / 3 files at 2026-09-25. |
-| `clippy::manual_is_multiple_of` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 14 sites / 14 files at 2026-09-25. |
+| `clippy::unnecessary_literal_unwrap` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 13 sites / 3 files at 2026-09-25, all Option::<T>::None.expect(msg) stand-ins for panic!; the fix moves the UBS panic-macro ratchet, so it is decided separately. |
 | `clippy::too_many_arguments` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 9 sites / 7 files at 2026-09-25. |
 
 ## Ownership vocabulary
@@ -398,5 +395,5 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 
 ## Pins
 
-* `id_table_hash` = `fnv1a64:0e4413dacc321415` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:7848d5e31d54c9ab` — every normative decision, prose excluded.
+* `id_table_hash` = `fnv1a64:d9b39b484ec6d047` — every stable id, sorted.
+* `semantic_contract_hash` = `fnv1a64:828179d7c2ae573a` — every normative decision, prose excluded.

@@ -169,8 +169,7 @@ fn grouped_transport_stops_before_demand_or_between_groups_without_success() {
                     }
                 },
             )
-            .err()
-            .expect("injected delivery failure");
+            .expect_err("injected delivery failure");
             assert_eq!(error.code, if cancelled { 3 } else { 5 });
             assert_eq!(pulls, usize::from(fail_at != Some(1)));
             if fail_at == Some(1) {

@@ -254,8 +254,7 @@ fn output_failure_and_predemand_cancellation_do_not_start_or_repeat_aggregation(
                 &mut output,
                 || cx.checkpoint().map_err(Failure::query),
             )
-            .err()
-            .expect("injected flush failure");
+            .expect_err("injected flush failure");
             assert_eq!(error.code, 5);
             assert_eq!(pulls.get(), fail - 1);
             if fail == 1 {
@@ -293,8 +292,7 @@ fn output_failure_and_predemand_cancellation_do_not_start_or_repeat_aggregation(
                 }
             },
         )
-        .err()
-        .expect("cancelled delivery");
+        .expect_err("cancelled delivery");
         assert_eq!(error.code, 3);
         assert_eq!(cursor.row_stats().snapshot_records, 0);
         assert_eq!(cursor.evaluator_stats().work_units, 0);
@@ -339,8 +337,7 @@ fn late_sum_and_quota_failures_never_encode_partial_summaries() {
                 &mut bytes,
                 || cx.checkpoint().map_err(Failure::query),
             )
-            .err()
-            .expect("quota refusal");
+            .expect_err("quota refusal");
             assert_eq!(error.code, 3);
             assert_eq!(cursor.state(), VertexScanState::Failed);
             assert_eq!(cursor.row_stats().result_rows, 0);
@@ -355,9 +352,7 @@ fn late_sum_and_quota_failures_never_encode_partial_summaries() {
         );
         db.write(&commit, edit).await.unwrap();
         let mut bytes = Vec::new();
-        let error = run(&db, &cx, &opts, true, &mut bytes)
-            .err()
-            .expect("late SUM refusal");
+        let error = run(&db, &cx, &opts, true, &mut bytes).expect_err("late SUM refusal");
         assert_eq!(error.code, 3);
         assert!(!error.message.contains("private late"));
         let output = String::from_utf8(bytes).unwrap();

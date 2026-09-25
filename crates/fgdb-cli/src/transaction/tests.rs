@@ -158,8 +158,7 @@ fn late_row_and_encoded_output_refusals_abort_the_entire_workspace() {
                 &mut db, &contexts, &options, None, true, &mut bytes, limits, None,
             )
             .await
-            .err()
-            .expect("bounded output must refuse");
+            .expect_err("bounded output must refuse");
             assert_eq!(error.code, 3, "{}", error.message);
             assert!(
                 bytes.is_empty(),
@@ -337,8 +336,7 @@ fn ambiguous_native_completion_never_emits_rows_or_a_rollback_claim() {
             Some(fgdb::CrashPoint::AfterMarkerFileSyncBeforeDirectorySync),
         )
         .await
-        .err()
-        .expect("injected native completion failure");
+        .expect_err("injected native completion failure");
         assert_eq!(error.code, 5, "{}", error.message);
         assert!(bytes.is_empty());
         assert!(!error.message.contains("rolled_back"));
