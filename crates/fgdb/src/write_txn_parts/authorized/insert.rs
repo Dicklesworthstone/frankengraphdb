@@ -26,9 +26,7 @@ fn source(error: WriteTxnError) -> Fault {
 fn query_control(error: WriteTxnError) -> QueryError {
     match error {
         WriteTxnError::Authorization(error) => QueryError::Authorization(error),
-        WriteTxnError::Interrupted(error) => {
-            QueryError::Pattern(GqlQueryError::Interrupted(error))
-        }
+        WriteTxnError::Interrupted(error) => QueryError::Pattern(GqlQueryError::Interrupted(error)),
         // Controls must never disclose a future native mutation error through
         // selection. Current controls produce only the two arms above.
         _ => QueryError::Authorization(Error::ScopeDenied),
@@ -103,8 +101,7 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphInsertStats, EmbeddedTxnCompletion), Fault> {
         self.insert_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock,
-            false,
+            txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock, false,
         )
         .await
         .map(|(stats, _, _, completion)| (stats, completion))
@@ -132,8 +129,7 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<Receipt, Fault> {
         self.insert_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock,
-            true,
+            txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock, true,
         )
         .await
     }
@@ -163,7 +159,9 @@ impl<V: Vfs + Clone> Database<V> {
             .begin_write_at(branch, now)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
         if insertion.selection().is_some() && !verified.predicates().rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
         commit_cx
             .with_restriction_async(async {
@@ -173,9 +171,10 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 execution.checkpoint().map_err(source)?;
-                let mut workspace = Workspace(Some(self.begin(txn_cx).map_err(|error| {
-                    source(WriteTxnError::Write(error))
-                })?));
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| source(WriteTxnError::Write(error)))?,
+                ));
                 let proposal = query_cx.with_restriction(|| {
                     // Sequential collector callbacks share the exact write
                     // allowance and owner. These borrows die BEFORE staging or
@@ -187,35 +186,40 @@ impl<V: Vfs + Clone> Database<V> {
                     insertion.execute_governed(
                         policy,
                         |pattern, allowance| {
-                            database.borrow().select_for_authorized_insert(
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                || {
-                                    query_cx.checkpoint().map_err(|error| {
-                                        query_control(WriteTxnError::Interrupted(error))
-                                    })?;
-                                    let mut borrowed = execution.borrow_mut();
-                                    let execution = &mut **borrowed;
-                                    execution.checkpoint().map_err(query_control)?;
-                                    let now = (execution.clock)();
-                                    execution.permit.charge_nodes_at(now, 1)
-                                        .map_err(QueryError::Authorization)
-                                },
-                                || {
-                                    query_cx.checkpoint().map_err(|error| {
-                                        query_control(WriteTxnError::Interrupted(error))
-                                    })?;
-                                    execution.borrow_mut().poll().map_err(query_control)
-                                },
-                                || {
-                                    query_cx.checkpoint().map_err(|error| {
-                                        query_control(WriteTxnError::Interrupted(error))
-                                    })?;
-                                    execution.borrow_mut().checkpoint().map_err(query_control)
-                                },
-                            ).map_err(selection_error)
+                            database
+                                .borrow()
+                                .select_for_authorized_insert(
+                                    query_cx,
+                                    pattern,
+                                    verified.predicates(),
+                                    allowance,
+                                    || {
+                                        query_cx.checkpoint().map_err(|error| {
+                                            query_control(WriteTxnError::Interrupted(error))
+                                        })?;
+                                        let mut borrowed = execution.borrow_mut();
+                                        let execution = &mut **borrowed;
+                                        execution.checkpoint().map_err(query_control)?;
+                                        let now = (execution.clock)();
+                                        execution
+                                            .permit
+                                            .charge_nodes_at(now, 1)
+                                            .map_err(QueryError::Authorization)
+                                    },
+                                    || {
+                                        query_cx.checkpoint().map_err(|error| {
+                                            query_control(WriteTxnError::Interrupted(error))
+                                        })?;
+                                        execution.borrow_mut().poll().map_err(query_control)
+                                    },
+                                    || {
+                                        query_cx.checkpoint().map_err(|error| {
+                                            query_control(WriteTxnError::Interrupted(error))
+                                        })?;
+                                        execution.borrow_mut().checkpoint().map_err(query_control)
+                                    },
+                                )
+                                .map_err(selection_error)
                         },
                         |request| database.borrow_mut().allocate_identity(query_cx, request),
                         || {
@@ -228,7 +232,10 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
                 for intent in proposal.into_intents() {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+                    query_cx
+                        .checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(source)?;
                     execution.checkpoint().map_err(source)?;
                     // Receipt admission precedes both its allocation and native
                     // publication. The stats-only path allocates no ID vectors.
@@ -239,7 +246,11 @@ impl<V: Vfs + Clone> Database<V> {
                             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
                     }
                     let batch = match intent {
-                        GraphInsertIntent::Vertex { vertex, labels, properties } => {
+                        GraphInsertIntent::Vertex {
+                            vertex,
+                            labels,
+                            properties,
+                        } => {
                             if returning {
                                 vertices.push(vertex);
                             }
@@ -247,7 +258,13 @@ impl<V: Vfs + Clone> Database<V> {
                             batch.create_vertex(vertex, labels, properties);
                             batch
                         }
-                        GraphInsertIntent::Edge { edge, relation, source, destination, properties } => {
+                        GraphInsertIntent::Edge {
+                            edge,
+                            relation,
+                            source,
+                            destination,
+                            properties,
+                        } => {
                             if returning {
                                 edges.push(edge);
                             }
@@ -257,8 +274,14 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                     };
                     for row in batch.rows {
-                        stage(workspace.transaction(), self, batch.relation, row, &mut execution)
-                            .map_err(source)?;
+                        stage(
+                            workspace.transaction(),
+                            self,
+                            batch.relation,
+                            row,
+                            &mut execution,
+                        )
+                        .map_err(source)?;
                     }
                 }
                 let completion = workspace

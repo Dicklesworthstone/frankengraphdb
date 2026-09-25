@@ -5,7 +5,9 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
+};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 
@@ -32,12 +34,20 @@ fn grant() -> Grant {
         relations: Scope::only([R, S]),
         properties: Scope::only([P]),
         rights: Rights::Write,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
         expires_at_ms: 10_000,
     }
 }
 fn policy() -> GraphInsertPolicy {
-    GraphInsertPolicy::new(GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 100_000), 100, 100)
+    GraphInsertPolicy::new(
+        GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 100_000),
+        100,
+        100,
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -52,13 +62,17 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn insert(text: &str) -> PreparedGraphInsert {
-    PreparedGraphInsertText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphInsertText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn authorization(error: Fault) -> Error {
     match error {
         GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
-        | GqlQueryError::Source(GraphInsertError::Source(WriteTxnError::Authorization(error))) => error,
+        | GqlQueryError::Source(GraphInsertError::Source(WriteTxnError::Authorization(error))) => {
+            error
+        }
         other => panic!("expected a typed authorization failure, got {other:?}"),
     }
 }
@@ -82,9 +96,15 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         let mut seed = WriteBatch::new(H);
-        seed.create_vertex(VId(900), vec![HIDDEN], vec![(SECRET, CanonicalScalar::Int(99))]);
+        seed.create_vertex(
+            VId(900),
+            vec![HIDDEN],
+            vec![(SECRET, CanonicalScalar::Int(99))],
+        );
         seed.create_vertex(VId(901), vec![HIDDEN], vec![]);
         seed.add_edge(EId(800), VId(900), VId(901), vec![]);
         db.write(&commit, seed).await.unwrap();
@@ -99,11 +119,24 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
             "INSERT (a:Visible {p:$value}), (b:Visible), (a)-[:R]->(b), (b)-[:S {p:7}]->(a), (a)-[:S]->(a)",
             R, symbols,
         ).unwrap();
-        let insertion = template.bind_parameters(&GqlParameters::new().with_int64("value", 42).unwrap()).unwrap();
+        let insertion = template
+            .bind_parameters(&GqlParameters::new().with_int64("value", 42).unwrap())
+            .unwrap();
         let baseline = txn.outstanding_obligations();
-        let (stats, vertices, edges, completion) = db.execute_graph_insert_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_insert_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &insertion,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.created_vertices, 2);
         assert_eq!(stats.created_edges, 3);
         assert_eq!(stats.selection.snapshot_records, 0);
@@ -113,25 +146,36 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         assert!(edges.iter().all(|id| id.0 > 800));
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+        );
         assert_eq!(txn.outstanding_obligations(), baseline);
         assert_eq!(db.vertex(VId(900)).unwrap(), hidden);
         let all_vertices = db.vertices().unwrap();
         let all_edges = db.edges().unwrap();
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), seq);
         assert_eq!(db.vertices().unwrap(), all_vertices);
         assert_eq!(db.edges().unwrap(), all_edges);
-        assert_eq!(db.vertex(vertices[0]).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(42))]);
+        assert_eq!(
+            db.vertex(vertices[0]).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(42))]
+        );
         for (index, source, relation, destination) in [
             (0, vertices[0], R, vertices[1]),
             (1, vertices[1], S, vertices[0]),
             (2, vertices[0], S, vertices[0]),
         ] {
             let edge = db.edge(edges[index]).unwrap().unwrap();
-            assert_eq!((edge.entry.src, edge.entry.relation, edge.entry.dst), (source, relation, destination));
+            assert_eq!(
+                (edge.entry.src, edge.entry.relation, edge.entry.dst),
+                (source, relation, destination)
+            );
         }
     });
 }
@@ -148,19 +192,43 @@ fn forbidden_creation_tail_aborts_every_relation_and_retries_without_reusing_ids
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let frontier = db.frontier().unwrap();
             let baseline = txn.outstanding_obligations();
-            let bad = insert(&format!("INSERT (a:Visible), (b:Visible), (a)-[:R]->(b), {tail}"));
-            let error = db.execute_graph_insert_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &bad, policy(), || NOW,
-            ).await.unwrap_err();
+            let bad = insert(&format!(
+                "INSERT (a:Visible), (b:Visible), (a)-[:R]->(b), {tail}"
+            ));
+            let error = db
+                .execute_graph_insert_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &bad,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::ScopeDenied);
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertices().unwrap().is_empty());
             assert!(db.edges().unwrap().is_empty());
             assert_eq!(txn.outstanding_obligations(), baseline);
             let good = insert("CREATE (a:Visible), (b:Visible), (a)-[:S]->(b)");
-            let (_, vertices, edges, _) = db.execute_graph_insert_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &good, policy(), || NOW,
-            ).await.unwrap();
+            let (_, vertices, edges, _) = db
+                .execute_graph_insert_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &good,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
             assert!(vertices.iter().all(|id| id.0 > 2));
             assert!(edges.iter().all(|id| id.0 > 2));
             assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
@@ -182,11 +250,24 @@ fn returned_identity_rows_are_admitted_before_commit_but_stats_need_no_row_budge
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let frontier = db.frontier().unwrap();
             let limited = token.attenuate(Restriction::MaxRows(rows)).unwrap();
-            let result = db.execute_graph_insert_returning_authorized(
-                &txn, &query, &commit, &authority, &limited, "main", &insertion, policy(), || NOW,
-            ).await;
+            let result = db
+                .execute_graph_insert_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &insertion,
+                    policy(),
+                    || NOW,
+                )
+                .await;
             if rows < 3 {
-                assert_eq!(authorization(result.unwrap_err()), Error::LimitExceeded(LimitDimension::Rows));
+                assert_eq!(
+                    authorization(result.unwrap_err()),
+                    Error::LimitExceeded(LimitDimension::Rows)
+                );
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.vertices().unwrap().is_empty());
                 assert!(db.edges().unwrap().is_empty());
@@ -199,9 +280,20 @@ fn returned_identity_rows_are_admitted_before_commit_but_stats_need_no_row_budge
         }
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, _) = db.execute_graph_insert_authorized(
-            &txn, &query, &commit, &authority, &zero, "main", &insertion, policy(), || NOW,
-        ).await.unwrap();
+        let (stats, _) = db
+            .execute_graph_insert_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &zero,
+                "main",
+                &insertion,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(txn.outstanding_obligations(), 0);
@@ -227,19 +319,39 @@ fn permission_and_creation_limits_precede_identity_issuance() {
                 policy.max_vertices = 0;
             }
             let token = authority.issue_at(&grant, NOW).unwrap();
-            let error = db.execute_graph_insert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &insertion, policy, || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_insert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &insertion,
+                    policy,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             if read_only {
                 assert_eq!(authorization(error), Error::PermissionDenied);
             } else {
-                assert!(matches!(error, GqlQueryError::Source(GraphInsertError::Limit {
-                    dimension: GraphInsertLimitDimension::Vertices, limit: 0, observed: 1,
-                })));
+                assert!(matches!(
+                    error,
+                    GqlQueryError::Source(GraphInsertError::Limit {
+                        dimension: GraphInsertLimitDimension::Vertices,
+                        limit: 0,
+                        observed: 1,
+                    })
+                ));
             }
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!(txn.outstanding_obligations(), 0);
-            assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap(), ElementId::Vertex(VId(1)));
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(VId(1))
+            );
         }
     });
 }
@@ -265,9 +377,20 @@ fn signed_work_and_node_limits_cover_collection_and_native_creation_together() {
                 let limited = token.attenuate(restriction).unwrap();
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 let frontier = db.frontier().unwrap();
-                match db.execute_graph_insert_authorized(
-                    &txn, &query, &commit, &authority, &limited, "main", &insertion, policy(), || NOW,
-                ).await {
+                match db
+                    .execute_graph_insert_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &limited,
+                        "main",
+                        &insertion,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                {
                     Ok((stats, _)) => {
                         assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
                         high = middle;
@@ -290,7 +413,10 @@ fn signed_work_and_node_limits_cover_collection_and_native_creation_together() {
 }
 
 fn read_write_grant() -> Grant {
-    Grant { rights: Rights::ReadWrite, ..grant() }
+    Grant {
+        rights: Rights::ReadWrite,
+        ..grant()
+    }
 }
 
 // Same visible graph and bag multiplicity, with optional hidden rows, fields,
@@ -320,9 +446,11 @@ async fn matched_fixture(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
 }
 
 fn matched_insert() -> PreparedGraphInsert {
-    insert("MATCH (a:Visible)-[:R]->(b:Visible) \
+    insert(
+        "MATCH (a:Visible)-[:R]->(b:Visible) \
         INSERT (copy:Visible {p:CASE WHEN a.secret IS NULL THEN a.p ELSE 999 END}), \
-        (a)-[:S]->(copy), (copy)-[:R]->(b)")
+        (a)-[:S]->(copy), (copy)-[:R]->(b)",
+    )
 }
 
 #[test]
@@ -339,27 +467,53 @@ fn match_insert_uses_masked_properties_and_preserves_occurrence_multiplicity() {
             let mut db = matched_fixture(&commit, hidden).await;
             let frontier = db.frontier().unwrap();
             let original = db.vertex(VId(1)).unwrap();
-            let (stats, vertices, edges, completion) = db.execute_graph_insert_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || NOW,
-            ).await.unwrap();
+            let (stats, vertices, edges, completion) = db
+                .execute_graph_insert_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &insertion,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
             assert_eq!((stats.created_vertices, stats.created_edges), (2, 4));
             assert_eq!(stats.selection.result_rows, 2);
             assert_eq!((vertices.len(), edges.len()), (2, 4));
             let seq = db.frontier().unwrap();
             assert_eq!(seq.0, frontier.0 + 1);
-            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+            );
             assert_eq!(db.vertex(VId(1)).unwrap(), original);
             for (occurrence, vertex) in vertices.iter().copied().enumerate() {
-                assert_eq!(db.vertex(vertex).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(10))]);
+                assert_eq!(
+                    db.vertex(vertex).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(10))]
+                );
                 let first = db.edge(edges[2 * occurrence]).unwrap().unwrap();
                 let second = db.edge(edges[2 * occurrence + 1]).unwrap().unwrap();
-                assert_eq!((first.entry.src, first.entry.relation, first.entry.dst), (VId(1), S, vertex));
-                assert_eq!((second.entry.src, second.entry.relation, second.entry.dst), (vertex, R, VId(2)));
+                assert_eq!(
+                    (first.entry.src, first.entry.relation, first.entry.dst),
+                    (VId(1), S, vertex)
+                );
+                assert_eq!(
+                    (second.entry.src, second.entry.relation, second.entry.dst),
+                    (vertex, R, VId(2))
+                );
             }
             assert_eq!(txn.outstanding_obligations(), 0);
             stats_seen.push(stats);
         }
-        assert_eq!(stats_seen[0], stats_seen[1], "hidden data changed visible execution statistics");
+        assert_eq!(
+            stats_seen[0], stats_seen[1],
+            "hidden data changed visible execution statistics"
+        );
     });
 }
 
@@ -370,26 +524,59 @@ fn empty_scoped_match_closes_without_publication_or_identity_reservations() {
         let query = contexts.query();
         let txn = contexts.txn();
         let authority = authority();
-        let token = authority.issue_at(&read_write_grant(), NOW).unwrap()
-            .attenuate(Restriction::MaxRows(0)).unwrap();
+        let token = authority
+            .issue_at(&read_write_grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(0))
+            .unwrap();
         let mut db = matched_fixture(&commit, true).await;
         let vertex_request = GraphInsertRequest::Vertex { row: 0, vertex: 0 };
         let edge_request = GraphInsertRequest::Edge { row: 0, edge: 0 };
-        let ElementId::Vertex(before_vertex) = db.allocate_identity(&query, vertex_request).unwrap() else { panic!("vertex allocator kind") };
-        let ElementId::Edge(before_edge) = db.allocate_identity(&query, edge_request).unwrap() else { panic!("edge allocator kind") };
+        let ElementId::Vertex(before_vertex) =
+            db.allocate_identity(&query, vertex_request).unwrap()
+        else {
+            panic!("vertex allocator kind")
+        };
+        let ElementId::Edge(before_edge) = db.allocate_identity(&query, edge_request).unwrap()
+        else {
+            panic!("edge allocator kind")
+        };
         let frontier = db.frontier().unwrap();
         let original = db.vertices().unwrap();
         let insertion = insert("MATCH (a:Hidden) INSERT (copy:Visible), (a)-[:S]->(copy)");
-        let (stats, vertices, edges, completion) = db.execute_graph_insert_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_insert_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &insertion,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
         assert!(vertices.is_empty() && edges.is_empty());
-        assert_eq!(completion, EmbeddedTxnCompletion::ReadClosed { snapshot_seq: frontier, validated_through: frontier });
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed {
+                snapshot_seq: frontier,
+                validated_through: frontier
+            }
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(db.vertices().unwrap(), original);
-        assert_eq!(db.allocate_identity(&query, vertex_request).unwrap(), ElementId::Vertex(VId(before_vertex.0 + 1)));
-        assert_eq!(db.allocate_identity(&query, edge_request).unwrap(), ElementId::Edge(EId(before_edge.0 + 1)));
+        assert_eq!(
+            db.allocate_identity(&query, vertex_request).unwrap(),
+            ElementId::Vertex(VId(before_vertex.0 + 1))
+        );
+        assert_eq!(
+            db.allocate_identity(&query, edge_request).unwrap(),
+            ElementId::Edge(EId(before_edge.0 + 1))
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -401,8 +588,11 @@ fn write_only_authority_cannot_gain_selection_reads_even_for_an_empty_match() {
         let query = contexts.query();
         let txn = contexts.txn();
         let authority = authority();
-        let token = authority.issue_at(&grant(), NOW).unwrap()
-            .attenuate(Restriction::MaxWork(0)).unwrap();
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxWork(0))
+            .unwrap();
         for text in [
             "MATCH (a:Visible) INSERT (copy:Visible {p:a.p})",
             "MATCH (a:Hidden) INSERT (copy:Visible)",
@@ -411,9 +601,20 @@ fn write_only_authority_cannot_gain_selection_reads_even_for_an_empty_match() {
             let frontier = db.frontier().unwrap();
             let original = db.vertices().unwrap();
             let insertion = insert(text);
-            let error = db.execute_graph_insert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_insert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &insertion,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::PermissionDenied);
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!(db.vertices().unwrap(), original);
@@ -446,9 +647,20 @@ fn hidden_data_changes_neither_match_insert_work_nor_node_refusal_thresholds() {
                     let mut db = matched_fixture(&commit, hidden).await;
                     let frontier = db.frontier().unwrap();
                     let original = db.vertices().unwrap();
-                    match db.execute_graph_insert_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main", &insertion, policy(), || NOW,
-                    ).await {
+                    match db
+                        .execute_graph_insert_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            &insertion,
+                            policy(),
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok((stats, _)) => {
                             assert_eq!((stats.created_vertices, stats.created_edges), (2, 4));
                             high = middle;
@@ -465,7 +677,10 @@ fn hidden_data_changes_neither_match_insert_work_nor_node_refusal_thresholds() {
                 assert!(low > 0 && low < 4096);
                 floors.push(low);
             }
-            assert_eq!(floors[0], floors[1], "{dimension:?}: hidden data changed the refusal threshold");
+            assert_eq!(
+                floors[0], floors[1],
+                "{dimension:?}: hidden data changed the refusal threshold"
+            );
         }
     });
 }
@@ -487,12 +702,26 @@ fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
                 let limited = token.attenuate(Restriction::MaxNodes(middle)).unwrap();
                 let mut db = matched_fixture(&commit, false).await;
                 let success = if matched {
-                    match db.execute_graph_insert_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main", &insertion, policy(), || NOW,
-                    ).await {
+                    match db
+                        .execute_graph_insert_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            &insertion,
+                            policy(),
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(error) => {
-                            assert_eq!(authorization(error), Error::LimitExceeded(LimitDimension::Nodes));
+                            assert_eq!(
+                                authorization(error),
+                                Error::LimitExceeded(LimitDimension::Nodes)
+                            );
                             false
                         }
                     }
@@ -510,9 +739,18 @@ fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
                         outgoing.add_edge(EId(101 + 2 * occurrence), vertex, VId(2), vec![]);
                         batches.extend([create, incoming, outgoing]);
                     }
-                    match db.write_ordered_authorized(
-                        &txn, &commit, &authority, &limited, "main", batches, || NOW,
-                    ).await {
+                    match db
+                        .write_ordered_authorized(
+                            &txn,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            batches,
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(WriteTxnError::Authorization(error)) => {
                             assert_eq!(error, Error::LimitExceeded(LimitDimension::Nodes));
@@ -521,7 +759,11 @@ fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
                         other => panic!("native allowance witness: {other:?}"),
                     }
                 };
-                if success { high = middle; } else { low = middle + 1; }
+                if success {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
             assert!(low > 2 && low < 128);
@@ -546,11 +788,21 @@ fn expiry_during_match_collection_or_final_admission_never_publishes_a_prefix() 
         let mut samples = 0_usize;
         let mut db = matched_fixture(&commit, false).await;
         db.execute_graph_insert_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || {
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &insertion,
+            policy(),
+            || {
                 samples += 1;
                 NOW
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let total = samples;
         assert!(total > 3);
         for cutoff in [1, total / 2, total] {
@@ -559,12 +811,23 @@ fn expiry_during_match_collection_or_final_admission_never_publishes_a_prefix() 
             let vertices = db.vertices().unwrap();
             let edges = db.edges().unwrap();
             let mut calls = 0;
-            let error = db.execute_graph_insert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &insertion, policy(), || {
-                    calls += 1;
-                    if calls >= cutoff { 10_000 } else { NOW }
-                },
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_insert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &insertion,
+                    policy(),
+                    || {
+                        calls += 1;
+                        if calls >= cutoff { 10_000 } else { NOW }
+                    },
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::Expired);
             assert_eq!(db.frontier().unwrap(), frontier, "cutoff={cutoff}");
             assert_eq!(db.vertices().unwrap(), vertices);

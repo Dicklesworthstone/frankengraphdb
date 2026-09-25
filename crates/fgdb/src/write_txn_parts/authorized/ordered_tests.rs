@@ -21,7 +21,14 @@ fn keys() -> DatabaseKeys {
 }
 
 fn authority() -> Authority {
-    Authority::new(AuthKey::from_seed(0xb301), NAMESPACE, "graph", SchemaEpoch(1), 1).unwrap()
+    Authority::new(
+        AuthKey::from_seed(0xb301),
+        NAMESPACE,
+        "graph",
+        SchemaEpoch(1),
+        1,
+    )
+    .unwrap()
 }
 
 fn grant() -> Grant {
@@ -47,7 +54,10 @@ where
     let ((), report) = run_async_under_lab(seed, |root| async move {
         test(PurposeContexts::narrow_runtime_root(&root)).await;
     });
-    assert!(report.lab_test_passed(), "lab invariants/quiescence: {report:?}");
+    assert!(
+        report.lab_test_passed(),
+        "lab invariants/quiescence: {report:?}"
+    );
 }
 
 fn dependent_batches() -> Vec<WriteBatch> {
@@ -110,7 +120,13 @@ fn dependent_relations_authorize_original_intents_and_reopen_one_commit() {
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let seq = db
             .write_ordered_authorized(
-                &txn, &cx, &authority, &token, "main", dependent_batches(), || NOW,
+                &txn,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                dependent_batches(),
+                || NOW,
             )
             .await
             .unwrap();
@@ -160,7 +176,13 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
         // The failed workspace must not reserve identities or fence the handle.
         let seq = db
             .write_ordered_authorized(
-                &txn, &cx, &authority, &token, "main", dependent_batches(), || NOW,
+                &txn,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                dependent_batches(),
+                || NOW,
             )
             .await
             .unwrap();
@@ -193,7 +215,13 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
         second.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(2)));
         assert!(matches!(
             db.write_ordered_authorized(
-                &txn, &cx, &authority, &token, "main", vec![first, second], || NOW,
+                &txn,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                vec![first, second],
+                || NOW,
             )
             .await,
             Err(WriteTxnError::Authorization(Error::ScopeDenied))
@@ -229,10 +257,18 @@ fn node_allowance_is_shared_across_relation_boundaries() {
         let batches = vec![first, second];
         assert!(matches!(
             db.write_ordered_authorized(
-                &txn, &cx, &authority, &token, "main", batches.clone(), || NOW,
+                &txn,
+                &cx,
+                &authority,
+                &token,
+                "main",
+                batches.clone(),
+                || NOW,
             )
             .await,
-            Err(WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))
+            Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            )))
         ));
         assert_eq!(db.frontier().unwrap(), initial);
         assert!(db.vertex(VId(1)).unwrap().is_none());
@@ -269,7 +305,13 @@ async fn budget_attempt(
     let result = if single {
         assert_eq!(batches.len(), 1);
         db.write_authorized(
-            &txn, &cx, &authority, &token, "main", batches.into_iter().next().unwrap(), || NOW,
+            &txn,
+            &cx,
+            &authority,
+            &token,
+            "main",
+            batches.into_iter().next().unwrap(),
+            || NOW,
         )
         .await
     } else {
@@ -287,7 +329,9 @@ async fn budget_attempt(
 
 async fn minimum_work(contexts: &PurposeContexts, batches: &[WriteBatch], single: bool) -> u64 {
     let (mut low, mut high) = (0, 4096);
-    budget_attempt(contexts, batches.to_vec(), high, single).await.unwrap();
+    budget_attempt(contexts, batches.to_vec(), high, single)
+        .await
+        .unwrap();
     while high - low > 1 {
         let middle = low + (high - low) / 2;
         match budget_attempt(contexts, batches.to_vec(), middle, single).await {
@@ -320,7 +364,9 @@ fn splitting_batches_cannot_refresh_work_or_change_single_batch_charges() {
         assert!(single > first_only.max(second_only));
         assert!(matches!(
             budget_attempt(&contexts, split, first_only.max(second_only), false).await,
-            Err(WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Work)))
+            Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                LimitDimension::Work
+            )))
         ));
     });
 }

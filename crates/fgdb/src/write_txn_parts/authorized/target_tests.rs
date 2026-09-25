@@ -23,7 +23,14 @@ fn keys() -> DatabaseKeys {
 }
 
 fn authority() -> Authority {
-    Authority::new(AuthKey::from_seed(0xb601), NAMESPACE, "graph", SchemaEpoch(1), 1).unwrap()
+    Authority::new(
+        AuthKey::from_seed(0xb601),
+        NAMESPACE,
+        "graph",
+        SchemaEpoch(1),
+        1,
+    )
+    .unwrap()
 }
 
 fn grant() -> Grant {
@@ -51,7 +58,10 @@ where
     let ((), report) = run_async_under_lab(seed, |root| async move {
         test(PurposeContexts::narrow_runtime_root(&root)).await;
     });
-    assert!(report.lab_test_passed(), "lab invariants/quiescence: {report:?}");
+    assert!(
+        report.lab_test_passed(),
+        "lab invariants/quiescence: {report:?}"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,7 +122,10 @@ fn request(mutation: Mutation) -> WriteBatch {
         }
         Mutation::VertexCas => {
             batch.compare_and_set_vertex_property(
-                VId(9), P, Some(CanonicalScalar::Int(9)), CanonicalScalar::Int(7),
+                VId(9),
+                P,
+                Some(CanonicalScalar::Int(9)),
+                CanonicalScalar::Int(7),
                 WriteMismatchPolicy::AbortWrite,
             );
         }
@@ -124,7 +137,10 @@ fn request(mutation: Mutation) -> WriteBatch {
         }
         Mutation::EdgeCas => {
             batch.compare_and_set_edge_property(
-                EId(9), P, Some(CanonicalScalar::Int(9)), CanonicalScalar::Int(7),
+                EId(9),
+                P,
+                Some(CanonicalScalar::Int(9)),
+                CanonicalScalar::Int(7),
                 WriteMismatchPolicy::AbortWrite,
             );
         }
@@ -175,9 +191,21 @@ async fn reaches_denial(
     // Attenuation is available to the holder without the issuer key.
     let limited = token.attenuate(restriction).unwrap();
     let result = db
-        .write_authorized(&txn, &cx, authority, &limited, "main", request(mutation), || NOW)
+        .write_authorized(
+            &txn,
+            &cx,
+            authority,
+            &limited,
+            "main",
+            request(mutation),
+            || NOW,
+        )
         .await;
-    assert_eq!(db.frontier().unwrap(), frontier, "{mutation:?} {meter:?}={limit}");
+    assert_eq!(
+        db.frontier().unwrap(),
+        frontier,
+        "{mutation:?} {meter:?}={limit}"
+    );
     assert_eq!(txn.outstanding_obligations(), baseline);
     assert!(db.vertex(VId(50)).unwrap().is_none());
     assert!(db.edge_at(EId(50), frontier).unwrap().is_none());
@@ -229,8 +257,12 @@ fn hidden_vertices_and_endpoints_share_absent_target_refusal_thresholds() {
         let mut absent = fixture(&cx, None).await;
         let mut hidden = fixture(&cx, Some(HiddenTarget::Vertex)).await;
         for mutation in [
-            Mutation::VertexSet, Mutation::VertexCas, Mutation::VertexLabel,
-            Mutation::CreateTo, Mutation::EnsureTo, Mutation::CreateFrom,
+            Mutation::VertexSet,
+            Mutation::VertexCas,
+            Mutation::VertexLabel,
+            Mutation::CreateTo,
+            Mutation::EnsureTo,
+            Mutation::CreateFrom,
         ] {
             for meter in [Meter::Work, Meter::Nodes] {
                 assert_eq!(
@@ -255,24 +287,34 @@ fn hidden_edge_relations_and_endpoints_share_absent_target_refusal_thresholds() 
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let mut absent = fixture(&cx, None).await;
         for target in [
-            HiddenTarget::Relation, HiddenTarget::Source,
-            HiddenTarget::Destination, HiddenTarget::SelfLoop,
+            HiddenTarget::Relation,
+            HiddenTarget::Source,
+            HiddenTarget::Destination,
+            HiddenTarget::SelfLoop,
         ] {
             let mut hidden = fixture(&cx, Some(target)).await;
             for mutation in [
-                Mutation::EdgeSet, Mutation::EdgeCas,
-                Mutation::EdgeDelete, Mutation::EdgeDeleteIfPresent,
+                Mutation::EdgeSet,
+                Mutation::EdgeCas,
+                Mutation::EdgeDelete,
+                Mutation::EdgeDeleteIfPresent,
             ] {
                 for meter in [Meter::Work, Meter::Nodes] {
                     assert_eq!(
-                        threshold(&mut absent, &contexts, &authority, &token, mutation, meter).await,
-                        threshold(&mut hidden, &contexts, &authority, &token, mutation, meter).await,
+                        threshold(&mut absent, &contexts, &authority, &token, mutation, meter)
+                            .await,
+                        threshold(&mut hidden, &contexts, &authority, &token, mutation, meter)
+                            .await,
                         "{target:?}: {mutation:?}, {meter:?}"
                     );
                 }
             }
             assert_eq!(
-                hidden.edge_at(EId(9), hidden.frontier().unwrap()).unwrap().unwrap().props,
+                hidden
+                    .edge_at(EId(9), hidden.frontier().unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .props,
                 vec![(P, CanonicalScalar::Int(9))]
             );
         }
@@ -288,29 +330,41 @@ fn admitted_updates_keep_original_hidden_fields_and_refuse_after_image_scope_esc
         let mut db = Database::<MemVfs>::open_memory(&cx, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(
-            VId(1), vec![L, HIDDEN],
-            vec![(P, CanonicalScalar::Int(1)), (SECRET, CanonicalScalar::Int(99))],
+            VId(1),
+            vec![L, HIDDEN],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (SECRET, CanonicalScalar::Int(99)),
+            ],
         );
         db.write(&cx, seed).await.unwrap();
         let authority = authority();
-        let token = authority.issue_at(&grant(), NOW).unwrap()
-            .attenuate(Restriction::Properties(Scope::only([P]))).unwrap();
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::Properties(Scope::only([P])))
+            .unwrap();
         let mut update = WriteBatch::new(R);
         update.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
         let frontier = db
             .write_authorized(&txn, &cx, &authority, &token, "main", update, || NOW)
-            .await.unwrap();
+            .await
+            .unwrap();
         let before = db.vertex(VId(1)).unwrap().unwrap();
         assert_eq!(before.labels, vec![L, HIDDEN]);
         assert_eq!(
             before.props,
-            vec![(P, CanonicalScalar::Int(7)), (SECRET, CanonicalScalar::Int(99))]
+            vec![
+                (P, CanonicalScalar::Int(7)),
+                (SECRET, CanonicalScalar::Int(99))
+            ]
         );
         let mut escape = WriteBatch::new(R);
         escape.create_vertex(VId(50), vec![L], vec![]);
         escape.set_vertex_label(VId(1), L, false);
         assert!(matches!(
-            db.write_authorized(&txn, &cx, &authority, &token, "main", escape, || NOW).await,
+            db.write_authorized(&txn, &cx, &authority, &token, "main", escape, || NOW)
+                .await,
             Err(WriteTxnError::Authorization(Error::ScopeDenied))
         ));
         assert_eq!(db.frontier().unwrap(), frontier);

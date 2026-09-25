@@ -512,11 +512,20 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
         let authority = issuer(NAMESPACE);
         let root = authority.issue_at(&edge_delete_grant(), NOW).unwrap();
         let scoped = [
-            ("allowlist", root.attenuate(Restriction::Properties(Scope::only([P]))).unwrap()),
-            ("empty", root.attenuate(Restriction::Properties(Scope::only([]))).unwrap()),
+            (
+                "allowlist",
+                root.attenuate(Restriction::Properties(Scope::only([P])))
+                    .unwrap(),
+            ),
+            (
+                "empty",
+                root.attenuate(Restriction::Properties(Scope::only([])))
+                    .unwrap(),
+            ),
             (
                 "denylist",
-                root.attenuate(Restriction::DenyProperties([SECRET].into_iter().collect())).unwrap(),
+                root.attenuate(Restriction::DenyProperties([SECRET].into_iter().collect()))
+                    .unwrap(),
             ),
         ];
         for hidden in 0..=5 {
@@ -528,8 +537,10 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
                     for if_present in [false, true] {
                         for work in [0, 1, 2, 3, 32, 4096] {
                             let limited = token
-                                .attenuate(Restriction::MaxWork(work)).unwrap()
-                                .attenuate(Restriction::MaxNodes(0)).unwrap();
+                                .attenuate(Restriction::MaxWork(work))
+                                .unwrap()
+                                .attenuate(Restriction::MaxNodes(0))
+                                .unwrap();
                             let mut batch = WriteBatch::new(R);
                             if if_present {
                                 batch.delete_edge_if_present(eid);
@@ -538,7 +549,13 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
                             }
                             let outcome = db
                                 .write_authorized(
-                                    &txn, &cx, &authority, &limited, BRANCH, batch, || NOW,
+                                    &txn,
+                                    &cx,
+                                    &authority,
+                                    &limited,
+                                    BRANCH,
+                                    batch,
+                                    || NOW,
                                 )
                                 .await;
                             let expected = if work < 2 {
@@ -576,7 +593,8 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
                 batch.create_vertex(VId(50), vec![L], vec![]);
                 batch.delete_edge(EId(10));
                 assert!(matches!(
-                    db.write_authorized(&txn, &cx, &authority, token, BRANCH, batch, || NOW).await,
+                    db.write_authorized(&txn, &cx, &authority, token, BRANCH, batch, || NOW)
+                        .await,
                     Err(WriteTxnError::Authorization(Error::ScopeDenied))
                 ));
                 assert_eq!(db.frontier().unwrap(), frontier);
@@ -596,10 +614,19 @@ fn full_property_authority_still_deletes_scoped_edges_and_reopens() {
         let path = scratch("scoped-edge-delete-reopen");
         let mut db = Database::create(&cx, &path, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
-        seed.create_vertex(VId(1), vec![L, HIDDEN], vec![(SECRET, CanonicalScalar::Int(99))]);
+        seed.create_vertex(
+            VId(1),
+            vec![L, HIDDEN],
+            vec![(SECRET, CanonicalScalar::Int(99))],
+        );
         seed.create_vertex(VId(2), vec![L], vec![]);
         seed.create_vertex(VId(3), vec![HIDDEN], vec![]);
-        seed.add_edge(EId(10), VId(1), VId(2), vec![(SECRET, CanonicalScalar::Int(88))]);
+        seed.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(SECRET, CanonicalScalar::Int(88))],
+        );
         seed.add_edge(EId(11), VId(1), VId(1), vec![(P, CanonicalScalar::Int(7))]);
         seed.add_edge(EId(30), VId(1), VId(3), vec![]);
         db.write(&cx, seed).await.unwrap();

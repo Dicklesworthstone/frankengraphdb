@@ -30,9 +30,7 @@ pub(crate) fn next_from_view<C>(
         view.snapshot
             .adjacency_index
             .next_incident_edge(endpoint, direction, after, control)
-            .map_err(|error| {
-                EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error))
-            })
+            .map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))
     })
 }
 
@@ -227,7 +225,10 @@ mod tests {
                 after = Some(eid);
             }
             assert_eq!(actual, expected);
-            assert!(work < 256, "an incidence seek scanned unrelated rows: {work}");
+            assert!(
+                work < 256,
+                "an incidence seek scanned unrelated rows: {work}"
+            );
         }
         assert_eq!(
             index

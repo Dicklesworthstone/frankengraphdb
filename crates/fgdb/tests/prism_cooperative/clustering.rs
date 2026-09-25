@@ -131,12 +131,19 @@ fn topology_admission_matches_exact_sync_work_workspace_rows_and_result_bytes() 
         db.write(&contexts.commit(), batch).await.unwrap();
         let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
-        for call in [FnxCallSpec::triangles(), FnxCallSpec::clustering_coefficient()] {
+        for call in [
+            FnxCallSpec::triangles(),
+            FnxCallSpec::clustering_coefficient(),
+        ] {
             let expected = call
                 .execute_sealed(&cx, &graph, opt.execution_limits, memory())
                 .unwrap();
             let columns = call.outputs().len() * size_of::<String>()
-                + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
+                + call
+                    .outputs()
+                    .iter()
+                    .map(|column| column.name.len())
+                    .sum::<usize>();
             let bytes = columns
                 + graph.node_count()
                     * (size_of::<Vec<fgdb_prism::FnxValue>>()
@@ -174,19 +181,23 @@ fn topology_admission_matches_exact_sync_work_workspace_rows_and_result_bytes() 
                 ),
                 (
                     "result rows",
-                    FnxExecutionLimits { max_result_rows: 2, ..exact },
+                    FnxExecutionLimits {
+                        max_result_rows: 2,
+                        ..exact
+                    },
                     mem,
                 ),
                 (
                     "result bytes",
                     exact,
-                    FnxMemoryLimits { max_result_bytes: bytes - 1, ..mem },
+                    FnxMemoryLimits {
+                        max_result_bytes: bytes - 1,
+                        ..mem
+                    },
                 ),
             ] {
                 let error = call
-                    .execute_sealed_cooperative(
-                        &cx, &graph, limits, memory, quantum(1), yield_now,
-                    )
+                    .execute_sealed_cooperative(&cx, &graph, limits, memory, quantum(1), yield_now)
                     .await
                     .unwrap_err();
                 assert!(matches!(
@@ -212,7 +223,10 @@ fn topology_empty_and_isolated_populations_yield_during_scalar_and_result_walks(
         for n in [0, 1, 512] {
             let db = small_database(&contexts.commit(), n, false).await;
             let graph = projection(&db, &cx, opt).await;
-            for call in [FnxCallSpec::triangles(), FnxCallSpec::clustering_coefficient()] {
+            for call in [
+                FnxCallSpec::triangles(),
+                FnxCallSpec::clustering_coefficient(),
+            ] {
                 let expected = call
                     .execute_sealed(&cx, &graph, opt.execution_limits, memory())
                     .unwrap();

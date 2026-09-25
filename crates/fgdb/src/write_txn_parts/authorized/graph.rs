@@ -87,7 +87,11 @@ impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
         // different work/node limit than an absent EId (FG-INV-20). These are
         // the native pinned rows, not a synthetic or masked graph overlay.
         self.poll()?;
-        if !self.permit.predicates().allows_relation(record.entry.relation) {
+        if !self
+            .permit
+            .predicates()
+            .allows_relation(record.entry.relation)
+        {
             return Err(denied());
         }
         let source = transaction
