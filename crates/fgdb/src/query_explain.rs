@@ -654,7 +654,7 @@ impl PreparedNativeRead {
             Self::PipelineAggregate(prepared) => {
                 // Same lane selection as the read-view and transaction hosts:
                 // from the admitted definition, never from a failed execution.
-                let result = if prepared.is_source_free() {
+                let result = if prepared.requires_relational_input() {
                     let query = prepared
                         .bind_relation_parameters(params)
                         .map_err(QueryError::PipelineText)?;

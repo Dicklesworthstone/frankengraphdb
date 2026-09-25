@@ -93,9 +93,9 @@ impl PreparedNativeRead {
             }
             Self::PipelineAggregate(prepared) => {
                 // Select from the admitted definition, never from source data
-                // or a failed execution. Existing graph-backed counters and
+                // or a failed execution. Existing single-source counters and
                 // source-error nesting stay on their original adapter.
-                let result = if prepared.is_source_free() {
+                let result = if prepared.requires_relational_input() {
                     let query = prepared
                         .bind_relation_parameters(params)
                         .map_err(QueryError::PipelineText)?;
