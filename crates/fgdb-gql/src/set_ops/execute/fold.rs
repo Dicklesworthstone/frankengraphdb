@@ -1,8 +1,9 @@
 //! Fold order-preserving relational stages without retaining their output bag.
 //!
-//! Sort/DISTINCT barriers and graph leaves keep the ordinary executor. UNWIND,
-//! Cartesian expansion, filters and order-preserving ALL projections forward
-//! owned rows directly. Pages drain their input: LIMIT 0 cannot hide failures.
+//! Graph leaves and child sorting barriers keep the ordinary executor. Set
+//! merges, UNWIND, Cartesian expansion, filters and order-preserving ALL
+//! projections forward owned rows directly. Pages drain their input: LIMIT 0
+//! cannot hide failures. Set inputs still sort/deduplicate in their own bags.
 //! This is query-local physical execution, not a new logical algebra or spill.
 
 use super::*;
@@ -24,7 +25,7 @@ impl PreparedGraphSet {
     /// Every descendant must still retain its own sequence boundaries.
     pub(super) fn has_foldable_node(&self) -> bool {
         match &self.node {
-            SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
+            SetNode::Unwind { .. } | SetNode::CrossJoin { .. } | SetNode::Binary { .. } => true,
             SetNode::Scope(input) | SetNode::Filter { input, .. } => input.has_foldable_expansion(),
             SetNode::Project {
                 input,
@@ -165,8 +166,9 @@ where
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
-    // The ordinary path remains the only implementation of a sorting or set
-    // barrier. Its complete selected output is already in its declared order.
+    // Nonfoldable sorting/projection barriers keep their complete selected
+    // output in its declared order. Binary sets use the same canonical merge
+    // below, without retaining a second bag for the terminal consumer.
     if !query.has_foldable_expansion() {
         let rows = run(query, source, meter, operand)?;
         let mut forward = Window::new(0, None);
@@ -250,6 +252,39 @@ where
     }
     let mut local = None;
     match &query.node {
+        SetNode::Binary {
+            operation,
+            quantifier,
+            left,
+            right,
+        } => {
+            // Complete BOTH original children before forwarding any row,
+            // including beneath LIMIT 0. Child pages, source error order,
+            // schema admission and the shared allowance remain unchanged.
+            let left = run(left, source, meter, operand)?;
+            let right = run(right, source, meter, operand)?;
+            let mut merge = merge::SortedMerge::new(
+                left,
+                right,
+                *operation,
+                *quantifier,
+                &mut |event| meter.event(event),
+                &mut |a, b, control| compare_rows(a, b, &[], control),
+            )?;
+            loop {
+                let row = merge.next_with_control(
+                    &mut |event| meter.event(event),
+                    &mut |a, b, control| compare_rows(a, b, &[], control),
+                )?;
+                let Some(row) = row else {
+                    break;
+                };
+                // Move the occurrence directly into the ordinary window/sink.
+                // A full page or deferred semantic sink failure still drains
+                // the merge; interruption/resource refusal stops immediately.
+                window.push(row, meter, consume)?;
+            }
+        }
         SetNode::CrossJoin { left, right } => {
             // Both children execute once, left-to-right, even if either is
             // empty. Their own sort/page and source-failure order are intact.
@@ -373,3 +408,6 @@ mod tests;
 
 #[cfg(test)]
 mod selected_tests;
+
+#[cfg(test)]
+mod set_tests;
