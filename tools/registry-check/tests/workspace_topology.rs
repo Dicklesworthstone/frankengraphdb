@@ -33,7 +33,8 @@ use registry_check::topology::{
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
+// Moved by 1207516b's new fgdb-beacon row (fgdb-topology-seven-crates-9n8ao).
+const ID_TABLE_PIN: &str = "fnv1a64:dfa5456a147b1dc7";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -42,7 +43,15 @@ const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
 // semantic contract covers activation_status AND posture status, so
 // activating a crate MUST move this — a pin that survived the change would
 // be pinning nothing.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:f179230f0b176d73";
+//
+// Last re-freeze (fgdb-topology-seven-crates-9n8ao): 1167eab2 activated
+// fgdb-protocol and moved only the registry-side pin, so this constant was
+// red from 2026-09-21; 1207516b then activated six crates, added fgdb-beacon
+// and made the cli posture live without moving either pin. The re-freeze
+// also covers two changes of its own: the posture line now includes
+// `consumes_entries` (0c2a4552 added that law without covering it), and
+// prism-over-fnx joins the required-edge live floor.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:62c130cf01dd3c93";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -151,13 +160,35 @@ fn topology_semantic_contract_hash_pin() {
 }
 
 #[test]
+fn topology_semantic_contract_covers_posture_consumption() {
+    // `consumes_entries` decides which foreign entry crates a posture closure
+    // may contain. 0c2a4552 added that law without covering it, so widening a
+    // posture's consumption moved no pin.
+    let base = registry();
+    let mut widened = base.clone();
+    widened
+        .postures
+        .iter_mut()
+        .find(|posture| posture.id == "cli")
+        .expect("cli posture")
+        .consumes_entries
+        .push("server".into());
+    assert_ne!(
+        recompute_semantic_contract_hash(&widened),
+        recompute_semantic_contract_hash(&base),
+        "the entry crates a posture consumes are part of the contract"
+    );
+}
+
+#[test]
 fn topology_cardinalities_are_exactly_the_plan_enumeration() {
     let registry = registry();
     assert_eq!(registry.layers.len(), 14, "§18.1 has fourteen layers");
     assert_eq!(
         registry.crates.len(),
-        70,
-        "sixty-nine crates plus fgdb-shard"
+        71,
+        "seventy crates (fgdb-beacon joined the §18.1 Beacon row in 1207516b) \
+         plus fgdb-shard"
     );
     assert_eq!(registry.capabilities.len(), 51, "23 + 19 + 9");
     assert_eq!(registry.postures.len(), 3, "§1 constraint 5");
@@ -168,8 +199,8 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        21,
-        "eighteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
+        29,
+        "twenty-six ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
          BLAKE3/AEAD kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's \
          §5.1 identity pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's \
          semantics oracle, fgdb-sim by fgdb-verif-sim-q97e's \
@@ -181,7 +212,9 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
          layer whose parser/binder the spine's execute paths already bind \
          through, activated when its live dependency edge made planned status \
          a topology violation, and fgdb-bench by fgdb-p95p's §17 adversarial \
-         benchmark harness) plus all three landed islands: \
+         benchmark harness; then fgdb-protocol by 1167eab2, and by 1207516b \
+         fgdb-policy, fgdb-order, fgdb-prism, fgdb-warden, fgdb-repl, fgdb-cli \
+         and the new fgdb-beacon) plus all three landed islands: \
          fgdb-unsafe-simd, fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
@@ -443,7 +476,7 @@ fn topology_neg_dropped_crate_row() {
 fn topology_neg_crate_in_the_wrong_layer() {
     let codes = codes_after_all(&[
         (
-            "name = \"fgdb-btree\"\nlayer = \"beacon\"\nlayer_position = 2",
+            "name = \"fgdb-btree\"\nlayer = \"beacon\"\nlayer_position = 3",
             "name = \"fgdb-btree\"\nlayer = \"strata\"\nlayer_position = 5",
         ),
         ("layer_count = 14", "layer_count = 14"),
@@ -573,7 +606,7 @@ fn topology_neg_role_not_verbatim() {
 
 #[test]
 fn topology_neg_source_block_byte_count() {
-    let codes = codes_after("byte_count = 2642", "byte_count = 2643");
+    let codes = codes_after("byte_count = 2657", "byte_count = 2658");
     assert_reports(&codes, "source_block_drift");
 }
 
@@ -616,8 +649,8 @@ fn topology_neg_residue_allowance_widened_to_hide_a_capability() {
 #[test]
 fn topology_neg_posture_entry_participation_drift() {
     let codes = codes_after(
-        "name = \"fgdb-cli\"\nlayer = \"composition\"\nlayer_position = 3\nrole = \"The CLI binary with robot mode and a human mode.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"entry_cli\"",
-        "name = \"fgdb-cli\"\nlayer = \"composition\"\nlayer_position = 3\nrole = \"The CLI binary with robot mode and a human mode.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"forbid\"\nactivation_status = \"planned\"\nposture_participation = \"all\"",
+        "name = \"fgdb-cli\"\nlayer = \"composition\"\nlayer_position = 3\nrole = \"The CLI binary with robot mode and a human mode.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"forbid\"\nactivation_status = \"active\"\nposture_participation = \"entry_cli\"",
+        "name = \"fgdb-cli\"\nlayer = \"composition\"\nlayer_position = 3\nrole = \"The CLI binary with robot mode and a human mode.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"forbid\"\nactivation_status = \"active\"\nposture_participation = \"all\"",
     );
     assert_reports(&codes, "posture_entry_participation_drift");
 }
@@ -625,8 +658,8 @@ fn topology_neg_posture_entry_participation_drift() {
 #[test]
 fn topology_neg_owner_scope_unresolved() {
     let codes = codes_after(
-        "owner = \"W11\"\nowner_bead = \"\"\nmanifest_dir = \"\"\n\n# Named by §18.1",
-        "owner = \"W13\"\nowner_bead = \"\"\nmanifest_dir = \"\"\n\n# Named by §18.1",
+        "owner = \"W11\"\nowner_bead = \"fgdb-w11-payload-availability-3y1\"",
+        "owner = \"W13\"\nowner_bead = \"fgdb-w11-payload-availability-3y1\"",
     );
     assert_reports(&codes, "crate_owner_unresolved");
 }
@@ -655,7 +688,7 @@ fn topology_neg_tooling_member_points_nowhere() {
 
 #[test]
 fn topology_neg_count_drift() {
-    let codes = codes_after("crate_count = 70", "crate_count = 69");
+    let codes = codes_after("crate_count = 71", "crate_count = 70");
     assert_reports(&codes, "count_drift");
 }
 
@@ -842,7 +875,7 @@ fn topology_required_edges_report_deferred_not_pass() {
             coverage.ratcheted_live_floor,
             coverage.unratcheted_live,
         ),
-        (8, 1, 7, 1, 0),
+        (8, 2, 6, 2, 0),
         "the full named-edge population and its ratcheted partition"
     );
     let live: Vec<&str> = coverage
@@ -851,11 +884,13 @@ fn topology_required_edges_report_deferred_not_pass() {
         .filter(|status| status.status != "deferred")
         .map(|status| status.id.as_str())
         .collect();
-    // Exactly one named edge has both endpoints active today. If this number
-    // ever silently drops to zero the law is vacuous, and the suite says so.
+    // Exactly two named edges have both endpoints active today: prism-over-fnx
+    // went live when 1207516b activated fgdb-prism, and was ratcheted into the
+    // floor by fgdb-topology-seven-crates-9n8ao. If this number ever silently
+    // drops to zero the law is vacuous, and the suite says so.
     assert_eq!(
         live,
-        vec!["calibrate-over-asupersync"],
+        vec!["prism-over-fnx", "calibrate-over-asupersync"],
         "the live/deferred split is part of the contract"
     );
     assert!(
@@ -872,19 +907,20 @@ fn topology_required_edges_report_deferred_not_pass() {
 fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
     let base = registry();
 
-    // FORWARD: 1 -> 2 evaluated edges is legal while the monotone floor stays
-    // at the one edge this commit owns. A floor is a lower bound, not a global
-    // equality over a graph another pane may advance.
+    // FORWARD: 2 -> 3 evaluated edges is legal while the monotone floor stays
+    // at the two edges already ratcheted. A floor is a lower bound, not a
+    // global equality over a graph another pane may advance.
     let mut forward = base.clone();
     forward
         .crates
         .iter_mut()
-        .find(|row| row.name == "fgdb-prism")
-        .expect("fgdb-prism row")
+        .find(|row| row.name == "fgdb-raft")
+        .expect("fgdb-raft row")
         .activation_status = "active".into();
     let forward_scan = synthetic_scan(vec![
         synthetic_crate("fgdb-calibrate", &["asupersync"]),
         synthetic_crate("fgdb-prism", &["fnx-core"]),
+        synthetic_crate("fgdb-raft", &["fgdb-order"]),
     ]);
     let forward_coverage = required_edge_coverage(&forward, &forward_scan);
     assert_eq!(
@@ -895,15 +931,15 @@ fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
             forward_coverage.ratcheted_live_floor,
             forward_coverage.unratcheted_live,
         ),
-        (8, 2, 6, 1, 1),
-        "named forward mutation: 1 -> 2 evaluated, 7 -> 6 deferred"
+        (8, 3, 5, 2, 1),
+        "named forward mutation: 2 -> 3 evaluated, 6 -> 5 deferred"
     );
     assert!(
         required_edge_floor_violations(&forward, &forward_coverage).is_empty(),
         "forward progress above a set-floor must remain legal"
     );
 
-    // BACKWARD: 1 -> 0 is rejected because the exact floor member, not merely
+    // BACKWARD: 2 -> 1 is rejected because the exact floor member, not merely
     // the aggregate count, moved back to deferred.
     let mut backward = base.clone();
     backward
@@ -912,15 +948,16 @@ fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
         .find(|row| row.name == "fgdb-calibrate")
         .expect("fgdb-calibrate row")
         .activation_status = "planned".into();
-    let backward_coverage = required_edge_coverage(&backward, &synthetic_scan(Vec::new()));
+    let backward_scan = synthetic_scan(vec![synthetic_crate("fgdb-prism", &["fnx-core"])]);
+    let backward_coverage = required_edge_coverage(&backward, &backward_scan);
     assert_eq!(
         (
             backward_coverage.declared,
             backward_coverage.evaluated_live,
             backward_coverage.deferred,
         ),
-        (8, 0, 8),
-        "named backward mutation: 1 -> 0 evaluated, 7 -> 8 deferred"
+        (8, 1, 7),
+        "named backward mutation: 2 -> 1 evaluated, 6 -> 7 deferred"
     );
     let backward_codes: BTreeSet<String> =
         required_edge_floor_violations(&backward, &backward_coverage)
@@ -933,8 +970,8 @@ fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
     );
 
     // BYPASS CONTROL: the old aggregate literal accepted a one-for-one swap.
-    // Keep Prism live while re-deferring calibrate; the total remains one, but
-    // the set-floor still rejects the exact regression.
+    // Keep Raft live while re-deferring calibrate; the total remains two, the
+    // size of the floor, but the set-floor still rejects the exact regression.
     let mut substitution = forward;
     substitution
         .crates
@@ -942,11 +979,14 @@ fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
         .find(|row| row.name == "fgdb-calibrate")
         .expect("fgdb-calibrate row")
         .activation_status = "planned".into();
-    let substitution_scan = synthetic_scan(vec![synthetic_crate("fgdb-prism", &["fnx-core"])]);
+    let substitution_scan = synthetic_scan(vec![
+        synthetic_crate("fgdb-prism", &["fnx-core"]),
+        synthetic_crate("fgdb-raft", &["fgdb-order"]),
+    ]);
     let substitution_coverage = required_edge_coverage(&substitution, &substitution_scan);
     assert_eq!(
-        substitution_coverage.evaluated_live, 1,
-        "the aggregate stays at one"
+        substitution_coverage.evaluated_live, 2,
+        "the aggregate stays at two"
     );
     assert!(
         required_edge_floor_violations(&substitution, &substitution_coverage)

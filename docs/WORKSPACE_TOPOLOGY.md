@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (22 active, 47 planned, 1 reserved)
+* **Crates:** 71 (29 active, 41 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -51,7 +51,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | 3 | `fgdb-delta-types` | active | `forbid` | all | W1 | fgdb-w1-foundation-types-tjk | G0/W2 delta schema only |
 | 4 | `fgdb-claim` | active | `forbid` | all | W1 | fgdb-w1-foundation-types-tjk | The claim-type constitution as a type system: the six registry claim classes and the lattice law as a compile error. |
 | 5 | `fgdb-authz-types` | planned | `forbid` | all | W1 | — | Authority, permit, and security-binding value types shared by the secure view and Warden. |
-| 6 | `fgdb-policy` | planned | `forbid` | all | W1 | — | restricted verifier IR |
+| 6 | `fgdb-policy` | active | `forbid` | all | W1 | fgdb-w1-authz-policy-10y | restricted verifier IR |
 | 7 | `fgdb-resource` | active | `forbid` | all | W1 | fgdb-w1-resource-ledger-contract-ym2g | Typed resource accounting and escrow vocabulary. |
 | 8 | `fgdb-codec` | active | `forbid` | all | W1 | fgdb-w1-codecs-3x8 | In-house compression kernels for the registered durable codec layer. |
 | 9 | `fgdb-sketch` | active | `forbid` | all | W1 | fgdb-w1-sketch-calibrate-tpj | Deterministic frequency, degree, and cardinality summaries. |
@@ -73,7 +73,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb-ecs` | planned | `forbid` | all | W2 | — | identity/encoding/bootstrap/object locator |
-| 2 | `fgdb-order` | planned | `forbid` | all | W2 | fgdb-w2-order-raft-0a90 | durable Raft log/state core and quorum-one driver |
+| 2 | `fgdb-order` | active | `forbid` | all | W2 | fgdb-w2-order-raft-0a90 | durable Raft log/state core and quorum-one driver |
 | 3 | `fgdb-chronicle` | active | `forbid` | all | W2 | fgdb-w2-object-identity-t0f | capsule/marker/logical-local roots, allocator, outcomes, checkpoints/retention, recovery/GC/scrub |
 | 4 | `fgdb-branch` | planned | `forbid` | all | W2 | — | Branch fork, merge, grants, and retirement over the shared commit stream. |
 | 5 | `fgdb-keymgr` | planned | `forbid` | all | W2 | — | Key-envelope DAG, rotation, and the two-stage key lifecycle. |
@@ -122,23 +122,24 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-index-core` | planned | `forbid` | all | W7 | — | Shadow build, validate, activate, and watermark/tail-correctness shared by every index. |
-| 2 | `fgdb-btree` | planned | `forbid` | all | W7 | — | The in-house B-tree property index. |
-| 3 | `fgdb-fts` | planned | `forbid` | all | W7 | — | Segment-based inverted index, BM25, tokenizers, and Levenshtein automata. |
-| 4 | `fgdb-vector` | planned | `forbid` | all | W7 | fgdb-w7-vector-79hu | HNSW generations, quantizers, and the IVF-PQ cold tier. |
-| 5 | `fgdb-pathidx` | planned | `forbid` | all | W7 | — | 2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7 |
+| 1 | `fgdb-beacon` | active | `forbid` | all | W7 | fgdb-w7-hybrid-99if | memory-resident search slices: HNSW generations, BM25, and the hybrid fabric index |
+| 2 | `fgdb-index-core` | planned | `forbid` | all | W7 | — | Shadow build, validate, activate, and watermark/tail-correctness shared by every index. |
+| 3 | `fgdb-btree` | planned | `forbid` | all | W7 | — | The in-house B-tree property index. |
+| 4 | `fgdb-fts` | planned | `forbid` | all | W7 | — | Segment-based inverted index, BM25, tokenizers, and Levenshtein automata. |
+| 5 | `fgdb-vector` | planned | `forbid` | all | W7 | fgdb-w7-vector-79hu | HNSW generations, quantizers, and the IVF-PQ cold tier. |
+| 6 | `fgdb-pathidx` | planned | `forbid` | all | W7 | — | 2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7 |
 
 ### 9. Prism
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-prism` | planned | `forbid` | all | W8 | — | authorized projection bridge, fnx cursor/cache/materialization paths, native kernels |
+| 1 | `fgdb-prism` | active | `forbid` | all | W8 | fgdb-epic-w8-syz | authorized projection bridge, fnx cursor/cache/materialization paths, native kernels |
 
 ### 10. Warden
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-warden` | planned | `forbid` | all | W9 | — | issuance/revocation/discharges/policy admin |
+| 1 | `fgdb-warden` | active | `forbid` | all | W9 | fgdb-w9-enforcement-j0fg | issuance/revocation/discharges/policy admin |
 | 2 | `fgdb-privacy` | planned | `forbid` | all | W9 | — | Differential-privacy state, budgets, and the irreversible-before-access rule. |
 | 3 | `fgdb-redaction` | planned | `forbid` | all | W9 | — | Ticket-gated redaction, erasure cuts, and rollback reconciliation. |
 
@@ -158,7 +159,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb-raft` | planned | `forbid` | all | W11 | — | multi-member protocol over `fgdb-order` |
-| 2 | `fgdb-repl` | planned | `forbid` | all | W11 | — | payload availability, anti-entropy, reconfiguration, fenced GC |
+| 2 | `fgdb-repl` | active | `forbid` | all | W11 | fgdb-w11-payload-availability-3y1 | payload availability, anti-entropy, reconfiguration, fenced GC |
 | 3 | `fgdb-shard` | reserved | `forbid` | all | W12 | — | future `fgdb-shard` belongs only to W12 |
 
 ### 13. Composition
@@ -167,7 +168,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb` | active | `forbid` | entry_embedded | W10 | fgdb-j0vu | embedded API |
 | 2 | `fgdb-server` | planned | `forbid` | entry_server | W10 | — | top-level Fabric+Warden+Aegis composition |
-| 3 | `fgdb-cli` | planned | `forbid` | entry_cli | W10 | — | The CLI binary with robot mode and a human mode. |
+| 3 | `fgdb-cli` | active | `forbid` | entry_cli | W10 | fgdb-huu9 | The CLI binary with robot mode and a human mode. |
 | 4 | `fgdb-python` | planned | `forbid` | packaging_boundary | W10 | — | allowed fnx-python packaging boundary only |
 | 5 | `fgdb-adbc` | planned | `forbid` | packaging_boundary | W10 | — | C-ABI ADBC packaging at the same boundary; §13.7 |
 
@@ -188,7 +189,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 |---|---|---|---|---|---|
 | Embedded library | `fgdb` | — | live | — | §1 constraint 5(a), §13.1 |
 | Server binary | `fgdb-server` | fgdbd | deferred | the owner bead of fgdb-server (W10 composition) | §1 constraint 5(b), §13 |
-| CLI binary | `fgdb-cli` | fgdb | deferred | the owner bead of fgdb-cli (W10 composition) | §1 constraint 5(c) |
+| CLI binary | `fgdb-cli` | fgdb | live | — | §1 constraint 5(c) |
 
 A posture closure is the transitive dependency set of its entry crate over the LIVE graph. A `test_only`, `packaging_boundary`, or foreign-entry crate inside a shipped closure is a violation. While every entry crate is `planned` the law reports `deferred` — never `pass` — and the closure evaluator is proved against synthetic graphs in the suite instead.
 
@@ -219,7 +220,7 @@ A posture closure is the transitive dependency set of its entry crate over the L
 | `python-over-fnx-python` | crate `fgdb-python` | foundation `franken_networkx` | allowed fnx-python packaging boundary only | The binding runtime is reached transitively through fnx-python, never by a direct PyO3 dependency. |
 | `calibrate-over-asupersync` | crate `fgdb-calibrate` | foundation `asupersync` | wraps the runtime's e-process/conformal machinery rather than reimplementing it | Live today: the one required edge both of whose endpoints are already active, which is what keeps this law from being vacuous at G0. |
 
-The evaluated-edge ratchet is the monotone set-floor ["calibrate-over-asupersync"]. New live edges may be observed without changing this floor; raising it is a deliberate append-only ratchet and is never required merely to keep another pane green. Once an edge is in the floor, moving it back to `deferred` fails even if another edge becomes live in the same change.
+The evaluated-edge ratchet is the monotone set-floor ["calibrate-over-asupersync", "prism-over-fnx"]. New live edges may be observed without changing this floor; raising it is a deliberate append-only ratchet and is never required merely to keep another pane green. Once an edge is in the floor, moving it back to `deferred` fails even if another edge becomes live in the same change.
 
 **Narrowing — `fgdb-reference`.** Layers ["foundation"], plus crates ["fgdb-gql", "fgdb-cypher"], plus foundation projects [] (§15.2). Importing any engine crate is a CI-rejected boundary violation in the unsafe-boundary-ledger style, so the differential cannot be quietly gutted by code sharing. The parser is the one recorded sharing exception.
 
@@ -317,7 +318,7 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | `W4` | workstream | Transactions + Secure View | 3 | §19 W4 |
 | `W5` | workstream | Loom | 8 | §19 W5 |
 | `W6` | workstream | Ripple | 3 | §19 W6 |
-| `W7` | workstream | Beacon | 5 | §19 W7 |
+| `W7` | workstream | Beacon | 6 | §19 W7 |
 | `W8` | workstream | Prism + fnx upstream | 1 | §19 W8 |
 | `W9` | workstream | Warden | 3 | §19 W9 |
 | `W10` | workstream | Fabric + operations | 11 | §19 W10 |
@@ -336,7 +337,7 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | `plan-fnx-assets-v1` | 81–89 | 9 | 2459 | `0x3768f87d4ec27de2` | pin only | §2.2 — the franken_networkx asset table (consume_from evidence) |
 | `plan-frankensqlite-donor-v1` | 95–105 | 11 | 3218 | `0x87134ba230bd874a` | pin only | §2.3 — the frankensqlite donor table (design_only evidence) |
 | `plan-reference-allowlist-v1` | 1156–1156 | 1 | 1924 | `0x4869259b5194c04d` | pin only | §15.2 — the fgdb-reference dependency allowlist and its one sharing exception |
-| `plan-crate-layer-table-v1` | 1285–1300 | 16 | 2642 | `0xcc94f5b08108d544` | yes | §18.1 — the crate/layer table (PARSED: the crate universe is derived from it) |
+| `plan-crate-layer-table-v1` | 1285–1300 | 16 | 2657 | `0x44eee19eae18a7e8` | yes | §18.1 — the crate/layer table (PARSED: the crate universe is derived from it) |
 | `plan-g0-materialization-v1` | 1302–1302 | 1 | 236 | `0x539eaa5c90799968` | pin only | §18 — what G0 materializes before Genesis implementation |
 | `plan-build-inventory-v1` | 1306–1306 | 1 | 1392 | `0xb3b636c76dfb854b` | yes | §18.2 — build-it-ourselves inventory (DECOMPOSED: residue coverage) |
 | `plan-workstream-table-v1` | 1319–1332 | 14 | 5939 | `0xfecc8909f6b9d2cf` | pin only | §19 — the workstream table (ownership vocabulary) |
@@ -365,7 +366,7 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | Txn + secure access | `fgdb-txn` (MVCC, Graph-SSI/witness lifecycle, coordinator, final-effect merge ladder), `fgdb-constraints` (branch-scoped canonical enforcement), `fgdb-secure-view` (sole authorized storage/permit facade); depends on Chronicle + Strata + foundation policy verifier |
 | Loom | `fgdb-gql` + `fgdb-cypher` (syntax only), `fgdb-bind`, `fgdb-algebra`, `fgdb-planner`, `fgdb-exec`, `fgdb-linalg`, `fgdb-datalog`; all reads flow through `fgdb-secure-view` |
 | Ripple | `fgdb-ripple` (Z-sets, circuits, incrementalizer), `fgdb-views`, `fgdb-subs` |
-| Beacon | `fgdb-index-core`, `fgdb-btree`, `fgdb-fts`, `fgdb-vector`, `fgdb-pathidx` (2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7) |
+| Beacon | `fgdb-beacon`, `fgdb-index-core`, `fgdb-btree`, `fgdb-fts`, `fgdb-vector`, `fgdb-pathidx` (2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7) |
 | Prism | `fgdb-prism` (authorized projection bridge, fnx cursor/cache/materialization paths, native kernels) |
 | Warden | `fgdb-warden` (issuance/revocation/discharges/policy admin), `fgdb-privacy`, `fgdb-redaction` |
 | Surface/operations | `fgdb-protocol` (FGP state machine), `fgdb-bolt`, `fgdb-formats`, `fgdb-udf-vm`, `fgdb-observatory`, `fgdb-system-graph` |
@@ -382,5 +383,5 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 
 ## Pins
 
-* `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:fdba88692eb86d36` — every normative decision, prose excluded.
+* `id_table_hash` = `fnv1a64:dfa5456a147b1dc7` — every stable id, sorted.
+* `semantic_contract_hash` = `fnv1a64:62c130cf01dd3c93` — every normative decision, prose excluded.

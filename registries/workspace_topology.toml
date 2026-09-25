@@ -122,14 +122,14 @@ required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
 # green; once appended, an id must never be removed or return to deferred.
-required_dependency_live_floor = ["calibrate-over-asupersync"]
+required_dependency_live_floor = ["calibrate-over-asupersync", "prism-over-fnx"]
 asset_evidence_gap_count = 1
 forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:fdba88692eb86d36"
+id_table_hash = "fnv1a64:dfa5456a147b1dc7"
+semantic_contract_hash = "fnv1a64:62c130cf01dd3c93"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -215,8 +215,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 plan_start_line = 1285
 plan_end_line = 1300
 line_count = 16
-byte_count = 2642
-fnv1a64 = "0xcc94f5b08108d544"
+byte_count = 2657
+fnv1a64 = "0x44eee19eae18a7e8"
 covers = "§18.1 — the crate/layer table (PARSED: the crate universe is derived from it)"
 
 [[source_block]]

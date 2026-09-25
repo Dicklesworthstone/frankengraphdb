@@ -218,7 +218,7 @@ allowed_outgoing_layers = ["foundation", "unsafe_islands", "chronicle", "loom"]'
 seed_fixture dropped-capability inventory_coverage_incomplete \
   'source_phrase = "persistent union-find"=>source_phrase = "persistent union find"'
 
-# 5. The one ratcheted live edge moves back to deferred. Other topology laws
+# 5. A ratcheted live edge moves back to deferred. Other topology laws
 #    also reject this fixture, but this exact code proves the set-floor itself
 #    fired rather than borrowing their failure.
 seed_fixture live-edge-redeferred required_edge_floor_regression \
@@ -239,7 +239,7 @@ activation_status = "planned"'
 # 6. A ratchet with no members rejects nothing. This is the vacuity control,
 #    and it must fire independently of the backwards-transition fixture.
 seed_fixture empty-live-edge-floor required_edge_floor_vacuous \
-  'required_dependency_live_floor = ["calibrate-over-asupersync"]=>required_dependency_live_floor = []'
+  'required_dependency_live_floor = ["calibrate-over-asupersync", "prism-over-fnx"]=>required_dependency_live_floor = []'
 
 echo "==> evidence retained at $EVIDENCE_DIR"
 gate_pass "g0_topology_e2e"

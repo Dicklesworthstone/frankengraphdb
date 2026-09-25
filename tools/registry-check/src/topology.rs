@@ -2136,8 +2136,9 @@ pub fn recompute_id_table_hash(registry: &TopologyRegistry) -> String {
 /// downstream consumer could read as normative. Deliberately excludes prose
 /// (charters, roles, notes, reasons) so a copy edit does not read as a contract
 /// change, and deliberately includes every layer edge, activation status,
-/// unsafe policy, posture participation, pinned revision, and capability
-/// disposition, because those ARE the contract.
+/// unsafe policy, posture participation, the entry crates each posture may
+/// consume, pinned revision, and capability disposition, because those ARE
+/// the contract.
 pub fn recompute_semantic_contract_hash(registry: &TopologyRegistry) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
@@ -2197,8 +2198,12 @@ pub fn recompute_semantic_contract_hash(registry: &TopologyRegistry) -> String {
     }
     for posture in &registry.postures {
         lines.push(format!(
-            "posture|{}|{}|{}|{}",
-            posture.id, posture.entry_crate, posture.binary_name, posture.status
+            "posture|{}|{}|{}|{}|{}",
+            posture.id,
+            posture.entry_crate,
+            posture.binary_name,
+            posture.status,
+            posture.consumes_entries.join(",")
         ));
     }
     for edge in &registry.required_dependencies {
