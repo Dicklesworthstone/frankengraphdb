@@ -20,6 +20,8 @@ use std::collections::BTreeSet;
 // like mod.rs children (in write_txn_parts/). Name the real location.
 #[path = "authorized/graph.rs"]
 mod graph;
+#[path = "authorized/insert.rs"]
+mod insert;
 
 #[cfg(test)]
 #[path = "authorized/ordered_tests.rs"]
