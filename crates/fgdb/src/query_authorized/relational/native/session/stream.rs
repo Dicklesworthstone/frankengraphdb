@@ -517,9 +517,7 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
 fn plan_error(error: VertexScanBuildError) -> QueryError {
     QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(error)))
 }
-fn compile(
-    pattern: &PreparedGraphPattern<GraphValueRow>,
-) -> Result<RowPlan, QueryError> {
+fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, QueryError> {
     if matches!(
         pattern.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })

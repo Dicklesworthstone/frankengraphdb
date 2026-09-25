@@ -24,8 +24,11 @@ fn values() -> Vec<GraphValue> {
         GraphValue::Edge(EId(0)),
         GraphValue::List(Box::new([])),
         GraphValue::List(
-            vec![GraphValue::Scalar(CanonicalScalar::Null), GraphValue::Vertex(VId(7))]
-                .into_boxed_slice(),
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Vertex(VId(7)),
+            ]
+            .into_boxed_slice(),
         ),
     ]
 }
@@ -54,11 +57,18 @@ fn mixed_native_domain_triples_agree_with_graph_value_order_in_both_directions()
                 let inputs = [first, second, third];
                 for maximum in [false, true] {
                     let ordered = inputs.into_iter().filter(|value| !value.is_null());
-                    let expected = if maximum { ordered.max() } else { ordered.min() };
+                    let expected = if maximum {
+                        ordered.max()
+                    } else {
+                        ordered.min()
+                    };
                     let expected = expected
                         .cloned()
                         .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null));
-                    assert_eq!(reduce(&inputs, maximum), GraphAggregateValue::Value(expected));
+                    assert_eq!(
+                        reduce(&inputs, maximum),
+                        GraphAggregateValue::Value(expected)
+                    );
                 }
             }
         }
@@ -76,7 +86,11 @@ impl Source {
                 .into_iter()
                 .enumerate()
                 .map(|(at, index)| {
-                    let id = if at == 4 { u128::MAX } else { u128::try_from(at).unwrap() };
+                    let id = if at == 4 {
+                        u128::MAX
+                    } else {
+                        u128::try_from(at).unwrap()
+                    };
                     let properties = index
                         .map(|index| vec![(INDEX, CanonicalScalar::Int(index))])
                         .unwrap_or_default();
@@ -109,10 +123,14 @@ impl VertexScanSource for Source {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<(), C>> {
         control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        Ok(self.rows.iter().find(|row| row.0 == id).map(|row| VertexScanRow {
-            labels: &[],
-            properties: &row.1,
-        }))
+        Ok(self
+            .rows
+            .iter()
+            .find(|row| row.0 == id)
+            .map(|row| VertexScanRow {
+                labels: &[],
+                properties: &row.1,
+            }))
     }
 }
 fn definition(grouped: bool) -> PreparedGraphAggregate {
@@ -149,7 +167,10 @@ fn definition(grouped: bool) -> PreparedGraphAggregate {
             ),
         ],
         if grouped { &[1] } else { &[] },
-        &[GraphAggregate::min("low", 0), GraphAggregate::max("high", 0)],
+        &[
+            GraphAggregate::min("low", 0),
+            GraphAggregate::max("high", 0),
+        ],
         0,
         None,
     )
@@ -165,7 +186,10 @@ fn expected(query: &PreparedGraphAggregate) -> Vec<GraphAggregateRow> {
             |_, _| Ok::<_, ()>(true),
             |id, key| {
                 Ok(source.rows.iter().find(|row| row.0 == id).and_then(|row| {
-                    row.1.iter().find(|(at, _)| *at == key).map(|(_, value)| value)
+                    row.1
+                        .iter()
+                        .find(|(at, _)| *at == key)
+                        .map(|(_, value)| value)
                 }))
             },
             policy(),
@@ -226,17 +250,18 @@ fn every_mixed_input_cursor_cut_and_inclusive_native_limit_remains_fail_closed()
         assert!(cursor.next().is_none());
     }
     let exact = GqlQueryPolicy::new(5, 1, stats.work_units, stats.scratch_entries);
-    let mut cursor = VertexAggregateCursor::new(
-        Source::new(), plan.clone(), exact, || Ok::<_, usize>(()),
+    let mut cursor =
+        VertexAggregateCursor::new(Source::new(), plan.clone(), exact, || Ok::<_, usize>(()));
+    assert_eq!(
+        cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        rows
     );
-    assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), rows);
     for denied in [
         GqlQueryPolicy::new(5, 1, stats.work_units - 1, stats.scratch_entries),
         GqlQueryPolicy::new(5, 1, stats.work_units, stats.scratch_entries - 1),
     ] {
-        let mut cursor = VertexAggregateCursor::new(
-            Source::new(), plan.clone(), denied, || Ok::<_, usize>(()),
-        );
+        let mut cursor =
+            VertexAggregateCursor::new(Source::new(), plan.clone(), denied, || Ok::<_, usize>(()));
         assert!(cursor.by_ref().collect::<Result<Vec<_>, _>>().is_err());
         assert_eq!(cursor.state(), VertexScanState::Failed);
     }
@@ -245,28 +270,33 @@ fn every_mixed_input_cursor_cut_and_inclusive_native_limit_remains_fail_closed()
 #[test]
 fn mixed_domain_replacements_admit_payload_before_mutation_and_never_copy_losers() {
     let prior = GraphValue::List(Box::new([]));
-    let candidate = GraphValue::Scalar(
-        CanonicalScalar::ucs_basic_text(&"visible".repeat(100)).unwrap(),
-    );
+    let candidate =
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"visible".repeat(100)).unwrap());
     let initial = || {
         let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(());
-        let mut state = NumericState::new_governed(GraphAggregateFunction::Min, &mut control)
+        let mut state =
+            NumericState::new_governed(GraphAggregateFunction::Min, &mut control).unwrap();
+        state
+            .update_governed(Input::from_value(&prior), 0, &mut control)
             .unwrap();
-        state.update_governed(Input::from_value(&prior), 0, &mut control).unwrap();
         state
     };
     let mut total = 0;
-    initial().update_governed(Input::from_value(&candidate), 0, &mut |_| {
-        total += 1;
-        Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-    }).unwrap();
+    initial()
+        .update_governed(Input::from_value(&candidate), 0, &mut |_| {
+            total += 1;
+            Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+        })
+        .unwrap();
     for cut in 1..=total {
         let mut state = initial();
         let mut seen = 0;
         let result = state.update_governed(Input::from_value(&candidate), 0, &mut |_| {
             seen += 1;
             if seen == cut {
-                Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(cut))
+                Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(
+                    cut,
+                ))
             } else {
                 Ok(())
             }
@@ -277,18 +307,24 @@ fn mixed_domain_replacements_admit_payload_before_mutation_and_never_copy_losers
             GraphAggregateValue::Value(prior.clone())
         );
     }
-    let mut state = NumericState::new_governed(
-        GraphAggregateFunction::Max, &mut |_| Ok::<_, ()>(()),
-    ).unwrap();
-    state.update_governed(Input::from_value(&prior), 0, &mut |_| {
-        Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-    }).unwrap();
+    let mut state =
+        NumericState::new_governed(GraphAggregateFunction::Max, &mut |_| Ok::<_, ()>(())).unwrap();
+    state
+        .update_governed(Input::from_value(&prior), 0, &mut |_| {
+            Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+        })
+        .unwrap();
     let mut scratch = 0;
-    state.update_governed(Input::from_value(&candidate), 0, &mut |event| {
-        scratch += usize::from(event == VertexScanEvent::ScratchEntry);
-        Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-    }).unwrap();
-    assert_eq!(scratch, 0, "a losing candidate must not be cloned for its domain comparison");
+    state
+        .update_governed(Input::from_value(&candidate), 0, &mut |event| {
+            scratch += usize::from(event == VertexScanEvent::ScratchEntry);
+            Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+        })
+        .unwrap();
+    assert_eq!(
+        scratch, 0,
+        "a losing candidate must not be cloned for its domain comparison"
+    );
     assert_eq!(
         state.finish_governed(&mut |_| Ok::<_, ()>(())).unwrap(),
         GraphAggregateValue::Value(prior)

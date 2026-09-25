@@ -5,8 +5,8 @@
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphAggregateBuildError, GraphAggregateError, GraphAggregateRow, GraphAggregateValue,
+    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateBuildError,
+    GraphAggregateError, GraphAggregateRow, GraphAggregateValue,
     GraphPipelineAggregateTextErrorKind, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
     PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
 };
@@ -57,9 +57,11 @@ fn run(
                 (1..=4).map(VId),
                 EDGES,
                 |vid, tests| {
-                    Ok::<_, &'static str>(tests.iter().all(|test| {
-                        test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
-                    }))
+                    Ok::<_, &'static str>(
+                        tests.iter().all(|test| {
+                            test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
+                        }),
+                    )
                 },
                 |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
                 remaining,
@@ -76,12 +78,20 @@ fn scalar(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 fn assert_ratio(value: &GraphAggregateValue, sum: i128, count: u64) {
-    let ratio = value.as_average().expect("exact average, not integer or float");
-    assert_eq!(ratio.numerator() * i128::from(count), sum * i128::from(ratio.denominator()));
+    let ratio = value
+        .as_average()
+        .expect("exact average, not integer or float");
+    assert_eq!(
+        ratio.numerator() * i128::from(count),
+        sum * i128::from(ratio.denominator())
+    );
 }
 fn assert_list(value: &GraphAggregateValue, expected: &[i64]) {
     let list = value.as_value().unwrap().as_list().unwrap();
-    assert_eq!(list, expected.iter().copied().map(scalar).collect::<Vec<_>>());
+    assert_eq!(
+        list,
+        expected.iter().copied().map(scalar).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -123,12 +133,20 @@ fn all_eleven_functions_aggregate_the_joined_bag_not_the_first_source() {
     );
     let mut expected: BTreeMap<VId, Vec<i64>> = BTreeMap::new();
     for &(source, _, target) in &EDGES {
-        expected.entry(source).or_default().push(SCORES[target.0 as usize - 1]);
+        expected
+            .entry(source)
+            .or_default()
+            .push(SCORES[target.0 as usize - 1]);
     }
     assert_eq!(rows.len(), expected.len());
     for (row, (source, mut scores)) in rows.iter().zip(expected) {
         scores.sort();
-        let unique: Vec<_> = scores.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+        let unique: Vec<_> = scores
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let total: i128 = scores.iter().copied().map(i128::from).sum();
         let distinct_total: i128 = unique.iter().copied().map(i128::from).sum();
         let values = row.values();
@@ -158,8 +176,11 @@ fn optional_null_extension_precedes_count_and_computed_aggregate_arguments() {
     assert_eq!(rows.len(), 4);
     for (index, row) in rows.iter().enumerate() {
         let source = VId(index as u128 + 1);
-        let scores: Vec<_> = EDGES.iter().filter(|(s, _, _)| *s == source)
-            .map(|(_, _, target)| SCORES[target.0 as usize - 1]).collect();
+        let scores: Vec<_> = EDGES
+            .iter()
+            .filter(|(s, _, _)| *s == source)
+            .map(|(_, _, target)| SCORES[target.0 as usize - 1])
+            .collect();
         assert_eq!(row.keys(), &[GraphValue::Vertex(source)]);
         assert_eq!(row.values()[0].as_count(), Some(scores.len().max(1) as u64));
         assert_eq!(row.values()[1].as_count(), Some(scores.len() as u64));
@@ -191,11 +212,11 @@ fn input_pages_distinct_and_filters_finish_before_grouping() {
         assert_eq!(rows.len(), 1, "keyless empty input still has one group");
         assert_eq!(rows[0].values()[0].as_count(), Some(count));
         assert_eq!(rows[0].values()[1].as_integer(), sum);
-        if sum.is_none() { assert!(rows[0].values()[1].is_null()); }
+        if sum.is_none() {
+            assert!(rows[0].values()[1].is_null());
+        }
     }
-    let keyed = execute(
-        "MATCH (n) WITH n LIMIT 0 MATCH (n) WITH n RETURN n,COUNT(*) AS rows",
-    );
+    let keyed = execute("MATCH (n) WITH n LIMIT 0 MATCH (n) WITH n RETURN n,COUNT(*) AS rows");
     assert!(keyed.is_empty());
 }
 
@@ -207,7 +228,9 @@ fn candidate_input_counts_only_real_graph_sources_and_preserves_occurrences() {
     assert_eq!(prepared.graph_source_count(), 2);
     assert!(!prepared.is_source_free());
     assert!(prepared.requires_relational_input());
-    let query = prepared.bind_relation_parameters(&GqlParameters::new()).unwrap();
+    let query = prepared
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
     let result = run(&query, wide(), &mut || Ok(())).unwrap();
     assert_eq!(result.value[0].values()[0].as_count(), Some(4));
     assert_eq!(result.rows.snapshot_records, 18);
@@ -219,11 +242,13 @@ fn wide_sums_and_fractional_averages_never_narrow_to_scalar_integers() {
         "MATCH (n) WITH n ORDER BY n LIMIT 1 MATCH (n)-[:R]->(m) WITH m \
          RETURN SUM(9223372036854775807) AS total,AVG(9223372036854775807) AS mean",
     );
-    assert_eq!(rows[0].values()[0].as_integer(), Some(i128::from(i64::MAX) * 3));
-    assert_ratio(&rows[0].values()[1], i128::from(i64::MAX) * 3, 3);
-    let rows = execute(
-        "MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH m.p AS score RETURN AVG(score) AS mean",
+    assert_eq!(
+        rows[0].values()[0].as_integer(),
+        Some(i128::from(i64::MAX) * 3)
     );
+    assert_ratio(&rows[0].values()[1], i128::from(i64::MAX) * 3, 3);
+    let rows =
+        execute("MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH m.p AS score RETURN AVG(score) AS mean");
     let ratio = rows[0].values()[0].as_average().unwrap();
     assert_eq!((ratio.numerator(), ratio.denominator()), (11, 5));
 }
@@ -235,42 +260,78 @@ fn parameters_catalog_and_template_identity_cover_all_parts_and_final_clauses() 
         RETURN SUM(score+$add) AS total HAVING total>$floor LIMIT $page";
     let mut seen = BTreeSet::new();
     let prepared = PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
-        assert!(seen.insert((kind, name.to_owned())), "catalog resolution is shared");
+        assert!(
+            seen.insert((kind, name.to_owned())),
+            "catalog resolution is shared"
+        );
         symbols(kind, name)
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(seen.len(), 2);
     assert_eq!(prepared.parameter_schema().len(), 5);
     let frozen = prepared.canonical_template_bytes();
-    let args = GqlParameters::new().with_int64("start", 1).unwrap()
-        .with_uint64("take", 1).unwrap().with_int64("add", 3).unwrap()
-        .with_int64("floor", 10).unwrap();
+    let args = GqlParameters::new()
+        .with_int64("start", 1)
+        .unwrap()
+        .with_uint64("take", 1)
+        .unwrap()
+        .with_int64("add", 3)
+        .unwrap()
+        .with_int64("floor", 10)
+        .unwrap();
     let missing = prepared.bind_relation_parameters(&args).unwrap_err();
     assert_eq!(missing.offset, text.find("$page").unwrap());
-    let query = prepared.bind_relation_parameters(&args.with_uint64("page", 1).unwrap()).unwrap();
+    let query = prepared
+        .bind_relation_parameters(&args.with_uint64("page", 1).unwrap())
+        .unwrap();
     let rows = run(&query, wide(), &mut || Ok(())).unwrap().value;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values()[0].as_integer(), Some(15));
     assert_eq!(prepared.canonical_template_bytes(), frozen);
     let inner = PreparedGraphPipelineAggregateText::prepare(
-        "MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH n,m RETURN n,COUNT(m) AS rows", symbols,
-    ).unwrap();
+        "MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH n,m RETURN n,COUNT(m) AS rows",
+        symbols,
+    )
+    .unwrap();
     let outer = PreparedGraphPipelineAggregateText::prepare(
-        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n,m RETURN n,COUNT(m) AS rows", symbols,
-    ).unwrap();
-    assert_ne!(inner.canonical_template_bytes(), outer.canonical_template_bytes());
+        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n,m RETURN n,COUNT(m) AS rows",
+        symbols,
+    )
+    .unwrap();
+    assert_ne!(
+        inner.canonical_template_bytes(),
+        outer.canonical_template_bytes()
+    );
     let operators = outer.template_operators();
-    assert_eq!(operators.iter().filter(|op| **op == "ScanGraphText").count(), 2);
-    assert!(operators.iter().position(|op| *op == "LeftJoin").unwrap()
-        < operators.iter().position(|op| *op == "Aggregate").unwrap());
+    assert_eq!(
+        operators
+            .iter()
+            .filter(|op| **op == "ScanGraphText")
+            .count(),
+        2
+    );
+    assert!(
+        operators.iter().position(|op| *op == "LeftJoin").unwrap()
+            < operators.iter().position(|op| *op == "Aggregate").unwrap()
+    );
 }
 
 #[test]
 fn source_contract_cannot_silently_drop_a_later_graph_leaf() {
     let multiple = PreparedGraphPipelineAggregateText::prepare(
-        "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows", symbols,
-    ).unwrap();
-    assert!(matches!(multiple.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
-        GraphPipelineAggregateTextErrorKind::Build(GraphAggregateBuildError::RequiresSingleGraphSource)));
+        "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows",
+        symbols,
+    )
+    .unwrap();
+    assert!(matches!(
+        multiple
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_err()
+            .kind,
+        GraphPipelineAggregateTextErrorKind::Build(
+            GraphAggregateBuildError::RequiresSingleGraphSource
+        )
+    ));
     for (text, sources) in [
         ("RETURN COUNT(*) AS rows", 0),
         ("MATCH (n) WITH n RETURN COUNT(*) AS rows", 1),
@@ -280,8 +341,16 @@ fn source_contract_cannot_silently_drop_a_later_graph_leaf() {
         assert_eq!(template.is_source_free(), sources == 0);
         assert_eq!(template.requires_relational_input(), sources != 1);
         if sources == 1 {
-            assert_eq!(template.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
-                template.bind_relation_parameters(&GqlParameters::new()).unwrap().canonical_bytes());
+            assert_eq!(
+                template
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .canonical_bytes(),
+                template
+                    .bind_relation_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .canonical_bytes()
+            );
         }
     }
 }
@@ -294,26 +363,40 @@ fn late_source_errors_and_limit_zero_do_not_return_a_partial_summary() {
     ] {
         let query = prepare(text);
         let mut calls = 0;
-        let result = query.execute_governed(wide(), |_, _| {
-            calls += 1;
-            if calls == 1 {
-                Ok(GqlQueryExecution::<GraphValueRow> {
-                    value: Vec::new(),
-                    rows: fgdb_gql::GqlExecutionStats { snapshot_records: 0, result_rows: 0 },
-                    evaluator: fgdb_gql::GlaExecutionStats::default(),
-                })
-            } else { Err(GqlQueryError::Source("last-source")) }
-        }, || Ok::<_, usize>(()));
-        assert!(matches!(result, Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
-            GraphSetExecutionError::Source("last-source"))))));
+        let result = query.execute_governed(
+            wide(),
+            |_, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(GqlQueryExecution::<GraphValueRow> {
+                        value: Vec::new(),
+                        rows: fgdb_gql::GqlExecutionStats {
+                            snapshot_records: 0,
+                            result_rows: 0,
+                        },
+                        evaluator: fgdb_gql::GlaExecutionStats::default(),
+                    })
+                } else {
+                    Err(GqlQueryError::Source("last-source"))
+                }
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                GraphSetExecutionError::Source("last-source")
+            )))
+        ));
         assert_eq!(calls, 2);
     }
-    let query = prepare(
-        "MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(1/0) AS bad LIMIT 0",
-    );
-    assert!(matches!(run(&query, wide(), &mut || Ok(())),
+    let query = prepare("MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(1/0) AS bad LIMIT 0");
+    assert!(matches!(
+        run(&query, wide(), &mut || Ok(())),
         Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
-            GraphSetExecutionError::Projection { .. })))));
+            GraphSetExecutionError::Projection { .. }
+        )))
+    ));
 }
 
 #[test]
@@ -323,18 +406,39 @@ fn exact_cumulative_quotas_and_every_cancellation_checkpoint_span_join_and_group
          WITH m.p AS score RETURN SUM(score+1) AS total",
     );
     let mut checkpoints = 0;
-    let measured = run(&query, wide(), &mut || { checkpoints += 1; Ok(()) }).unwrap();
-    let caps = [measured.rows.snapshot_records, measured.rows.result_rows,
-        measured.evaluator.work_units, measured.evaluator.scratch_entries];
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
     assert_eq!(measured.value[0].values()[0].as_integer(), Some(9));
-    assert_eq!(run(&query, GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
-        &mut || Ok(())).unwrap(), measured);
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
     for dimension in 0..4 {
         let mut limits = caps;
         assert!(limits[dimension] > 0);
         limits[dimension] -= 1;
-        assert!(run(&query, GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
-            &mut || Ok(())).is_err());
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                &mut || Ok(())
+            )
+            .is_err()
+        );
     }
     for stop in 1..=checkpoints {
         let mut seen = 0;
@@ -358,16 +462,27 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
         "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS bad RETURN SUM(bad)",
     ] {
         let mut calls = 0;
-        assert!(PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
-            calls += 1; symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls, 0, "{text}");
     }
-    let text = format!("MATCH (n){} WITH n RETURN COUNT(*) AS rows",
-        " WITH n MATCH (n)".repeat(fgdb_gql::MAX_GRAPH_SET_DEPTH));
+    let text = format!(
+        "MATCH (n){} WITH n RETURN COUNT(*) AS rows",
+        " WITH n MATCH (n)".repeat(fgdb_gql::MAX_GRAPH_SET_DEPTH)
+    );
     let mut calls = 0;
-    assert!(PreparedGraphPipelineAggregateText::prepare(&text, |kind, name| {
-        calls += 1; symbols(kind, name)
-    }).is_err());
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(&text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .is_err()
+    );
     assert_eq!(calls, 0);
 }

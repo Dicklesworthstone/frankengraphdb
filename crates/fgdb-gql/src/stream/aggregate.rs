@@ -802,11 +802,7 @@ impl NumericState {
                 // expression. A VId carrier is fixed-size; comparing it uses
                 // GraphValue's total order without copying a candidate payload.
                 let next = GraphValue::Vertex(*next);
-                if *maximum {
-                    &next > old
-                } else {
-                    &next < old
-                }
+                if *maximum { &next > old } else { &next < old }
             }
             (Some(GraphValue::Scalar(old)), Input::Scalar(Some(next))) => {
                 if *maximum {

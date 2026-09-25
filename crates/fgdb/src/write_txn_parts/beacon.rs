@@ -185,11 +185,7 @@ impl WriteTxn {
         options: &Options,
         configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<IndexConfig, BeaconError>,
         mut selected: impl FnMut(VId, &RefCell<Control<'_>>) -> Result<(), BeaconError>,
-        finish: impl FnOnce(
-            &IndexSnapshot,
-            &Snapshot,
-            &RefCell<Control<'_>>,
-        ) -> Result<T, BeaconError>,
+        finish: impl FnOnce(&IndexSnapshot, &Snapshot, &RefCell<Control<'_>>) -> Result<T, BeaconError>,
     ) -> Result<T, ReadError<WriteTxnError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(ReadError::Interrupted)?;

@@ -169,8 +169,8 @@ fn finish_token(
     let positions = result.frequencies.entry(std::mem::take(token)).or_default();
     // Analysis owns these lists exclusively. Never copy a previously shared
     // posting behind a caller's work meter.
-    let positions = Arc::get_mut(positions)
-        .ok_or(BeaconError::Invariant("shared posting during analysis"))?;
+    let positions =
+        Arc::get_mut(positions).ok_or(BeaconError::Invariant("shared posting during analysis"))?;
     if positions.len() == u32::MAX as usize {
         return Err(BeaconError::ResourceLimit {
             resource: "term frequency",
@@ -182,10 +182,12 @@ fn finish_token(
     // of retained u64 positions, including repeated terms. They are NOT RSS
     // limits: positional storage adds up to one u64 per input token plus
     // vector capacity/metadata, and retained old generations remain live.
-    positions.try_reserve(1).map_err(|_| BeaconError::ResourceLimit {
-        resource: "token position allocation",
-        limit: result.source_bytes,
-    })?;
+    positions
+        .try_reserve(1)
+        .map_err(|_| BeaconError::ResourceLimit {
+            resource: "token position allocation",
+            limit: result.source_bytes,
+        })?;
     positions.push(result.length);
     result.length = next_length;
     Ok(())
@@ -357,9 +359,12 @@ impl TextSegment {
         let mut positions = Vec::new();
         if mode == TextMatch::Phrase {
             work.charge(terms.len())?;
-            positions.try_reserve_exact(terms.len()).map_err(|_| BeaconError::ResourceLimit {
-                resource: "phrase posting references", limit: terms.len(),
-            })?;
+            positions
+                .try_reserve_exact(terms.len())
+                .map_err(|_| BeaconError::ResourceLimit {
+                    resource: "phrase posting references",
+                    limit: terms.len(),
+                })?;
         }
         loop {
             work.charge(streams.len().saturating_add(1))?;
@@ -396,9 +401,7 @@ impl TextSegment {
                 }
             }
             if visible && (mode == TextMatch::Any || matches == terms.len()) {
-                if mode == TextMatch::Phrase
-                    && !phrase_matches(query, &positions, length, work)?
-                {
+                if mode == TextMatch::Phrase && !phrase_matches(query, &positions, length, work)? {
                     continue;
                 }
                 if !score.is_finite() {
@@ -451,7 +454,9 @@ fn phrase_matches(
     };
     'candidate: for &position in candidates {
         work.charge(1)?;
-        let Some(start) = position.checked_sub(offset) else { continue };
+        let Some(start) = position.checked_sub(offset) else {
+            continue;
+        };
         if start > document_length - query.length {
             continue;
         }

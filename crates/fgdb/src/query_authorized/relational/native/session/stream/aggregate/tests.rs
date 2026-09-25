@@ -417,9 +417,14 @@ fn opening_is_lazy_but_owner_branch_shape_and_future_cut_admission_are_mandatory
         }
         // Edge aggregates now share the same lazy admission law. Opening
         // reads nothing; the zero candidate allowance refuses on first demand.
-        let edge = session.prepare(&cx, "MATCH (a)-[e:R]->(b) RETURN COUNT(*) AS n", &args).unwrap();
+        let edge = session
+            .prepare(&cx, "MATCH (a)-[e:R]->(b) RETURN COUNT(*) AS n", &args)
+            .unwrap();
         let mut edge = session.stream_aggregate(&cx, &edge, &args).unwrap();
-        assert!(matches!(edge.next(), Some(Err(QueryError::EdgeAggregateStream(GqlQueryError::Rows(_))))));
+        assert!(matches!(
+            edge.next(),
+            Some(Err(QueryError::EdgeAggregateStream(GqlQueryError::Rows(_))))
+        ));
         assert!(edge.next().is_none());
         drop(edge);
         let routed = GqlParameters::new()

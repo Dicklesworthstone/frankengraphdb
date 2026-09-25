@@ -294,7 +294,9 @@ mod graph_tests {
         DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
     };
     use fgdb_delta_types::{LabelId, PropertyKeyId, SchemaEpoch};
-    use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+    use fgdb_types::{
+        CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    };
     use fgdb_warden::{Grant, QueryLimits, Scope};
 
     const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x83; 32]);
@@ -309,7 +311,10 @@ mod graph_tests {
                 VId(id),
                 vec![LabelId(1)],
                 vec![
-                    (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph").unwrap()),
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                    ),
                     (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
                 ],
             );
@@ -320,7 +325,10 @@ mod graph_tests {
                 VId(90),
                 vec![LabelId(99)],
                 vec![
-                    (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph graph").unwrap()),
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("graph graph").unwrap(),
+                    ),
                     (PropertyKeyId(2), CanonicalScalar::Int(0)),
                 ],
             );
@@ -343,11 +351,22 @@ mod graph_tests {
             let full = graph(&c.commit(), true).await;
             let clean = graph(&c.commit(), false).await;
             let authority = Authority::new(
-                AuthKey::from_seed(2201), NS, "host-graph", SchemaEpoch(0), 1,
-            ).unwrap();
-            let mut grant = Grant::read_only("main", 1000, QueryLimits {
-                max_nodes: 3, max_work: 1_000_000, max_rows: 3,
-            });
+                AuthKey::from_seed(2201),
+                NS,
+                "host-graph",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
+            let mut grant = Grant::read_only(
+                "main",
+                1000,
+                QueryLimits {
+                    max_nodes: 3,
+                    max_work: 1_000_000,
+                    max_rows: 3,
+                },
+            );
             grant.labels = Scope::only([LabelId(1)]);
             grant.relations = Scope::only([RelationId(1)]);
             grant.properties = Scope::only([PropertyKeyId(1), PropertyKeyId(2)]);
@@ -357,28 +376,63 @@ mod graph_tests {
             options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
             let query = GraphHybridQuery {
                 retrieval: ExactHybridQuery {
-                    vector: &[0.0], text: "graph", k: 3,
-                    vector_candidates: 3, text_candidates: 3,
-                    vector_mode: VectorSearch::Exact, text_mode: TextMatch::Any,
+                    vector: &[0.0],
+                    text: "graph",
+                    k: 3,
+                    vector_candidates: 3,
+                    text_candidates: 3,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
                     profile: ExactRrfProfile::default(),
                 },
-                graph_candidates: 8, graph_weight: 100,
+                graph_candidates: 8,
+                graph_weight: 100,
             };
             let expansion = ExpansionSpec {
-                seeds: &[VId(1)], relation: None, direction: ExpansionDirection::Outgoing,
-                max_hops: 2, include_seeds: false, limits: ExpansionLimits::default(),
+                seeds: &[VId(1)],
+                relation: None,
+                direction: ExpansionDirection::Outgoing,
+                max_hops: 2,
+                include_seeds: false,
+                limits: ExpansionLimits::default(),
             };
-            let actual = full.beacon_search_graph_authorized(
-                &c.query(), &authority, &token, "main", &options, query, expansion, || 100,
-            ).unwrap();
-            let expected = clean.beacon_search_graph(&c.query(), &options, query, expansion).unwrap();
+            let actual = full
+                .beacon_search_graph_authorized(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &options,
+                    query,
+                    expansion,
+                    || 100,
+                )
+                .unwrap();
+            let expected = clean
+                .beacon_search_graph(&c.query(), &options, query, expansion)
+                .unwrap();
             assert_eq!(actual, expected); // Includes all scores, ranks and hop metadata.
-            assert_eq!(actual.iter().find(|hit| hit.id == VId(2)).unwrap().graph_hops, Some(1));
-            assert_eq!(actual.iter().find(|hit| hit.id == VId(3)).unwrap().graph_hops, None);
+            assert_eq!(
+                actual
+                    .iter()
+                    .find(|hit| hit.id == VId(2))
+                    .unwrap()
+                    .graph_hops,
+                Some(1)
+            );
+            assert_eq!(
+                actual
+                    .iter()
+                    .find(|hit| hit.id == VId(3))
+                    .unwrap()
+                    .graph_hops,
+                None
+            );
             assert!(actual.iter().all(|hit| hit.id != VId(90)));
             assert_ne!(
                 actual,
-                full.beacon_search_graph(&c.query(), &options, query, expansion).unwrap(),
+                full.beacon_search_graph(&c.query(), &options, query, expansion)
+                    .unwrap(),
                 "the hidden graph must change an unscoped query, not be an inert fixture",
             );
         });

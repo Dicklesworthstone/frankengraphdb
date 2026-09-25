@@ -20,10 +20,8 @@ const EDGES: [(VId, RelationId, VId); 4] = [
     (VId(3), R, VId(3)),
 ];
 
-type ResultRows = Result<
-    GqlQueryExecution<GraphValueRow>,
-    GqlQueryError<GraphSetExecutionError<usize>, usize>,
->;
+type ResultRows =
+    Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<usize>, usize>>;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -89,17 +87,22 @@ fn rows(text: &str) -> Vec<GraphValueRow> {
 }
 fn vertices(values: &[Option<u128>]) -> GraphValueRow {
     GraphValueRow::from_owned_values(
-        values.iter().map(|value| {
-            value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
-                GraphValue::Vertex(VId(id))
+        values
+            .iter()
+            .map(|value| {
+                value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
+                    GraphValue::Vertex(VId(id))
+                })
             })
-        }).collect(),
+            .collect(),
     )
 }
 fn scalar_vertex(value: Option<i64>, vertex: Option<u128>) -> GraphValueRow {
     GraphValueRow::from_owned_values(vec![
         GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
-        vertex.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| GraphValue::Vertex(VId(id))),
+        vertex.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
+            GraphValue::Vertex(VId(id))
+        }),
     ])
 }
 
@@ -131,14 +134,19 @@ fn unmatched_parts_preserve_carried_values_and_keep_private_join_columns_hidden(
         OPTIONAL MATCH (a)-[:R]->(b) RETURN *";
     let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
     assert_eq!(prepared.columns(), &["a", "saved", "b"]);
-    assert_eq!(rows(text), vec![GraphValueRow::from_owned_values(vec![
-        GraphValue::Vertex(VId(4)),
-        GraphValue::Scalar(CanonicalScalar::Int(40)),
-        GraphValue::Scalar(CanonicalScalar::Null),
-    ])]);
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=40 WITH a AS kept,7 AS token \
-            OPTIONAL MATCH (kept)-[:R]->(b) RETURN token,kept"),
+        rows(text),
+        vec![GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Scalar(CanonicalScalar::Int(40)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ])]
+    );
+    assert_eq!(
+        rows(
+            "MATCH (a) WHERE a.score=40 WITH a AS kept,7 AS token \
+            OPTIONAL MATCH (kept)-[:R]->(b) RETURN token,kept"
+        ),
         vec![scalar_vertex(Some(7), Some(4))],
     );
 }
@@ -149,19 +157,26 @@ fn property_map_correlations_and_where_filter_candidates_before_null_extension()
         (20, vec![vertices(&[Some(1), Some(2)]); 2]),
         (99, vec![vertices(&[Some(1), None])]),
     ] {
-        assert_eq!(rows(&format!(
-            "MATCH (a) WHERE a.score=10 WITH a,{wanted} AS wanted \
+        assert_eq!(
+            rows(&format!(
+                "MATCH (a) WHERE a.score=10 WITH a,{wanted} AS wanted \
              OPTIONAL MATCH (a)-[:R]->(b {{score:wanted}}) RETURN a,b"
-        )), expected);
+            )),
+            expected
+        );
     }
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=10 WITH a \
-            OPTIONAL MATCH (a)-[:R]->(b) WHERE b.score=99 RETURN a,b"),
+        rows(
+            "MATCH (a) WHERE a.score=10 WITH a \
+            OPTIONAL MATCH (a)-[:R]->(b) WHERE b.score=99 RETURN a,b"
+        ),
         vec![vertices(&[Some(1), None])],
     );
     assert_eq!(
-        rows("MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
-            WITH a,b WHERE b IS NULL RETURN a"),
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+            WITH a,b WHERE b IS NULL RETURN a"
+        ),
         vec![vertices(&[Some(4)])],
     );
 }
@@ -169,17 +184,24 @@ fn property_map_correlations_and_where_filter_candidates_before_null_extension()
 #[test]
 fn null_imports_remain_null_through_optional_parts_and_fail_required_matching() {
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
-            WITH a,b OPTIONAL MATCH (b)-[:R]->(c) RETURN a,b,c"),
+        rows(
+            "MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+            WITH a,b OPTIONAL MATCH (b)-[:R]->(c) RETURN a,b,c"
+        ),
         vec![vertices(&[Some(4), None, None])],
     );
-    assert!(rows(
-        "MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+    assert!(
+        rows(
+            "MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
          WITH a,b MATCH (b)-[:R]->(c) RETURN a,c"
-    ).is_empty());
+        )
+        .is_empty()
+    );
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=10 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
-            WITH b AS pivot OPTIONAL MATCH (pivot)-[:R]->(c) RETURN c"),
+        rows(
+            "MATCH (a) WHERE a.score=10 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+            WITH b AS pivot OPTIONAL MATCH (pivot)-[:R]->(c) RETURN c"
+        ),
         vec![vertices(&[Some(3)]); 2],
     );
 }
@@ -187,8 +209,10 @@ fn null_imports_remain_null_through_optional_parts_and_fail_required_matching() 
 #[test]
 fn values_only_optional_inputs_keep_bags_null_keys_and_no_match_rows() {
     assert_eq!(
-        rows("UNWIND [20,99,20,NULL] AS wanted WITH wanted \
-            OPTIONAL MATCH (n {score:wanted}) RETURN wanted,n ORDER BY wanted NULLS FIRST,n"),
+        rows(
+            "UNWIND [20,99,20,NULL] AS wanted WITH wanted \
+            OPTIONAL MATCH (n {score:wanted}) RETURN wanted,n ORDER BY wanted NULLS FIRST,n"
+        ),
         vec![
             scalar_vertex(None, None),
             scalar_vertex(Some(20), Some(2)),
@@ -202,7 +226,9 @@ fn values_only_optional_inputs_keep_bags_null_keys_and_no_match_rows() {
     );
     assert_eq!(
         rows("WITH 7 AS token OPTIONAL MATCH (n) RETURN token,n ORDER BY n"),
-        (1..=4).map(|n| scalar_vertex(Some(7), Some(n))).collect::<Vec<_>>(),
+        (1..=4)
+            .map(|n| scalar_vertex(Some(7), Some(n)))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -210,19 +236,31 @@ fn values_only_optional_inputs_keep_bags_null_keys_and_no_match_rows() {
 fn typed_candidates_preserve_full_width_ids_without_coercing_scalar_integers() {
     let prepared = PreparedGraphSetText::prepare(
         "UNWIND $ids AS seed WITH seed OPTIONAL MATCH (seed)-[:R]->(neighbor) \
-         RETURN seed,neighbor", symbols,
-    ).unwrap();
-    let arguments = GqlParameters::new().with_list("ids", vec![
-        GraphValue::Vertex(VId(1)),
-        GraphValue::Vertex(VId(1)),
-        GraphValue::Scalar(CanonicalScalar::Int(1)),
-        GraphValue::Vertex(VId(u128::MAX)),
-        GraphValue::Scalar(CanonicalScalar::Null),
-    ]).unwrap();
+         RETURN seed,neighbor",
+        symbols,
+    )
+    .unwrap();
+    let arguments = GqlParameters::new()
+        .with_list(
+            "ids",
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Vertex(VId(u128::MAX)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap();
     let calls = Cell::new(0);
     let observed = run(
-        &prepared.bind_parameters(&arguments).unwrap(), wide(), None, &calls, || Ok(()),
-    ).unwrap();
+        &prepared.bind_parameters(&arguments).unwrap(),
+        wide(),
+        None,
+        &calls,
+        || Ok(()),
+    )
+    .unwrap();
     let mut expected = vec![vertices(&[Some(1), Some(2)]); 4];
     expected.push(scalar_vertex(Some(1), None));
     expected.push(vertices(&[Some(u128::MAX), None]));
@@ -238,21 +276,28 @@ fn typed_candidates_preserve_full_width_ids_without_coercing_scalar_integers() {
 #[test]
 fn local_pages_and_distinct_finish_before_the_next_optional_part() {
     assert_eq!(
-        rows("MATCH (a) WITH a ORDER BY a DESC LIMIT 1 \
-            OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b"),
+        rows(
+            "MATCH (a) WITH a ORDER BY a DESC LIMIT 1 \
+            OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b"
+        ),
         vec![vertices(&[Some(4), None])],
     );
     for (quantifier, count) in [("", 4), ("DISTINCT ", 2)] {
-        assert_eq!(rows(&format!(
-            "MATCH (a)-[:R]->(b) WITH {quantifier}b AS pivot \
+        assert_eq!(
+            rows(&format!(
+                "MATCH (a)-[:R]->(b) WITH {quantifier}b AS pivot \
              OPTIONAL MATCH (pivot)-[:R]->(c) RETURN c"
-        )), vec![vertices(&[Some(3)]); count]);
+            )),
+            vec![vertices(&[Some(3)]); count]
+        );
     }
     assert_eq!(
-        rows("(MATCH (a) WHERE a.score=40 WITH a \
+        rows(
+            "(MATCH (a) WHERE a.score=40 WITH a \
             OPTIONAL MATCH (a)-[:R]->(b) RETURN b) \
             UNION ALL (MATCH (n) WHERE n.score=20 RETURN n AS b) \
-            ORDER BY b NULLS FIRST"),
+            ORDER BY b NULLS FIRST"
+        ),
         vec![vertices(&[None]), vertices(&[Some(2)])],
     );
 }
@@ -265,7 +310,8 @@ fn optional_kind_and_parameters_are_bound_into_the_existing_transcripts() {
     let template = PreparedGraphSetText::prepare(text, |kind, name| {
         calls += 1;
         symbols(kind, name)
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(calls, 2); // one property and one relation, cached across parts
     assert_eq!(template.parameter_schema().len(), 2);
     let transcript = template.canonical_template_bytes();
@@ -276,20 +322,38 @@ fn optional_kind_and_parameters_are_bound_into_the_existing_transcripts() {
         (20, vec![vertices(&[Some(1), Some(2)]); 2]),
         (99, vec![vertices(&[Some(1), None])]),
     ] {
-        let args = GqlParameters::new().with_int64("start", 10).unwrap()
-            .with_int64("wanted", wanted).unwrap();
+        let args = GqlParameters::new()
+            .with_int64("start", 10)
+            .unwrap()
+            .with_int64("wanted", wanted)
+            .unwrap();
         let bound = template.bind_parameters(&args).unwrap();
-        assert_ne!(required.bind_parameters(&args).unwrap().canonical_bytes(), bound.canonical_bytes());
+        assert_ne!(
+            required.bind_parameters(&args).unwrap().canonical_bytes(),
+            bound.canonical_bytes()
+        );
         if let Some(previous) = previous {
             assert_ne!(previous, bound.canonical_bytes());
         }
         previous = Some(bound.canonical_bytes());
-        assert_eq!(run(&bound, wide(), None, &Cell::new(0), || Ok(())).unwrap().value, expected);
+        assert_eq!(
+            run(&bound, wide(), None, &Cell::new(0), || Ok(()))
+                .unwrap()
+                .value,
+            expected
+        );
         assert_eq!(template.canonical_template_bytes(), transcript);
     }
     let args = GqlParameters::new().with_int64("start", 10).unwrap();
-    assert_eq!(template.bind_parameters(&args).unwrap_err().offset, text.find("$wanted").unwrap());
-    assert!(template.bind_parameters(&args.with_uint64("wanted", 20).unwrap()).is_err());
+    assert_eq!(
+        template.bind_parameters(&args).unwrap_err().offset,
+        text.find("$wanted").unwrap()
+    );
+    assert!(
+        template
+            .bind_parameters(&args.with_uint64("wanted", 20).unwrap())
+            .is_err()
+    );
     assert_eq!(calls, 2);
 }
 
@@ -306,19 +370,30 @@ fn unsupported_optional_scopes_and_carried_dereferences_refuse_before_catalog() 
         "MATCH (a) WITH a OPTIONAL RETURN a",
     ] {
         let mut calls = 0;
-        assert!(PreparedGraphSetText::prepare(text, |kind, name| {
-            calls += 1;
-            symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls, 0, "{text}");
     }
     // The guard is not a blanket refusal of properties on OPTIONAL output.
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=10 WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN b.score AS score"),
-        vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(20))]); 2],
+        rows(
+            "MATCH (a) WHERE a.score=10 WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN b.score AS score"
+        ),
+        vec![
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(20))]);
+            2
+        ],
     );
     assert_eq!(
-        rows("MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN b.score AS score"),
+        rows(
+            "MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN b.score AS score"
+        ),
         vec![vertices(&[None])],
     );
 }
@@ -338,9 +413,19 @@ fn empty_input_limit_zero_and_unmatched_results_never_hide_late_failures() {
         assert_eq!(calls.get(), 2);
     }
     assert!(matches!(
-        run(&bind("MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
-            RETURN 1/0 AS bad LIMIT 0"), wide(), None, &Cell::new(0), || Ok(())),
-        Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. })),
+        run(
+            &bind(
+                "MATCH (a) WHERE a.score=40 WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+            RETURN 1/0 AS bad LIMIT 0"
+            ),
+            wide(),
+            None,
+            &Cell::new(0),
+            || Ok(())
+        ),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::Projection { .. }
+        )),
     ));
 }
 
@@ -351,30 +436,51 @@ fn exact_quotas_and_every_cancellation_checkpoint_cover_optional_join_and_delive
     let measured = run(&query, wide(), None, &Cell::new(0), || {
         checkpoints.set(checkpoints.get() + 1);
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(measured.rows.snapshot_records, 16);
     assert_eq!(measured.rows.result_rows, 5);
     let caps = [
-        measured.rows.snapshot_records, measured.rows.result_rows,
-        measured.evaluator.work_units, measured.evaluator.scratch_entries,
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
     ];
     assert_eq!(
-        run(&query, GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]), None,
-            &Cell::new(0), || Ok(())).unwrap(),
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            None,
+            &Cell::new(0),
+            || Ok(())
+        )
+        .unwrap(),
         measured,
     );
     for dimension in 0..4 {
         let mut limits = caps;
         assert!(limits[dimension] > 0);
         limits[dimension] -= 1;
-        assert!(run(&query, GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
-            None, &Cell::new(0), || Ok(())).is_err());
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                None,
+                &Cell::new(0),
+                || Ok(())
+            )
+            .is_err()
+        );
     }
     for stop in 1..=checkpoints.get() {
         let seen = Cell::new(0);
         let result = run(&query, wide(), None, &Cell::new(0), || {
             seen.set(seen.get() + 1);
-            if seen.get() == stop { Err(stop) } else { Ok(()) }
+            if seen.get() == stop {
+                Err(stop)
+            } else {
+                Ok(())
+            }
         });
         assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
         assert_eq!(seen.get(), stop);

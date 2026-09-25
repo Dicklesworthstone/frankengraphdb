@@ -21,7 +21,10 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
         && query.input_projection().is_none()
         && !query.input_pattern().plan().requires_identified_edges()
         && query.input_pattern().value_columns().iter().all(|column| {
-            matches!(column, ValueProjection::Vertex { .. } | ValueProjection::Property { .. })
+            matches!(
+                column,
+                ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
+            )
         })
     {
         return visit_at(snapshot, at, query, scope, execution, policy);
@@ -53,10 +56,23 @@ fn visit_at<Clock: FnMut() -> u64>(
         query.input_pattern().plan(),
         at,
         scope,
-        || execution.borrow_mut().node().map_err(GqlQueryError::Interrupted),
-        &mut |_| execution.borrow_mut().poll().map_err(GqlQueryError::Interrupted),
+        || {
+            execution
+                .borrow_mut()
+                .node()
+                .map_err(GqlQueryError::Interrupted)
+        },
+        &mut |_| {
+            execution
+                .borrow_mut()
+                .poll()
+                .map_err(GqlQueryError::Interrupted)
+        },
         &mut |event| {
-            execution.borrow_mut().checkpoint().map_err(GqlQueryError::Interrupted)?;
+            execution
+                .borrow_mut()
+                .checkpoint()
+                .map_err(GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )
@@ -64,13 +80,19 @@ fn visit_at<Clock: FnMut() -> u64>(
     let result = query.execute_governed(
         tables.records,
         tables.vertices.keys().copied(),
-        tables.edges.values().map(|((_, from, relation, to), _)| (*from, *relation, *to)),
+        tables
+            .edges
+            .values()
+            .map(|((_, from, relation, to), _)| (*from, *relation, *to)),
         |vid, required| Ok(tables.matches(vid, required, scope)),
         |vid, key| Ok(tables.property(vid, key, scope)),
         usage.remaining(policy),
         || execution.borrow_mut().checkpoint(),
     );
-    usage.finish(policy, result).map(|result| result.value).map_err(aggregate_error)
+    usage
+        .finish(policy, result)
+        .map(|result| result.value)
+        .map_err(aggregate_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {

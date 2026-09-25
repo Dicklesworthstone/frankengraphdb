@@ -102,7 +102,9 @@ pub(crate) fn evaluate(
             // before filtering. No earlier visible edge can be resurrected.
             // Edge properties/weights are not read or copied for unit-hop BFS.
             source::visit_edges(&snapshot.blocks, at, &mut control, |edge, _| {
-                if expansion.relation.is_none_or(|relation| relation == edge.relation)
+                if expansion
+                    .relation
+                    .is_none_or(|relation| relation == edge.relation)
                     && relation_allowed(edge.relation)
                     && graph.contains(edge.src)
                     && graph.contains(edge.dst)
@@ -190,8 +192,17 @@ impl EmbeddedReadView {
                 cx.checkpoint()
             }));
             let result = evaluate(
-                &self.snapshot, at, options, query, expansion, &work,
-                Scan::Metered, |_| Ok(true), |_| true, |_| true, |_| true,
+                &self.snapshot,
+                at,
+                options,
+                query,
+                expansion,
+                &work,
+                Scan::Metered,
+                |_| Ok(true),
+                |_| true,
+                |_| true,
+                |_| true,
             );
             work.into_inner().finish(result)
         })
@@ -208,13 +219,19 @@ mod tests {
     use crate::{DatabaseKeys, MemVfs, WriteBatch};
     use asupersync::lab::run_async_under_lab;
     use fgdb_beacon::expansion::{ExpansionDirection as Direction, ExpansionLimits};
-    use fgdb_beacon::{DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch};
+    use fgdb_beacon::{
+        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
+    };
     use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
     const HIGH: VId = VId((1_u128 << 100) + 3);
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0x31; 32], DatabaseSecurityNamespaceId([0x32; 32]), [0x33; 32])
+        DatabaseKeys::new(
+            [0x31; 32],
+            DatabaseSecurityNamespaceId([0x32; 32]),
+            [0x33; 32],
+        )
     }
 
     fn options() -> Options {
@@ -228,46 +245,76 @@ mod tests {
     fn query() -> GraphHybridQuery<'static> {
         GraphHybridQuery {
             retrieval: ExactHybridQuery {
-                vector: &[0.0], text: "graph", k: 1,
-                vector_candidates: 3, text_candidates: 0,
-                vector_mode: VectorSearch::Exact, text_mode: TextMatch::Any,
+                vector: &[0.0],
+                text: "graph",
+                k: 1,
+                vector_candidates: 3,
+                text_candidates: 0,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
                 profile: ExactRrfProfile::new(60, 1, 0).unwrap(),
             },
-            graph_candidates: 10, graph_weight: 100,
+            graph_candidates: 10,
+            graph_weight: 100,
         }
     }
 
     fn expansion(seeds: &[VId]) -> ExpansionSpec<'_, RelationId> {
         ExpansionSpec {
-            seeds, relation: Some(RelationId(1)), direction: Direction::Outgoing,
-            max_hops: 2, include_seeds: false, limits: ExpansionLimits::default(),
+            seeds,
+            relation: Some(RelationId(1)),
+            direction: Direction::Outgoing,
+            max_hops: 2,
+            include_seeds: false,
+            limits: ExpansionLimits::default(),
         }
     }
 
     fn initial() -> WriteBatch {
         let mut batch = WriteBatch::new(RelationId(1));
-        for (id, x, words) in [(VId(1), 0, "graph"), (VId(2), 5, "storage"), (HIGH, 10, "graph graph")] {
-            batch.create_vertex(id, vec![LabelId(1)], vec![
-                (PropertyKeyId(1), CanonicalScalar::ucs_basic_text(words).unwrap()),
-                (PropertyKeyId(2), CanonicalScalar::Int(x)),
-            ]);
+        for (id, x, words) in [
+            (VId(1), 0, "graph"),
+            (VId(2), 5, "storage"),
+            (HIGH, 10, "graph graph"),
+        ] {
+            batch.create_vertex(
+                id,
+                vec![LabelId(1)],
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text(words).unwrap(),
+                    ),
+                    (PropertyKeyId(2), CanonicalScalar::Int(x)),
+                ],
+            );
         }
         batch.create_vertex(VId(4), vec![LabelId(1)], vec![]);
-        for (eid, src, dst) in [(1, VId(1), VId(2)), (2, VId(1), VId(2)),
-            (3, VId(2), HIGH), (4, HIGH, VId(1)), (5, VId(2), VId(2))] {
+        for (eid, src, dst) in [
+            (1, VId(1), VId(2)),
+            (2, VId(1), VId(2)),
+            (3, VId(2), HIGH),
+            (4, HIGH, VId(1)),
+            (5, VId(2), VId(2)),
+        ] {
             batch.add_edge(EId(eid), src, dst, vec![]);
         }
         batch
     }
 
     fn graph_population(
-        db: &Database<MemVfs>, cx: &QueryCx, options: &Options,
+        db: &Database<MemVfs>,
+        cx: &QueryCx,
+        options: &Options,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Vec<(VId, u32)> {
         let mut q = query();
         q.retrieval.k = 10;
-        let mut rows = db.beacon_search_graph(cx, options, q, expansion).unwrap()
-            .into_iter().filter_map(|hit| hit.graph_hops.map(|hops| (hit.id, hops)))
+        let mut rows = db
+            .beacon_search_graph(cx, options, q, expansion)
+            .unwrap()
+            .into_iter()
+            .filter_map(|hit| hit.graph_hops.map(|hops| (hit.id, hops)))
             .collect::<Vec<_>>();
         rows.sort_by_key(|(id, hops)| (*hops, *id));
         rows
@@ -284,14 +331,19 @@ mod tests {
             let options = options();
             let mut spec = expansion(&[VId(2)]);
             spec.max_hops = 1;
-            let hits = db.beacon_search_graph(&cx, &options, query(), spec).unwrap();
+            let hits = db
+                .beacon_search_graph(&cx, &options, query(), spec)
+                .unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].id, HIGH);
             assert_eq!(hits[0].vector_rank.unwrap().get(), 3);
             assert_eq!(hits[0].graph_rank.unwrap().get(), 1);
             assert_eq!(hits[0].graph_hops, Some(1));
             // Independent arithmetic: 1/63 + 100/61 = 6361/3843.
-            assert_eq!((hits[0].score.numerator(), hits[0].score.denominator()), (6361, 3843));
+            assert_eq!(
+                (hits[0].score.numerator(), hits[0].score.denominator()),
+                (6361, 3843)
+            );
             let mut edge = WriteBatch::new(RelationId(2));
             edge.add_edge(EId(6), VId(1), VId(4), vec![]);
             db.write(&commit, edge).await.unwrap();
@@ -305,11 +357,17 @@ mod tests {
             assert_eq!(hits[0].vector_rank, None);
             assert_eq!(hits[0].text_rank, None);
             assert_eq!(hits[0].graph_hops, Some(1));
-            assert_eq!((hits[0].score.numerator(), hits[0].score.denominator()), (100, 61));
+            assert_eq!(
+                (hits[0].score.numerator(), hits[0].score.denominator()),
+                (100, 61)
+            );
             q.retrieval.text_candidates = 3;
             q.retrieval.profile = ExactRrfProfile::new(60, 1, 1).unwrap();
             let hits = db.beacon_search_graph(&cx, &options, q, spec).unwrap();
-            assert!(hits.iter().any(|h| h.text_rank.is_some() && h.vector_rank.is_some()));
+            assert!(
+                hits.iter()
+                    .any(|h| h.text_rank.is_some() && h.vector_rank.is_some())
+            );
             assert_eq!(hits[0].id, VId(4));
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -328,7 +386,9 @@ mod tests {
             let spec = expansion(&[VId(1)]);
             let expected = vec![(VId(2), 1), (HIGH, 2)];
             assert_eq!(graph_population(&db, &cx, &options, spec), expected);
-            let before = pinned.beacon_search_graph(&cx, &options, query(), spec).unwrap();
+            let before = pinned
+                .beacon_search_graph(&cx, &options, query(), spec)
+                .unwrap();
             let mut changes = WriteBatch::new(RelationId(1));
             changes.delete_edge(EId(1));
             db.write(&commit, changes).await.unwrap();
@@ -337,22 +397,40 @@ mod tests {
             changes.set_vertex_label(VId(2), LabelId(1), false);
             changes.set_vertex_property(HIGH, PropertyKeyId(2), Some(CanonicalScalar::Int(1)));
             db.write(&commit, changes).await.unwrap();
-            assert!(graph_population(&db, &cx, &options, spec).is_empty(), "excluded vertex cannot be a bridge");
+            assert!(
+                graph_population(&db, &cx, &options, spec).is_empty(),
+                "excluded vertex cannot be a bridge"
+            );
             let mut historical = options.clone();
             historical.as_of = Some(at);
-            assert_eq!(db.beacon_search_graph(&cx, &historical, query(), spec).unwrap(), before);
+            assert_eq!(
+                db.beacon_search_graph(&cx, &historical, query(), spec)
+                    .unwrap(),
+                before
+            );
             let mut changes = WriteBatch::new(RelationId(1));
             changes.delete_vertex(VId(2));
             changes.add_edge(EId(7), VId(1), HIGH, vec![]);
             db.write(&commit, changes).await.unwrap();
             assert_eq!(graph_population(&db, &cx, &options, spec), vec![(HIGH, 1)]);
             db.compact(&commit).await.unwrap();
-            assert_eq!(db.beacon_search_graph(&cx, &historical, query(), spec).unwrap(), before);
+            assert_eq!(
+                db.beacon_search_graph(&cx, &historical, query(), spec)
+                    .unwrap(),
+                before
+            );
             drop(db);
-            assert_eq!(pinned.beacon_search_graph(&cx, &options, query(), spec).unwrap(), before);
+            assert_eq!(
+                pinned
+                    .beacon_search_graph(&cx, &options, query(), spec)
+                    .unwrap(),
+                before
+            );
             historical.as_of = Some(CommitSeq(at.0 + 1));
-            assert!(matches!(pinned.beacon_search_graph(&cx, &historical, query(), spec),
-                Err(Error::Read(ReadError::BeyondFrontier { .. }))));
+            assert!(matches!(
+                pinned.beacon_search_graph(&cx, &historical, query(), spec),
+                Err(Error::Read(ReadError::BeyondFrontier { .. }))
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -380,7 +458,10 @@ mod tests {
             spec.limits.max_input_edges = 0;
             spec.limits.max_source_scratch = 0;
             spec.include_seeds = true;
-            assert_eq!(graph_population(&db, &cx, &options, spec), vec![(VId(2), 0)]);
+            assert_eq!(
+                graph_population(&db, &cx, &options, spec),
+                vec![(VId(2), 0)]
+            );
             spec.include_seeds = false;
             assert!(graph_population(&db, &cx, &options, spec).is_empty());
             spec = expansion(&[]);
@@ -390,7 +471,10 @@ mod tests {
             spec.relation = Some(RelationId(999));
             assert!(graph_population(&db, &cx, &options, spec).is_empty());
             spec.relation = None;
-            assert_eq!(graph_population(&db, &cx, &options, spec), vec![(VId(2), 1), (HIGH, 2)]);
+            assert_eq!(
+                graph_population(&db, &cx, &options, spec),
+                vec![(VId(2), 1), (HIGH, 2)]
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -405,31 +489,78 @@ mod tests {
             let at = db.write(&commit, initial()).await.unwrap();
             let options = options();
             for (limits, resource) in [
-                (ExpansionLimits { max_vertices: 3, ..ExpansionLimits::default() }, "expansion vertices"),
-                (ExpansionLimits { max_input_edges: 1, ..ExpansionLimits::default() }, "expansion input edges"),
-                (ExpansionLimits { max_visited_vertices: 1, ..ExpansionLimits::default() }, "expansion visited vertices"),
-                (ExpansionLimits { max_seed_ids: 0, ..ExpansionLimits::default() }, "expansion seed IDs"),
-                (ExpansionLimits { max_source_scratch: 0, ..ExpansionLimits::default() }, "expansion source scratch entries"),
+                (
+                    ExpansionLimits {
+                        max_vertices: 3,
+                        ..ExpansionLimits::default()
+                    },
+                    "expansion vertices",
+                ),
+                (
+                    ExpansionLimits {
+                        max_input_edges: 1,
+                        ..ExpansionLimits::default()
+                    },
+                    "expansion input edges",
+                ),
+                (
+                    ExpansionLimits {
+                        max_visited_vertices: 1,
+                        ..ExpansionLimits::default()
+                    },
+                    "expansion visited vertices",
+                ),
+                (
+                    ExpansionLimits {
+                        max_seed_ids: 0,
+                        ..ExpansionLimits::default()
+                    },
+                    "expansion seed IDs",
+                ),
+                (
+                    ExpansionLimits {
+                        max_source_scratch: 0,
+                        ..ExpansionLimits::default()
+                    },
+                    "expansion source scratch entries",
+                ),
             ] {
                 let mut spec = expansion(&[VId(1)]);
                 spec.limits = limits;
-                assert!(matches!(db.beacon_search_graph(&cx, &options, query(), spec),
-                    Err(Error::Index(BeaconError::ResourceLimit { resource: actual, .. })) if actual == resource), "{resource}");
+                assert!(
+                    matches!(db.beacon_search_graph(&cx, &options, query(), spec),
+                    Err(Error::Index(BeaconError::ResourceLimit { resource: actual, .. })) if actual == resource),
+                    "{resource}"
+                );
                 assert_eq!(db.frontier().unwrap(), at);
             }
             let mut spec = expansion(&[VId(1), VId(999)]);
-            spec.limits = ExpansionLimits { max_vertices: 0, max_input_edges: 0,
-                max_visited_vertices: 0, max_seed_ids: 0, max_source_scratch: 0 };
+            spec.limits = ExpansionLimits {
+                max_vertices: 0,
+                max_input_edges: 0,
+                max_visited_vertices: 0,
+                max_seed_ids: 0,
+                max_source_scratch: 0,
+            };
             for (weight, candidates) in [(0, 10), (100, 0)] {
-                let q = GraphHybridQuery { graph_weight: weight, graph_candidates: candidates, ..query() };
+                let q = GraphHybridQuery {
+                    graph_weight: weight,
+                    graph_candidates: candidates,
+                    ..query()
+                };
                 let hits = db.beacon_search_graph(&cx, &options, q, spec).unwrap();
                 assert_eq!(hits[0].id, VId(1));
                 assert!(hits[0].graph_rank.is_none());
             }
             let mut denied = options.clone();
             denied.policy.max_result_rows = 0;
-            assert!(matches!(db.beacon_search_graph(&cx, &denied, query(), expansion(&[VId(1)])),
-                Err(Error::Index(BeaconError::ResourceLimit { resource: "result rows", .. }))));
+            assert!(matches!(
+                db.beacon_search_graph(&cx, &denied, query(), expansion(&[VId(1)])),
+                Err(Error::Index(BeaconError::ResourceLimit {
+                    resource: "result rows",
+                    ..
+                }))
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -437,11 +568,18 @@ mod tests {
     #[test]
     fn every_source_projection_expansion_fusion_and_final_checkpoint_can_refuse() {
         #[derive(Default)]
-        struct Cut { calls: usize, stop: Option<usize> }
+        struct Cut {
+            calls: usize,
+            stop: Option<usize>,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
-                if self.stop == Some(self.calls) { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.stop == Some(self.calls) {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let ((), report) = run_async_under_lab(0xbeac_2105, |root| async move {
@@ -456,9 +594,23 @@ mod tests {
                 let mut q = query();
                 q.retrieval.k = k;
                 let run = |stop| {
-                    let work = RefCell::new(Cut { stop, ..Cut::default() });
-                    let result = evaluate(&db.snapshot, at, &options, q, expansion(&[VId(1)]),
-                        &work, Scan::Metered, |_| Ok(true), |_| true, |_| true, |_| true);
+                    let work = RefCell::new(Cut {
+                        stop,
+                        ..Cut::default()
+                    });
+                    let result = evaluate(
+                        &db.snapshot,
+                        at,
+                        &options,
+                        q,
+                        expansion(&[VId(1)]),
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| true,
+                        |_| true,
+                    );
                     (result, work.into_inner().calls)
                 };
                 let (expected, calls) = run(None);
@@ -467,10 +619,17 @@ mod tests {
                 assert!(calls > 2);
                 for stop in 1..=calls {
                     let (result, visited) = run(Some(stop));
-                    assert!(matches!(result, Err(BeaconError::Cancelled)), "k={k} stop={stop}");
+                    assert!(
+                        matches!(result, Err(BeaconError::Cancelled)),
+                        "k={k} stop={stop}"
+                    );
                     assert_eq!(visited, stop);
                 }
-                assert_eq!(db.beacon_search_graph(&cx, &options, q, expansion(&[VId(1)])).unwrap(), expected);
+                assert_eq!(
+                    db.beacon_search_graph(&cx, &options, q, expansion(&[VId(1)]))
+                        .unwrap(),
+                    expected
+                );
             }
             assert_eq!(db.frontier().unwrap(), at);
             assert_eq!(db.manifest().unwrap(), manifest);

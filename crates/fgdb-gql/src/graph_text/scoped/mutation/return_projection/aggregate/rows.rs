@@ -31,7 +31,10 @@ pub(super) fn prefix<'a>(
     if multipart {
         let (first, continuations, schema, depth) = parser.multipart_aggregate_prefix(statement)?;
         return Ok((
-            Head::Multipart { first: Box::new(first), continuations },
+            Head::Multipart {
+                first: Box::new(first),
+                continuations,
+            },
             Vec::new(),
             schema,
             depth,
@@ -84,9 +87,15 @@ pub(super) fn finish<'a>(
                 },
             };
             // Keep the old resolver and source definition for a single part.
-            return Ok(BoundReadInput { first: first.resolve(resolve)?, continuations: Vec::new() });
+            return Ok(BoundReadInput {
+                first: first.resolve(resolve)?,
+                continuations: Vec::new(),
+            });
         }
-        Head::Multipart { mut first, mut continuations } => {
+        Head::Multipart {
+            mut first,
+            mut continuations,
+        } => {
             // Terminal argument/key expressions are evaluated on the COMPLETE
             // joined row, after every original input filter, DISTINCT and page.
             // Never attach them to a graph leaf before optional null extension.
@@ -95,11 +104,19 @@ pub(super) fn finish<'a>(
             } else {
                 first.pipeline.extend(stages);
             }
-            first.syntax.parameters.clone_from(&parser.syntax.parameters);
-            first.syntax.parameter_offsets.clone_from(&parser.syntax.parameter_offsets);
+            first
+                .syntax
+                .parameters
+                .clone_from(&parser.syntax.parameters);
+            first
+                .syntax
+                .parameter_offsets
+                .clone_from(&parser.syntax.parameter_offsets);
             for (part, _) in &mut continuations {
                 part.syntax.parameters.clone_from(&parser.syntax.parameters);
-                part.syntax.parameter_offsets.clone_from(&parser.syntax.parameter_offsets);
+                part.syntax
+                    .parameter_offsets
+                    .clone_from(&parser.syntax.parameter_offsets);
             }
             (*first, continuations)
         }
@@ -119,9 +136,15 @@ pub(super) fn finish<'a>(
     let first = first.resolve(&mut symbols)?;
     let mut bound = Vec::new();
     for (input, join) in continuations {
-        bound.push(BoundContinuation { input: input.resolve(&mut symbols)?, join });
+        bound.push(BoundContinuation {
+            input: input.resolve(&mut symbols)?,
+            join,
+        });
     }
-    Ok(BoundReadInput { first, continuations: bound })
+    Ok(BoundReadInput {
+        first,
+        continuations: bound,
+    })
 }
 
 impl PreparedGraphPipelineAggregateText {

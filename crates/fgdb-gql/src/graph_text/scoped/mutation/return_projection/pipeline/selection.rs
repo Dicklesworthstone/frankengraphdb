@@ -84,10 +84,12 @@ impl<'a> Parser<'a> {
             for value in selection.values {
                 let column = projection.len();
                 let shape = bind_read_value(&value, &witnesses)?;
-                let kind = GraphSetProjection::admit_output(&shape, &types, column)
-                    .map_err(|kind| GraphSetTextError {
-                        offset: at,
-                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                let kind =
+                    GraphSetProjection::admit_output(&shape, &types, column).map_err(|kind| {
+                        GraphSetTextError {
+                            offset: at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        }
                     })?;
                 expanded_types.push(kind);
                 let name = loop {
@@ -306,7 +308,8 @@ impl<'a> Parser<'a> {
                 && !self.parameter_types.contains_key(&spec.name)
             {
                 spec.parameter_type = expected_type;
-                self.parameter_types.insert(spec.name.clone(), expected_type);
+                self.parameter_types
+                    .insert(spec.name.clone(), expected_type);
             }
             if !matches!(
                 spec.parameter_type,
@@ -476,11 +479,9 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(
                 b'+' | b'-' | b'*' | b'/' | b'%' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
             ) => true,
-            TokenKind::Word(word) => {
-                ["IS", "IN", "BETWEEN", "NOT", "STARTS", "ENDS", "CONTAINS"]
-                    .iter()
-                    .any(|operator| word.eq_ignore_ascii_case(operator))
-            }
+            TokenKind::Word(word) => ["IS", "IN", "BETWEEN", "NOT", "STARTS", "ENDS", "CONTAINS"]
+                .iter()
+                .any(|operator| word.eq_ignore_ascii_case(operator)),
             _ => false,
         })
     }
@@ -528,9 +529,7 @@ mod tests {
             vec![row(1), row(2)]
         );
         assert_eq!(
-            execute(
-                "UNWIND [1, 2, 3] AS n WITH n WHERE NOT (n + 1 = 3 OR n = 1) RETURN n"
-            ),
+            execute("UNWIND [1, 2, 3] AS n WITH n WHERE NOT (n + 1 = 3 OR n = 1) RETURN n"),
             vec![row(3)]
         );
     }
@@ -681,9 +680,7 @@ mod tests {
         )
         .unwrap();
         let frozen = prepared.canonical_template_bytes();
-        for (step, minimum, expected) in
-            [(1, 3, vec![row(3)]), (3, 4, vec![row(2), row(3)])]
-        {
+        for (step, minimum, expected) in [(1, 3, vec![row(3)]), (3, 4, vec![row(2), row(3)])] {
             let arguments = GqlParameters::new()
                 .with_int64("step", step)
                 .unwrap()
@@ -811,14 +808,16 @@ mod tests {
                 "UNWIND ['Alpha', 'beta', NULL] AS word WITH word \
                  WHERE (CASE WHEN word IS NULL THEN '' ELSE LOWER(word) END) \
                  STARTS WITH 'al' RETURN word"
-            ).len(),
+            )
+            .len(),
             1
         );
         assert_eq!(
             execute(
                 "UNWIND ['éclair', 'plain'] AS word WITH word \
                  WHERE word STARTS WITH 'é' AND word CONTAINS 'cl' RETURN word"
-            ).len(),
+            )
+            .len(),
             1
         );
     }
@@ -827,9 +826,8 @@ mod tests {
     fn text_parameters_are_inferred_once_and_never_reinterpret_numeric_uses() {
         use fgdb_types::CanonicalScalarKind;
         for condition in ["word STARTS WITH $prefix", "$prefix STARTS WITH $prefix"] {
-            let statement = format!(
-                "UNWIND ['alpha'] AS word WITH word WHERE {condition} RETURN word"
-            );
+            let statement =
+                format!("UNWIND ['alpha'] AS word WITH word WHERE {condition} RETURN word");
             let prepared = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap();
             let schema = prepared.parameter_schema();
             assert_eq!(schema.len(), 1);
@@ -838,13 +836,15 @@ mod tests {
                 GqlParameterType::Scalar(CanonicalScalarKind::Text)
             );
             let mut arguments = GqlParameters::new();
-            arguments.insert(
-                "prefix",
-                GqlParameterValue::Scalar(
-                    GqlScalarParameter::new(CanonicalScalar::ucs_basic_text("al").unwrap())
-                        .unwrap(),
-                ),
-            ).unwrap();
+            arguments
+                .insert(
+                    "prefix",
+                    GqlParameterValue::Scalar(
+                        GqlScalarParameter::new(CanonicalScalar::ucs_basic_text("al").unwrap())
+                            .unwrap(),
+                    ),
+                )
+                .unwrap();
             let result = prepared
                 .bind_parameters(&arguments)
                 .unwrap()
@@ -862,14 +862,21 @@ mod tests {
             );
         }
         let mut parser = Parser::new("$prefix STARTS WITH 'a'").unwrap();
-        parser.parameter_types.insert("prefix".into(), GqlParameterType::Int64);
+        parser
+            .parameter_types
+            .insert("prefix".into(), GqlParameterType::Int64);
         let mut depth = 2;
-        assert!(parser.row_selection(&[], &mut Vec::new(), &mut depth, 0).is_err());
+        assert!(
+            parser
+                .row_selection(&[], &mut Vec::new(), &mut depth, 0)
+                .is_err()
+        );
         assert!(
             PreparedGraphSetText::prepare(
                 "UNWIND [1] AS n WITH n WHERE n = $value AND 'a' STARTS WITH $value RETURN n",
                 |_, _| None,
-            ).is_err()
+            )
+            .is_err()
         );
     }
 
@@ -909,7 +916,9 @@ mod tests {
         assert_eq!(execute(&allowed), vec![row(1)]);
         let refused = format!("UNWIND [1] AS n WITH n WHERE n IN [{members},1] RETURN n");
         assert!(matches!(
-            PreparedGraphSetText::prepare(&refused, |_, _| None).unwrap_err().kind,
+            PreparedGraphSetText::prepare(&refused, |_, _| None)
+                .unwrap_err()
+                .kind,
             GraphSetTextErrorKind::FilterBuild(GraphSetFilterError::TooManyPredicates { .. })
         ));
     }

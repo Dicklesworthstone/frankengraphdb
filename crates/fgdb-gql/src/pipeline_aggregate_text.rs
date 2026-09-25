@@ -276,7 +276,11 @@ impl PreparedGraphPipelineAggregateText {
         }
         stages(&mut operators, &self.input.first.pipeline);
         for part in &self.input.continuations {
-            let selection = part.input.selection.as_ref().expect("continuation graph source");
+            let selection = part
+                .input
+                .selection
+                .as_ref()
+                .expect("continuation graph source");
             operators.push("ScanGraphText");
             operators.extend(selection.template_operators());
             operators.push(match part.join.kind() {

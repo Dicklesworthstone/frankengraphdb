@@ -59,13 +59,20 @@ fn policy(request: ReadPolicy, host: GqlQueryPolicy) -> ReadPolicy {
     };
     ReadPolicy {
         max_work_units: cap(request.max_work_units, host.evaluator.max_work_units),
-        max_source_scratch: cap(request.max_source_scratch, host.evaluator.max_scratch_entries),
-        max_staging_rows: host.rows.max_snapshot_records().map_or(request.max_staging_rows, |n| {
-            cap(request.max_staging_rows, n)
-        }),
-        max_result_rows: host.rows.max_result_rows().map_or(request.max_result_rows, |n| {
-            cap(request.max_result_rows, n)
-        }),
+        max_source_scratch: cap(
+            request.max_source_scratch,
+            host.evaluator.max_scratch_entries,
+        ),
+        max_staging_rows: host
+            .rows
+            .max_snapshot_records()
+            .map_or(request.max_staging_rows, |n| {
+                cap(request.max_staging_rows, n)
+            }),
+        max_result_rows: host
+            .rows
+            .max_result_rows()
+            .map_or(request.max_result_rows, |n| cap(request.max_result_rows, n)),
     }
 }
 
@@ -78,11 +85,12 @@ fn admit_query(
     let count = u64::try_from(query.k())
         .map_err(|_| execution.borrow_mut().refusal(WardenError::TooLarge))?;
     if count > scope.limits().max_rows {
-        return Err(execution.borrow_mut().refusal(WardenError::LimitExceeded(
-            LimitDimension::Rows,
-        )));
+        return Err(execution
+            .borrow_mut()
+            .refusal(WardenError::LimitExceeded(LimitDimension::Rows)));
     }
-    host.rows.check(GqlBudgetDimension::ResultRows, count)
+    host.rows
+        .check(GqlBudgetDimension::ResultRows, count)
         .map_err(|error| QueryError::Pattern(GqlQueryError::Rows(error)))
 }
 
@@ -97,22 +105,30 @@ fn definition(
     work.charge(1)?;
     config.validate()?;
     if config.text.is_some() && options.projection.text.is_none() {
-        return Err(BeaconError::InvalidConfig("text index needs a text property"));
+        return Err(BeaconError::InvalidConfig(
+            "text index needs a text property",
+        ));
     }
     let mut vector_keys = Vec::new();
     if let Some(vector) = &config.vector {
         if options.projection.vector.len() != vector.dimensions {
-            return Err(BeaconError::InvalidConfig("vector properties must match dimensions"));
+            return Err(BeaconError::InvalidConfig(
+                "vector properties must match dimensions",
+            ));
         }
         if vector.dimensions > config.max_vector_values {
             return Err(BeaconError::ResourceLimit {
-                resource: "vector projection", limit: config.max_vector_values,
+                resource: "vector projection",
+                limit: config.max_vector_values,
             });
         }
         work.charge(vector.dimensions)?;
-        vector_keys.try_reserve_exact(vector.dimensions).map_err(|_| {
-            BeaconError::ResourceLimit { resource: "vector projection allocation", limit: vector.dimensions }
-        })?;
+        vector_keys
+            .try_reserve_exact(vector.dimensions)
+            .map_err(|_| BeaconError::ResourceLimit {
+                resource: "vector projection allocation",
+                limit: vector.dimensions,
+            })?;
         vector_keys.extend_from_slice(&options.projection.vector);
     }
     Ok(Options {
@@ -145,27 +161,42 @@ where
     // Reuse the production authorization-before-projection builder, including
     // its poll-only history walk and masking BEFORE value/type inspection.
     let mut poll = || {
-        execution.borrow_mut().poll().map_err(|error| work.borrow_mut().refuse(error))
+        execution
+            .borrow_mut()
+            .poll()
+            .map_err(|error| work.borrow_mut().refuse(error))
     };
     let index = beacon::build(
-        &view.snapshot, at, options, options.index.clone(), work,
+        &view.snapshot,
+        at,
+        options,
+        options.index.clone(),
+        work,
         Scan::Unmetered(&mut poll),
         |row| {
             if !scope.allows_vertex(&row.labels) {
                 return Ok(false);
             }
-            execution.borrow_mut().node().map_err(|error| work.borrow_mut().refuse(error))?;
+            execution
+                .borrow_mut()
+                .node()
+                .map_err(|error| work.borrow_mut().refuse(error))?;
             let next = admitted.checked_add(1).ok_or(BeaconError::ResourceLimit {
-                resource: "admitted vertices", limit: usize::MAX,
+                resource: "admitted vertices",
+                limit: usize::MAX,
             })?;
-            host.rows.check(GqlBudgetDimension::SnapshotRecords, next).map_err(|error| {
-                work.borrow_mut().refuse(QueryError::Pattern(GqlQueryError::Rows(error)))
-            })?;
+            host.rows
+                .check(GqlBudgetDimension::SnapshotRecords, next)
+                .map_err(|error| {
+                    work.borrow_mut()
+                        .refuse(QueryError::Pattern(GqlQueryError::Rows(error)))
+                })?;
             // One visible-source metadata admission, independent of hidden
             // versions and before user label selection, like signed nodes.
             if u128::from(admitted) >= options.policy.max_source_scratch as u128 {
                 return Err(BeaconError::ResourceLimit {
-                    resource: "admitted vertex scratch", limit: options.policy.max_source_scratch,
+                    resource: "admitted vertex scratch",
+                    limit: options.policy.max_source_scratch,
                 });
             }
             admitted = next;
@@ -203,9 +234,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             admit_query(query, scope, host, execution)?;
             let at = options.as_of.unwrap_or(view.frontier());
             view.snapshot.check_frontier(at).map_err(QueryError::Read)?;
-            let work = RefCell::new(Meter::new(policy(options.policy, host).max_work_units, |units| {
-                charge(execution, units)
-            }));
+            let work = RefCell::new(Meter::new(
+                policy(options.policy, host).max_work_units,
+                |units| charge(execution, units),
+            ));
             let result = (|| {
                 work.borrow_mut().charge(1)?;
                 let config = options.config_for(query)?;

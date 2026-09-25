@@ -174,7 +174,10 @@ impl WriteTxn {
                 PendingRow::Edge { eid, .. }
                 | PendingRow::DeleteEdge { eid, .. }
                 | PendingRow::SetEdgeProperty { eid, .. }
-                | PendingRow::CompareAndSet { elem: ElementId::Edge(eid), .. } => {
+                | PendingRow::CompareAndSet {
+                    elem: ElementId::Edge(eid),
+                    ..
+                } => {
                     edge_work.observe(self, ElementId::Edge(*eid))?;
                 }
                 _ => {}
@@ -195,7 +198,13 @@ impl WriteTxn {
                 for row in &coordinate.rows {
                     edge_work.source(SourceEvent::Work)?;
                     match row {
-                        DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
+                        DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation,
+                            dst,
+                            ..
+                        } => {
                             edge_work.observe(self, ElementId::Edge(*eid))?;
                             edge_work.observe(self, ElementId::Vertex(*src))?;
                             edge_work.replace(&mut changes, *eid, Some((*src, *relation, *dst)))?;
@@ -204,22 +213,34 @@ impl WriteTxn {
                             edge_work.observe(self, ElementId::Edge(*eid))?;
                             edge_work.replace(&mut changes, *eid, None)?;
                         }
-                        DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+                        DeltaRow::DeleteVertex {
+                            vid,
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
                             edge_work.observe(self, ElementId::Vertex(*vid))?;
                             for &eid in sorted_retired_incident_edges {
                                 edge_work.observe(self, ElementId::Edge(eid))?;
                                 edge_work.replace(&mut changes, eid, None)?;
                             }
                         }
-                        DeltaRow::Property { elem: ElementId::Edge(eid), .. } => {
+                        DeltaRow::Property {
+                            elem: ElementId::Edge(eid),
+                            ..
+                        } => {
                             edge_work.observe(self, ElementId::Edge(*eid))?;
                         }
                         DeltaRow::CreateVertex { .. }
                         | DeltaRow::LabelMembership { .. }
-                        | DeltaRow::Property { elem: ElementId::Vertex(_), .. } => {}
-                        _ => return Err(BeaconError::InvalidQuery(
-                            "transaction graph search has no overlay law for this delta",
-                        )),
+                        | DeltaRow::Property {
+                            elem: ElementId::Vertex(_),
+                            ..
+                        } => {}
+                        _ => {
+                            return Err(BeaconError::InvalidQuery(
+                                "transaction graph search has no overlay law for this delta",
+                            ));
+                        }
                     }
                 }
             }
@@ -227,7 +248,9 @@ impl WriteTxn {
         let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
             edge_work.source(SourceEvent::Work)?;
             let (src, relation, dst) = incidence;
-            if expansion.relation.is_none_or(|requested| requested == relation)
+            if expansion
+                .relation
+                .is_none_or(|requested| requested == relation)
                 && graph.contains(src)
                 && graph.contains(dst)
             {
@@ -242,8 +265,10 @@ impl WriteTxn {
             |edge, _| {
                 edge_work.observe(self, ElementId::Edge(edge.eid))?;
                 edge_work.observe(self, ElementId::Vertex(edge.src))?;
-                let after = changes.remove(&edge.eid)
-                    .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
+                let after =
+                    changes
+                        .remove(&edge.eid)
+                        .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
                 if let Some(incidence) = after {
                     emit(incidence)?;
                 }
@@ -278,21 +303,35 @@ mod tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let query_cx = contexts.query();
-            let keys = DatabaseKeys::new([0xd1; 32], DatabaseSecurityNamespaceId([0xd2; 32]), [0xd3; 32]);
+            let keys = DatabaseKeys::new(
+                [0xd1; 32],
+                DatabaseSecurityNamespaceId([0xd2; 32]),
+                [0xd3; 32],
+            );
             let mut db = Database::open_memory(&commit, keys).await.unwrap();
             let label = LabelId(1);
             let text = PropertyKeyId(1);
             let x = PropertyKeyId(2);
             let mut seed = WriteBatch::new(RelationId(1));
             for id in 1..=5 {
-                seed.create_vertex(VId(id), vec![label], vec![
-                    (text, CanonicalScalar::ucs_basic_text("graph").unwrap()),
-                    (x, CanonicalScalar::Int(id as i64)),
-                ]);
+                seed.create_vertex(
+                    VId(id),
+                    vec![label],
+                    vec![
+                        (text, CanonicalScalar::ucs_basic_text("graph").unwrap()),
+                        (x, CanonicalScalar::Int(id as i64)),
+                    ],
+                );
             }
             seed.create_vertex(VId(6), vec![label], vec![]);
-            for (eid, src, dst) in [(10, 1, 2), (11, 1, 2), (12, 2, 3),
-                (13, 3, 4), (14, 4, 1), (15, 1, 6)] {
+            for (eid, src, dst) in [
+                (10, 1, 2),
+                (11, 1, 2),
+                (12, 2, 3),
+                (13, 3, 4),
+                (14, 4, 1),
+                (15, 1, 6),
+            ] {
                 seed.add_edge(EId(eid), VId(src), VId(dst), vec![]);
             }
             db.write(&commit, seed).await.unwrap();
@@ -318,31 +357,58 @@ mod tests {
             options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
             let query = GraphHybridQuery {
                 retrieval: ExactHybridQuery {
-                    vector: &[0.0], text: "graph", k: 8,
-                    vector_candidates: 8, text_candidates: 8,
-                    vector_mode: VectorSearch::Exact, text_mode: TextMatch::Any,
+                    vector: &[0.0],
+                    text: "graph",
+                    k: 8,
+                    vector_candidates: 8,
+                    text_candidates: 8,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
                     profile: ExactRrfProfile::default(),
                 },
-                graph_candidates: 8, graph_weight: 100,
+                graph_candidates: 8,
+                graph_weight: 100,
             };
             let expansion = ExpansionSpec {
-                seeds: &[VId(1)], relation: Some(RelationId(1)),
-                direction: ExpansionDirection::Outgoing, max_hops: 4,
-                include_seeds: false, limits: ExpansionLimits::default(),
+                seeds: &[VId(1)],
+                relation: Some(RelationId(1)),
+                direction: ExpansionDirection::Outgoing,
+                max_hops: 4,
+                include_seeds: false,
+                limits: ExpansionLimits::default(),
             };
-            let actual = txn.beacon_search_graph(&db, &query_cx, &options, query, expansion).unwrap();
+            let actual = txn
+                .beacon_search_graph(&db, &query_cx, &options, query, expansion)
+                .unwrap();
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(txn.scanned_edges.get());
             assert!(txn.read_set.borrow().contains(&ElementId::Edge(EId(100))));
             assert!(txn.read_set.borrow().contains(&ElementId::Edge(EId(30))));
             for (id, hops) in [(2, 1), (6, 1), (7, 2), (5, 2)] {
-                assert_eq!(actual.iter().find(|hit| hit.id == VId(id)).unwrap().graph_hops, Some(hops));
+                assert_eq!(
+                    actual
+                        .iter()
+                        .find(|hit| hit.id == VId(id))
+                        .unwrap()
+                        .graph_hops,
+                    Some(hops)
+                );
             }
-            assert!(actual.iter().all(|hit| hit.id != VId(3) && hit.id != VId(4)));
+            assert!(
+                actual
+                    .iter()
+                    .all(|hit| hit.id != VId(3) && hit.id != VId(4))
+            );
             txn.commit(&mut db, &commit).await.unwrap();
-            assert_eq!(db.beacon_search_graph(&query_cx, &options, query, expansion).unwrap(), actual);
-            assert!(matches!(txn.beacon_search_graph(&db, &query_cx, &options, query, expansion),
-                Err(ReadError::Read(WriteTxnError::Finished))));
+            assert_eq!(
+                db.beacon_search_graph(&query_cx, &options, query, expansion)
+                    .unwrap(),
+                actual
+            );
+            assert!(matches!(
+                txn.beacon_search_graph(&db, &query_cx, &options, query, expansion),
+                Err(ReadError::Read(WriteTxnError::Finished))
+            ));
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

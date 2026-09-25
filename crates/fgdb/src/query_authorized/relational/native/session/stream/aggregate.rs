@@ -116,9 +116,7 @@ fn compiled(
         query.input_pattern().plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
     ) {
-        Plan::Edge(
-            EdgeAggregatePlan::compile(query).map_err(QueryError::EdgeAggregateStreamPlan)?,
-        )
+        Plan::Edge(EdgeAggregatePlan::compile(query).map_err(QueryError::EdgeAggregateStreamPlan)?)
     } else {
         let plan = VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?;
         admit_source_profile(query.input_pattern())?;

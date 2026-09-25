@@ -13,10 +13,10 @@ use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CommitSeq, QueryCx};
 use std::cell::RefCell;
 
-#[path = "query_beacon/resident.rs"]
-mod resident;
 #[path = "query_beacon/graph.rs"]
 pub(crate) mod graph;
+#[path = "query_beacon/resident.rs"]
+mod resident;
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
@@ -99,8 +99,16 @@ pub(crate) fn build(
     property_allowed: impl FnMut(PropertyKeyId) -> bool,
 ) -> Result<BeaconIndex, BeaconError> {
     build_selected(
-        snapshot, at, options, config, work, scan, admit, label_allowed,
-        property_allowed, |_| Ok(()),
+        snapshot,
+        at,
+        options,
+        config,
+        work,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        |_| Ok(()),
     )
 }
 

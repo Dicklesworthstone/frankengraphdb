@@ -14,7 +14,9 @@ use super::{Meter, Scan, SharedWork, build};
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
-use fgdb_beacon::{BeaconError, BeaconIndex, IndexMutation, IndexSnapshot, IndexStats, WorkControl};
+use fgdb_beacon::{
+    BeaconError, BeaconIndex, IndexMutation, IndexSnapshot, IndexStats, WorkControl,
+};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
 use fgdb_gql::stream::{VertexScanEvent, VertexScanSource, VertexScanSourceError};
 use fgdb_types::{CommitSeq, QueryCx};
@@ -62,11 +64,15 @@ impl core::fmt::Display for Error {
             Self::Index(error) => error.fmt(f),
             Self::ForeignDatabase => f.write_str("Beacon index belongs to another opened database"),
             Self::BeforeSource { source, requested } => write!(
-                f, "cannot refresh Beacon backwards from {source:?} to {requested:?}"
+                f,
+                "cannot refresh Beacon backwards from {source:?} to {requested:?}"
             ),
-            Self::UnsupportedDelta => f.write_str("Beacon projection requires an explicit rebuild after this delta"),
+            Self::UnsupportedDelta => {
+                f.write_str("Beacon projection requires an explicit rebuild after this delta")
+            }
             Self::IncompleteDelta { after, through } => write!(
-                f, "Beacon refresh lacks a contiguous delta path after {after:?} through {through:?}"
+                f,
+                "Beacon refresh lacks a contiguous delta path after {after:?} through {through:?}"
             ),
         }
     }
@@ -150,15 +156,20 @@ fn definition(options: &Options, work: &mut impl WorkControl) -> Result<Options,
     work.charge(1)?;
     options.index.validate()?;
     if options.index.text.is_some() && options.projection.text.is_none() {
-        return Err(BeaconError::InvalidConfig("text index needs a text property"));
+        return Err(BeaconError::InvalidConfig(
+            "text index needs a text property",
+        ));
     }
     let vector = if let Some(vector) = &options.index.vector {
         if options.projection.vector.len() != vector.dimensions {
-            return Err(BeaconError::InvalidConfig("vector properties must match dimensions"));
+            return Err(BeaconError::InvalidConfig(
+                "vector properties must match dimensions",
+            ));
         }
         if vector.dimensions > options.index.max_vector_values {
             return Err(BeaconError::ResourceLimit {
-                resource: "vector projection", limit: options.index.max_vector_values,
+                resource: "vector projection",
+                limit: options.index.max_vector_values,
             });
         }
         work.charge(vector.dimensions)?;
@@ -192,8 +203,10 @@ fn search(
             work.borrow_mut().charge(1)?;
             if query.k() > policy.max_result_rows {
                 return Err(BeaconError::ResourceLimit {
-                    resource: "result rows", limit: policy.max_result_rows,
-                }.into());
+                    resource: "result rows",
+                    limit: policy.max_result_rows,
+                }
+                .into());
             }
             let (vector, text) = query.lanes();
             if vector && definition.index.vector.is_none() {
@@ -234,7 +247,12 @@ impl ResidentIndex {
         Arc::ptr_eq(&self.owner, &database.handle_owner)
     }
 
-    pub fn search(&self, cx: &QueryCx, query: Search<'_>, policy: ReadPolicy) -> Result<Rows, Error> {
+    pub fn search(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+    ) -> Result<Rows, Error> {
         search(&self.index.snapshot(), &self.definition, cx, query, policy)
     }
 
@@ -289,10 +307,16 @@ impl ResidentIndex {
         // Even a no-op cannot bless a handle fenced by an ambiguous write.
         let frontier = database.frontier().map_err(Error::Source)?;
         let through = through.unwrap_or(frontier);
-        database.snapshot.check_frontier(through).map_err(Error::Source)?;
+        database
+            .snapshot
+            .check_frontier(through)
+            .map_err(Error::Source)?;
         let from = self.source_sequence;
         if through.0 < from.0 {
-            return Err(Error::BeforeSource { source: from, requested: through });
+            return Err(Error::BeforeSource {
+                source: from,
+                requested: through,
+            });
         }
         let mut scratch = 0usize;
         let mut affected = BTreeSet::new();
@@ -302,7 +326,9 @@ impl ResidentIndex {
             // Do not even poll the first batch newer than the requested cut.
             while after.0 < through.0 {
                 work.borrow_mut().charge(1)?;
-                let batch = batches.next().ok_or(Error::IncompleteDelta { after, through })?;
+                let batch = batches
+                    .next()
+                    .ok_or(Error::IncompleteDelta { after, through })?;
                 if after.0.checked_add(1) != Some(batch.commit_seq().0) {
                     return Err(Error::IncompleteDelta { after, through });
                 }
@@ -318,18 +344,28 @@ impl ResidentIndex {
                             DeltaRow::CreateVertex { vid, .. }
                             | DeltaRow::DeleteVertex { vid, .. }
                             | DeltaRow::LabelMembership { vid, .. }
-                            | DeltaRow::Property { elem: ElementId::Vertex(vid), .. } => *vid,
+                            | DeltaRow::Property {
+                                elem: ElementId::Vertex(vid),
+                                ..
+                            } => *vid,
                             DeltaRow::CreateEdge { .. }
                             | DeltaRow::DeleteEdge { .. }
-                            | DeltaRow::Property { elem: ElementId::Edge(_), .. } => continue,
+                            | DeltaRow::Property {
+                                elem: ElementId::Edge(_),
+                                ..
+                            } => continue,
                             _ => return Err(Error::UnsupportedDelta),
                         };
                         if !affected.contains(&vid) {
-                            let limit = policy.max_staging_rows.min(self.definition.index.max_batch_operations);
+                            let limit = policy
+                                .max_staging_rows
+                                .min(self.definition.index.max_batch_operations);
                             if affected.len() == limit {
                                 return Err(BeaconError::ResourceLimit {
-                                    resource: "refresh vertices", limit,
-                                }.into());
+                                    resource: "refresh vertices",
+                                    limit,
+                                }
+                                .into());
                             }
                             reserve_scratch(&mut scratch, policy)?;
                             affected.insert(vid);
@@ -354,34 +390,50 @@ impl ResidentIndex {
                 .map_err(Error::Source)?
                 .vertex_scan_source(cx, through)
                 .map_err(Error::Source)?;
-            let mutations = affected.into_iter().map(|vid| -> Result<IndexMutation, Error> {
-                work.borrow_mut().charge(1)?;
-                let row = source.vertex(vid, &mut |event| {
+            let mutations = affected
+                .into_iter()
+                .map(|vid| -> Result<IndexMutation, Error> {
                     work.borrow_mut().charge(1)?;
-                    if matches!(event, VertexScanEvent::ScratchEntry) {
-                        reserve_scratch(&mut scratch, policy)?;
+                    let row = source
+                        .vertex(vid, &mut |event| {
+                            work.borrow_mut().charge(1)?;
+                            if matches!(event, VertexScanEvent::ScratchEntry) {
+                                reserve_scratch(&mut scratch, policy)?;
+                            }
+                            Ok::<(), BeaconError>(())
+                        })
+                        .map_err(|error| match error {
+                            VertexScanSourceError::Source(error) => Error::Source(error),
+                            VertexScanSourceError::Control(error) => Error::Index(error),
+                        })?;
+                    let Some(row) = row else {
+                        return Ok(IndexMutation::Delete(vid));
+                    };
+                    work.borrow_mut().charge(row.labels.len())?;
+                    if self
+                        .definition
+                        .vertex_label
+                        .is_some_and(|label| row.labels.binary_search(&label).is_err())
+                    {
+                        // A label exit removes BOTH lanes before projecting values.
+                        return Ok(IndexMutation::Delete(vid));
                     }
-                    Ok::<(), BeaconError>(())
-                }).map_err(|error| match error {
-                    VertexScanSourceError::Source(error) => Error::Source(error),
-                    VertexScanSourceError::Control(error) => Error::Index(error),
-                })?;
-                let Some(row) = row else {
-                    return Ok(IndexMutation::Delete(vid));
-                };
-                work.borrow_mut().charge(row.labels.len())?;
-                if self.definition.vertex_label.is_some_and(|label| row.labels.binary_search(&label).is_err()) {
-                    // A label exit removes BOTH lanes before projecting values.
-                    return Ok(IndexMutation::Delete(vid));
-                }
-                self.definition.projection.project(
-                    vid,
-                    &self.definition.index,
-                    |key| row.properties.binary_search_by_key(&key, |(key, _)| *key)
-                        .ok().map(|slot| &row.properties[slot].1),
-                    &mut SharedWork(work),
-                ).map(IndexMutation::Upsert).map_err(Error::Index)
-            });
+                    self.definition
+                        .projection
+                        .project(
+                            vid,
+                            &self.definition.index,
+                            |key| {
+                                row.properties
+                                    .binary_search_by_key(&key, |(key, _)| *key)
+                                    .ok()
+                                    .map(|slot| &row.properties[slot].1)
+                            },
+                            &mut SharedWork(work),
+                        )
+                        .map(IndexMutation::Upsert)
+                        .map_err(Error::Index)
+                });
             next.try_apply_batch(mutations, &mut SharedWork(work))?;
         }
         // The native source sequence is distinct from Beacon's internal Arc
@@ -396,7 +448,8 @@ impl ResidentIndex {
 fn reserve_scratch(scratch: &mut usize, policy: ReadPolicy) -> Result<(), BeaconError> {
     if *scratch == policy.max_source_scratch {
         return Err(BeaconError::ResourceLimit {
-            resource: "refresh scratch entries", limit: policy.max_source_scratch,
+            resource: "refresh scratch entries",
+            limit: policy.max_source_scratch,
         });
     }
     *scratch += 1;
@@ -419,7 +472,12 @@ impl PinnedIndex {
     /// scratch/staging allowances are unused: no graph scan or rebuild occurs.
     /// Exact vector mode remains exact only for the admitted f32 projection;
     /// approximate mode and candidate-limited fusion do not become exact.
-    pub fn search(&self, cx: &QueryCx, query: Search<'_>, policy: ReadPolicy) -> Result<Rows, Error> {
+    pub fn search(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+    ) -> Result<Rows, Error> {
         search(&self.index, &self.definition, cx, query, policy)
     }
 }
@@ -430,18 +488,31 @@ impl<V: Vfs + Clone> Database<V> {
     /// frontier. All enabled lanes share that cut, projection and source domain.
     /// No supplied document list, sequence assertion or alternate graph model
     /// can enter the resulting index. This method grants no Warden authority.
-    pub fn prepare_beacon_index(&self, cx: &QueryCx, options: &Options) -> Result<ResidentIndex, Error> {
+    pub fn prepare_beacon_index(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+    ) -> Result<ResidentIndex, Error> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| cx.checkpoint()));
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
             let result = (|| {
                 let definition = definition(options, &mut SharedWork(&work))?;
                 let frontier = self.frontier().map_err(Error::Source)?;
                 let at = options.as_of.unwrap_or(frontier);
                 self.snapshot.check_frontier(at).map_err(Error::Source)?;
                 let index = build(
-                    &self.snapshot, at, &definition, definition.index.clone(), &work,
-                    Scan::Metered, |_| Ok(true), |_| true, |_| true,
+                    &self.snapshot,
+                    at,
+                    &definition,
+                    definition.index.clone(),
+                    &work,
+                    Scan::Metered,
+                    |_| Ok(true),
+                    |_| true,
+                    |_| true,
                 )?;
                 let prepared = ResidentIndex {
                     owner: Arc::clone(&self.handle_owner),
@@ -491,7 +562,10 @@ mod tests {
             VId(id),
             vec![],
             vec![
-                (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph").unwrap()),
+                (
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                ),
                 (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
             ],
         );
@@ -500,8 +574,16 @@ mod tests {
 
     fn searches() -> [Search<'static>; 2] {
         [
-            Search::Text { query: "graph", k: 8, mode: TextMatch::Any },
-            Search::Vector { query: &[0.0], k: 8, mode: VectorSearch::Exact },
+            Search::Text {
+                query: "graph",
+                k: 8,
+                mode: TextMatch::Any,
+            },
+            Search::Vector {
+                query: &[0.0],
+                k: 8,
+                mode: VectorSearch::Exact,
+            },
         ]
     }
 
@@ -535,28 +617,31 @@ mod tests {
             let definition = options();
             let original = db.prepare_beacon_index(&query, &definition).unwrap();
             let old = original.snapshot();
-            let expected_old = searches().map(|search| {
-                old.search(&query, search, ReadPolicy::default()).unwrap()
-            });
+            let expected_old =
+                searches().map(|search| old.search(&query, search, ReadPolicy::default()).unwrap());
 
             let mut changes = document(3);
             changes.delete_vertex(VId(2));
-            changes.set_vertex_property(
-                VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(9)),
-            );
+            changes.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
             let target = db.write(&commit, changes).await.unwrap();
-            let expected_new = searches().map(|search| {
-                db.beacon_search(&query, &definition, search).unwrap()
-            });
+            let expected_new =
+                searches().map(|search| db.beacon_search(&query, &definition, search).unwrap());
             let trace = RefCell::new(Cut::default());
             let mut success = original.clone();
-            success.refresh_with_work(&query, &db, None, ReadPolicy::default(), &trace).unwrap();
+            success
+                .refresh_with_work(&query, &db, None, ReadPolicy::default(), &trace)
+                .unwrap();
             let calls = trace.into_inner().calls;
             assert!(calls > 2, "must reach index construction and publication");
             assert_eq!(success.source_sequence(), target);
             assert_eq!(success.snapshot().stats().segments, 1);
             for (search, expected) in searches().into_iter().zip(&expected_new) {
-                assert_eq!(success.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+                assert_eq!(
+                    success
+                        .search(&query, search, ReadPolicy::default())
+                        .unwrap(),
+                    *expected
+                );
             }
 
             // Includes the adapter's FINAL charge, after Beacon accepted the
@@ -564,27 +649,55 @@ mod tests {
             // at that cut even if every inner index failure was atomic.
             for stop_at in 1..=calls {
                 let mut candidate = original.clone();
-                let work = RefCell::new(Cut { stop_at: Some(stop_at), ..Cut::default() });
-                assert!(matches!(
-                    candidate.refresh_with_work(&query, &db, None, ReadPolicy::default(), &work),
-                    Err(Error::Index(BeaconError::Cancelled))
-                ), "cut {stop_at}");
+                let work = RefCell::new(Cut {
+                    stop_at: Some(stop_at),
+                    ..Cut::default()
+                });
+                assert!(
+                    matches!(
+                        candidate.refresh_with_work(
+                            &query,
+                            &db,
+                            None,
+                            ReadPolicy::default(),
+                            &work
+                        ),
+                        Err(Error::Index(BeaconError::Cancelled))
+                    ),
+                    "cut {stop_at}"
+                );
                 assert_eq!(work.borrow().calls, stop_at);
                 assert_eq!(candidate.source_sequence(), old.source_sequence());
                 assert_eq!(candidate.snapshot().stats(), old.stats());
                 for (search, expected) in searches().into_iter().zip(&expected_old) {
-                    assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+                    assert_eq!(
+                        candidate
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap(),
+                        *expected
+                    );
                 }
-                candidate.refresh(&query, &db, None, ReadPolicy::default()).unwrap();
+                candidate
+                    .refresh(&query, &db, None, ReadPolicy::default())
+                    .unwrap();
                 assert_eq!(candidate.source_sequence(), target);
                 for (search, expected) in searches().into_iter().zip(&expected_new) {
-                    assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+                    assert_eq!(
+                        candidate
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap(),
+                        *expected
+                    );
                 }
             }
 
             for stop_at in [1, calls / 2, calls - 1, calls] {
                 let mut candidate = original.clone();
-                let work = RefCell::new(Cut { stop_at: Some(stop_at), unwind: true, calls: 0 });
+                let work = RefCell::new(Cut {
+                    stop_at: Some(stop_at),
+                    unwind: true,
+                    calls: 0,
+                });
                 let panic = catch_unwind(AssertUnwindSafe(|| {
                     candidate.refresh_with_work(&query, &db, None, ReadPolicy::default(), &work)
                 }));
@@ -592,13 +705,23 @@ mod tests {
                 assert_eq!(candidate.source_sequence(), old.source_sequence());
                 assert_eq!(candidate.snapshot().stats(), old.stats());
                 for (search, expected) in searches().into_iter().zip(&expected_old) {
-                    assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+                    assert_eq!(
+                        candidate
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap(),
+                        *expected
+                    );
                 }
-                candidate.refresh(&query, &db, None, ReadPolicy::default()).unwrap();
+                candidate
+                    .refresh(&query, &db, None, ReadPolicy::default())
+                    .unwrap();
                 assert_eq!(candidate.source_sequence(), target);
             }
             for (search, expected) in searches().into_iter().zip(&expected_old) {
-                assert_eq!(old.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+                assert_eq!(
+                    old.search(&query, search, ReadPolicy::default()).unwrap(),
+                    *expected
+                );
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -620,13 +743,20 @@ mod tests {
 
             // Test-only window surgery retains REAL committed payloads. It
             // models reader admission, not a production retention/GC command.
-            Arc::make_mut(&mut db.snapshot).delta_index.retire_prefix(second).unwrap();
+            Arc::make_mut(&mut db.snapshot)
+                .delta_index
+                .retire_prefix(second)
+                .unwrap();
             let mut lagging = original.clone();
-            assert!(matches!(lagging.refresh(&query, &db, None, ReadPolicy::default()),
-                Err(Error::Source(ReadError::DeltaCursorRetired { .. }))));
+            assert!(matches!(
+                lagging.refresh(&query, &db, None, ReadPolicy::default()),
+                Err(Error::Source(ReadError::DeltaCursorRetired { .. }))
+            ));
             assert_eq!(lagging.source_sequence(), first);
             assert_eq!(lagging.snapshot().stats().documents, 1);
-            boundary.refresh(&query, &db, None, ReadPolicy::default()).unwrap();
+            boundary
+                .refresh(&query, &db, None, ReadPolicy::default())
+                .unwrap();
             assert_eq!(boundary.source_sequence(), third);
             assert_eq!(boundary.snapshot().stats().documents, 3);
             // Explicit rebuild remains usable when incremental catch-up is not.
@@ -637,7 +767,11 @@ mod tests {
             for (sequence, expected_after) in [(third, first), (second, second)] {
                 let batch = authoritative.delta_index.get(sequence).unwrap().clone();
                 Arc::make_mut(&mut db.snapshot).delta_index =
-                    LocalDeltaBatchIndex::from_parts_for_test(first, third, vec![(sequence, batch)]);
+                    LocalDeltaBatchIndex::from_parts_for_test(
+                        first,
+                        third,
+                        vec![(sequence, batch)],
+                    );
                 let mut candidate = original.clone();
                 assert!(matches!(
                     candidate.refresh(&query, &db, None, ReadPolicy::default()),
@@ -648,7 +782,9 @@ mod tests {
                 assert_eq!(candidate.snapshot().stats(), original.snapshot().stats());
             }
             db.snapshot = authoritative;
-            lagging.refresh(&query, &db, None, ReadPolicy::default()).unwrap();
+            lagging
+                .refresh(&query, &db, None, ReadPolicy::default())
+                .unwrap();
             assert_eq!(lagging.source_sequence(), third);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -666,19 +802,37 @@ mod tests {
             let pinned = resident.snapshot();
             let prior = db.state;
             // Drive the real read fence without claiming disk-fault coverage.
-            db.state = DatabaseState::CommitOutcomeUnknown { published_frontier: frontier };
-            assert!(matches!(resident.refresh(&query, &db, Some(frontier), ReadPolicy::default()),
-                Err(Error::Source(ReadError::CommitOutcomeUnknown { .. }))));
-            assert!(matches!(db.prepare_beacon_index(&query, &options()),
-                Err(Error::Source(ReadError::CommitOutcomeUnknown { .. }))));
+            db.state = DatabaseState::CommitOutcomeUnknown {
+                published_frontier: frontier,
+            };
+            assert!(matches!(
+                resident.refresh(&query, &db, Some(frontier), ReadPolicy::default()),
+                Err(Error::Source(ReadError::CommitOutcomeUnknown { .. }))
+            ));
+            assert!(matches!(
+                db.prepare_beacon_index(&query, &options()),
+                Err(Error::Source(ReadError::CommitOutcomeUnknown { .. }))
+            ));
             assert_eq!(resident.source_sequence(), frontier);
             assert_eq!(resident.snapshot().stats(), pinned.stats());
             for search in searches() {
-                assert_eq!(resident.search(&query, search, ReadPolicy::default()).unwrap(),
-                    pinned.search(&query, search, ReadPolicy::default()).unwrap());
+                assert_eq!(
+                    resident
+                        .search(&query, search, ReadPolicy::default())
+                        .unwrap(),
+                    pinned
+                        .search(&query, search, ReadPolicy::default())
+                        .unwrap()
+                );
             }
             db.state = prior;
-            assert_eq!(resident.refresh(&query, &db, None, ReadPolicy::default()).unwrap().commits, 0);
+            assert_eq!(
+                resident
+                    .refresh(&query, &db, None, ReadPolicy::default())
+                    .unwrap()
+                    .commits,
+                0
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -702,23 +856,29 @@ mod tests {
                 let coordinate = &mut coordinates[0];
                 match family {
                     0 => coordinate.schema_transition = Some(oid),
-                    1 => coordinate.rows = vec![DeltaRow::Schema {
-                        transition_oid: oid,
-                        before_epoch: coordinate.schema_epoch,
-                        after_epoch: fgdb_delta_types::SchemaEpoch(2),
-                    }],
-                    2 => coordinate.rows = vec![DeltaRow::ValidTime {
-                        elem: ElementId::Vertex(VId(1)),
-                        contract_id: oid,
-                        before: None,
-                        after: None,
-                    }],
-                    _ => coordinate.rows = vec![DeltaRow::Constraint {
-                        before_schema_root: oid,
-                        after_schema_root: oid,
-                        before_constraint_root: oid,
-                        after_constraint_root: oid,
-                    }],
+                    1 => {
+                        coordinate.rows = vec![DeltaRow::Schema {
+                            transition_oid: oid,
+                            before_epoch: coordinate.schema_epoch,
+                            after_epoch: fgdb_delta_types::SchemaEpoch(2),
+                        }]
+                    }
+                    2 => {
+                        coordinate.rows = vec![DeltaRow::ValidTime {
+                            elem: ElementId::Vertex(VId(1)),
+                            contract_id: oid,
+                            before: None,
+                            after: None,
+                        }]
+                    }
+                    _ => {
+                        coordinate.rows = vec![DeltaRow::Constraint {
+                            before_schema_root: oid,
+                            after_schema_root: oid,
+                            before_constraint_root: oid,
+                            after_constraint_root: oid,
+                        }]
+                    }
                 }
                 // Explicitly synthetic reader-admission fixture. This does
                 // not attest that these mutated payloads were committed or
@@ -733,21 +893,33 @@ mod tests {
                 let second_batch = authoritative.delta_index.get(second).unwrap().clone();
                 Arc::make_mut(&mut db.snapshot).delta_index =
                     LocalDeltaBatchIndex::from_parts_for_test(
-                        first, third, vec![(second, second_batch), (third, future)],
+                        first,
+                        third,
+                        vec![(second, second_batch), (third, future)],
                     );
                 let mut candidate = original.clone();
                 // The unselected future batch must NOT block a supported cut.
-                candidate.refresh(&query, &db, Some(second), ReadPolicy::default()).unwrap();
+                candidate
+                    .refresh(&query, &db, Some(second), ReadPolicy::default())
+                    .unwrap();
                 let pinned = candidate.snapshot();
                 assert_eq!(pinned.source_sequence(), second);
                 assert_eq!(pinned.stats().documents, 2);
-                assert!(matches!(candidate.refresh(&query, &db, None, ReadPolicy::default()),
-                    Err(Error::UnsupportedDelta)));
+                assert!(matches!(
+                    candidate.refresh(&query, &db, None, ReadPolicy::default()),
+                    Err(Error::UnsupportedDelta)
+                ));
                 assert_eq!(candidate.source_sequence(), second);
                 assert_eq!(candidate.snapshot().stats(), pinned.stats());
                 for search in searches() {
-                    assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(),
-                        pinned.search(&query, search, ReadPolicy::default()).unwrap());
+                    assert_eq!(
+                        candidate
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap(),
+                        pinned
+                            .search(&query, search, ReadPolicy::default())
+                            .unwrap()
+                    );
                 }
             }
             db.snapshot = authoritative;

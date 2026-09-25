@@ -30,13 +30,12 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
             TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
             _ if depth == 0 => {
                 let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
-                let name = previous.is_some_and(|previous| {
-                    previous.punct(b'.') || previous.word("AS")
-                });
-                if !name && token.word("WITH")
-                    && !previous.is_some_and(|previous| {
-                        previous.word("STARTS") || previous.word("ENDS")
-                    })
+                let name =
+                    previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS"));
+                if !name
+                    && token.word("WITH")
+                    && !previous
+                        .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"))
                 {
                     with = true;
                 }

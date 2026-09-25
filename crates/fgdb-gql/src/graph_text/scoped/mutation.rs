@@ -121,8 +121,7 @@ impl<'a> Parser<'a> {
     ) -> Result<usize, GraphPatternTextError> {
         if let Some(at) = columns.iter().position(|column| {
             column.variable.text == projection.variable.text
-                && column.property.map(|key| key.text)
-                    == projection.property.map(|key| key.text)
+                && column.property.map(|key| key.text) == projection.property.map(|key| key.text)
                 && column.path == projection.path
         }) {
             return Ok(at);
@@ -549,10 +548,9 @@ mod graph_function_tests {
 
     #[test]
     fn source_slots_distinguish_path_values_and_each_metadata_function() {
-        let mut parser = Parser::new(
-            "MATCH p = (a)-[:R]->{1,2}(b) RETURN path_length(p) + PATH_LENGTH(p)",
-        )
-        .unwrap();
+        let mut parser =
+            Parser::new("MATCH p = (a)-[:R]->{1,2}(b) RETURN path_length(p) + PATH_LENGTH(p)")
+                .unwrap();
         parser.parse_match_prefix().unwrap();
         parser.word("RETURN").unwrap();
         let mut columns = Vec::new();
@@ -564,7 +562,9 @@ mod graph_function_tests {
         assert_eq!(columns.len(), 1);
         assert_eq!(columns[0].path, Some(GraphPathFunction::Length));
         let path = parser.syntax.path.unwrap();
-        let entity = parser.mutation_projection(&mut columns, path, None).unwrap();
+        let entity = parser
+            .mutation_projection(&mut columns, path, None)
+            .unwrap();
         assert_eq!(entity, 1);
         assert_eq!(columns[entity].path, Some(GraphPathFunction::Value));
         for (function, expected) in [
@@ -653,9 +653,8 @@ mod graph_function_tests {
             "nodes(missing)",
             "path_length(p, p)",
         ] {
-            let text = format!(
-                "MATCH p = (a)-[:R]->{{1,2}}(b) RETURN {expression} AS value LIMIT 0"
-            );
+            let text =
+                format!("MATCH p = (a)-[:R]->{{1,2}}(b) RETURN {expression} AS value LIMIT 0");
             let mut calls = 0;
             let result = PreparedGraphSetText::prepare(&text, |kind, name| {
                 calls += 1;

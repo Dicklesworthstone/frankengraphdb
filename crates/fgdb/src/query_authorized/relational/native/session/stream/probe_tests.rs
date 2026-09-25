@@ -187,11 +187,20 @@ fn property_observation(
     vid: VId,
     key: PropertyKeyId,
     limit: u64,
-) -> (Result<Option<Option<CanonicalScalar>>, QueryError>, u64, u64, u64) {
+) -> (
+    Result<Option<Option<CanonicalScalar>>, QueryError>,
+    u64,
+    u64,
+    u64,
+) {
     let mut grant = Grant::read_only(
         "branch",
         1000,
-        QueryLimits { max_nodes: 1, max_work: limit, max_rows: 0 },
+        QueryLimits {
+            max_nodes: 1,
+            max_work: limit,
+            max_rows: 0,
+        },
     );
     grant.labels = Scope::All;
     // Some allowed keys are intentionally absent, before/between/after fields.
@@ -199,23 +208,27 @@ fn property_observation(
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
-    let execution: Shared<'_> =
-        Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
+    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
     let source = ScopedSource {
-        inner: PropertyRow { fields: fields.to_vec() },
+        inner: PropertyRow {
+            fields: fields.to_vec(),
+        },
         execution: Rc::clone(&execution),
     };
     let mut work = 0;
     let mut scratch = 0;
-    let result = source.vertex_property(vid, key, &mut |event| {
-        match event {
-            VertexScanEvent::Work => work += 1,
-            VertexScanEvent::ScratchEntry => scratch += 1,
-        }
-        execution.borrow_mut().checkpoint()
-    }).map(|value| value.map(|value| value.cloned())).map_err(|error| match error {
-        VertexScanSourceError::Source(error) | VertexScanSourceError::Control(error) => error,
-    });
+    let result = source
+        .vertex_property(vid, key, &mut |event| {
+            match event {
+                VertexScanEvent::Work => work += 1,
+                VertexScanEvent::ScratchEntry => scratch += 1,
+            }
+            execution.borrow_mut().checkpoint()
+        })
+        .map(|value| value.map(|value| value.cloned()))
+        .map_err(|error| match error {
+            VertexScanSourceError::Source(error) | VertexScanSourceError::Control(error) => error,
+        });
     assert_eq!(scratch, 0, "borrowed fields must not clone a masked row");
     let execution = execution.borrow();
     let usage = execution.permit.usage();
@@ -229,9 +242,13 @@ fn field_probe_usage_and_exact_refusal_threshold_ignore_hidden_key_population() 
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.query();
     let issuer = Authority::new(
-        AuthKey::from_seed(7303), DatabaseSecurityNamespaceId([1; 32]),
-        "graph", SchemaEpoch(0), 1,
-    ).unwrap();
+        AuthKey::from_seed(7303),
+        DatabaseSecurityNamespaceId([1; 32]),
+        "graph",
+        SchemaEpoch(0),
+        1,
+    )
+    .unwrap();
     let visible = vec![
         (PropertyKeyId(17), CanonicalScalar::Int(7)),
         (PropertyKeyId(33), CanonicalScalar::Int(9)),
@@ -251,18 +268,23 @@ fn field_probe_usage_and_exact_refusal_threshold_ignore_hidden_key_population() 
             let (got, actual_native, actual_signed, actual_nodes) =
                 property_observation(&cx, &issuer, &hidden, VId(7), key, 1000);
             assert_eq!(got.unwrap(), expected);
-            assert_eq!((actual_native, actual_signed, actual_nodes), (native, signed, nodes));
+            assert_eq!(
+                (actual_native, actual_signed, actual_nodes),
+                (native, signed, nodes)
+            );
             assert_eq!(nodes, 1);
             for fields in [&visible, &hidden] {
                 assert_eq!(
-                    property_observation(&cx, &issuer, fields, VId(7), key, signed).0.unwrap(),
+                    property_observation(&cx, &issuer, fields, VId(7), key, signed)
+                        .0
+                        .unwrap(),
                     expected,
                 );
                 assert!(matches!(
                     property_observation(&cx, &issuer, fields, VId(7), key, signed - 1).0,
-                    Err(QueryError::Authorization(AuthorizationError::LimitExceeded(
-                        fgdb_warden::LimitDimension::Work
-                    )))
+                    Err(QueryError::Authorization(
+                        AuthorizationError::LimitExceeded(fgdb_warden::LimitDimension::Work)
+                    ))
                 ));
             }
         }
@@ -275,7 +297,9 @@ fn field_probe_usage_and_exact_refusal_threshold_ignore_hidden_key_population() 
     // absence of the vertex or a leaked hidden value.
     for key in [25, 63].map(PropertyKeyId) {
         assert_eq!(
-            property_observation(&cx, &issuer, &visible, VId(7), key, 1000).0.unwrap(),
+            property_observation(&cx, &issuer, &visible, VId(7), key, 1000)
+                .0
+                .unwrap(),
             Some(None),
         );
     }
