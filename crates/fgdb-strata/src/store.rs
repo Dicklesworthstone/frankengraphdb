@@ -930,17 +930,22 @@ impl<V: Vfs> BlockStore<V> {
     /// everything it staged together at its next flush, and only then gives a
     /// new inode its canonical name. `slot` picks this object's noncanonical
     /// staging name.
+    /// `id` is `bytes`' identity under `kind`, which the batch already derived.
     async fn stage_object_under_permit(
         &self,
         kind: StoredObjectKind,
         cx: &CommitCx,
+        id: ObjectId,
         bytes: &[u8],
         slot: usize,
         _permit: &ObjectPublicationPermit,
     ) -> Result<StagedObject<V::File>, StoreError> {
         let limit = kind.stored_limit();
         ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
-        let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
+        debug_assert_eq!(
+            id,
+            kind.identity(self.k_oid.expose(), self.namespace, bytes)
+        );
         let path = self.path(id);
 
         if let Some(file) = self
@@ -2082,6 +2087,12 @@ pub struct PublishReceipts {
     >,
     vertex_validator: crate::root::VertexHistoryValidator,
     patch_spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+    /// Edge-property patches this session made durable (fgdb-8y2jj). A later
+    /// block hosting byte-identical property rows names the same patch; like a
+    /// block or vertex-patch receipt, it is then a filesystem skip rather than
+    /// a re-read, re-hash and re-sync. The block's own admission still proves
+    /// the joint block/patch laws over the bytes the caller passes.
+    property_patches: std::collections::BTreeSet<ObjectId>,
     /// The root-scope checks' state after the longest root prefix this handle
     /// has already verified (fgdb-d5vo4). A later root that extends that
     /// prefix, reference for reference (identities AND span claims), resumes
@@ -2133,6 +2144,11 @@ impl PublishReceipts {
     }
 
     /// The vertex-patch counterpart of [`Self::holds`].
+    /// Whether this session made the edge-property patch `id` durable.
+    pub fn holds_property_patch(&self, id: ObjectId) -> bool {
+        self.property_patches.contains(&id)
+    }
+
     pub fn holds_patch(&self, id: VertexPatchVersion) -> bool {
         self.patch_spans.contains_key(&id.0)
     }
@@ -2155,6 +2171,7 @@ enum PendingAdmission {
         Option<DeltaBlockVersion>,
     ),
     Patch(ObjectId, VertexPatchRows),
+    PropertyPatch(ObjectId),
 }
 
 /// Exclusive, non-clone publication session. Dropping it discards all pending
@@ -2172,25 +2189,26 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
 }
 
 impl<V: Vfs> BlockPublicationBatch<'_, V> {
+    /// Stage `bytes`, whose identity under `kind` the caller already derived.
     async fn put_object(
         &mut self,
         cx: &CommitCx,
         kind: StoredObjectKind,
+        id: ObjectId,
         bytes: &[u8],
-    ) -> Result<ObjectId, StoreError> {
-        let id = kind.identity(self.store.k_oid.expose(), self.store.namespace, bytes);
+    ) -> Result<(), StoreError> {
         if !self.objects.contains(&id) {
             if self.staged.len() == BATCH_SYNCS_IN_FLIGHT {
                 self.flush_staged(cx).await?;
             }
             let staged = self
                 .store
-                .stage_object_under_permit(kind, cx, bytes, self.staged.len(), &self.permit)
+                .stage_object_under_permit(kind, cx, id, bytes, self.staged.len(), &self.permit)
                 .await?;
             self.staged.push(staged);
             self.objects.insert(id);
         }
-        Ok(id)
+        Ok(())
     }
 
     /// The bytes of an object this batch staged but has not yet flushed: its
@@ -2302,10 +2320,16 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 )
                 .await?;
             if let Some(patch_bytes) = patch_bytes {
-                self.put_object(cx, StoredObjectKind::EdgePropertyPatch, patch_bytes)
-                    .await?;
+                let kind = StoredObjectKind::EdgePropertyPatch;
+                let patch_id =
+                    kind.identity(self.store.k_oid.expose(), self.store.namespace, patch_bytes);
+                if !self.receipts.property_patches.contains(&patch_id) {
+                    self.put_object(cx, kind, patch_id, patch_bytes).await?;
+                    self.pending.push(PendingAdmission::PropertyPatch(patch_id));
+                }
             }
-            self.put_object(cx, StoredObjectKind::Block, bytes).await?;
+            self.put_object(cx, StoredObjectKind::Block, id, bytes)
+                .await?;
             self.pending.push(PendingAdmission::Block(
                 id,
                 entries,
@@ -2328,7 +2352,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         if !self.receipts.patch_spans.contains_key(&id) && !self.objects.contains(&id) {
             let rows = decode_patch_inner(bytes, self.store.decode_resolver())
                 .map_err(StoreError::MalformedPatch)?;
-            self.put_object(cx, StoredObjectKind::VertexPatch, bytes)
+            self.put_object(cx, StoredObjectKind::VertexPatch, id, bytes)
                 .await?;
             self.pending.push(PendingAdmission::Patch(id, rows));
         }
@@ -2386,6 +2410,10 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                             self.receipts.patch_spans.insert(id, span);
                         }
                     }),
+                PendingAdmission::PropertyPatch(id) => {
+                    self.receipts.property_patches.insert(id);
+                    Ok(())
+                }
             };
             if let Err(error) = result {
                 *self.receipts = PublishReceipts::new();

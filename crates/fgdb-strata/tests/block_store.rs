@@ -1494,6 +1494,96 @@ fn a_receipted_block_is_admitted_without_rereading_its_file() {
     });
 }
 
+/// **An edge-property patch this session made durable is a receipt too
+/// (fgdb-8y2jj).** Two blocks of different families host byte-identical
+/// property rows, so they name one patch. After the first block's batch
+/// makes it durable, damage planted over the patch file does not reach the
+/// second block's batch: the receipt answers, exactly as a block receipt
+/// does. A fresh session has no receipt, re-reads the file and refuses.
+#[test]
+fn a_receipted_property_patch_is_not_reread_by_a_later_block() {
+    let dir = scratch_dir("receipts-property-patch");
+    under_lab(54, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let keys = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, keys);
+        for (eid, src) in [(20_u128, 1_u128), (21, 2)] {
+            writer
+                .apply(
+                    keys,
+                    CommitSeq(2),
+                    &DeltaRow::CreateEdge {
+                        eid: EId(eid),
+                        birth_ordinal: eid as u64,
+                        src: VId(src),
+                        relation: REL,
+                        dst: VId(3),
+                        canonical_key: None,
+                        props: vec![(
+                            fgdb_delta_types::PropertyKeyId(7),
+                            fgdb_types::CanonicalScalar::Int(42),
+                        )],
+                        valid_time: None,
+                    },
+                )
+                .expect("propertied edge");
+        }
+        let (_, blocks, _) = writer.publish(keys, CommitSeq(2)).expect("blocks");
+        let hosts: Vec<_> = blocks
+            .iter()
+            .filter(|block| block.property_patch.is_some())
+            .collect();
+        assert_eq!(hosts.len(), 2, "one propertied block per family");
+        let patch = hosts[0].property_patch.clone().expect("hosted patch");
+        assert_eq!(
+            hosts[1].property_patch.as_ref(),
+            Some(&patch),
+            "precondition: both blocks name one byte-identical patch"
+        );
+        assert_ne!(hosts[0].block_id, hosts[1].block_id);
+
+        let mut receipts = PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("batch");
+        batch
+            .put_verified(&cx, &hosts[0].bytes, Some(&patch.bytes))
+            .await
+            .expect("first host stages the patch");
+        batch.finish(&cx).await.expect("first host publishes");
+        assert!(receipts.holds_property_patch(patch.patch_id));
+
+        let other = encode_block(0, None, &[entry(9, 9, 7)]).expect("encodes");
+        std::fs::write(store.path(patch.patch_id), &other).expect("plants damage");
+
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("batch");
+        batch
+            .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
+            .await
+            .expect("the receipt answers without re-reading the patch file");
+        batch.finish(&cx).await.expect("second host publishes");
+
+        let mut fresh = PublishReceipts::new();
+        let mut batch = store
+            .publication_batch(&cx, &mut fresh, None)
+            .expect("batch");
+        assert!(
+            matches!(
+                batch
+                    .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
+                    .await,
+                Err(StoreError::DamagedExisting { .. })
+            ),
+            "a session without the receipt re-reads the file and sees the damage"
+        );
+    });
+}
+
 /// A root that lies about a receipted block's range gets no benefit from the
 /// receipt: the span mismatch routes that reference back through full disk
 /// admission, which refuses it with exactly the diagnostic the plain path
