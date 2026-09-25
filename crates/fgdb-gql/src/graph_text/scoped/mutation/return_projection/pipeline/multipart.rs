@@ -168,9 +168,49 @@ impl<'a> Parser<'a> {
         mut self,
         statement: &'a str,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+        let (mut result, _) = self.multipart_parts(statement, false)?;
+        self.end()?;
+        result.first.syntax.parameters.clone_from(&self.syntax.parameters);
+        result.first.syntax.parameter_offsets.clone_from(&self.syntax.parameter_offsets);
+        for part in &mut result.continuations {
+            part.input.syntax.parameters.clone_from(&self.syntax.parameters);
+            part.input.syntax.parameter_offsets.clone_from(&self.syntax.parameter_offsets);
+        }
+        Ok(result)
+    }
+
+    // Leave RETURN to the exact aggregate compiler, with the same live lexer,
+    // argument indices and statement-wide counters. No synthetic query text or
+    // second MATCH parser is introduced. The tuple crosses only this private
+    // module boundary; the aggregate owner immediately restores a typed head.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::graph_text) fn multipart_aggregate_prefix(
+        &mut self,
+        statement: &'a str,
+    ) -> Result<(
+        UnresolvedGraphText<'a>,
+        Vec<(UnresolvedGraphText<'a>, RowJoinSpec)>,
+        RowSchema<'a>,
+        usize,
+    ), GraphSetTextError> {
+        let (result, schema) = self.multipart_parts(statement, true)?;
+        let depth = result.depth();
+        Ok((
+            result.first,
+            result.continuations.into_iter().map(|part| (part.input, part.join)).collect(),
+            schema,
+            depth,
+        ))
+    }
+
+    fn multipart_parts(
+        &mut self,
+        statement: &'a str,
+        aggregate: bool,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         let mut incoming = Vec::new();
         let first = if self.is_word("MATCH") {
-            let (input, next, terminal, _) = self.multipart_graph_part(statement, &incoming, None)?;
+            let (input, next, terminal, _) = self.multipart_graph_part(statement, &incoming, None, aggregate)?;
             if terminal {
                 return Err(expected(self.current.at, "WITH before the next MATCH"));
             }
@@ -201,7 +241,7 @@ impl<'a> Parser<'a> {
                 return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
             }
             let (input, next, terminal, join) =
-                self.multipart_graph_part(statement, &incoming, Some(kind))?;
+                self.multipart_graph_part(statement, &incoming, Some(kind), aggregate)?;
             result.continuations.push(UnresolvedContinuation {
                 input,
                 join: join.expect("a continuation has an incoming relation"),
@@ -220,21 +260,10 @@ impl<'a> Parser<'a> {
             }
             incoming = next;
             if terminal {
-                self.end()?;
                 break;
             }
         }
-        // All parts used ONE global argument-index table. Later declarations
-        // and occurrences are now frozen into every source without reparsing.
-        let parameters = self.syntax.parameters;
-        let offsets = self.syntax.parameter_offsets;
-        result.first.syntax.parameters.clone_from(&parameters);
-        result.first.syntax.parameter_offsets.clone_from(&offsets);
-        for part in &mut result.continuations {
-            part.input.syntax.parameters.clone_from(&parameters);
-            part.input.syntax.parameter_offsets.clone_from(&offsets);
-        }
-        Ok(result)
+        Ok((result, incoming))
     }
 
     fn take_part_syntax(&mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
@@ -252,6 +281,7 @@ impl<'a> Parser<'a> {
         statement: &'a str,
         incoming: &RowSchema<'a>,
         kind: Option<RowJoinKind>,
+        aggregate: bool,
     ) -> Result<(UnresolvedGraphText<'a>, RowSchema<'a>, bool, Option<RowJoinSpec>), GraphSetTextError> {
         let at = self.current.at;
         let optional = kind == Some(RowJoinKind::Left);
@@ -308,6 +338,14 @@ impl<'a> Parser<'a> {
                 keys.push((left, right));
             }
         }
+        // An aggregate terminal addresses completed row aliases, not graph
+        // slots. Require the same explicit graph-to-row boundary as the
+        // single-source pipeline aggregate; do not invent a RETURN projection.
+        if aggregate && !self.is_word("WITH")
+            && !(kind.is_none() && self.is_word("UNWIND"))
+        {
+            return Err(expected(self.current.at, "WITH before a multipart aggregate RETURN"));
+        }
         let mut head = if kind.is_none() {
             self.graph_projection_head()?
         } else {
@@ -337,7 +375,7 @@ impl<'a> Parser<'a> {
         } else {
             (Vec::new(), schema)
         };
-        if !terminal && self.is_word("RETURN") {
+        if !terminal && self.is_word("RETURN") && !aggregate {
             let at = self.current.at;
             self.advance()?;
             let distinct = self.take_word("DISTINCT")?;
@@ -348,6 +386,9 @@ impl<'a> Parser<'a> {
                 quantifier: if distinct { GraphSetQuantifier::Distinct } else { GraphSetQuantifier::All },
             });
             next = schema;
+            terminal = true;
+        }
+        if aggregate && self.is_word("RETURN") {
             terminal = true;
         }
         // The surrounding set parser owns terminal ORDER BY/SKIP/LIMIT. Every
@@ -471,20 +512,35 @@ impl BoundReadInput {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        if self.continuations.is_empty() { return self.first.bind_parameters(arguments); }
-        let values = self.first.checked_arguments(arguments)?;
-        let mut input = self.first.bind_values(&values)?;
+        let values = self.checked_arguments(arguments)?;
+        self.bind_values(&values)
+    }
+
+    pub(crate) fn checked_arguments(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
+        self.first.checked_arguments(arguments)
+    }
+
+    /// Only a caller that checked the complete shared argument map may enter.
+    /// Both ordinary multipart reads and exact aggregation bind this same tree.
+    pub(crate) fn bind_values(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
             let right = source.selection.as_ref().expect("continuations are graph sources")
-                .bind_values(&values)?;
+                .bind_values(values)?;
             input = input.join(right.into(), part.join.clone()).map_err(|kind| {
                 GraphSetTextError { offset: source.return_at, kind: GraphSetTextErrorKind::SetBuild(kind) }
             })?;
             if let Some(projection) = &source.projection {
-                input = super::super::bind_projection(input, projection, source.quantifier, &values, source.return_at)?;
+                input = super::super::bind_projection(input, projection, source.quantifier, values, source.return_at)?;
             }
-            input = super::super::bind_stages(input, &source.pipeline, &values)?;
+            input = super::super::bind_stages(input, &source.pipeline, values)?;
         }
         Ok(input)
     }

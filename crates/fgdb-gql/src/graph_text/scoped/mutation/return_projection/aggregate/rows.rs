@@ -4,18 +4,39 @@
 
 use super::*;
 use crate::PreparedGraphSetAggregate;
+use crate::row_join::RowJoinSpec;
+use crate::set_text::multipart::{BoundContinuation, BoundReadInput};
+
+pub(super) enum Head<'a> {
+    Single(Option<GraphProjectionHead<'a>>),
+    Multipart {
+        first: Box<UnresolvedGraphText<'a>>,
+        continuations: Vec<(UnresolvedGraphText<'a>, RowJoinSpec)>,
+    },
+}
 
 pub(super) fn prefix<'a>(
     parser: &mut Parser<'a>,
+    statement: &'a str,
+    multipart: bool,
 ) -> Result<
     (
-        Option<GraphProjectionHead<'a>>,
+        Head<'a>,
         Vec<ReadStageTemplate>,
         pipeline::RowSchema<'a>,
         usize,
     ),
     Error,
 > {
+    if multipart {
+        let (first, continuations, schema, depth) = parser.multipart_aggregate_prefix(statement)?;
+        return Ok((
+            Head::Multipart { first: Box::new(first), continuations },
+            Vec::new(),
+            schema,
+            depth,
+        ));
+    }
     if parser.is_word("MATCH") {
         parser.parse_match_prefix()?;
         if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
@@ -27,7 +48,7 @@ pub(super) fn prefix<'a>(
         let head = parser.graph_projection_head()?;
         let (stages, schema, depth) =
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
-        return Ok((Some(head), stages, schema, depth));
+        return Ok((Head::Single(Some(head)), stages, schema, depth));
     }
     if !parser.is_word("WITH") && !parser.is_word("UNWIND") && !parser.is_word("RETURN") {
         return Err(expected(parser.current.at, "MATCH, WITH, UNWIND or RETURN"));
@@ -37,28 +58,70 @@ pub(super) fn prefix<'a>(
     // The shared prefix starts at depth two (graph leaf + first projection).
     // This input starts with only Singleton. Its Aggregate parent uses the
     // freed level, so the prefix's existing early depth refusal stays sound.
-    Ok((None, stages, schema, depth - 1))
+    Ok((Head::Single(None), stages, schema, depth - 1))
 }
 
 pub(super) fn finish<'a>(
     parser: Parser<'a>,
     statement: &'a str,
-    head: Option<GraphProjectionHead<'a>>,
+    head: Head<'a>,
     stages: Vec<ReadStageTemplate>,
-) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
-    match head {
-        Some(head) => parser.finish_graph_projection(statement, head, stages),
-        None => Ok(UnresolvedGraphText {
-            statement,
-            syntax: parser.syntax,
-            projection: None,
-            pipeline: stages,
-            singleton: true,
-            leading: Vec::new(),
-            leading_types: Vec::new(),
-            correlations: Vec::new(),
-        }),
+    mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+) -> Result<BoundReadInput, GraphSetTextError> {
+    let (first, continuations) = match head {
+        Head::Single(head) => {
+            let first = match head {
+                Some(head) => parser.finish_graph_projection(statement, head, stages)?,
+                None => UnresolvedGraphText {
+                    statement,
+                    syntax: parser.syntax,
+                    projection: None,
+                    pipeline: stages,
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: Vec::new(),
+                    correlations: Vec::new(),
+                },
+            };
+            // Keep the old resolver and source definition for a single part.
+            return Ok(BoundReadInput { first: first.resolve(resolve)?, continuations: Vec::new() });
+        }
+        Head::Multipart { mut first, mut continuations } => {
+            // Terminal argument/key expressions are evaluated on the COMPLETE
+            // joined row, after every original input filter, DISTINCT and page.
+            // Never attach them to a graph leaf before optional null extension.
+            if let Some((last, _)) = continuations.last_mut() {
+                last.pipeline.extend(stages);
+            } else {
+                first.pipeline.extend(stages);
+            }
+            first.syntax.parameters.clone_from(&parser.syntax.parameters);
+            first.syntax.parameter_offsets.clone_from(&parser.syntax.parameter_offsets);
+            for (part, _) in &mut continuations {
+                part.syntax.parameters.clone_from(&parser.syntax.parameters);
+                part.syntax.parameter_offsets.clone_from(&parser.syntax.parameter_offsets);
+            }
+            (*first, continuations)
+        }
+    };
+    // All syntax, aliases, argument types and total depth were admitted before
+    // touching the catalog. Every graph source shares this domain-aware cache.
+    let mut cache = std::collections::BTreeMap::new();
+    let mut symbols = |kind, name: &str| {
+        let key = (kind, name.to_owned());
+        if let Some(symbol) = cache.get(&key) {
+            return Some(*symbol);
+        }
+        let symbol = resolve(kind, name)?;
+        cache.insert(key, symbol);
+        Some(symbol)
+    };
+    let first = first.resolve(&mut symbols)?;
+    let mut bound = Vec::new();
+    for (input, join) in continuations {
+        bound.push(BoundContinuation { input: input.resolve(&mut symbols)?, join });
     }
+    Ok(BoundReadInput { first, continuations: bound })
 }
 
 impl PreparedGraphPipelineAggregateText {
@@ -67,11 +130,24 @@ impl PreparedGraphPipelineAggregateText {
     /// Hosts use it to preserve the existing graph-backed execution lane.
     #[must_use]
     pub fn is_source_free(&self) -> bool {
-        self.input.singleton && self.input.selection.is_none()
+        self.graph_source_count() == 0
+    }
+
+    /// Number of actual graph leaves; singleton row inputs do not count.
+    #[must_use]
+    pub fn graph_source_count(&self) -> usize {
+        usize::from(self.input.first.selection.is_some()) + self.input.continuations.len()
+    }
+
+    /// Hosts must use the source-aware relation executor for zero/multiple
+    /// graph leaves. Do not mistake a nonempty source count for exactly one.
+    #[must_use]
+    pub fn requires_relational_input(&self) -> bool {
+        self.graph_source_count() != 1
     }
 
     /// Bind the entire relational pipeline, including zero-source WITH/UNWIND
-    /// and standalone aggregate RETURN. Execute through the set-aggregate API:
+    /// and multipart MATCH/OPTIONAL MATCH. Execute through the set-aggregate API:
     /// source callbacks run only for actual graph leaves, never for Singleton.
     ///
     /// The initial relation contains one empty row. UNWIND may expand or remove

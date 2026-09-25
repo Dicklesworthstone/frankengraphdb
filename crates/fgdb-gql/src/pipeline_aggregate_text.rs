@@ -3,7 +3,8 @@
 //! This is preparation metadata. Binding emits the existing
 //! PreparedGraphAggregate with its real source leaf and relational input.
 
-use crate::set_text::{BoundSetTextInput, ReadFilterOp, ReadPageNumber, ReadStageTemplate};
+use crate::set_text::multipart::BoundReadInput;
+use crate::set_text::{ReadFilterOp, ReadPageNumber, ReadStageTemplate};
 use crate::{
     GqlParameterSpec, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateFunction,
     GraphAggregateOrder, GraphAggregateTextSlot, GraphHavingError, GraphNullPlacement,
@@ -91,12 +92,16 @@ pub(crate) struct PipelineSummary {
 /// after every preceding filter, DISTINCT, UNWIND and page. Plain-column inputs
 /// retain their original definitions and execution traces. Projection consumes
 /// the same depth/work/scratch budgets; output LIMIT never hides input errors.
-/// This bounded single-source profile does not implement aggregate WITH stages,
-/// binary set inputs, expressions combining aggregate results, or writes after WITH.
+/// Required/optional MATCH continuations may precede the final WITH projection.
+/// Grouping follows the complete joined relation, including null extension and
+/// every input-local page. Use bind_relation_parameters for zero/multiple graph
+/// sources; bind_parameters retains its exactly-one-graph source contract.
+/// This bounded profile does not implement aggregate WITH stages, binary set
+/// inputs, expressions combining aggregate results, or writes after WITH.
 #[derive(Clone)]
 pub struct PreparedGraphPipelineAggregateText {
     pub(crate) statement: String,
-    pub(crate) input: BoundSetTextInput,
+    pub(crate) input: BoundReadInput,
     pub(crate) keys: Vec<usize>,
     pub(crate) output_keys: Vec<usize>,
     pub(crate) summaries: Vec<PipelineSummary>,
@@ -252,24 +257,44 @@ impl PreparedGraphPipelineAggregateText {
             }
         }
         let mut operators = Vec::new();
-        stages(&mut operators, &self.input.leading);
-        if let Some(selection) = &self.input.selection {
+        stages(&mut operators, &self.input.first.leading);
+        if let Some(selection) = &self.input.first.selection {
             operators.push("ScanGraphText");
             operators.extend(selection.template_operators());
-            if !self.input.leading.is_empty() || self.input.singleton {
+            if !self.input.first.leading.is_empty() || self.input.first.singleton {
                 operators.push("CrossJoin");
-                if !self.input.correlations.is_empty() {
+                if !self.input.first.correlations.is_empty() {
                     operators.push("Select");
                 }
             }
         }
-        if self.input.projection.is_some() {
+        if self.input.first.projection.is_some() {
             operators.push("ProjectValues");
-            if self.input.quantifier == crate::GraphSetQuantifier::Distinct {
+            if self.input.first.quantifier == crate::GraphSetQuantifier::Distinct {
                 operators.push("Distinct");
             }
         }
-        stages(&mut operators, &self.input.pipeline);
+        stages(&mut operators, &self.input.first.pipeline);
+        for part in &self.input.continuations {
+            let selection = part.input.selection.as_ref().expect("continuation graph source");
+            operators.push("ScanGraphText");
+            operators.extend(selection.template_operators());
+            operators.push(match part.join.kind() {
+                crate::row_join::RowJoinKind::Inner => "InnerJoin",
+                crate::row_join::RowJoinKind::Left => "LeftJoin",
+                crate::row_join::RowJoinKind::Right => "RightJoin",
+                crate::row_join::RowJoinKind::Full => "FullJoin",
+                crate::row_join::RowJoinKind::Semi => "SemiJoin",
+                crate::row_join::RowJoinKind::Anti => "AntiJoin",
+            });
+            if part.input.projection.is_some() {
+                operators.push("ProjectValues");
+                if part.input.quantifier == crate::GraphSetQuantifier::Distinct {
+                    operators.push("Distinct");
+                }
+            }
+            stages(&mut operators, &part.input.pipeline);
+        }
         operators.push("Aggregate");
         if !self.having.is_empty() {
             operators.push("SelectHaving");

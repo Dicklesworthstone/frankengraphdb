@@ -213,7 +213,9 @@ impl PreparedGraphPipelineAggregateText {
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, Error> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        let (head, mut stages, schema, depth) = rows::prefix(&mut parser)?;
+        let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
+        let multipart = crate::set_text::multipart::has_continuation(&tokens);
+        let (head, mut stages, schema, depth) = rows::prefix(&mut parser, statement, multipart)?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(
@@ -458,7 +460,7 @@ impl PreparedGraphPipelineAggregateText {
             depth,
             aggregate_at,
         )?;
-        let input = rows::finish(parser, statement, head, stages)?.resolve(resolve)?;
+        let input = rows::finish(parser, statement, head, stages, resolve)?;
         Ok(Self {
             statement: statement.to_owned(),
             input,
@@ -479,8 +481,9 @@ impl PreparedGraphPipelineAggregateText {
     }
 
     /// Bind exactly one graph-backed pipeline for iterator-based source APIs.
-    /// Source-free pipelines use bind_relation_parameters instead: they must
-    /// never manufacture a graph leaf to satisfy this source contract.
+    /// Zero-source and multipart pipelines use bind_relation_parameters instead.
+    /// The existing relation constructor rejects any source count other than
+    /// one; a later source is never discarded to satisfy the iterator contract.
     pub fn bind_parameters(
         &self,
         arguments: &GqlParameters,
