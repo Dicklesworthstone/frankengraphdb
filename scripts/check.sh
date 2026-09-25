@@ -1330,10 +1330,29 @@ run_ubs() {
 #   16 are exactly the 5259fb3b sites.
 # - Hardcoded secrets (new class, 1): resident_tests.rs's leak sentinel
 #   string, adjudicated with ubs:ignore at the site, so the class reports 0.
+# fgdb-7rqf3 re-pin (2026-09-25, UBS v5.4.9, regex mode, 1,600 tracked files):
+# local_proof at cd539f87 went red on this ratchet (738 -> 739); at e5a348b0
+# the tree reads 749. Tool control: today's ubs over 2377ee00 (the 738
+# commit) reads 738/16/1, so the move is the tree, not the tool. The 80 .rs
+# files changed since then (none deleted), scanned jointly, read 62 at
+# 2377ee00 and 73 at the tip: 738 - 62 + 73 = 749 exactly. Per-file
+# attribution pairs each file with a zero-count anchor (fgdb-types lib.rs),
+# because a lone path runs ubs's "one file directly" mode, which undercounts
+# (62 jointly vs 31 summed alone). It sums to +11, every site in test code:
+# - write_txn_parts/authorized/insert_tests.rs +4 (8c175045, 719cf9bb),
+#   ordered_tests.rs +1 (60eddf3d), target_tests.rs +1 (2178af74);
+# - tests/prism_cooperative.rs +1 and prism_cooperative/clustering.rs +1
+#   (ce30d20a);
+# - fgdb-cli tests cli_robot.rs +1 and cli_fuzz_contract.rs +1 (8ae77715: a
+#   None.expect(&format!(..)) helper became panic!(..) for expect_fun_call,
+#   the same panic made explicit);
+# - fgdb-strata tests/block_store.rs +1 (ccb28142: a let-else panic! in the
+#   batch staging law).
+# Secret/token comparisons and Command::new are unchanged at 16 and 1.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=738"
+  "panic!/unreachable!/todo!/unimplemented!=749"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1352,7 +1371,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=738"
+  "panic!/unreachable!/todo!/unimplemented!=749"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
