@@ -226,7 +226,17 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }
             (target, true, false, fields)
         }
-        PendingRow::DeleteEdge { eid, .. } => (*eid, false, true, execution.fields([], [])?),
+        PendingRow::DeleteEdge { eid, .. } => {
+            // A whole-edge delete erases every property. Refusing only when
+            // a hidden property actually exists would disclose one bit about
+            // the edge (FG-INV-20, fgdb-4iiho). Decide from the capability
+            // before looking up any target, including an if-present delete.
+            // Label/relation scopes remain legal: endpoints are not erased.
+            if !execution.permit.predicates().sees_all_properties() {
+                return Err(denied());
+            }
+            (*eid, false, true, execution.fields([], [])?)
+        }
         PendingRow::SetEdgeProperty { eid, key, .. }
         | PendingRow::CompareAndSet {
             elem: ElementId::Edge(eid),

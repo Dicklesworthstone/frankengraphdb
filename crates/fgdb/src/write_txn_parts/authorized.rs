@@ -286,6 +286,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// is refused before any observation otherwise, so the refusal cannot reveal
     /// hidden incidence or fields. Missing and hidden non-create targets both refuse
     /// ScopeDenied, including if-present deletes and removal of absent targets.
+    /// Edge deletion requires an unrestricted property scope with no property
+    /// denials, checked before any target read; otherwise even a property-free
+    /// or absent edge is refused. Label/relation scopes may still restrict an
+    /// edge delete because its endpoints and other incidence are preserved.
     /// The trusted host supplies its current issuer, exact branch routing and a
     /// monotone issuer-epoch clock. Never expose the raw Database or Authority
     /// to token holders. Namespace/signature/rights checks precede observation.

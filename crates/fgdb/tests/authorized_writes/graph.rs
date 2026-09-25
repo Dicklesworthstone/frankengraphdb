@@ -1,6 +1,14 @@
 use super::*;
 use fgdb_types::EId;
 
+/// Edge deletion needs every property, but not every relation or endpoint label.
+fn edge_delete_grant() -> Grant {
+    Grant {
+        properties: Scope::All,
+        ..grant()
+    }
+}
+
 #[test]
 fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
     under_lab(0xa911, |contexts| async move {
@@ -9,7 +17,7 @@ fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
         let path = scratch("graph-reopen");
         let mut db = Database::create(&cx, &path, keys()).await.unwrap();
         let authority = issuer(NAMESPACE);
-        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let token = authority.issue_at(&edge_delete_grant(), NOW).unwrap();
         let baseline = txn.outstanding_obligations();
         let frontier = db.frontier().unwrap();
         let mut batch = WriteBatch::new(R);
@@ -488,5 +496,149 @@ fn vertex_delete_outcome_depends_only_on_the_capability() {
             assert!(db.vertex(VId(2)).unwrap().is_some());
             assert_eq!(txn.outstanding_obligations(), baseline);
         }
+    });
+}
+
+/// A property-scoped delete must refuse before observing whether the edge or
+/// a hidden property exists. Two work units pay execution + intent admission;
+/// no node/image admission may occur, even when the edge has no properties.
+#[test]
+fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
+    use fgdb_warden::Restriction;
+    under_lab(0xa9a3, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let baseline = txn.outstanding_obligations();
+        let authority = issuer(NAMESPACE);
+        let root = authority.issue_at(&edge_delete_grant(), NOW).unwrap();
+        let scoped = [
+            ("allowlist", root.attenuate(Restriction::Properties(Scope::only([P]))).unwrap()),
+            ("empty", root.attenuate(Restriction::Properties(Scope::only([]))).unwrap()),
+            (
+                "denylist",
+                root.attenuate(Restriction::DenyProperties([SECRET].into_iter().collect())).unwrap(),
+            ),
+        ];
+        for hidden in 0..=5 {
+            let mut db = delete_fixture(&cx, hidden).await;
+            let frontier = db.frontier().unwrap();
+            let original = db.edge_at(EId(10), frontier).unwrap().unwrap().props;
+            for (name, token) in &scoped {
+                for eid in [EId(10), EId(999)] {
+                    for if_present in [false, true] {
+                        for work in [0, 1, 2, 3, 32, 4096] {
+                            let limited = token
+                                .attenuate(Restriction::MaxWork(work)).unwrap()
+                                .attenuate(Restriction::MaxNodes(0)).unwrap();
+                            let mut batch = WriteBatch::new(R);
+                            if if_present {
+                                batch.delete_edge_if_present(eid);
+                            } else {
+                                batch.delete_edge(eid);
+                            }
+                            let outcome = db
+                                .write_authorized(
+                                    &txn, &cx, &authority, &limited, BRANCH, batch, || NOW,
+                                )
+                                .await;
+                            let expected = if work < 2 {
+                                matches!(
+                                    &outcome,
+                                    Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                                        LimitDimension::Work
+                                    )))
+                                )
+                            } else {
+                                matches!(
+                                    &outcome,
+                                    Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                                )
+                            };
+                            assert!(
+                                expected,
+                                "{name}, hidden={hidden}, {eid:?}, if_present={if_present}, \
+                                 work={work}: {outcome:?}"
+                            );
+                            assert_eq!(db.frontier().unwrap(), frontier);
+                            assert_eq!(txn.outstanding_obligations(), baseline);
+                            assert_eq!(
+                                db.edge_at(EId(10), frontier).unwrap().unwrap().props,
+                                original
+                            );
+                            assert!(db.vertex(VId(1)).unwrap().is_some());
+                            assert!(db.vertex(VId(2)).unwrap().is_some());
+                        }
+                    }
+                }
+                // An allowed, native-prepared prefix must not escape when the
+                // later whole-edge delete is refused by this capability gate.
+                let mut batch = WriteBatch::new(R);
+                batch.create_vertex(VId(50), vec![L], vec![]);
+                batch.delete_edge(EId(10));
+                assert!(matches!(
+                    db.write_authorized(&txn, &cx, &authority, token, BRANCH, batch, || NOW).await,
+                    Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                ));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(50)).unwrap().is_none());
+                assert_eq!(txn.outstanding_obligations(), baseline);
+            }
+        }
+    });
+}
+
+#[test]
+fn full_property_authority_still_deletes_scoped_edges_and_reopens() {
+    under_lab(0xa9a4, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let baseline = txn.outstanding_obligations();
+        let path = scratch("scoped-edge-delete-reopen");
+        let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L, HIDDEN], vec![(SECRET, CanonicalScalar::Int(99))]);
+        seed.create_vertex(VId(2), vec![L], vec![]);
+        seed.create_vertex(VId(3), vec![HIDDEN], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![(SECRET, CanonicalScalar::Int(88))]);
+        seed.add_edge(EId(11), VId(1), VId(1), vec![(P, CanonicalScalar::Int(7))]);
+        seed.add_edge(EId(30), VId(1), VId(3), vec![]);
+        db.write(&cx, seed).await.unwrap();
+        let mut hidden = WriteBatch::new(RelationId(2));
+        hidden.add_edge(EId(20), VId(1), VId(2), vec![]);
+        db.write(&cx, hidden).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        let authority = issuer(NAMESPACE);
+        // This token cannot see label HIDDEN or relation 2. Do not replace it
+        // with total_grant: that would miss an over-broad deletion gate.
+        let token = authority.issue_at(&edge_delete_grant(), NOW).unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.delete_edge(EId(10));
+        batch.delete_edge_if_present(EId(11));
+        let seq = db
+            .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
+            .await
+            .unwrap();
+        assert_eq!(seq.0, frontier.0 + 1);
+        assert_eq!(txn.outstanding_obligations(), baseline);
+        for eid in [EId(10), EId(11)] {
+            assert!(db.edge_at(eid, seq).unwrap().is_none());
+        }
+        for eid in [EId(20), EId(30)] {
+            assert!(db.edge_at(eid, seq).unwrap().is_some());
+        }
+        drop(db);
+        let reopened = Database::open_rebuilding(&cx, &path, keys()).await.unwrap();
+        assert_eq!(reopened.frontier().unwrap(), seq);
+        for eid in [EId(10), EId(11)] {
+            assert!(reopened.edge_at(eid, seq).unwrap().is_none());
+        }
+        for eid in [EId(20), EId(30)] {
+            assert!(reopened.edge_at(eid, seq).unwrap().is_some());
+        }
+        let endpoint = reopened.vertex(VId(1)).unwrap().unwrap();
+        assert_eq!(endpoint.labels, vec![L, HIDDEN]);
+        assert_eq!(endpoint.props, vec![(SECRET, CanonicalScalar::Int(99))]);
+        assert!(reopened.vertex(VId(2)).unwrap().is_some());
+        assert!(reopened.vertex(VId(3)).unwrap().is_some());
     });
 }

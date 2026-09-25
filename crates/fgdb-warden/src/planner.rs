@@ -101,14 +101,22 @@ impl PlannerPredicates {
         self.label_clauses.is_empty() && matches!(self.relations, Scope::All)
     }
 
+    /// Whether no property can be hidden by this capability. Check this before
+    /// looking up a whole-edge deletion target: accepting only when the target
+    /// happens to have no hidden properties would disclose their existence.
+    /// Unlike vertex deletion, deleting an admitted edge erases no endpoint
+    /// labels or other incidence, so label/relation scopes remain permitted.
+    #[must_use]
+    pub fn sees_all_properties(&self) -> bool {
+        matches!(self.properties, Scope::All) && self.denied_properties.is_empty()
+    }
+
     /// Whether every label and property of a visible element is visible, so an
     /// operation that erases the whole element cannot erase or reveal fields
     /// the capability cannot observe.
     #[must_use]
     pub fn sees_all_fields(&self) -> bool {
-        self.label_clauses.is_empty()
-            && matches!(self.properties, Scope::All)
-            && self.denied_properties.is_empty()
+        self.label_clauses.is_empty() && self.sees_all_properties()
     }
 
     pub(crate) fn check_at(&self, branch: &str, now_ms: u64) -> Result<(), Error> {
