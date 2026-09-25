@@ -5,8 +5,7 @@
 use std::collections::VecDeque;
 use std::future::{Future, pending};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{
     Configuration, Domain, Envelope, Error, Event, Limits, MemberId, Message, PersistentState, Role,
@@ -14,14 +13,9 @@ use fgdb_order::{
 use fgdb_repl::driver::{RaftPublisher, SequenceError};
 use fgdb_repl::replica::{ReadIndexId, ReadResolution, Replica, ReplicaError, ReplicaOutput};
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    match pin!(future).as_mut().poll(&mut Context::from_waker(&waker)) {
+    let waker = Waker::noop();
+    match pin!(future).as_mut().poll(&mut Context::from_waker(waker)) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("publication unexpectedly suspended"),
     }
@@ -214,11 +208,11 @@ fn preview_winner_cannot_send_actual_votes_after_failed_or_cancelled_publication
                     node.replica
                         .step(&mut node.publisher, Event::Receive(reply))
                 );
-                let waker = Waker::from(Arc::new(NoopWake));
+                let waker = Waker::noop();
                 assert!(
                     future
                         .as_mut()
-                        .poll(&mut Context::from_waker(&waker))
+                        .poll(&mut Context::from_waker(waker))
                         .is_pending()
                 );
             }

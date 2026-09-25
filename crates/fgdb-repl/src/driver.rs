@@ -435,17 +435,10 @@ mod tests {
     use fgdb_order::{Configuration, Domain, Limits, MemberId, Role};
     use std::future::{pending, ready};
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     fn immediate<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         match pin!(future).as_mut().poll(&mut cx) {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("test operation unexpectedly suspended"),
@@ -545,8 +538,7 @@ mod tests {
         let mut store = SuspendedPublisher;
         {
             let mut future = pin!(sequence(&mut raft, &mut store, Event::ElectionTimeout));
-            let waker = Waker::from(Arc::new(NoopWake));
-            let mut cx = Context::from_waker(&waker);
+            let mut cx = Context::from_waker(Waker::noop());
             assert!(future.as_mut().poll(&mut cx).is_pending());
         }
         assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));

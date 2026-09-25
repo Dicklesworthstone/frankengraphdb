@@ -9,8 +9,7 @@ use std::collections::VecDeque;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{
     Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
@@ -30,12 +29,8 @@ use fgdb_types::ObjectId;
 const RELEASE: u64 = 100_000;
 type Member = AppliedReplica<u64, Backend>;
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
 fn poll<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
-    future.poll(&mut Context::from_waker(&Waker::from(Arc::new(NoopWake))))
+    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 fn immediate<F: Future>(future: F) -> F::Output {
     match poll(pin!(future)) {

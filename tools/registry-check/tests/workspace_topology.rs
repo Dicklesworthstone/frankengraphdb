@@ -34,8 +34,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 // Moved by 1207516b's new fgdb-beacon row (fgdb-topology-seven-crates-9n8ao),
-// then by the 13 lint_allowance rows (fgdb-gate-weakening-rollback-mthlh).
-const ID_TABLE_PIN: &str = "fnv1a64:952fc4a9a07d0500";
+// then by the 13 lint_allowance rows (fgdb-gate-weakening-rollback-mthlh), and
+// again as each residual row is retired (manual_noop_waker: 12 rows).
+const ID_TABLE_PIN: &str = "fnv1a64:0e4413dacc321415";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -53,8 +54,8 @@ const ID_TABLE_PIN: &str = "fnv1a64:952fc4a9a07d0500";
 // `consumes_entries` (0c2a4552 added that law without covering it), and
 // prism-over-fnx joins the required-edge live floor. Then the workspace lint
 // table became a registered contract: 13 lint_allowance (lint, level) lines
-// (fgdb-gate-weakening-rollback-mthlh).
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:2a08ab32522f3fdd";
+// (fgdb-gate-weakening-rollback-mthlh), 12 once manual_noop_waker was fixed.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:7848d5e31d54c9ab";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

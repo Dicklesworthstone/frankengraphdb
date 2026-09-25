@@ -7,18 +7,12 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{Configuration, Limits, MemberId, SnapshotCut};
 
-pub(super) struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 pub(super) fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     match pin!(future).as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("test operation unexpectedly suspended"),
@@ -405,11 +399,10 @@ fn cancellation_after_atomic_publish_recovers_without_duplicate_effects() {
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 1)).unwrap();
     {
         let mut future = pin!(app.apply_next(&replica));
-        let waker = Waker::from(Arc::new(NoopWake));
         assert!(
             future
                 .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+                .poll(&mut Context::from_waker(Waker::noop()))
                 .is_pending()
         );
     }

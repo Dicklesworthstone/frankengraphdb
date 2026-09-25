@@ -11,8 +11,7 @@ use std::collections::BTreeSet;
 use std::future::{Future, pending};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_chronicle::seed::{
     ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan, SeedPublicationId,
@@ -34,14 +33,9 @@ use support::{DEK, Fixture};
 
 const DONORS: [DonorId; 3] = [DonorId(1), DonorId(2), DonorId(3)];
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     match pin!(future).as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("test operation unexpectedly suspended"),
@@ -49,8 +43,8 @@ fn immediate<F: Future>(future: F) -> F::Output {
 }
 
 fn cancel_pending<F: Future>(future: F) {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     let mut future = pin!(future);
     assert!(future.as_mut().poll(&mut cx).is_pending());
     // Dropping the future must release its window without discarding its owner.

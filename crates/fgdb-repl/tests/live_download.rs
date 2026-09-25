@@ -10,8 +10,7 @@ mod support;
 
 use std::future::{Future, pending};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_chronicle::seed::{
     ObjectPublication, SeedAnchor, SeedError, SeedLimits, SeedObjectSpec, SeedPlan,
@@ -28,13 +27,8 @@ use fgdb_repl::driver::{SeedDriveError, SeedObjectSource, SeedPublisher};
 use fgdb_repl::{CatchupError, CatchupPhase, SnapshotPublication};
 use support::{Fixture, KIND};
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
 fn poll<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
-    let waker = Waker::from(Arc::new(NoopWake));
-    future.poll(&mut Context::from_waker(&waker))
+    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 fn immediate<F: Future>(future: F) -> F::Output {
     match poll(pin!(future)) {

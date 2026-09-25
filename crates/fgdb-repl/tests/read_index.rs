@@ -5,8 +5,7 @@
 use std::collections::VecDeque;
 use std::future::{Future, pending};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{
     Configuration, Domain, Entry, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
@@ -17,14 +16,9 @@ use fgdb_repl::replica::{
     ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
 };
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     match pin!(future).as_mut().poll(&mut context) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("memory publication unexpectedly suspended"),
@@ -555,8 +549,8 @@ fn failed_or_cancelled_publication_cannot_release_a_quorum_read() {
         node.root.suspend = suspend;
         if suspend {
             let mut future = pin!(node.member.step(&mut node.root, Event::Receive(ack)));
-            let waker = Waker::from(Arc::new(NoopWake));
-            let mut context = Context::from_waker(&waker);
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
             assert!(future.as_mut().poll(&mut context).is_pending());
         } else {
             assert!(matches!(

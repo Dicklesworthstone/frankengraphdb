@@ -1,5 +1,5 @@
 use super::super::tests::{
-    Command, MemoryApplication, MemoryState, Mode, NoopWake, genesis, immediate, memory, oid,
+    Command, MemoryApplication, MemoryState, Mode, genesis, immediate, memory, oid,
 };
 use super::*;
 use std::cell::{Cell, RefCell};
@@ -7,7 +7,6 @@ use std::collections::{BTreeSet, VecDeque};
 use std::future::{pending, ready};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::{Context, Waker};
 
 use crate::SnapshotPublication;
@@ -476,11 +475,11 @@ fn pin_cancellation_releases_the_guard_but_retains_the_original_read() {
     let writes = models[0].1.borrow().raft_writes;
     {
         let mut future = pin!(nodes[0].try_read(&id));
-        let waker = Waker::from(Arc::new(NoopWake));
+        let waker = Waker::noop();
         assert!(
             future
                 .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+                .poll(&mut Context::from_waker(waker))
                 .is_pending()
         );
         assert_eq!(models[0].1.borrow().active_pins.get(), 1);
@@ -582,11 +581,11 @@ fn application_cancellation_fences_consensus_and_reads_until_root_recovery() {
     models[0].0.borrow_mut().mode = Mode::SuspendAfter;
     {
         let mut future = pin!(nodes[0].apply_next());
-        let waker = Waker::from(Arc::new(NoopWake));
+        let waker = Waker::noop();
         assert!(
             future
                 .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+                .poll(&mut Context::from_waker(waker))
                 .is_pending()
         );
     }
@@ -812,11 +811,11 @@ fn failed_or_cancelled_post_seed_reload_never_reactivates_the_old_application() 
         if fault == Fault::Pending {
             let mut future =
                 pin!(nodes[1].install_snapshot(crypto::namespace(), transfer, plan, &mut source));
-            let waker = Waker::from(Arc::new(NoopWake));
+            let waker = Waker::noop();
             assert!(
                 future
                     .as_mut()
-                    .poll(&mut Context::from_waker(&waker))
+                    .poll(&mut Context::from_waker(waker))
                     .is_pending()
             );
         } else {

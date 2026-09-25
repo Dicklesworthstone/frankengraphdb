@@ -3,8 +3,7 @@ use std::collections::VecDeque;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{Configuration, Envelope, Limits, PersistentState, SnapshotCut};
 use fgdb_types::ObjectId;
@@ -16,21 +15,15 @@ use crate::availability::{
 };
 use crate::driver::SequenceError;
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     match pin!(future).as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("test future unexpectedly suspended"),
     }
 }
 fn poll_and_cancel<F: Future>(future: F) {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     let mut future = pin!(future);
     assert!(future.as_mut().poll(&mut cx).is_pending());
 }

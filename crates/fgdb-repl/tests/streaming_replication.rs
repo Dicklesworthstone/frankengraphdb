@@ -9,8 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
@@ -30,14 +29,9 @@ use support::{DEK, Fixture};
 
 const DONORS: [DonorId; 3] = [DonorId(1), DonorId(2), DonorId(3)];
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     match pin!(future).as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("healthy donors should complete without waiting for silent peers"),
@@ -235,8 +229,8 @@ fn cancellation_preserves_verified_symbols_and_releases_every_credit() {
     let mut verification = Vec::new();
     {
         let mut future = pin!(recover(&mut pull, &transport, &mut verification, 8));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(pull.symbol_count(), 8);
@@ -338,8 +332,8 @@ fn instant_timeouts_cooperate_instead_of_monopolizing_the_executor() {
     let mut verification = Vec::new();
     {
         let mut future = pin!(recover(&mut pull, &transport, &mut verification, 6));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert!(transport.counters.started.get() <= 64 + 6);
@@ -497,8 +491,8 @@ fn seed_cancellation_resumes_the_same_pinned_object_without_resetting_progress()
     );
     {
         let mut future = pin!(source.recover(spec));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(source.active_object(), Some(spec));
@@ -815,8 +809,8 @@ fn cancelling_streaming_seed_during_atomic_publication_fences_the_member() {
     };
     {
         let mut future = pin!(catchup.install(&mut source, &mut root));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(root.objects.len(), 4);
@@ -1091,8 +1085,8 @@ fn abandoning_seed_recovery_is_explicit_and_does_not_touch_durable_publication()
     let spec = catalog.spec(0);
     {
         let mut future = pin!(source.recover(spec));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(source.retained_symbols(), 8);

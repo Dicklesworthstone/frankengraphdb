@@ -9,8 +9,7 @@ mod support;
 use std::collections::VecDeque;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
@@ -27,14 +26,9 @@ use fgdb_repl::driver::{
 use fgdb_repl::{SnapshotCatchup, SnapshotPublication};
 use support::{DEK, Fixture};
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     match pin!(future).as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("test operation unexpectedly suspended"),
@@ -305,8 +299,8 @@ fn cancelling_a_window_releases_credit_but_preserves_verified_symbols() {
             &mut verification,
             8
         ));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(pull.symbol_count(), 8);
@@ -527,8 +521,8 @@ fn cancelled_atomic_seed_publication_fences_the_replica() {
     };
     {
         let mut future = pin!(catchup.install(&mut source, &mut root));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         assert!(future.as_mut().poll(&mut cx).is_pending());
     }
     assert_eq!(root.objects.len(), 4);

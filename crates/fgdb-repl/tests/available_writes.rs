@@ -7,8 +7,7 @@ use std::collections::VecDeque;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_order::{Configuration, Domain, Envelope, Event, Limits, MemberId, PersistentState, Role};
 use fgdb_repl::application::member::proposal::{MemberProposalError, MemberProposalOutput};
@@ -37,23 +36,20 @@ mod leadership;
 #[path = "available_writes/batches.rs"]
 mod batches;
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
 fn immediate<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    match pin!(future).as_mut().poll(&mut Context::from_waker(&waker)) {
+    match pin!(future)
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("unexpected suspension"),
     }
 }
 fn cancel<F: Future>(future: F) {
-    let waker = Waker::from(Arc::new(NoopWake));
     assert!(
         pin!(future)
             .as_mut()
-            .poll(&mut Context::from_waker(&waker))
+            .poll(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
 }

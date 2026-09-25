@@ -8,8 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::future::{Future, pending, ready};
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
@@ -27,17 +26,12 @@ use fgdb_repl::driver::{
 use fgdb_repl::{SnapshotCatchup, SnapshotPublication};
 use support::{DEK, Fixture};
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 // Borrowed transports and publishers below complete immediately except for
 // deliberately silent/cancelled requests and the driver's cooperative yield.
 // Bounded polling is a test executor, not an ATP runtime or deadline model.
 fn run_ready<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     let mut future = pin!(future);
     for _ in 0..4096 {
         if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
@@ -216,11 +210,11 @@ fn dropping_a_multiblock_stream_retires_only_requests_not_verified_equations() {
             &mut verification,
             9
         ));
-        let waker = Waker::from(Arc::new(NoopWake));
+        let waker = Waker::noop();
         assert!(
             future
                 .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+                .poll(&mut Context::from_waker(waker))
                 .is_pending()
         );
     }
@@ -293,11 +287,11 @@ fn streaming_seed_source_resumes_its_multiblock_object_after_cancellation() {
     );
     {
         let mut future = pin!(source.recover(spec(f)));
-        let waker = Waker::from(Arc::new(NoopWake));
+        let waker = Waker::noop();
         assert!(
             future
                 .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+                .poll(&mut Context::from_waker(waker))
                 .is_pending()
         );
     }
