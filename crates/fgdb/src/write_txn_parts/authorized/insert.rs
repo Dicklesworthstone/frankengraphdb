@@ -3,8 +3,7 @@
 //! No unchecked proposal, identity receipt or workspace escapes before completion.
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
-use super::{Workspace, WriteBatch, WriteTxnError, stage};
-use crate::query::QueryError;
+use super::{Workspace, WriteBatch, WriteTxnError, selection, stage};
 use fgdb_gql::GqlQueryError;
 use fgdb_gql::insertion::{
     GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
@@ -19,38 +18,6 @@ type Receipt = (GraphInsertStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphInsertError::Source(error))
-}
-
-// The masked read kernel has its existing query-error carrier. Preserve the
-// two errors produced by write controls without issuing another permit.
-fn query_control(error: WriteTxnError) -> QueryError {
-    match error {
-        WriteTxnError::Authorization(error) => QueryError::Authorization(error),
-        WriteTxnError::Interrupted(error) => QueryError::Pattern(GqlQueryError::Interrupted(error)),
-        // Controls must never disclose a future native mutation error through
-        // selection. Current controls produce only the two arms above.
-        _ => QueryError::Authorization(Error::ScopeDenied),
-    }
-}
-
-fn selection_error(
-    error: GqlQueryError<crate::ReadError, QueryError>,
-) -> GqlQueryError<WriteTxnError, WriteTxnError> {
-    match error {
-        GqlQueryError::Source(error) => GqlQueryError::Source(WriteTxnError::from(error)),
-        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
-        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
-        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
-        GqlQueryError::Interrupted(QueryError::Authorization(error)) => {
-            GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
-        }
-        GqlQueryError::Interrupted(QueryError::Pattern(GqlQueryError::Interrupted(error))) => {
-            GqlQueryError::Interrupted(WriteTxnError::Interrupted(error))
-        }
-        GqlQueryError::Interrupted(_) => {
-            GqlQueryError::Source(WriteTxnError::AuthorizedMutationRefused)
-        }
-    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -186,40 +153,14 @@ impl<V: Vfs + Clone> Database<V> {
                     insertion.execute_governed(
                         policy,
                         |pattern, allowance| {
-                            database
-                                .borrow()
-                                .select_for_authorized_insert(
-                                    query_cx,
-                                    pattern,
-                                    verified.predicates(),
-                                    allowance,
-                                    || {
-                                        query_cx.checkpoint().map_err(|error| {
-                                            query_control(WriteTxnError::Interrupted(error))
-                                        })?;
-                                        let mut borrowed = execution.borrow_mut();
-                                        let execution = &mut **borrowed;
-                                        execution.checkpoint().map_err(query_control)?;
-                                        let now = (execution.clock)();
-                                        execution
-                                            .permit
-                                            .charge_nodes_at(now, 1)
-                                            .map_err(QueryError::Authorization)
-                                    },
-                                    || {
-                                        query_cx.checkpoint().map_err(|error| {
-                                            query_control(WriteTxnError::Interrupted(error))
-                                        })?;
-                                        execution.borrow_mut().poll().map_err(query_control)
-                                    },
-                                    || {
-                                        query_cx.checkpoint().map_err(|error| {
-                                            query_control(WriteTxnError::Interrupted(error))
-                                        })?;
-                                        execution.borrow_mut().checkpoint().map_err(query_control)
-                                    },
-                                )
-                                .map_err(selection_error)
+                            selection::select(
+                                &database.borrow(),
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
+                                &execution,
+                            )
                         },
                         |request| database.borrow_mut().allocate_identity(query_cx, request),
                         || {

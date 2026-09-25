@@ -22,6 +22,10 @@ use std::collections::BTreeSet;
 mod graph;
 #[path = "authorized/insert.rs"]
 mod insert;
+#[path = "authorized/mutation.rs"]
+mod mutation;
+#[path = "authorized/selection.rs"]
+mod selection;
 
 #[cfg(test)]
 #[path = "authorized/ordered_tests.rs"]
