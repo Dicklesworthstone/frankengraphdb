@@ -189,6 +189,54 @@ impl WriteTxn {
         self.adjacency_neighbours(database, dst, relation, true)
     }
 
+    /// Resolve only incident historical identities, borrowing topology from
+    /// the admitted generation rather than cloning every edge and property.
+    /// Keep EIds until after overlay application: neighbour deduplication here
+    /// would lose the last-surviving-parallel-edge rule and read witnesses.
+    fn adjacency_basis<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        vertex: VId,
+        relation: RelationId,
+        incoming: bool,
+        control: &mut impl FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), WriteTxnError>,
+    ) -> Result<std::collections::BTreeMap<EId, VId>, WriteTxnError> {
+        use fgdb_gql::algebra::GlaDirection;
+
+        self.ensure_database(database)?;
+        let snapshot = &database.snapshot;
+        snapshot.check_frontier(self.basis)?;
+        let direction = if incoming {
+            GlaDirection::Reverse
+        } else {
+            GlaDirection::Forward
+        };
+        let index = &snapshot.adjacency_index;
+        let mut matching = std::collections::BTreeMap::new();
+        let mut after = None;
+        while let Some(eid) = index.next_incident_edge(vertex, direction, after, control)? {
+            // Advance even for invisible or other-relation candidates. Strict
+            // successors also handle zero and u128::MAX without arithmetic.
+            after = Some(eid);
+            let Some((block, row)) = index.statement_at(&snapshot.blocks, eid, self.basis) else {
+                continue;
+            };
+            let entry = &snapshot.blocks[block][row];
+            let (anchor, neighbour) = if incoming {
+                (entry.dst, entry.src)
+            } else {
+                (entry.src, entry.dst)
+            };
+            // The index is a historical superset, never an authority beside
+            // the exact-cut winner. In particular, do not resurrect retired
+            // edges or admit creations newer than the pinned transaction.
+            if anchor == vertex && entry.relation == relation {
+                matching.insert(eid, neighbour);
+            }
+        }
+        Ok(matching)
+    }
+
     fn adjacency_neighbours<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -196,22 +244,12 @@ impl WriteTxn {
         relation: RelationId,
         incoming: bool,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        self.ensure_database(database)?;
         // Do not call edges(): that would turn a local expansion into a global
         // edge-scan conflict witness. The endpoint read below also detects a
         // previously empty incoming adjacency through adjacency_endpoints.
-        let mut matching = std::collections::BTreeMap::new();
-        for record in database.edges_at(self.basis)? {
-            let entry = record.entry;
-            let (anchor, neighbour) = if incoming {
-                (entry.dst, entry.src)
-            } else {
-                (entry.src, entry.dst)
-            };
-            if anchor == vertex && entry.relation == relation {
-                matching.insert(entry.eid, neighbour);
-            }
-        }
+        let mut matching = self.adjacency_basis(
+            database, vertex, relation, incoming, &mut |_| Ok(()),
+        )?;
         let mut observed_edges: std::collections::BTreeSet<EId> =
             matching.keys().copied().collect();
         let mut deleted_vertices = std::collections::BTreeSet::new();
@@ -410,6 +448,142 @@ mod adjacency_overlay_tests {
                 assert!(report.lab_test_passed(), "{report:?}");
             }
         }
+    }
+
+    #[test]
+    fn indexed_adjacency_preserves_pinned_history_and_local_dependencies() {
+        use fgdb_delta_types::PropertyKeyId;
+
+        let ((), report) = run_async_under_lab(0xa91c_0031, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 0..=130 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            for (eid, src, dst) in [
+                (0, 0, 1), (7, 0, 1), (8, 1, 0), (u128::MAX, 0, 0),
+            ] {
+                seed.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+            }
+            for vid in 2..130 {
+                seed.add_edge(EId(1000 + vid), VId(vid), VId(vid + 1), vec![]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let mut other = WriteBatch::new(RelationId(2));
+            other.add_edge(EId(90), VId(0), VId(2), vec![]);
+            db.write(&commit, other).await.unwrap();
+            let mut pinned = db.begin(&txcx).unwrap();
+            let basis = pinned.basis();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.delete_edge(EId(0));
+            changes.delete_edge(EId(8));
+            changes.set_edge_property(EId(7), PropertyKeyId(1),
+                Some(CanonicalScalar::Int(42)));
+            changes.add_edge(EId(40), VId(0), VId(2), vec![]);
+            changes.add_edge(EId(41), VId(2), VId(0), vec![]);
+            db.write(&commit, changes).await.unwrap();
+
+            for incoming in [false, true] {
+                let mut seek_work = 0;
+                let indexed = pinned.adjacency_basis(
+                    &db, VId(0), RelationId(1), incoming, &mut |_| {
+                        seek_work += 1;
+                        Ok(())
+                    },
+                ).unwrap();
+                let expected: std::collections::BTreeMap<_, _> = db.edges_at(basis)
+                    .unwrap().into_iter().filter_map(|record| {
+                        let entry = record.entry;
+                        let (anchor, neighbour) = if incoming {
+                            (entry.dst, entry.src)
+                        } else {
+                            (entry.src, entry.dst)
+                        };
+                        (anchor == VId(0) && entry.relation == RelationId(1))
+                            .then_some((entry.eid, neighbour))
+                    }).collect();
+                assert_eq!(indexed, expected);
+                assert!(seek_work < 128, "unrelated history was scanned: {seek_work}");
+                assert_eq!(pinned.adjacency_neighbours(&db, VId(0), RelationId(1), incoming)
+                    .unwrap(), vec![VId(0), VId(1)]);
+            }
+            assert!(!pinned.scanned_edges.get());
+            assert_eq!(*pinned.read_set.borrow(), [
+                ElementId::Vertex(VId(0)), ElementId::Edge(EId(0)),
+                ElementId::Edge(EId(7)), ElementId::Edge(EId(8)),
+                ElementId::Edge(EId(u128::MAX)),
+            ].into_iter().collect());
+
+            let current = db.begin(&txcx).unwrap();
+            assert_eq!(current.neighbours(&db, VId(0), RelationId(1)).unwrap(),
+                vec![VId(0), VId(1), VId(2)]);
+            assert_eq!(current.in_neighbours(&db, VId(0), RelationId(1)).unwrap(),
+                vec![VId(0), VId(2)]);
+            assert_eq!(current.neighbours(&db, VId(0), RelationId(2)).unwrap(), vec![VId(2)]);
+            assert!(!current.read_set.borrow().contains(&ElementId::Edge(EId(0))));
+            assert!(!current.read_set.borrow().contains(&ElementId::Edge(EId(8))));
+            current.abort();
+            assert!(matches!(pinned.finish(&mut db, &commit).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01", ..
+                }))));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn indexed_adjacency_source_refusal_does_not_publish_partial_dependencies() {
+        let ((), report) = run_async_under_lab(0xa91c_0032, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 0..4 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            for eid in 0..12 {
+                seed.add_edge(EId(eid), VId(0), VId(eid % 4), vec![]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let txn = db.begin(&txcx).unwrap();
+            for incoming in [false, true] {
+                let mut total = 0;
+                let expected = txn.adjacency_basis(
+                    &db, VId(0), RelationId(1), incoming, &mut |_| {
+                        total += 1;
+                        Ok(())
+                    },
+                ).unwrap();
+                assert!(!expected.is_empty());
+                for stop in 1..=total {
+                    let mut calls = 0;
+                    let result = txn.adjacency_basis(
+                        &db, VId(0), RelationId(1), incoming, &mut |_| {
+                            calls += 1;
+                            if calls == stop {
+                                // A deterministic sentinel for the fallible source seam.
+                                Err(WriteTxnError::NoPreparedWrite)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    );
+                    assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
+                    assert_eq!(calls, stop);
+                    assert!(txn.read_set.borrow().is_empty());
+                    assert!(!txn.scanned_edges.get());
+                    assert_eq!(txn.adjacency_basis(
+                        &db, VId(0), RelationId(1), incoming, &mut |_| Ok(()),
+                    ).unwrap(), expected);
+                }
+            }
+            txn.abort();
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 
