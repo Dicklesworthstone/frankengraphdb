@@ -134,6 +134,18 @@ corpus is an explicit projection chosen by flags:
 - Both lanes: exact reciprocal-rank fusion of `--candidates` hits per lane
   (default `--k`). This fuses two candidate sets. It is not an exhaustive
   hybrid answer.
+- Graph lane (GraphRAG): `--expand-from <vid,...>` with an explicit
+  `--max-hops <n>` expands from those seed vertices and fuses the reached
+  vertices as a third reciprocal-rank lane with the text and/or vector lanes.
+  The expansion is bounded:
+  - `--expand-relation <relation>` (default every relation);
+  - `--expand-direction out|in|both` (default out);
+  - `--include-seeds true|false` (default false);
+  - `--graph-candidates` (default `--candidates`) and `--graph-weight`
+    (default 1).
+
+  Label selection applies to transit vertices too, and missing seeds are
+  simply absent.
 - `--k` bounds the hits (default 10).
 - `--vertex-label <label>` restricts the corpus.
 - `--as-of <seq>` searches a committed sequence (time travel). The default is
@@ -148,6 +160,7 @@ is exactly the sequence searched. Output uses the ordinary `columns`, `row` and
 | Text | `vertex`, `score` |
 | Vector | `vertex`, `distance` |
 | Both | `vertex`, `score` (an exact decimal), `vector_rank`, `text_rank`, `vector_distance`, `text_score` |
+| With the graph lane | `vertex`, `score`, `vector_rank`, `text_rank`, `graph_rank`, `vector_distance`, `text_score`, `graph_hops` |
 
 A lane that did not rank a hit leaves its fields `null`. These are usage errors
 (exit 2) before the database opens:
@@ -156,8 +169,10 @@ A lane that did not rank a hit leaves its fields `null`. These are usage errors
 - a lane flag without its lane;
 - a vector whose length differs from its `--vector-property` count;
 - a non-finite coordinate;
-- `--candidates` without both lanes;
+- `--candidates` without a fused search (both lanes, or the graph lane);
 - `--max-expansions` without a fuzzy mode;
+- a graph lane flag without `--expand-from`, or `--expand-from` without
+  `--max-hops` or without a text or vector lane;
 - an unbound symbol.
 
 

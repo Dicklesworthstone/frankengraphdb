@@ -14,6 +14,13 @@
 //! - both lanes together run the exact reciprocal-rank fusion of the two
 //!   candidate sets (`--candidates <n>` per lane, default `--k`), which is
 //!   NOT an exhaustive hybrid answer;
+//! - `--expand-from <vid,...>` with an explicit `--max-hops <n>` adds the
+//!   graph lane: a bounded expansion from those seed vertices
+//!   (`--expand-relation <relation>`, default every relation;
+//!   `--expand-direction out|in|both`, default out; `--include-seeds
+//!   true|false`, default false), fused as a third reciprocal-rank lane
+//!   (`--graph-candidates`, default `--candidates`; `--graph-weight`, default
+//!   1) with the text and/or vector lanes it needs;
 //! - `--k <n>` bounds the hits (default 10), `--vertex-label <label>`
 //!   restricts the corpus and `--as-of <seq>` pins a committed sequence.
 //!
@@ -22,12 +29,13 @@
 use super::{Failure, Options, float_text, render_rows};
 use asupersync::fs::Vfs;
 use fgdb::Database;
+use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{
-    DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
-    TextMatch, VectorSearch,
+    DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
+    IndexConfig, TextMatch, VectorSearch,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -48,6 +56,13 @@ pub(super) struct SearchFlags {
     candidates: Option<u32>,
     vertex_label: Option<String>,
     as_of: Option<CommitSeq>,
+    expand_from: Option<Vec<VId>>,
+    expand_relation: Option<String>,
+    expand_direction: Option<ExpansionDirection>,
+    max_hops: Option<u32>,
+    include_seeds: Option<bool>,
+    graph_candidates: Option<u32>,
+    graph_weight: Option<u16>,
 }
 
 /// Vocabulary terms a fuzzy text match may expand to unless
@@ -55,7 +70,7 @@ pub(super) struct SearchFlags {
 const DEFAULT_MAX_EXPANSIONS: usize = 64;
 
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 12] = [
+    pub(super) const FLAGS: [&str; 19] = [
         "--text",
         "--text-property",
         "--text-match",
@@ -68,6 +83,13 @@ impl SearchFlags {
         "--candidates",
         "--vertex-label",
         "--as-of",
+        "--expand-from",
+        "--expand-relation",
+        "--expand-direction",
+        "--max-hops",
+        "--include-seeds",
+        "--graph-candidates",
+        "--graph-weight",
     ];
 
     /// Every flag but `--vector-property` (one per coordinate) is given once.
@@ -155,6 +177,54 @@ impl SearchFlags {
                     .map_err(|_| Failure::usage("--as-of must be a commit sequence"))?;
                 once(&mut self.as_of, CommitSeq(seq), flag)
             }
+            "--expand-from" => {
+                let seeds = value
+                    .split(',')
+                    .map(|raw| {
+                        raw.trim().parse::<u128>().map(VId).map_err(|_| {
+                            Failure::usage("--expand-from is comma-separated vertex identities")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                once(&mut self.expand_from, seeds, flag)
+            }
+            "--expand-relation" => once(&mut self.expand_relation, value.to_owned(), flag),
+            "--expand-direction" => {
+                let direction = match value {
+                    "out" => ExpansionDirection::Outgoing,
+                    "in" => ExpansionDirection::Incoming,
+                    "both" => ExpansionDirection::Undirected,
+                    _ => return Err(Failure::usage("--expand-direction is out, in or both")),
+                };
+                once(&mut self.expand_direction, direction, flag)
+            }
+            "--max-hops" => {
+                let hops = value
+                    .parse()
+                    .map_err(|_| Failure::usage("--max-hops must be a hop count"))?;
+                once(&mut self.max_hops, hops, flag)
+            }
+            "--include-seeds" => {
+                let include = match value {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(Failure::usage("--include-seeds is true or false")),
+                };
+                once(&mut self.include_seeds, include, flag)
+            }
+            "--graph-candidates" => {
+                let n = u32::try_from(positive(value, flag)?)
+                    .map_err(|_| Failure::usage("--graph-candidates must fit in u32"))?;
+                once(&mut self.graph_candidates, n, flag)
+            }
+            "--graph-weight" => {
+                let weight = value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|weight| *weight > 0)
+                    .ok_or_else(|| Failure::usage("--graph-weight is a positive u16"))?;
+                once(&mut self.graph_weight, weight, flag)
+            }
             _ => Err(Failure::usage("unknown search flag")),
         }
     }
@@ -173,12 +243,27 @@ enum Lanes {
     },
 }
 
+/// The graph lane: an explicit expansion from seed vertices, fused as a third
+/// reciprocal-rank lane with whichever text/vector lanes were requested.
+struct GraphLane {
+    seeds: Vec<VId>,
+    relation: Option<RelationId>,
+    direction: ExpansionDirection,
+    max_hops: u32,
+    include_seeds: bool,
+    candidates: u32,
+    weight: u16,
+}
+
 /// A validated search, resolved before the database opens so a refused input
 /// never touches storage.
 pub(super) struct Prepared {
     read: ReadOptions<PropertyKeyId, LabelId>,
     lanes: Lanes,
     k: usize,
+    /// Per-lane candidate depth of a fused search (`--candidates`, default k).
+    candidates: u32,
+    graph: Option<GraphLane>,
 }
 
 fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyId, Failure> {
@@ -227,12 +312,63 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     if vector.is_none() && (flags.metric.is_some() || flags.ann.is_some()) {
         return Err(Failure::usage("--metric and --ann need --vector"));
     }
-    let hybrid = text.is_some() && vector.is_some();
-    if !hybrid && flags.candidates.is_some() {
+    let graph = match (&flags.expand_from, flags.max_hops) {
+        (Some(seeds), Some(max_hops)) => {
+            if text.is_none() && vector.is_none() {
+                return Err(Failure::usage(
+                    "the graph lane fuses with --text and/or --vector",
+                ));
+            }
+            let relation = flags
+                .expand_relation
+                .as_ref()
+                .map(|name| {
+                    options
+                        .relations
+                        .get(name)
+                        .map(|id| RelationId(u64::from(*id)))
+                        .ok_or_else(|| Failure::usage(format!("unbound relation {name:?}")))
+                })
+                .transpose()?;
+            Some((seeds.clone(), relation, max_hops))
+        }
+        (Some(_), None) => {
+            return Err(Failure::usage("--expand-from needs an explicit --max-hops"));
+        }
+        (None, _) => {
+            if flags.max_hops.is_some()
+                || flags.expand_relation.is_some()
+                || flags.expand_direction.is_some()
+                || flags.include_seeds.is_some()
+                || flags.graph_candidates.is_some()
+                || flags.graph_weight.is_some()
+            {
+                return Err(Failure::usage("graph lane flags need --expand-from"));
+            }
+            None
+        }
+    };
+    let fused = (text.is_some() && vector.is_some()) || graph.is_some();
+    if !fused && flags.candidates.is_some() {
         return Err(Failure::usage(
-            "--candidates applies only to a text and vector search",
+            "--candidates applies only to a fused search: text and vector, or a graph lane",
         ));
     }
+    let candidates = match flags.candidates {
+        Some(n) => n,
+        None => u32::try_from(k).map_err(|_| Failure::usage("--k must fit in u32"))?,
+    };
+    let graph = graph.map(|(seeds, relation, max_hops)| GraphLane {
+        seeds,
+        relation,
+        direction: flags
+            .expand_direction
+            .unwrap_or(ExpansionDirection::Outgoing),
+        max_hops,
+        include_seeds: flags.include_seeds.unwrap_or(false),
+        candidates: flags.graph_candidates.unwrap_or(candidates),
+        weight: flags.graph_weight.unwrap_or(1),
+    });
     let vertex_label = flags
         .vertex_label
         .as_ref()
@@ -296,19 +432,13 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         policy: ReadPolicy::default(),
     };
     let lanes = match (text, vector) {
-        (Some((text, _)), Some((vector, _))) => {
-            let candidates = match flags.candidates {
-                Some(n) => n,
-                None => u32::try_from(k).map_err(|_| Failure::usage("--k must fit in u32"))?,
-            };
-            Lanes::Hybrid {
-                text,
-                text_mode,
-                vector,
-                vector_mode,
-                candidates,
-            }
-        }
+        (Some((text, _)), Some((vector, _))) => Lanes::Hybrid {
+            text,
+            text_mode,
+            vector,
+            vector_mode,
+            candidates,
+        },
         (Some((text, _)), None) => Lanes::Text(text, text_mode),
         (None, Some((vector, _))) => Lanes::Vector(vector, vector_mode),
         (None, None) => {
@@ -317,7 +447,13 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             ));
         }
     };
-    Ok(Prepared { read, lanes, k })
+    Ok(Prepared {
+        read,
+        lanes,
+        k,
+        candidates,
+        graph,
+    })
 }
 
 impl Prepared {
@@ -351,6 +487,51 @@ impl Prepared {
             }),
         }
     }
+
+    /// The text/vector part of a graph-fused search. A lane that was not
+    /// requested gets weight zero and no candidates, so it is never evaluated.
+    fn retrieval(&self) -> Result<ExactHybridQuery<'_>, Failure> {
+        let profile =
+            |vector: u16, text: u16| ExactRrfProfile::new(60, vector, text).map_err(Failure::usage);
+        Ok(match &self.lanes {
+            Lanes::Text(query, mode) => ExactHybridQuery {
+                vector: &[],
+                text: query,
+                k: self.k,
+                vector_candidates: 0,
+                text_candidates: self.candidates,
+                vector_mode: VectorSearch::Exact,
+                text_mode: *mode,
+                profile: profile(0, 1)?,
+            },
+            Lanes::Vector(query, mode) => ExactHybridQuery {
+                vector: query,
+                text: "",
+                k: self.k,
+                vector_candidates: self.candidates,
+                text_candidates: 0,
+                vector_mode: *mode,
+                text_mode: TextMatch::Any,
+                profile: profile(1, 0)?,
+            },
+            Lanes::Hybrid {
+                text,
+                text_mode,
+                vector,
+                vector_mode,
+                candidates,
+            } => ExactHybridQuery {
+                vector,
+                text,
+                k: self.k,
+                vector_candidates: *candidates,
+                text_candidates: *candidates,
+                vector_mode: *vector_mode,
+                text_mode: *text_mode,
+                profile: ExactRrfProfile::default(),
+            },
+        })
+    }
 }
 
 pub(super) fn run<V: Vfs + Clone>(
@@ -368,6 +549,53 @@ pub(super) fn run<V: Vfs + Clone>(
         None => db.frontier().map_err(Failure::io)?,
     };
     read.as_of = Some(seq);
+    if let Some(graph) = &prepared.graph {
+        let query = GraphHybridQuery {
+            retrieval: prepared.retrieval()?,
+            graph_candidates: graph.candidates,
+            graph_weight: graph.weight,
+        };
+        let expansion = ExpansionSpec {
+            seeds: &graph.seeds,
+            relation: graph.relation,
+            direction: graph.direction,
+            max_hops: graph.max_hops,
+            include_seeds: graph.include_seeds,
+            limits: ExpansionLimits::default(),
+        };
+        let hits = db
+            .beacon_search_graph(cx, &read, query, expansion)
+            .map_err(Failure::query)?;
+        let columns: Vec<String> = [
+            "vertex",
+            "score",
+            "vector_rank",
+            "text_rank",
+            "graph_rank",
+            "vector_distance",
+            "text_score",
+            "graph_hops",
+        ]
+        .iter()
+        .map(|c| (*c).to_owned())
+        .collect();
+        let cells = hits
+            .iter()
+            .map(|hit| {
+                vec![
+                    vertex(hit.id, robot),
+                    decimal(&hit.decimal_score.to_string(), robot),
+                    rank(hit.vector_rank.map(|r| r.get()), robot),
+                    rank(hit.text_rank.map(|r| r.get()), robot),
+                    rank(hit.graph_rank.map(|r| r.get()), robot),
+                    float(hit.vector_distance, robot),
+                    float(hit.text_score, robot),
+                    rank(hit.graph_hops, robot),
+                ]
+            })
+            .collect();
+        return render_rows(&columns, cells, seq.0, "searched", robot, out);
+    }
     let rows = db
         .beacon_search(cx, &read, prepared.search())
         .map_err(Failure::query)?;
@@ -397,11 +625,7 @@ pub(super) fn run<V: Vfs + Clone>(
                 .map(|hit| {
                     vec![
                         vertex(hit.id, robot),
-                        if robot {
-                            format!(r#"{{"type":"decimal","value":"{}"}}"#, hit.decimal_score)
-                        } else {
-                            hit.decimal_score.to_string()
-                        },
+                        decimal(&hit.decimal_score.to_string(), robot),
                         rank(hit.vector_rank.map(|r| r.get()), robot),
                         rank(hit.text_rank.map(|r| r.get()), robot),
                         float(hit.vector_distance, robot),
@@ -422,6 +646,13 @@ fn vertex(id: VId, robot: bool) -> String {
         format!(r#"{{"type":"vertex","value":"{}"}}"#, id.0)
     } else {
         format!("vertex {}", id.0)
+    }
+}
+fn decimal(value: &str, robot: bool) -> String {
+    if robot {
+        format!(r#"{{"type":"decimal","value":"{value}"}}"#)
+    } else {
+        value.to_owned()
     }
 }
 fn float(value: Option<f64>, robot: bool) -> String {

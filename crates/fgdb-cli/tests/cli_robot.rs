@@ -2224,23 +2224,26 @@ fn searched(db: &TestDb, args: &[&str]) -> (u64, Vec<String>, SearchRows) {
 fn search_lanes_equal_the_library_and_pin_history() {
     use asupersync::{Budget, runtime::RuntimeBuilder};
     use fgdb::{Database, DatabaseKeys};
+    use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
     use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
     use fgdb_beacon::{
-        DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
-        TextMatch, VectorSearch,
+        DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery,
+        HnswConfig, IndexConfig, TextMatch, VectorSearch,
     };
-    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_types::CommitSeq;
     use fgdb_types::context::PurposeContexts;
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
 
     let db = TestDb::new("search");
     db.create();
-    // E carries no label, so --vertex-label Person excludes it.
-    let first = db.write(&["INSERT (:Person {name:'A', team:'red apple', born:0}),\
-         (:Person {name:'B', team:'red red', born:10}),\
-         (:Person {name:'C', team:'blue', born:20}),\
-         ({name:'E', team:'red', born:4})"]);
+    // E carries no label, so --vertex-label Person excludes it. A->B->C over
+    // KNOWS gives the graph lane something to expand.
+    let first = db.write(&["INSERT (a:Person {name:'A', team:'red apple', born:0}),\
+         (b:Person {name:'B', team:'red red', born:10}),\
+         (c:Person {name:'C', team:'blue', born:20}),\
+         ({name:'E', team:'red', born:4}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c)"]);
     let later = db.write(&["INSERT (:Person {name:'D', team:'red apple', born:5})"]);
 
     let (text_key, vector_key, person) = (PropertyKeyId(3), PropertyKeyId(2), LabelId(1));
@@ -2505,6 +2508,200 @@ fn search_lanes_equal_the_library_and_pin_history() {
         "{}",
         human.stdout
     );
+
+    // The graph lane (GraphRAG): expansion from seed vertices, fused as a
+    // third reciprocal-rank lane, equals Database::beacon_search_graph.
+    let ids = vertex_ids(&db);
+    let seed = |name: &str| fgdb_types::VId(ids[name].parse::<u128>().unwrap());
+    let graph_oracle = |read: ReadOptions<PropertyKeyId, LabelId>,
+                        query: GraphHybridQuery<'_>,
+                        expansion: ExpansionSpec<'_, RelationId>|
+     -> SearchRows {
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let hits = runtime.block_on(async {
+            let database = Database::open(&contexts.commit(), &db.db, keys)
+                .await
+                .unwrap();
+            database
+                .beacon_search_graph(&contexts.query(), &read, query, expansion)
+                .unwrap()
+        });
+        let absent = || ("null".to_owned(), String::new());
+        let int = |v: Option<u32>| v.map_or_else(absent, |v| ("int".to_owned(), v.to_string()));
+        let float = |v: Option<f64>| v.map_or_else(absent, |v| ("float".to_owned(), v.to_string()));
+        hits.iter()
+            .map(|hit| {
+                vec![
+                    ("vertex".to_owned(), hit.id.0.to_string()),
+                    ("decimal".to_owned(), hit.decimal_score.to_string()),
+                    int(hit.vector_rank.map(|r| r.get())),
+                    int(hit.text_rank.map(|r| r.get())),
+                    int(hit.graph_rank.map(|r| r.get())),
+                    float(hit.vector_distance),
+                    float(hit.text_score),
+                    int(hit.graph_hops),
+                ]
+            })
+            .collect()
+    };
+    let graph_columns = [
+        "vertex",
+        "score",
+        "vector_rank",
+        "text_rank",
+        "graph_rank",
+        "vector_distance",
+        "text_score",
+        "graph_hops",
+    ];
+    let (a, c) = (ids["A"].clone(), ids["C"].clone());
+    // Text lane plus a 2-hop KNOWS expansion from A: C ("blue") matches no
+    // text term and is reached only through the graph lane, at 2 hops.
+    let (seq, columns, rows) = searched(
+        &db,
+        &[
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--expand-from",
+            &a,
+            "--expand-relation",
+            "KNOWS",
+            "--max-hops",
+            "2",
+        ],
+    );
+    assert_eq!(seq, later);
+    assert_eq!(columns, graph_columns);
+    let expected = graph_oracle(
+        options(true, None, false, None),
+        GraphHybridQuery {
+            retrieval: ExactHybridQuery {
+                vector: &[],
+                text: "red",
+                k: 10,
+                vector_candidates: 0,
+                text_candidates: 10,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::new(60, 0, 1).unwrap(),
+            },
+            graph_candidates: 10,
+            graph_weight: 1,
+        },
+        ExpansionSpec {
+            seeds: &[seed("A")],
+            relation: Some(RelationId(1)),
+            direction: ExpansionDirection::Outgoing,
+            max_hops: 2,
+            include_seeds: false,
+            limits: ExpansionLimits::default(),
+        },
+    );
+    assert_eq!(rows, expected);
+    let reached_c = rows
+        .iter()
+        .find(|row| row[0].1 == c)
+        .expect("C via the graph");
+    assert_eq!(reached_c[3].0, "null", "C matches no text term");
+    assert_eq!(reached_c[7], ("int".to_owned(), "2".to_owned()));
+    // All three lanes, incoming from C with the seed included, a heavier
+    // graph weight and a shallower graph candidate depth.
+    let (_, columns, rows) = searched(
+        &db,
+        &[
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--vector",
+            "4",
+            "--vector-property",
+            "born",
+            "--k",
+            "3",
+            "--expand-from",
+            &c,
+            "--expand-direction",
+            "in",
+            "--max-hops",
+            "1",
+            "--include-seeds",
+            "true",
+            "--graph-weight",
+            "2",
+            "--graph-candidates",
+            "3",
+        ],
+    );
+    assert_eq!(columns, graph_columns);
+    assert!(!rows.is_empty());
+    assert_eq!(
+        rows,
+        graph_oracle(
+            options(true, l2, false, None),
+            GraphHybridQuery {
+                retrieval: ExactHybridQuery {
+                    vector: &[4.0],
+                    text: "red",
+                    k: 3,
+                    vector_candidates: 3,
+                    text_candidates: 3,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
+                    profile: ExactRrfProfile::default(),
+                },
+                graph_candidates: 3,
+                graph_weight: 2,
+            },
+            ExpansionSpec {
+                seeds: &[seed("C")],
+                relation: None,
+                direction: ExpansionDirection::Incoming,
+                max_hops: 1,
+                include_seeds: true,
+                limits: ExpansionLimits::default(),
+            },
+        )
+    );
+    for args in [
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--expand-from",
+            &a,
+        ],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--max-hops",
+            "2",
+        ],
+        vec!["--expand-from", &a, "--max-hops", "1"],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--expand-from",
+            &a,
+            "--max-hops",
+            "1",
+            "--expand-relation",
+            "NOPE",
+        ],
+    ] {
+        db.command("search", &args).failure(2, "usage");
+    }
 
     // --as-of searches the committed history: D did not exist at `first`.
     let d = vertex_ids(&db)["D"].clone();
