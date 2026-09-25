@@ -507,7 +507,10 @@ fn every_capacity_and_context_refusal_leaves_search_retryable_and_unpublished() 
             txn.beacon_search_graph(&other, &c.query(), &options(), q, e),
             Err(ReadError::Read(WriteTxnError::WrongDatabase))
         ));
-        txn.abort();
+        // `abort` consumes the transaction, so searching after it is already
+        // impossible at compile time. Close this read-only workspace through
+        // the non-consuming `finish` and check the runtime refusal instead.
+        txn.finish(&mut db, &c.commit()).await.unwrap();
         assert!(matches!(
             txn.beacon_search_graph(&db, &c.query(), &options(), q, e),
             Err(ReadError::Read(WriteTxnError::Finished))
@@ -545,7 +548,7 @@ fn graph_work_shares_the_whole_query_allowance_with_an_exact_refusal_boundary() 
             let mut attempt = |limit| -> Result<Vec<GraphHybridHit>, Error> {
                 // Fresh observations at EVERY trial: a previous successful
                 // read must not subsidize this trial's read-witness allocations.
-                let mut txn = db.begin(&c.txn()).unwrap();
+                let txn = db.begin(&c.txn()).unwrap();
                 let mut o = options();
                 o.policy.max_work_units = limit;
                 let result = txn.beacon_search_graph(&db, &c.query(), &o, q, expansion(&[VId(1)]));

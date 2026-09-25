@@ -653,14 +653,6 @@ impl BoundSetTextInput {
         Ok(values)
     }
 
-    pub(crate) fn bind_parameters(
-        &self,
-        arguments: &GqlParameters,
-    ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let values = self.checked_arguments(arguments)?;
-        self.bind_values(&values)
-    }
-
     /// Only callers that checked the COMPLETE native argument table may use
     /// this path. Shared grouped terminals need that same table for HAVING/page.
     pub(crate) fn bind_values(
