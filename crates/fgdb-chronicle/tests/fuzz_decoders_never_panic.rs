@@ -16,9 +16,10 @@
 //! capsule decoder enforces `MAX_CAPSULE_CONTAINER_BYTES_V1` against the
 //! actual input length before allocating, and every symbol-count/length
 //! field is validated against the remaining byte length before use (the
-//! framing laws the capsule suite pins). The enforced per-input wall bound
-//! (50 ms) is the indirect allocation instrument: any huge allocation must
-//! zero/fill its memory and would blow the bound first.
+//! framing laws the capsule suite pins). The enforced per-input bound (50 ms
+//! of the decoding thread's CPU time, see `bounded`) is the indirect
+//! allocation instrument: any huge allocation must zero/fill its memory and
+//! would blow the bound first.
 //! `header_inflation_is_refused_or_bounded` plants maximal counts and
 //! asserts the bound.
 // knob: `CAMPAIGNS` scales the mutation campaign (mutants = CAMPAIGNS * 3
@@ -44,8 +45,34 @@ const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77
 const KIND: u16 = 0x0274;
 const HEADER: &[u8] = b"canonical-header";
 
-/// Per-input wall bound; also the documented allocation guard (module doc).
+/// Per-input CPU-time bound; also the documented allocation guard (module doc).
 const PER_INPUT_BOUND: Duration = Duration::from_millis(50);
+
+/// Charge one decode against [`PER_INPUT_BOUND`] by the CPU time its thread
+/// spent, not wall time. On a shared host, wall time also charges the decoder
+/// for every slice another process took: an unchanged binary failed one run in
+/// three at load average 50, and the fastest of three back-to-back attempts
+/// still exceeded 50 ms at load 102 (fgdb-g79t4). A hanging, super-linear or
+/// allocation-heavy decoder burns CPU, page faults included, so it is still
+/// caught. Where the kernel has no per-thread CPU accounting, wall time.
+fn bounded<T>(decode: impl FnOnce() -> T) -> (T, Duration) {
+    let (cpu, wall) = (thread_cpu_time(), Instant::now());
+    let value = decode();
+    let spent = match (cpu, thread_cpu_time()) {
+        (Some(before), Some(after)) => after.saturating_sub(before),
+        _ => wall.elapsed(),
+    };
+    (value, spent)
+}
+
+/// This thread's on-CPU time from the scheduler's own accounting (first field
+/// of `/proc/thread-self/schedstat`, nanoseconds; current to within a tick).
+fn thread_cpu_time() -> Option<Duration> {
+    let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let nanos = stat.split_whitespace().next()?.parse().ok()?;
+    Some(Duration::from_nanos(nanos))
+}
+
 const DECODERS: usize = 3;
 
 // ---------------------------------------------------------------------------
@@ -292,24 +319,24 @@ fn fan_out(
     symbols: &[Vec<u8>],
     outcomes: &mut [Outcomes; DECODERS],
 ) {
-    let started = Instant::now();
-
-    let marker = decode_canonical(marker_bytes).map(|m| m.commit_seq);
-    let capsule = decode_container(container_bytes);
-    let target = RecoveryTarget {
-        k_oid: &K_OID,
-        namespace: NAMESPACE,
-        object_id: seeds_object_id(),
-        canonical_header: HEADER,
-        protected_len: seeds_protected_len(),
-    };
-    let symbolized = decode_object(&seeds_encoding(), symbols, target, &DEK, &mut Vec::new());
+    let ((marker, capsule, symbolized), elapsed) = bounded(|| {
+        let marker = decode_canonical(marker_bytes).map(|m| m.commit_seq);
+        let capsule = decode_container(container_bytes);
+        let target = RecoveryTarget {
+            k_oid: &K_OID,
+            namespace: NAMESPACE,
+            object_id: seeds_object_id(),
+            canonical_header: HEADER,
+            protected_len: seeds_protected_len(),
+        };
+        let symbolized = decode_object(&seeds_encoding(), symbols, target, &DEK, &mut Vec::new());
+        (marker, capsule, symbolized)
+    });
 
     outcomes[0].record_option(&marker);
     outcomes[1].record(&capsule);
     outcomes[2].record(&symbolized);
 
-    let elapsed = started.elapsed();
     assert!(
         elapsed <= PER_INPUT_BOUND,
         "decode fan-out exceeded the per-input bound: {elapsed:?}; marker len={} container len={} symbols={}",
@@ -408,30 +435,31 @@ fn tiny_inputs_are_typed_refusals_seen_by_every_decoder() {
             let marker_bytes = vec![fill; len];
             let container_bytes = vec![fill; len];
             let symbol_bytes = vec![fill; len];
-            let started = Instant::now();
-
-            let marker = decode_canonical(&marker_bytes).map(|m| m.commit_seq);
-            let capsule = decode_container(&container_bytes);
-            let symbolized = decode_object(
-                &encoding,
-                &[symbol_bytes],
-                RecoveryTarget {
-                    k_oid: &K_OID,
-                    namespace: NAMESPACE,
-                    object_id,
-                    canonical_header: HEADER,
-                    protected_len,
-                },
-                &DEK,
-                &mut Vec::new(),
-            );
+            let ((marker, capsule, symbolized), elapsed) = bounded(|| {
+                let marker = decode_canonical(&marker_bytes).map(|m| m.commit_seq);
+                let capsule = decode_container(&container_bytes);
+                let symbolized = decode_object(
+                    &encoding,
+                    std::slice::from_ref(&symbol_bytes),
+                    RecoveryTarget {
+                        k_oid: &K_OID,
+                        namespace: NAMESPACE,
+                        object_id,
+                        canonical_header: HEADER,
+                        protected_len,
+                    },
+                    &DEK,
+                    &mut Vec::new(),
+                );
+                (marker, capsule, symbolized)
+            });
 
             outcomes[0].record_option(&marker);
             outcomes[1].record(&capsule);
             outcomes[2].record(&symbolized);
 
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
+                elapsed <= PER_INPUT_BOUND,
                 "tiny-input fan-out exceeded the bound at len {len}"
             );
         }
@@ -476,13 +504,10 @@ fn every_strict_prefix_is_a_typed_refusal_and_one_reaches_the_structure() {
     // Marker prefixes: every strict prefix must decode to None.
     for cut in 0..encoded.len() {
         let prefix = &encoded[..cut];
-        let started = Instant::now();
+        let (refused, elapsed) = bounded(|| decode_canonical(prefix).is_none());
+        assert!(refused, "a strict marker prefix decoded at cut {cut}");
         assert!(
-            decode_canonical(prefix).is_none(),
-            "a strict marker prefix decoded at cut {cut}"
-        );
-        assert!(
-            started.elapsed() <= PER_INPUT_BOUND,
+            elapsed <= PER_INPUT_BOUND,
             "marker prefix decode exceeded the bound at cut {cut}"
         );
     }
@@ -496,10 +521,9 @@ fn every_strict_prefix_is_a_typed_refusal_and_one_reaches_the_structure() {
     // past the header must return Ok with FEWER symbols than the full
     // container, proving the parser walked past the header into the body.
     for cut in 0..CAPSULE_HEADER_BYTES_V1.min(container.len()) {
-        let started = Instant::now();
-        let outcome = decode_container(&container[..cut]);
+        let (outcome, elapsed) = bounded(|| decode_container(&container[..cut]));
         assert!(
-            started.elapsed() <= PER_INPUT_BOUND,
+            elapsed <= PER_INPUT_BOUND,
             "container prefix decode exceeded the bound at cut {cut}"
         );
         assert!(
@@ -520,22 +544,23 @@ fn every_strict_prefix_is_a_typed_refusal_and_one_reaches_the_structure() {
     for symbol in &seed.symbols {
         for cut in 0..symbol.len().min(64) {
             let torn = symbol[..cut].to_vec();
-            let started = Instant::now();
-            let outcome = decode_object(
-                &seed.encoding,
-                &[torn],
-                RecoveryTarget {
-                    k_oid: &K_OID,
-                    namespace: NAMESPACE,
-                    object_id: seed.object_id,
-                    canonical_header: HEADER,
-                    protected_len: seed.protected_len,
-                },
-                &DEK,
-                &mut Vec::new(),
-            );
+            let (outcome, elapsed) = bounded(|| {
+                decode_object(
+                    &seed.encoding,
+                    std::slice::from_ref(&torn),
+                    RecoveryTarget {
+                        k_oid: &K_OID,
+                        namespace: NAMESPACE,
+                        object_id: seed.object_id,
+                        canonical_header: HEADER,
+                        protected_len: seed.protected_len,
+                    },
+                    &DEK,
+                    &mut Vec::new(),
+                )
+            });
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
+                elapsed <= PER_INPUT_BOUND,
                 "torn symbol decode exceeded the bound at cut {cut}"
             );
             assert!(outcome.is_err(), "a torn symbol decoded");
@@ -585,16 +610,23 @@ fn header_inflation_is_refused_or_bounded() {
     };
     let encoding = seeds_encoding();
     for pattern in &patterns {
-        let started = Instant::now();
-        let marker = decode_canonical(pattern).map(|m| m.commit_seq);
-        let capsule = decode_container(pattern);
-        let symbolized =
-            decode_object(&encoding, &[pattern.clone()], target, &DEK, &mut Vec::new());
+        let ((marker, capsule, symbolized), elapsed) = bounded(|| {
+            let marker = decode_canonical(pattern).map(|m| m.commit_seq);
+            let capsule = decode_container(pattern);
+            let symbolized = decode_object(
+                &encoding,
+                std::slice::from_ref(pattern),
+                target,
+                &DEK,
+                &mut Vec::new(),
+            );
+            (marker, capsule, symbolized)
+        });
         outcomes[0].record_option(&marker);
         outcomes[1].record(&capsule);
         outcomes[2].record(&symbolized);
         assert!(
-            started.elapsed() <= PER_INPUT_BOUND,
+            elapsed <= PER_INPUT_BOUND,
             "an inflated header burst the per-input bound; len={}",
             pattern.len()
         );
@@ -644,41 +676,39 @@ fn mutated_seeds_never_panic_any_decoder() {
         let mut rng = fuzz::Rng::new(0x6B0B + campaign as u64);
         for (name, seed) in [("marker", &encoded), ("capsule", &container)] {
             // Pristine keepalive: real-encoder bytes must still decode.
-            let started = Instant::now();
-            if name == "marker" {
-                assert!(
-                    decode_canonical(seed).is_some(),
-                    "the real-encoder marker seed must decode"
-                );
-            } else {
-                assert!(
-                    decode_container(seed).is_ok(),
-                    "the real-encoder capsule seed must decode"
-                );
-            }
+            let (decoded, elapsed) = bounded(|| {
+                if name == "marker" {
+                    decode_canonical(seed).is_some()
+                } else {
+                    decode_container(seed).is_ok()
+                }
+            });
+            assert!(decoded, "the real-encoder {name} seed must decode");
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
+                elapsed <= PER_INPUT_BOUND,
                 "{name}: seed decode exceeded the bound"
             );
             for op in 0..6 {
                 let Some(mutant) = fuzz::mutate(op, &mut rng, seed) else {
                     continue;
                 };
-                let started = Instant::now();
-                let marker = decode_canonical(&mutant).map(|m| m.commit_seq);
-                let capsule = decode_container(&mutant);
-                let symbolized = decode_object(
-                    &symbol.encoding,
-                    &[mutant.clone()],
-                    target,
-                    &DEK,
-                    &mut Vec::new(),
-                );
+                let ((marker, capsule, symbolized), elapsed) = bounded(|| {
+                    let marker = decode_canonical(&mutant).map(|m| m.commit_seq);
+                    let capsule = decode_container(&mutant);
+                    let symbolized = decode_object(
+                        &symbol.encoding,
+                        std::slice::from_ref(&mutant),
+                        target,
+                        &DEK,
+                        &mut Vec::new(),
+                    );
+                    (marker, capsule, symbolized)
+                });
                 outcomes[0].record_option(&marker);
                 outcomes[1].record(&capsule);
                 outcomes[2].record(&symbolized);
                 assert!(
-                    started.elapsed() <= PER_INPUT_BOUND,
+                    elapsed <= PER_INPUT_BOUND,
                     "{name} op {op}: fan-out exceeded the bound; len={}",
                     mutant.len()
                 );
@@ -709,12 +739,12 @@ fn mutated_seeds_never_panic_any_decoder() {
                 }
                 _ => records[index].push(rng.next_u64() as u8),
             }
-            let started = Instant::now();
-            let symbolized =
-                decode_object(&symbol.encoding, &records, target, &DEK, &mut Vec::new());
+            let (symbolized, elapsed) = bounded(|| {
+                decode_object(&symbol.encoding, &records, target, &DEK, &mut Vec::new())
+            });
             assert!(
-                started.elapsed() <= PER_INPUT_BOUND,
-                "symbol mutation decode exceeded the bound"
+                elapsed <= PER_INPUT_BOUND,
+                "symbol mutation decode exceeded the bound: {elapsed:?}"
             );
             outcomes[2].record(&symbolized);
             mutants += 1;
