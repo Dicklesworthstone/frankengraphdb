@@ -37,7 +37,9 @@ pub enum WriteTxnError {
     /// No live savepoint has the requested name. Names are transaction-local.
     UnknownSavepoint,
     /// The bounded embedded workspace has reached its savepoint-count limit.
-    SavepointLimit { limit: usize },
+    SavepointLimit {
+        limit: usize,
+    },
     RelationMismatch {
         expected: RelationId,
         found: RelationId,
@@ -54,6 +56,10 @@ pub enum WriteTxnError {
     },
     /// The compound command cannot assign distinct u64 intent-visit ordinals.
     AtomicOrdinalOverflow,
+    /// Re-staging would give two created elements the same birth ordinal once
+    /// the prefix's observed births are retained. Retention never renumbers,
+    /// so this refuses instead of publishing ambiguous births.
+    BirthOrdinalCollision,
     /// A new delta family needs an explicit compound-write independence law.
     UnsupportedAtomicMutation,
     /// The requested 128-bit identity domain has no remaining successor.
@@ -69,7 +75,9 @@ pub enum WriteTxnError {
 impl core::fmt::Display for WriteTxnError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Authorization(source) => write!(formatter, "write authorization refused: {source}"),
+            Self::Authorization(source) => {
+                write!(formatter, "write authorization refused: {source}")
+            }
             Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
@@ -88,16 +96,25 @@ impl core::fmt::Display for WriteTxnError {
                 formatter,
                 "write transaction pinned {pinned:?}, but the live snapshot advanced to {live:?}"
             ),
-            Self::AtomicRelationConflict { first, second, element } => write!(
+            Self::AtomicRelationConflict {
+                first,
+                second,
+                element,
+            } => write!(
                 formatter,
                 "atomic relation groups {first:?} and {second:?} are not independent at {element:?}"
             ),
-            Self::AtomicOrdinalOverflow => formatter.write_str("atomic write intent ordinal overflow"),
+            Self::AtomicOrdinalOverflow => {
+                formatter.write_str("atomic write intent ordinal overflow")
+            }
+            Self::BirthOrdinalCollision => formatter
+                .write_str("retained birth ordinals would collide with newly assigned births"),
             Self::IdentityExhausted => formatter.write_str("element identity domain exhausted"),
-            Self::UnsupportedAtomicMutation => formatter.write_str(
-                "atomic write contains a mutation without a defined independence law"
-            ),
-            Self::Interrupted(source) => write!(formatter, "transaction completion interrupted: {source}"),
+            Self::UnsupportedAtomicMutation => formatter
+                .write_str("atomic write contains a mutation without a defined independence law"),
+            Self::Interrupted(source) => {
+                write!(formatter, "transaction completion interrupted: {source}")
+            }
             Self::Read(source) => write!(formatter, "could not read the pinned snapshot: {source}"),
             Self::Gql(source) => write!(formatter, "transaction GQL failed: {source}"),
             Self::Write(source) => write!(formatter, "write transaction failed: {source}"),
@@ -123,6 +140,7 @@ impl core::error::Error for WriteTxnError {
             | Self::AtomicRelationConflict { .. }
             | Self::RelationMismatch { .. }
             | Self::AtomicOrdinalOverflow
+            | Self::BirthOrdinalCollision
             | Self::IdentityExhausted
             | Self::UnsupportedAtomicMutation => None,
         }

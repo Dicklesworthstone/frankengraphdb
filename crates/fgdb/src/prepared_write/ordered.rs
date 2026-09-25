@@ -271,5 +271,104 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+impl PreparedWrite {
+    /// Keep every birth ordinal the previously staged prefix already exposed
+    /// when an ordered suffix re-prepares it.
+    ///
+    /// Ordered preparation assigns births in source order, which can permute
+    /// births a prefix staged as independent groups (relation order) already
+    /// exposed. Observed ordinals are part of the transaction's visible state,
+    /// so under ordered composition a created element keeps the ordinal it was
+    /// first seen with. The whole prefix precedes the suffix in source order,
+    /// so it re-occupies the same ordinal set and new births are unaffected;
+    /// a collision would mean that premise broke, and it refuses rather than
+    /// publishing ambiguous births.
+    ///
+    /// Only ordered composition calls this. Atomic groups are canonical by
+    /// design: relation order assigns births on every call, so a new group
+    /// that sorts first moves the births of later relations (atomic_txn's
+    /// point_bulk_and_committed_vertices_use_the_same_canonical_births_and_values).
+    ///
+    /// Restores the law ebabc3ae introduced, at the call site it used, and
+    /// that d8ce9e90 silently reverted (fgdb-write-ordered-silent-revert-2d80i).
+    pub(crate) fn retain_birth_ordinals(
+        mut self,
+        previous: Option<&Self>,
+    ) -> Result<Self, WriteTxnError> {
+        let Some(previous) = previous else {
+            return Ok(self);
+        };
+        if !Arc::ptr_eq(&self.handle_owner, &previous.handle_owner) {
+            return Err(WriteTxnError::WrongDatabase);
+        }
+        if self.basis != previous.basis {
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: previous.basis,
+                live: self.basis,
+            });
+        }
+        let births: BTreeMap<ElementId, u64> = previous
+            .template
+            .coordinate_entries()
+            .iter()
+            .flat_map(|coordinate| &coordinate.rows)
+            .filter_map(birth)
+            .collect();
+        if births.is_empty() {
+            return Ok(self);
+        }
+        let mut coordinates = self.template.coordinate_entries().to_vec();
+        let mut changed = false;
+        for row in coordinates
+            .iter_mut()
+            .flat_map(|coordinate| &mut coordinate.rows)
+        {
+            let (identity, ordinal) = match row {
+                DeltaRow::CreateVertex {
+                    vid, birth_ordinal, ..
+                } => (ElementId::Vertex(*vid), birth_ordinal),
+                DeltaRow::CreateEdge {
+                    eid, birth_ordinal, ..
+                } => (ElementId::Edge(*eid), birth_ordinal),
+                _ => continue,
+            };
+            if let Some(retained) = births.get(&identity) {
+                changed |= *ordinal != *retained;
+                *ordinal = *retained;
+            }
+        }
+        if !changed {
+            return Ok(self);
+        }
+        let mut seen = BTreeSet::new();
+        let unique = coordinates
+            .iter()
+            .flat_map(|coordinate| &coordinate.rows)
+            .filter_map(birth)
+            .all(|(_, ordinal)| seen.insert(ordinal));
+        if !unique {
+            return Err(WriteTxnError::BirthOrdinalCollision);
+        }
+        let intent = self.template.intent_semantics_oid();
+        let source = *self.template.source_intent_root_digest();
+        self.template = LogicalDeltaTemplate::build(intent, source, coordinates)
+            .map_err(WriteError::Canonical)?;
+        Ok(self)
+    }
+}
+
+/// The element a create row births, with its ordinal.
+fn birth(row: &DeltaRow) -> Option<(ElementId, u64)> {
+    match row {
+        DeltaRow::CreateVertex {
+            vid, birth_ordinal, ..
+        } => Some((ElementId::Vertex(*vid), *birth_ordinal)),
+        DeltaRow::CreateEdge {
+            eid, birth_ordinal, ..
+        } => Some((ElementId::Edge(*eid), *birth_ordinal)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -72,7 +72,10 @@ impl WriteTxn {
             });
         }
         if let Some(first) = self.staged.first()
-            && (self.staged.iter().any(|staged| staged.relation != first.relation)
+            && (self
+                .staged
+                .iter()
+                .any(|staged| staged.relation != first.relation)
                 || (self.program_multi_relation && batch.relation != first.relation))
         {
             // Mixed programs promise that each step sees its predecessor.
@@ -89,7 +92,11 @@ impl WriteTxn {
                 found: batch.relation,
             });
         }
-        if batch.rows.iter().any(|row| matches!(row, PendingRow::Edge { ensure: true, .. })) {
+        if batch
+            .rows
+            .iter()
+            .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
+        {
             // Keep actual ensure aliases and insertion witnesses even if
             // subsequent preparation fails or normalizes the ensure to no-op.
             drop(self.edges(database)?);
@@ -173,7 +180,9 @@ impl WriteTxn {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if batches.iter().flat_map(|batch| &batch.rows)
+        if batches
+            .iter()
+            .flat_map(|batch| &batch.rows)
             .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
         {
             drop(self.edges(database)?);
@@ -181,7 +190,12 @@ impl WriteTxn {
         let previous_len = self.staged.len();
         self.staged.extend(batches);
         let result = if ordered {
-            database.prepare_ordered_writes(self.staged.clone())
+            // An ordered suffix must not renumber births the prefix already
+            // exposed. Atomic groups stay canonical instead: relation order
+            // assigns births on every call, so a new group may move them.
+            database
+                .prepare_ordered_writes(self.staged.clone())
+                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_ref()))
         } else {
             database.prepare_atomic_writes(self.staged.clone())
         };
@@ -253,11 +267,17 @@ mod ordered_staging_tests {
         second.add_edge(EId(60), VId(5), VId(6), vec![]);
         let mut last = WriteBatch::new(RelationId(1));
         last.compare_and_set_vertex_property(
-            VId(5), P, Some(CanonicalScalar::Int(2)), CanonicalScalar::Int(3),
+            VId(5),
+            P,
+            Some(CanonicalScalar::Int(2)),
+            CanonicalScalar::Int(3),
             WriteMismatchPolicy::AbortWrite,
         );
         last.compare_and_set_edge_property(
-            EId(50), P, Some(CanonicalScalar::Int(10)), CanonicalScalar::Int(11),
+            EId(50),
+            P,
+            Some(CanonicalScalar::Int(10)),
+            CanonicalScalar::Int(11),
             WriteMismatchPolicy::AbortWrite,
         );
         last.add_edge(EId(70), VId(6), VId(2), vec![]);
@@ -282,19 +302,25 @@ mod ordered_staging_tests {
             txn.write_ordered(&mut db, vec![second]).unwrap();
             // A normal continuation must not switch back to independent groups.
             txn.write(&mut db, last).unwrap();
-            assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(
+                txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]
+            );
             assert!(txn.vertex(&db, VId(6)).unwrap().is_some());
             assert!(db.vertex(VId(5)).unwrap().is_none());
             assert_eq!(db.frontier().unwrap(), basis);
             let seq = txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(seq, CommitSeq(basis.0 + 1));
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
-            assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(
+                db.vertex(VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]
+            );
             assert_eq!(db.vertex(VId(6)).unwrap().unwrap().birth_ordinal, 4);
-            assert_eq!(db.edge(EId(50)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]);
+            assert_eq!(
+                db.edge(EId(50)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(11))]
+            );
             for (eid, relation) in [(50, 9), (60, 2), (70, 1)] {
                 let edge = db.edge(EId(eid)).unwrap().unwrap();
                 assert_eq!(edge.entry.relation, RelationId(relation));
@@ -320,7 +346,10 @@ mod ordered_staging_tests {
             let prefix = txn.prepared.as_ref().unwrap().template.clone();
             let mut bad = WriteBatch::new(RelationId(3));
             bad.compare_and_set_vertex_property(
-                VId(5), P, Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(4),
+                VId(5),
+                P,
+                Some(CanonicalScalar::Int(999)),
+                CanonicalScalar::Int(4),
                 WriteMismatchPolicy::AbortWrite,
             );
             assert!(txn.write_ordered(&mut db, vec![bad]).is_err());
@@ -330,12 +359,16 @@ mod ordered_staging_tests {
             txn.rollback_to_savepoint(&db, "prefix").unwrap();
             assert_eq!(txn.staged.len(), 2);
             assert_eq!(txn.prepared.as_ref().unwrap().template, prefix);
-            assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]);
+            assert_eq!(
+                txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(2))]
+            );
             txn.write(&mut db, last).unwrap();
             txn.commit(&mut db, &cx).await.unwrap();
-            assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(
+                db.vertex(VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -356,7 +389,10 @@ mod ordered_staging_tests {
             txn.savepoint(&db, "before_guard").unwrap();
             let mut noop = WriteBatch::new(RelationId(3));
             noop.compare_and_set_vertex_property(
-                VId(1), P, Some(CanonicalScalar::Int(0)), CanonicalScalar::Int(0),
+                VId(1),
+                P,
+                Some(CanonicalScalar::Int(0)),
+                CanonicalScalar::Int(0),
                 WriteMismatchPolicy::AbortWrite,
             );
             txn.write_ordered(&mut db, vec![noop]).unwrap();
@@ -365,8 +401,10 @@ mod ordered_staging_tests {
             winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
             db.write(&cx, winner).await.unwrap();
             let frontier = db.frontier().unwrap();
-            assert!(matches!(txn.commit(&mut db, &cx).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+            assert!(matches!(
+                txn.commit(&mut db, &cx).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ));
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertex(VId(5)).unwrap().is_none());
             assert!(db.vertex(VId(6)).unwrap().is_none());
@@ -387,23 +425,34 @@ mod ordered_staging_tests {
             let [first, second, _] = dependent_program();
             txn.write(&mut db, first).unwrap();
             let prefix = txn.prepared.as_ref().unwrap().template.clone();
-            assert!(matches!(txn.write_ordered(&mut other, vec![second.clone()]),
-                Err(WriteTxnError::WrongDatabase)));
-            assert!(matches!(txn.write_ordered(&mut db, vec![]),
-                Err(WriteTxnError::Write(WriteError::EmptyBatch))));
-            assert!(matches!(txn.write_ordered(&mut db, vec![WriteBatch::new(RelationId(2))]),
-                Err(WriteTxnError::Write(WriteError::EmptyBatch))));
+            assert!(matches!(
+                txn.write_ordered(&mut other, vec![second.clone()]),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.write_ordered(&mut db, vec![]),
+                Err(WriteTxnError::Write(WriteError::EmptyBatch))
+            ));
+            assert!(matches!(
+                txn.write_ordered(&mut db, vec![WriteBatch::new(RelationId(2))]),
+                Err(WriteTxnError::Write(WriteError::EmptyBatch))
+            ));
             let mut winner = WriteBatch::new(RelationId(1));
             winner.create_vertex(VId(999), vec![], vec![]);
             db.write(&cx, winner).await.unwrap();
-            assert!(matches!(txn.write_ordered(&mut db, vec![second]),
-                Err(WriteTxnError::SnapshotAdvanced { .. })));
+            assert!(matches!(
+                txn.write_ordered(&mut db, vec![second]),
+                Err(WriteTxnError::SnapshotAdvanced { .. })
+            ));
             assert_eq!(txn.staged.len(), 1);
             assert_eq!(txn.prepared.as_ref().unwrap().template, prefix);
             txn.commit(&mut db, &cx).await.unwrap();
             assert!(db.vertex(VId(5)).unwrap().is_some());
             assert!(db.vertex(VId(6)).unwrap().is_none());
-            assert!(matches!(txn.write_ordered(&mut db, vec![]), Err(WriteTxnError::Finished)));
+            assert!(matches!(
+                txn.write_ordered(&mut db, vec![]),
+                Err(WriteTxnError::Finished)
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -429,13 +478,17 @@ mod ordered_staging_tests {
                 workspace.accept();
             }
             assert!(!txn.program_multi_relation);
-            assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(
+                txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]
+            );
             assert_eq!(db.frontier().unwrap(), basis);
             let seq = txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(seq, CommitSeq(basis.0 + 1));
-            assert_eq!(db.edge(EId(50)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]);
+            assert_eq!(
+                db.edge(EId(50)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(11))]
+            );
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -462,7 +515,10 @@ mod ordered_staging_tests {
                     }
                     let mut bad = WriteBatch::new(RelationId(3));
                     bad.compare_and_set_vertex_property(
-                        VId(5), P, Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(4),
+                        VId(5),
+                        P,
+                        Some(CanonicalScalar::Int(999)),
+                        CanonicalScalar::Int(4),
                         WriteMismatchPolicy::AbortWrite,
                     );
                     workspace.txn.write(&mut db, bad)?;
@@ -478,15 +534,21 @@ mod ordered_staging_tests {
                 assert_eq!(txn.staged.len(), 1);
                 assert_eq!(txn.prepared.as_ref().unwrap().template, prefix);
                 assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
-                assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1))]);
+                assert_eq!(
+                    txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(1))]
+                );
                 // No remembered execution mode may outlive a rolled-back program.
-                assert!(matches!(txn.write(&mut db, second),
-                    Err(WriteTxnError::RelationMismatch { .. })));
+                assert!(matches!(
+                    txn.write(&mut db, second),
+                    Err(WriteTxnError::RelationMismatch { .. })
+                ));
                 txn.commit(&mut db, &cx).await.unwrap();
                 assert!(db.vertex(VId(6)).unwrap().is_none());
-                assert_eq!(db.edge(EId(50)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(10))]);
+                assert_eq!(
+                    db.edge(EId(50)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(10))]
+                );
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -519,8 +581,63 @@ mod ordered_staging_tests {
             }
             assert!(!txn.program_multi_relation);
             txn.commit(&mut db, &cx).await.unwrap();
-            assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(
+                db.vertex(VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// Ported from ebabc3ae's `switching_from_independent_groups_never_renumbers_observed_births`
+    /// (lost in d8ce9e90, fgdb-write-ordered-silent-revert-2d80i). Ordinals are now
+    /// database-global, so the observed values are captured, not hard-coded.
+    #[test]
+    fn switching_from_independent_groups_never_renumbers_observed_births() {
+        let ((), report) = run_async_under_lab(0x6f74_0008, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = seeded(&cx).await;
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut first = WriteBatch::new(RelationId(9));
+            first.create_vertex(VId(5), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            let mut second = WriteBatch::new(RelationId(2));
+            second.create_vertex(VId(6), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            txn.write_atomic(&mut db, vec![first, second]).unwrap();
+            let birth = |txn: &WriteTxn, db: &Database<MemVfs>, id| {
+                txn.vertex(db, VId(id)).unwrap().unwrap().birth_ordinal
+            };
+            let births = [birth(&txn, &db, 5), birth(&txn, &db, 6)];
+            assert!(
+                births[1] < births[0],
+                "independent groups stage in relation order: {births:?}"
+            );
+            let saved = txn.staged_effect_digest().unwrap();
+            txn.savepoint(&db, "independent").unwrap();
+            let mut suffix = WriteBatch::new(RelationId(1));
+            suffix.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(3)));
+            suffix.add_edge(EId(50), VId(5), VId(6), vec![]);
+            txn.write_ordered(&mut db, vec![suffix.clone()]).unwrap();
+            assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
+            txn.rollback_to_savepoint(&db, "independent").unwrap();
+            assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+            assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
+            txn.write_ordered(&mut db, vec![suffix]).unwrap();
+            let mut later = WriteBatch::new(RelationId(9));
+            later.create_vertex(VId(7), vec![], vec![]);
+            txn.write(&mut db, later).unwrap();
+            let seventh = birth(&txn, &db, 7);
+            assert!(
+                seventh > births[0].max(births[1]),
+                "a fresh birth is never reused"
+            );
+            assert_eq!([birth(&txn, &db, 5), birth(&txn, &db, 6)], births);
+            txn.commit(&mut db, &cx).await.unwrap();
+            for (id, expected) in [(5, births[0]), (6, births[1]), (7, seventh)] {
+                assert_eq!(db.vertex(VId(id)).unwrap().unwrap().birth_ordinal, expected);
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
