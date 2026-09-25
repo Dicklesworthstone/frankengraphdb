@@ -259,6 +259,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
             assert!(
+                // ubs:ignore -- test assertion on a limit dimension, not secret material.
                 matches!(cursor.next(), Some(Err(QueryError::Authorization(Error::LimitExceeded(actual)))) if actual == dimension)
             );
             assert_eq!(cursor.state(), VertexScanState::Failed);
@@ -585,6 +586,7 @@ fn exact_signed_work_is_cumulative_through_eof_not_refreshed_for_each_row() {
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(3, 19));
+            // ubs:ignore -- test comparison of two limit values, not secret material.
             if limit == work {
                 assert!(cursor.next().is_none());
             } else {

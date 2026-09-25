@@ -249,6 +249,7 @@ impl FnxSignatureRegistry {
         SIGNATURES
     }
     pub fn lookup(name: &str) -> Option<&'static FnxSignature> {
+        // ubs:ignore -- public procedure-signature names, not secret material.
         SIGNATURES.iter().find(|signature| signature.name == name)
     }
 }
@@ -448,6 +449,7 @@ impl FnxCallSpec {
         let signature = SIGNATURES
             .iter()
             .find(|signature| {
+                // ubs:ignore -- public procedure-signature names, not secret material.
                 namespace == "fnx" && signature.name.strip_prefix("fnx.") == Some(procedure)
             })
             .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownProcedure))?;
@@ -559,6 +561,7 @@ impl FnxCallSpec {
                         .outputs
                         .iter()
                         .copied()
+                        // ubs:ignore -- public YIELD field names, not secret material.
                         .find(|field| field.name() == name)
                         .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownYield))?;
                     let alias = if parser.keyword("AS") {
@@ -568,6 +571,7 @@ impl FnxCallSpec {
                     };
                     if outputs
                         .iter()
+                        // ubs:ignore -- public YIELD field names and aliases, not secret material.
                         .any(|column| column.field == field || column.name == alias)
                     {
                         return Err(parser.error(FnxBindErrorKind::DuplicateYield));

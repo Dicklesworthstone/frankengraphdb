@@ -170,6 +170,7 @@ fn refused(result: Result<Vec<GraphHybridHit>, SearchError>, expected: Error) {
     assert!(
         matches!(
             &result,
+            // ubs:ignore -- test assertion on an authorization error value, not secret material.
             Err(ReadError::Interrupted(QueryError::Authorization(error))) if *error == expected
         ),
         "expected {expected:?}, got {result:?}"

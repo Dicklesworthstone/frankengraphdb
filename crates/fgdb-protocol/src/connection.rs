@@ -123,6 +123,7 @@ impl Connection {
         let legal = match header.kind {
             FrameKind::Hello => self.phase == Phase::TransportEstablished,
             FrameKind::Auth => self.phase == Phase::VersionNegotiated,
+            // ubs:ignore -- connection-phase enum state, not secret material.
             FrameKind::SelectDatabase => self.phase == Phase::Authenticated,
             FrameKind::AuthRefresh => matches!(self.phase, Phase::Authenticated | Phase::Ready),
             FrameKind::Prepare | FrameKind::Execute => self.phase == Phase::Ready,
@@ -191,6 +192,8 @@ impl Connection {
         if self.phase != Phase::Authenticated {
             return Err(ProtocolError::InvalidState);
         }
+        // Checks the host-built ReadyBinding against this connection's own session.
+        // ubs:ignore -- SessionBinding is a transcript binding, not a bearer credential.
         if self.binding != Binding::Session(ready.session) {
             return Err(ProtocolError::InvalidBinding);
         }

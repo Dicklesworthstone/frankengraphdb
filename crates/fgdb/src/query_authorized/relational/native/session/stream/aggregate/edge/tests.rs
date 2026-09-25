@@ -602,6 +602,7 @@ fn aggregate_edge_error_translation_keeps_terminal_and_arithmetic_causes() {
         Denied::LimitExceeded(LimitDimension::Nodes),
     ] {
         assert!(
+            // ubs:ignore -- test assertion on an authorization error value, not secret material.
             matches!(error(GqlQueryError::Source(GraphAggregateError::Source(EdgeScanError::Source(QueryError::Authorization(cause))))),QueryError::Authorization(actual) if actual==cause)
         );
     }

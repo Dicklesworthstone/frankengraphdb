@@ -1308,10 +1308,32 @@ run_ubs() {
 # - Retired rules (transmute, JWT decode, Security-sensitive non-crypto randomness) no longer reported
 # Test harmonization re-pin (2026-09-22):
 # - panic!/unreachable!/todo!/unimplemented! updated to 526 (added test assertion panics in streaming aggregations, fold, and standing queries)
+# fgdb-l9vc0 re-pin (2026-09-24, UBS v5.4.9, regex mode, 1,590 tracked files):
+# Tool control: today's ubs over 5259fb3b (the 526 commit) reproduces 3/16/526
+# exactly (Critical 545), so every move below is the tree, not the tool.
+# Attribution is a same-tool subset differential over the 405 .rs files
+# changed since 5259fb3b, plus the 16 renamed-away base paths, reconciling
+# exactly: 429 unchanged + 273 + 36 = 738.
+# - panic! 526 -> 738 (+212). Changed test-only files (_tests.rs, tests.rs,
+#   non-root tests/ modules): 67 -> 273. Changed library files: 12 -> 36,
+#   where each of the 24 added sites sits in a #[cfg(test)] module tail
+#   (e.g. sealed_execute.rs 5, fgdb-cli scrub.rs 3, strata buffer.rs 2). The
+#   renamed-away base paths held 18. Zero new production panic surface.
+# - Command::new 3 -> 1. df4f553f removed the retired fgdb-binary invocation
+#   from embedded_query_diagnostics.rs (-2). cli_fuzz_contract.rs moved to
+#   fgdb-cli/tests unchanged (4dc0b7fc).
+# - Secret/token comparisons stay 16. The 22 new hits since 5259fb3b were
+#   each read and adjudicated at the site with a reasoned ubs:ignore: public
+#   names, enum state, error values, vertex ids, SECRET used as a property
+#   KEY, and fgdb-protocol's SessionBinding (a transcript binding, not a
+#   bearer credential). None compares a MAC, tag, token or key. The remaining
+#   16 are exactly the 5259fb3b sites.
+# - Hardcoded secrets (new class, 1): resident_tests.rs's leak sentinel
+#   string, adjudicated with ubs:ignore at the site, so the class reports 0.
 UBS_CRITICAL_BASELINE=(
-  "Command::new executable from untrusted-looking value=3"
+  "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=526"
+  "panic!/unreachable!/todo!/unimplemented!=738"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1323,10 +1345,14 @@ UBS_CRITICAL_BASELINE=(
 # exact-equality table and `ubs_critical_ratchet` selects by the mode line ubs
 # itself prints ("ast-grep available" → AST table; otherwise the regex table
 # above). Both tables fail closed on any increase, decrease, or unknown class.
+# fgdb-l9vc0: UBS v5.4.9's Rust path never prints "ast-grep available" (the
+# string occurs only in its Java scanner). The mode is not selected even with
+# ast-grep on PATH, so this table is unreachable with the installed tool. It
+# is kept equal to the measured regex table, not independently measured.
 UBS_CRITICAL_BASELINE_ASTGREP=(
-  "Command::new executable from untrusted-looking value=3"
+  "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=526"
+  "panic!/unreachable!/todo!/unimplemented!=738"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new

@@ -659,6 +659,7 @@ fn error_translation_preserves_terminal_credentials_and_native_fault_variants() 
         let native = GqlQueryError::Source(GraphAggregateError::Source(VertexScanError::Source(
             QueryError::Authorization(cause),
         )));
+        // ubs:ignore -- test assertion on an authorization error value, not secret material.
         assert!(matches!(error(native),QueryError::Authorization(actual) if actual==cause));
     }
     assert!(matches!(

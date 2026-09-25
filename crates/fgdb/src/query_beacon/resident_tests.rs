@@ -255,6 +255,7 @@ fn retained_construction_admits_explicit_lanes_without_changing_one_shot_lane_el
             resident.search(&query, vector_query(), ReadPolicy::default()),
             Err(Error::Index(BeaconError::Disabled("vector")))
         ));
+        // ubs:ignore -- a sentinel document string this test proves never reaches Debug output.
         let secret = "private_projection_sentinel";
         db.write(&commit, document(2, secret, 1, 0)).await.unwrap();
         let next = db.prepare_beacon_index(&query, &definition).unwrap();

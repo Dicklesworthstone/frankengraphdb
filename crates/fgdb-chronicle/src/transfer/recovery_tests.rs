@@ -120,6 +120,7 @@ impl Fixture {
             let image = encoder.try_repair_symbol(esi).unwrap();
             assert!(image[2..].iter().all(|value| *value == 0));
             let signature = [image[0], image[1]];
+            // ubs:ignore -- two repair-symbol bytes in a rank test, not authentication material.
             if signature == [0, 0] {
                 continue;
             }

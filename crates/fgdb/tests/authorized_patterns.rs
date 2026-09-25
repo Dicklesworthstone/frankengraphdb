@@ -446,6 +446,7 @@ fn signed_nodes_work_and_rows_and_native_limits_are_independent_fail_closed_boun
             let denied = token.attenuate(restriction).unwrap();
             assert!(
                 matches!(db.execute_graph_pattern_authorized(&cx, &issuer, &denied, BRANCH, &p, policy(), || 100),
+                // ubs:ignore -- test assertion on a limit dimension, not secret material.
                 Err(QueryError::Authorization(Error::LimitExceeded(actual))) if actual == dimension)
             );
         }

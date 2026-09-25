@@ -205,8 +205,10 @@ fn historical_cuts_and_all_enabled_lanes_are_validated_at_preparation() {
         assert_eq!(old.source_sequence(), at);
         assert_eq!(current.source_sequence(), db.frontier().unwrap());
         let rows = session.search_beacon_index(&c.query(), &old, queries()[2], ReadPolicy::default()).unwrap();
+        // ubs:ignore -- test assertion on a vertex id, not secret material.
         assert!(matches!(rows, Rows::Vector(ref hits) if hits.iter().any(|hit| hit.id == VId(1))));
         let rows = session.search_beacon_index(&c.query(), &current, queries()[2], ReadPolicy::default()).unwrap();
+        // ubs:ignore -- test assertion on a vertex id, not secret material.
         assert!(matches!(rows, Rows::Vector(ref hits) if hits.iter().all(|hit| hit.id != VId(1))));
         let mut invalid = options();
         invalid.projection.vector.push(SECRET);

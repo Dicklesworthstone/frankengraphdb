@@ -124,6 +124,7 @@ fn scoped_session_uses_the_native_three_lane_result_in_every_direction() {
             }
         }
         let rows = session.beacon_search_graph(&c.query(), &options(), query(), expansion(&[VId(1)])).unwrap();
+        // ubs:ignore -- test lookup by vertex id, not secret material.
         let graph_only = rows.iter().find(|hit| hit.id == VId(4)).unwrap();
         assert_eq!(graph_only.graph_hops, Some(3));
         assert_eq!(graph_only.vector_rank, None);

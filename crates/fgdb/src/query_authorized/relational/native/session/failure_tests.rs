@@ -54,6 +54,7 @@ pub(super) async fn database(cx: &CommitCx) -> Database<MemVfs> {
     db
 }
 pub(super) fn refusal<T>(result: Result<T, QueryError>, expected: AuthorizationError) {
+    // ubs:ignore -- test assertion on an authorization error value, not secret material.
     assert!(matches!(result, Err(QueryError::Authorization(actual)) if actual == expected));
 }
 

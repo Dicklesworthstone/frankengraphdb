@@ -172,6 +172,7 @@ fn read(
 }
 fn authorization(error: Failure, expected: Error) {
     assert!(
+        // ubs:ignore -- test assertion on an authorization error value, not secret material.
         matches!(error, FnxReadError::Cancelled(QueryError::Authorization(actual)) if actual == expected)
     );
 }

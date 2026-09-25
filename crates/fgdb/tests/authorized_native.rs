@@ -301,6 +301,7 @@ fn historical_aggregate_scope_and_exact_delivery_limits_survive_compaction() {
             let denied = issuer.issue_at(&denied, 100).unwrap();
             assert!(
                 matches!(db.execute_graph_aggregate_authorized(&cx, &issuer, &denied, BRANCH, &query, policy(), || 100),
+                // ubs:ignore -- test assertion on a limit dimension, not secret material.
                 Err(QueryError::Authorization(Error::LimitExceeded(actual))) if actual == dimension)
             );
         }
@@ -717,6 +718,7 @@ fn authentication_precedes_text_catalog_and_future_cut_admission() {
                 assert!(
                     matches!(db.query_authorized(&cx, authority, token, BRANCH, text,
                     &GqlParameters::new(), |_, _: &str| -> Option<GraphSymbol> { panic!("unauthenticated catalog access") },
+                    // ubs:ignore -- test assertion on an authorization error value, not secret material.
                     policy(), || now), Err(QueryError::Authorization(actual)) if actual == error)
                 );
             }

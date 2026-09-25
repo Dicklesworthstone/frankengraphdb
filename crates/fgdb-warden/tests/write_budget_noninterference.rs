@@ -378,15 +378,18 @@ fn hidden_fields_remain_exactly_validated_and_cannot_be_changed_or_deleted() {
     changed
         .properties
         .iter_mut()
+        // ubs:ignore -- SECRET is a hidden property KEY in this fixture, not secret material.
         .find(|(key, _)| *key == SECRET)
         .unwrap()
         .1 = CanonicalScalar::Int(9);
     let mut removed = original.clone();
+    // ubs:ignore -- SECRET is a hidden property KEY in this fixture, not secret material.
     removed.properties.retain(|(key, _)| *key != SECRET);
     let mut duplicate = original.clone();
     let at = duplicate
         .properties
         .iter()
+        // ubs:ignore -- SECRET is a hidden property KEY in this fixture, not secret material.
         .position(|(key, _)| *key == SECRET)
         .unwrap();
     duplicate
