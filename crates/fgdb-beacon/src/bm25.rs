@@ -1,9 +1,14 @@
 use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Arc;
 
 use fgdb_types::VId;
 
 use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
+
+#[cfg(test)]
+#[path = "bm25/phrase_tests.rs"]
+mod phrase_tests;
 
 /// SimpleUnicodeV1: maximal alphanumeric runs, Unicode lowercase, no stemming,
 /// stop-word removal, or normalization. Unicode tables follow the pinned Rust
@@ -68,13 +73,8 @@ impl Bm25Config {
         &self,
         query: &str,
         work: &mut dyn WorkControl,
-    ) -> Result<Vec<String>, BeaconError> {
-        Ok(
-            analyze(query, self.max_query_bytes, self.max_query_terms, work)?
-                .frequencies
-                .into_keys()
-                .collect(),
-        )
+    ) -> Result<AnalyzedText, BeaconError> {
+        analyze(query, self.max_query_bytes, self.max_query_terms, work)
     }
 }
 
@@ -82,6 +82,11 @@ impl Bm25Config {
 pub enum TextMatch {
     Any,
     All,
+    /// An exact, contiguous sequence of SimpleUnicodeV1 tokens. Order and
+    /// repeated terms matter; punctuation separates tokens, not phrases.
+    /// Empty analyzed queries match nothing. Matching documents retain the
+    /// ordinary distinct-term BM25 score: no phrase bonus or new scorer.
+    Phrase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,7 +105,9 @@ pub struct Bm25Stats {
 
 #[derive(Clone)]
 pub(crate) struct AnalyzedText {
-    pub frequencies: BTreeMap<String, u32>,
+    // One positional list per term; its length is the term frequency. Lists
+    // are shared by the stored document and all segment/compaction views.
+    pub frequencies: BTreeMap<String, Arc<Vec<u64>>>,
     pub length: u64,
     pub source_bytes: usize,
 }
@@ -132,10 +139,10 @@ fn analyze(
                 token.push(lower);
             }
         } else {
-            finish_token(&mut result, &mut token, term_limit)?;
+            finish_token(&mut result, &mut token, term_limit, work)?;
         }
     }
-    finish_token(&mut result, &mut token, term_limit)?;
+    finish_token(&mut result, &mut token, term_limit, work)?;
     Ok(result)
 }
 
@@ -143,6 +150,7 @@ fn finish_token(
     result: &mut AnalyzedText,
     token: &mut String,
     limit: usize,
+    work: &mut dyn WorkControl,
 ) -> Result<(), BeaconError> {
     if token.is_empty() {
         return Ok(());
@@ -153,15 +161,33 @@ fn finish_token(
             limit,
         });
     }
-    let frequency = result.frequencies.entry(std::mem::take(token)).or_default();
-    *frequency = frequency.checked_add(1).ok_or(BeaconError::ResourceLimit {
-        resource: "term frequency",
-        limit: u32::MAX as usize,
-    })?;
-    result.length = result
+    work.charge(1)?;
+    let next_length = result
         .length
         .checked_add(1)
         .ok_or(BeaconError::Invariant("token count overflow"))?;
+    let positions = result.frequencies.entry(std::mem::take(token)).or_default();
+    // Analysis owns these lists exclusively. Never copy a previously shared
+    // posting behind a caller's work meter.
+    let positions = Arc::get_mut(positions)
+        .ok_or(BeaconError::Invariant("shared posting during analysis"))?;
+    if positions.len() == u32::MAX as usize {
+        return Err(BeaconError::ResourceLimit {
+            resource: "term frequency",
+            limit: u32::MAX as usize,
+        });
+    }
+    // There cannot be more tokens than input bytes. Existing per-document,
+    // query and live/staged text-byte limits therefore also bound the number
+    // of retained u64 positions, including repeated terms. They are NOT RSS
+    // limits: positional storage adds up to one u64 per input token plus
+    // vector capacity/metadata, and retained old generations remain live.
+    positions.try_reserve(1).map_err(|_| BeaconError::ResourceLimit {
+        resource: "token position allocation",
+        limit: result.source_bytes,
+    })?;
+    positions.push(result.length);
+    result.length = next_length;
     Ok(())
 }
 
@@ -263,7 +289,7 @@ impl CorpusStats {
 
 #[derive(Clone, Default)]
 pub(crate) struct TextSegment {
-    postings: BTreeMap<String, BTreeMap<VId, u32>>,
+    postings: BTreeMap<String, BTreeMap<VId, Arc<Vec<u64>>>>,
     lengths: BTreeMap<VId, u64>,
 }
 
@@ -278,24 +304,27 @@ impl TextSegment {
             if segment.lengths.insert(id, text.length).is_some() {
                 return Err(BeaconError::DuplicateVertex(id));
             }
-            for (term, &frequency) in &text.frequencies {
+            for (term, positions) in &text.frequencies {
                 work.charge(term.len().saturating_add(1))?;
                 segment
                     .postings
                     .entry(term.clone())
                     .or_default()
-                    .insert(id, frequency);
+                    .insert(id, Arc::clone(positions));
             }
         }
         Ok(segment)
     }
 
-    /// Document-at-a-time merge: auxiliary query memory is O(terms + k), not
-    /// O(matching documents). Only eligible postings contribute to the bounded
-    /// heap, and each document's terms are accumulated in lexical term order.
+    /// Document-at-a-time merge: auxiliary merge memory is O(unique terms + k),
+    /// not O(matching documents); the analyzed query also retains its bounded
+    /// token offsets. Only eligible postings contribute to the bounded heap,
+    /// and each document's terms are accumulated in lexical term order.
+    /// Phrase admission precedes top-k, so non-phrase hits cannot hide a lower
+    /// scoring phrase. Position checks happen only for the selected generation.
     pub fn search_into(
         &self,
-        terms: &[String],
+        query: &AnalyzedText,
         mode: TextMatch,
         config: &Bm25Config,
         corpus: &CorpusStats,
@@ -304,11 +333,12 @@ impl TextSegment {
         best: &mut BinaryHeap<Ranked>,
         work: &mut dyn WorkControl,
     ) -> Result<(), BeaconError> {
+        let terms = &query.frequencies;
         if limit == 0 || terms.is_empty() || corpus.documents == 0 || corpus.total_length == 0 {
             return Ok(());
         }
         let mut streams = Vec::new();
-        for term in terms {
+        for term in terms.keys() {
             work.charge(1)?;
             let df = corpus.frequencies.get(term).copied().unwrap_or(0);
             if df > corpus.documents {
@@ -319,11 +349,18 @@ impl TextSegment {
                     let idf = ((corpus.documents - df) as f64 + 0.5) / (df as f64 + 0.5);
                     streams.push((idf.ln_1p(), postings.iter().peekable()));
                 }
-                _ if mode == TextMatch::All => return Ok(()),
+                _ if mode != TextMatch::Any => return Ok(()),
                 _ => {}
             }
         }
         let average_length = corpus.total_length as f64 / corpus.documents as f64;
+        let mut positions = Vec::new();
+        if mode == TextMatch::Phrase {
+            work.charge(terms.len())?;
+            positions.try_reserve_exact(terms.len()).map_err(|_| BeaconError::ResourceLimit {
+                resource: "phrase posting references", limit: terms.len(),
+            })?;
+        }
         loop {
             work.charge(streams.len().saturating_add(1))?;
             let Some(id) = streams
@@ -341,18 +378,29 @@ impl TextSegment {
             let length_norm = 1.0 - config.b + config.b * length as f64 / average_length;
             let mut matches = 0;
             let mut score = 0.0;
+            positions.clear();
             for (idf, stream) in &mut streams {
                 if stream.peek().is_some_and(|(next, _)| **next == id) {
-                    let (_, frequency) = stream
+                    let (_, posting) = stream
                         .next()
                         .ok_or(BeaconError::Invariant("posting cursor disappeared"))?;
                     matches += 1;
                     if visible {
-                        score += *idf * saturation(config.k1, length_norm, f64::from(*frequency));
+                        // Analysis limits each frequency to u32::MAX, exactly
+                        // representable in f64 as in the count-only kernel.
+                        score += *idf * saturation(config.k1, length_norm, posting.len() as f64);
+                        if mode == TextMatch::Phrase {
+                            positions.push(posting.as_slice());
+                        }
                     }
                 }
             }
             if visible && (mode == TextMatch::Any || matches == terms.len()) {
+                if mode == TextMatch::Phrase
+                    && !phrase_matches(query, &positions, length, work)?
+                {
+                    continue;
+                }
                 if !score.is_finite() {
                     return Err(BeaconError::Invariant("non-finite BM25 score"));
                 }
@@ -369,6 +417,68 @@ impl TextSegment {
         }
         Ok(())
     }
+}
+
+/// Anchor on the rarest term in THIS document, not necessarily the first
+/// phrase term. Every actual occurrence of that anchor supplies one possible
+/// phrase start; all query offsets (including repetitions) must then exist.
+/// This uses no candidate-start set and never rescans/tokenizes source text.
+fn phrase_matches(
+    query: &AnalyzedText,
+    postings: &[&[u64]],
+    document_length: u64,
+    work: &mut dyn WorkControl,
+) -> Result<bool, BeaconError> {
+    work.charge(1)?;
+    if query.length == 0 || query.length > document_length {
+        return Ok(false);
+    }
+    if postings.len() != query.frequencies.len() {
+        return Err(BeaconError::Invariant("phrase posting arity"));
+    }
+    let mut anchor = None;
+    for (query_positions, &document_positions) in query.frequencies.values().zip(postings) {
+        work.charge(1)?;
+        let Some(&offset) = query_positions.first() else {
+            return Err(BeaconError::Invariant("empty query posting"));
+        };
+        if anchor.is_none_or(|(_, best): (u64, &[u64])| document_positions.len() < best.len()) {
+            anchor = Some((offset, document_positions));
+        }
+    }
+    let Some((offset, candidates)) = anchor else {
+        return Ok(false);
+    };
+    'candidate: for &position in candidates {
+        work.charge(1)?;
+        let Some(start) = position.checked_sub(offset) else { continue };
+        if start > document_length - query.length {
+            continue;
+        }
+        for (query_positions, &document_positions) in query.frequencies.values().zip(postings) {
+            for &offset in query_positions.iter() {
+                // The prior length check and analyzer offsets prove addition
+                // cannot overflow. Each binary-search comparison has a gate.
+                let wanted = start + offset;
+                let (mut low, mut high) = (0, document_positions.len());
+                while low < high {
+                    work.charge(1)?;
+                    let middle = low + (high - low) / 2;
+                    if document_positions[middle] < wanted {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                work.charge(1)?;
+                if document_positions.get(low) != Some(&wanted) {
+                    continue 'candidate;
+                }
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn saturation(k1: f64, length_norm: f64, tf: f64) -> f64 {
