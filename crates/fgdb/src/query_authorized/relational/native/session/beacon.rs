@@ -11,6 +11,10 @@ use fgdb_types::{CommitSeq, QueryCx};
 use fgdb_warden::{Error as WardenError, LimitDimension, PlannerPredicates};
 use std::cell::RefCell;
 
+#[path = "beacon/prepared.rs"]
+mod prepared;
+pub use prepared::AuthorizedBeaconIndex;
+
 type Error = SearchError<ReadError, QueryError>;
 
 #[cfg(test)]
