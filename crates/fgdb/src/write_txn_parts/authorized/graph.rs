@@ -226,6 +226,16 @@ pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
     let PendingRow::DeleteVertex { vid, .. } = &row else {
         return Err(WriteTxnError::AuthorizedMutationRefused);
     };
+    // FG-INV-20 (fgdb-4iiho, owner ruling 2026-09-25): a vertex delete erases
+    // every label and property and cascades to every incident edge. If the
+    // capability could hide any of them, the outcome would reveal whether
+    // hidden fields or incidence exist (or destroy data the holder cannot
+    // observe). Such a capability is refused here, before any read or charge,
+    // so the refusal depends on the capability alone, never on the data.
+    let predicates = execution.permit.predicates();
+    if !(predicates.sees_all_incidence() && predicates.sees_all_fields()) {
+        return Err(denied());
+    }
     let vid = *vid;
     let before = execution
         .vertex(transaction, database, vid)?

@@ -72,6 +72,52 @@ fn issue_roundtrip_and_verify() {
     assert_eq!(predicates.limits(), grant().limits);
 }
 
+/// fgdb-4iiho: whole-element and cascading write decisions ask the capability,
+/// never the data. Only a capability with no relation scope and no label
+/// clause sees all incidence; only one with no label clause, no property scope
+/// and no property denial sees all fields. Attenuation can only take either
+/// away, and an unrelated restriction keeps both.
+#[test]
+fn whole_element_visibility_is_a_property_of_the_capability() {
+    let authority = authority();
+    let mut total = grant();
+    total.labels = Scope::All;
+    total.relations = Scope::All;
+    total.properties = Scope::All;
+    let token = authority.issue_at(&total, START).unwrap();
+    let verified = authority.verify_at(&token, BRANCH, START).unwrap();
+    assert!(verified.predicates().sees_all_incidence());
+    assert!(verified.predicates().sees_all_fields());
+    for (restriction, incidence, fields) in [
+        (
+            Restriction::Relations(Scope::only([RelationId(10)])),
+            false,
+            true,
+        ),
+        (Restriction::Labels(Scope::only([LabelId(1)])), false, false),
+        (
+            Restriction::Properties(Scope::only([PropertyKeyId(100)])),
+            true,
+            false,
+        ),
+        (
+            Restriction::DenyProperties(BTreeSet::from([PropertyKeyId(100)])),
+            true,
+            false,
+        ),
+        (Restriction::MaxWork(1), true, true),
+    ] {
+        let child = token.attenuate(restriction).unwrap();
+        let verified = authority.verify_at(&child, BRANCH, START).unwrap();
+        assert_eq!(verified.predicates().sees_all_incidence(), incidence);
+        assert_eq!(verified.predicates().sees_all_fields(), fields);
+    }
+    let scoped = authority.issue_at(&grant(), START).unwrap();
+    let verified = authority.verify_at(&scoped, BRANCH, START).unwrap();
+    assert!(!verified.predicates().sees_all_incidence());
+    assert!(!verified.predicates().sees_all_fields());
+}
+
 #[test]
 fn least_privilege_constructor_denies_all_objects() {
     let authority = authority();

@@ -91,6 +91,26 @@ impl PlannerPredicates {
             && self.allows_vertex(destination_labels)
     }
 
+    /// Whether every incident edge of a visible vertex is visible: there is no
+    /// relation scope and no label clause that could hide an edge or its other
+    /// endpoint. A decision that depends on complete incidence, such as a
+    /// cascading vertex delete, must require this up front so that its refusal
+    /// depends on the capability alone, never on hidden data (fgdb-4iiho).
+    #[must_use]
+    pub fn sees_all_incidence(&self) -> bool {
+        self.label_clauses.is_empty() && matches!(self.relations, Scope::All)
+    }
+
+    /// Whether every label and property of a visible element is visible, so an
+    /// operation that erases the whole element cannot erase or reveal fields
+    /// the capability cannot observe.
+    #[must_use]
+    pub fn sees_all_fields(&self) -> bool {
+        self.label_clauses.is_empty()
+            && matches!(self.properties, Scope::All)
+            && self.denied_properties.is_empty()
+    }
+
     pub(crate) fn check_at(&self, branch: &str, now_ms: u64) -> Result<(), Error> {
         if branch != self.branch {
             return Err(Error::ScopeDenied);

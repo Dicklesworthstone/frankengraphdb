@@ -60,17 +60,32 @@ fn vertex_delete_authorizes_and_removes_all_prefix_incidence() {
             .await
             .unwrap();
         let authority = issuer(NAMESPACE);
-        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let token = authority.issue_at(&total_grant(), NOW).unwrap();
         let baseline = txn.outstanding_obligations();
-        let mut batch = WriteBatch::new(R);
-        for vid in [VId(1), VId(2), VId(3)] {
-            batch.create_vertex(vid, vec![L], vec![]);
-        }
-        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
-        batch.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(1))]);
-        batch.add_edge(EId(12), VId(2), VId(2), vec![]);
-        batch.add_edge(EId(13), VId(1), VId(3), vec![]);
-        batch.delete_vertex(VId(2));
+        let batch = || {
+            let mut batch = WriteBatch::new(R);
+            for vid in [VId(1), VId(2), VId(3)] {
+                batch.create_vertex(vid, vec![L], vec![]);
+            }
+            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+            batch.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(1))]);
+            batch.add_edge(EId(12), VId(2), VId(2), vec![]);
+            batch.add_edge(EId(13), VId(1), VId(3), vec![]);
+            batch.delete_vertex(VId(2));
+            batch
+        };
+        // A scoped capability may not delete vertices at all (fgdb-4iiho),
+        // even when everything the batch touches is visible to it.
+        let scoped = authority.issue_at(&grant(), NOW).unwrap();
+        let frontier = db.frontier().unwrap();
+        assert!(matches!(
+            db.write_authorized(&txn, &cx, &authority, &scoped, BRANCH, batch(), || NOW)
+                .await,
+            Err(WriteTxnError::Authorization(Error::ScopeDenied))
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.outstanding_obligations(), baseline);
+        let batch = batch();
         let seq = db
             .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
             .await
@@ -127,9 +142,7 @@ fn hidden_relation_in_a_cascade_refuses_the_whole_batch() {
             assert!(db.edge_at(eid, frontier).unwrap().is_some());
         }
         assert_eq!(txn.outstanding_obligations(), baseline);
-        let mut all = grant();
-        all.relations = Scope::All;
-        let token = authority.issue_at(&all, NOW).unwrap();
+        let token = authority.issue_at(&total_grant(), NOW).unwrap();
         let mut delete = WriteBatch::new(R);
         delete.delete_vertex(VId(1));
         let seq = db
@@ -214,7 +227,10 @@ fn ignored_ensure_alias_cannot_capture_an_unrelated_hidden_edge() {
         );
         db.write(&cx, hidden).await.unwrap();
         let authority = issuer(NAMESPACE);
-        let token = authority.issue_at(&grant(), NOW).unwrap();
+        // Vertex deletion needs a capability that hides nothing (fgdb-4iiho),
+        // so edge 99 is visible here; it is still unrelated to vertex 1, and
+        // its original record, not the ignored ensure spelling, decides that.
+        let token = authority.issue_at(&total_grant(), NOW).unwrap();
         let mut batch = WriteBatch::new(R);
         batch.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![(P, CanonicalScalar::Int(55))]);
         batch.delete_vertex(VId(1));
@@ -356,6 +372,121 @@ fn ensure_edge_threshold_cannot_count_hidden_incident_edges() {
                 thresholds[0], thresholds[1],
                 "alias={alias}: MaxWork threshold moved with hidden incident edges"
             );
+        }
+    });
+}
+
+/// Visible vertices 1 and 2 joined by an R edge, plus one kind of data around
+/// vertex 1 that a scoped capability cannot see. Variant 0 adds nothing; 1 a
+/// hidden-relation edge; 2 an R edge to a hidden vertex; 3 a hidden property
+/// on vertex 1; 4 a hidden label on vertex 1; 5 a hidden property on the
+/// cascaded R edge.
+async fn delete_fixture(cx: &fgdb_types::CommitCx, hidden: u8) -> Database<fgdb::MemVfs> {
+    let mut db = Database::open_memory(cx, keys()).await.unwrap();
+    let mut batch = WriteBatch::new(R);
+    let labels = if hidden == 4 {
+        vec![L, HIDDEN]
+    } else {
+        vec![L]
+    };
+    let secret = |variant| {
+        if hidden == variant {
+            vec![(SECRET, CanonicalScalar::Int(9))]
+        } else {
+            vec![]
+        }
+    };
+    batch.create_vertex(VId(1), labels, secret(3));
+    batch.create_vertex(VId(2), vec![L], vec![]);
+    batch.add_edge(EId(10), VId(1), VId(2), secret(5));
+    if hidden == 2 {
+        batch.create_vertex(VId(3), vec![HIDDEN], vec![]);
+        batch.add_edge(EId(11), VId(1), VId(3), vec![]);
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden == 1 {
+        let mut other = WriteBatch::new(RelationId(2));
+        other.add_edge(EId(20), VId(2), VId(1), vec![]);
+        db.write(cx, other).await.unwrap();
+    }
+    db
+}
+
+/// FG-INV-20 on the write path (fgdb-4iiho item 2, owner ruling 2026-09-25).
+/// Deleting a visible vertex must not reveal whether it has hidden incidence
+/// (a hidden-relation edge, an edge to a hidden vertex) or hidden fields (a
+/// hidden label or property on it or on a cascaded edge). Each capability has
+/// ONE outcome across every database variant: one that could hide anything is
+/// refused in all of them, and one that hides nothing deletes the vertex and
+/// its whole incidence in all of them.
+#[test]
+fn vertex_delete_outcome_depends_only_on_the_capability() {
+    use fgdb_warden::Restriction;
+    under_lab(0xa9a2, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let authority = issuer(NAMESPACE);
+        let total = authority.issue_at(&total_grant(), NOW).unwrap();
+        let narrow = |restriction| total.attenuate(restriction).unwrap();
+        let scoped = [
+            (
+                "relations",
+                narrow(Restriction::Relations(Scope::only([R]))),
+            ),
+            ("labels", narrow(Restriction::Labels(Scope::only([L])))),
+            (
+                "properties",
+                narrow(Restriction::Properties(Scope::only([P]))),
+            ),
+            (
+                "denied",
+                narrow(Restriction::DenyProperties([SECRET].into_iter().collect())),
+            ),
+            ("grant", authority.issue_at(&grant(), NOW).unwrap()),
+        ];
+        let baseline = txn.outstanding_obligations();
+        for (name, token) in &scoped {
+            for hidden in 0..=5 {
+                let mut db = delete_fixture(&cx, hidden).await;
+                let frontier = db.frontier().unwrap();
+                let mut batch = WriteBatch::new(R);
+                batch.delete_vertex(VId(1));
+                let outcome = db
+                    .write_authorized(&txn, &cx, &authority, token, BRANCH, batch, || NOW)
+                    .await;
+                assert!(
+                    matches!(
+                        outcome,
+                        Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                    ),
+                    "{name} capability, hidden variant {hidden}: {outcome:?}"
+                );
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(1)).unwrap().is_some());
+                assert_eq!(txn.outstanding_obligations(), baseline);
+            }
+        }
+        for hidden in 0..=5 {
+            let mut db = delete_fixture(&cx, hidden).await;
+            let mut batch = WriteBatch::new(R);
+            batch.delete_vertex(VId(1));
+            let outcome = db
+                .write_authorized(&txn, &cx, &authority, &total, BRANCH, batch, || NOW)
+                .await;
+            assert!(
+                outcome.is_ok(),
+                "total capability, variant {hidden}: {outcome:?}"
+            );
+            let seq = outcome.unwrap();
+            assert!(db.vertex(VId(1)).unwrap().is_none());
+            for eid in [EId(10), EId(11), EId(20)] {
+                assert!(
+                    db.edge_at(eid, seq).unwrap().is_none(),
+                    "variant {hidden}: {eid:?} survived"
+                );
+            }
+            assert!(db.vertex(VId(2)).unwrap().is_some());
+            assert_eq!(txn.outstanding_obligations(), baseline);
         }
     });
 }

@@ -250,7 +250,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// Supports every native WriteBatch intent: vertex/edge creation and ensure,
     /// label/property updates, CAS and deletion. Every cascade edge is checked
     /// with both original endpoints; whole-object deletion needs authority over
-    /// every removed field. Missing and hidden non-create targets both refuse
+    /// every removed field. Vertex deletion also needs a capability that hides
+    /// nothing (no relation scope, label clause, property scope or denial) and
+    /// is refused before any observation otherwise, so the refusal cannot reveal
+    /// hidden incidence or fields. Missing and hidden non-create targets both refuse
     /// ScopeDenied, including if-present deletes and removal of absent targets.
     /// The trusted host supplies its current issuer, exact branch routing and a
     /// monotone issuer-epoch clock. Never expose the raw Database or Authority

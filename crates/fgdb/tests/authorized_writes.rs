@@ -49,6 +49,15 @@ fn grant() -> Grant {
         expires_at_ms: 10_000,
     }
 }
+/// The same write grant with nothing hidden: vertex deletion requires it.
+fn total_grant() -> Grant {
+    Grant {
+        labels: Scope::All,
+        relations: Scope::All,
+        properties: Scope::All,
+        ..grant()
+    }
+}
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "fgdb-authorized-writes-{}-{name}",
