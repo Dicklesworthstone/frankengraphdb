@@ -307,6 +307,22 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | `fnx-attribution` |  — all fnx | The attribution tail for the two fnx rows. |
 | `moat-rationale` | The closed-universe constraint, which sounds like an albatross, is the moat: the entire dependency surface is auditable, deterministic under lab, and owned. | Rationale sentence, not an inventory item. Pinned verbatim so this allowance cannot be widened to hide a capability. |
 
+| Workspace lint | Level | Reference | Basis |
+|---|---|---|---|
+| `rust::recursion_depth_exceeding_limit` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 8 sites / 8 files at 2026-09-25. |
+| `clippy::double_must_use` | allow | 088e510f | Toolchain bump: #[must_use] on functions already returning a must_use type; cosmetic. |
+| `clippy::needless_range_loop` | allow | 088e510f | Toolchain bump: index walks over parallel slices by one counter; an iterator rewrite obscures the arithmetic. |
+| `clippy::result_large_err` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 263 sites / 48 files at 2026-09-25. |
+| `clippy::unusual_byte_groupings` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 44 sites / 11 files at 2026-09-25. |
+| `clippy::collapsible_if` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 38 sites / 34 files at 2026-09-25. |
+| `clippy::type_complexity` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25. |
+| `clippy::err_expect` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 30 sites / 9 files at 2026-09-25. |
+| `clippy::unnecessary_mut_passed` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 18 sites / 6 files at 2026-09-25. |
+| `clippy::unnecessary_literal_unwrap` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 15 sites / 3 files at 2026-09-25. |
+| `clippy::manual_is_multiple_of` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 14 sites / 14 files at 2026-09-25. |
+| `clippy::manual_noop_waker` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 21ccbfd7: 13 sites / 13 files at 2026-09-25. |
+| `clippy::too_many_arguments` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 9 sites / 7 files at 2026-09-25. |
+
 ## Ownership vocabulary
 
 | Id | Kind | Title | Crates | Anchor |
@@ -383,5 +399,5 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 
 ## Pins
 
-* `id_table_hash` = `fnv1a64:dfa5456a147b1dc7` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:62c130cf01dd3c93` — every normative decision, prose excluded.
+* `id_table_hash` = `fnv1a64:952fc4a9a07d0500` — every stable id, sorted.
+* `semantic_contract_hash` = `fnv1a64:2a08ab32522f3fdd` — every normative decision, prose excluded.

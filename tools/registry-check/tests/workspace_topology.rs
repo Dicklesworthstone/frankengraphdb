@@ -33,8 +33,9 @@ use registry_check::topology::{
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-// Moved by 1207516b's new fgdb-beacon row (fgdb-topology-seven-crates-9n8ao).
-const ID_TABLE_PIN: &str = "fnv1a64:dfa5456a147b1dc7";
+// Moved by 1207516b's new fgdb-beacon row (fgdb-topology-seven-crates-9n8ao),
+// then by the 13 lint_allowance rows (fgdb-gate-weakening-rollback-mthlh).
+const ID_TABLE_PIN: &str = "fnv1a64:952fc4a9a07d0500";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -50,8 +51,10 @@ const ID_TABLE_PIN: &str = "fnv1a64:dfa5456a147b1dc7";
 // and made the cli posture live without moving either pin. The re-freeze
 // also covers two changes of its own: the posture line now includes
 // `consumes_entries` (0c2a4552 added that law without covering it), and
-// prism-over-fnx joins the required-edge live floor.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:62c130cf01dd3c93";
+// prism-over-fnx joins the required-edge live floor. Then the workspace lint
+// table became a registered contract: 13 lint_allowance (lint, level) lines
+// (fgdb-gate-weakening-rollback-mthlh).
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:2a08ab32522f3fdd";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -693,6 +696,18 @@ fn topology_neg_count_drift() {
 }
 
 #[test]
+fn topology_neg_lint_allowance_level_drift() {
+    // A row that registers a different level than Cargo.toml sets admits
+    // neither: the manifest allow is unregistered and the row is stale.
+    let codes = codes_after(
+        "lint = \"clippy::too_many_arguments\"\nlevel = \"allow\"",
+        "lint = \"clippy::too_many_arguments\"\nlevel = \"warn\"",
+    );
+    assert_reports(&codes, "workspace_lint_unregistered");
+    assert_reports(&codes, "workspace_lint_registration_stale");
+}
+
+#[test]
 fn topology_neg_acyclicity_law_disabled() {
     let codes = codes_after(
         "crate_graph_must_be_acyclic = true",
@@ -733,6 +748,7 @@ fn synthetic_crate(name: &str, deps: &[&str]) -> ScannedCrate {
 fn synthetic_scan(crates: Vec<ScannedCrate>) -> WorkspaceScan {
     WorkspaceScan {
         members: crates.iter().map(|entry| entry.dir.clone()).collect(),
+        workspace_lints: Vec::new(),
         workspace_unsafe_lint: "forbid".to_string(),
         toolchain_channel: "nightly-2026-07-05".to_string(),
         crates,

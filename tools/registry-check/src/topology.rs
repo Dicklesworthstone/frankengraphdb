@@ -122,6 +122,7 @@ pub struct RegistryHeader {
     pub consume_from_count: usize,
     pub design_only_count: usize,
     pub residue_allowance_count: usize,
+    pub lint_allowance_count: usize,
     pub required_dependency_count: usize,
     pub required_dependency_live_floor: Vec<String>,
     pub asset_evidence_gap_count: usize,
@@ -253,6 +254,22 @@ pub struct ResidueAllowance {
     pub reason: String,
 }
 
+/// One `[workspace.lints.<tool>]` entry the registry admits
+/// (fgdb-gate-weakening-rollback-mthlh). Every workspace lint level except
+/// `rust::unsafe_code`, which `workspace_unsafe_lint` governs, needs a row, and
+/// every row needs its manifest entry. A workspace-wide allow therefore cannot
+/// land silently: 89b49d38 added 24 of them to quiet a gate.
+#[derive(Debug, Clone)]
+pub struct LintAllowance {
+    /// `tool::name`, for example `clippy::result_large_err`.
+    pub lint: String,
+    /// The level the manifest sets: allow, warn, deny or forbid.
+    pub level: String,
+    /// The commit or bead that justifies or tracks the entry.
+    pub reference: String,
+    pub basis: String,
+}
+
 /// A consume_from row whose capability the §2.1/§2.2 asset tables do not
 /// enumerate. Registered one row at a time, and checked by ABSENCE: the gap is
 /// only legal while the asset row really is missing.
@@ -289,6 +306,7 @@ pub struct TopologyRegistry {
     pub required_dependencies: Vec<RequiredDependency>,
     pub dependency_narrowings: Vec<DependencyNarrowing>,
     pub residue_allowances: Vec<ResidueAllowance>,
+    pub lint_allowances: Vec<LintAllowance>,
     pub asset_evidence_gaps: Vec<AssetEvidenceGap>,
     pub capabilities: Vec<Capability>,
 }
@@ -428,6 +446,7 @@ fn header_from(table: &Table) -> Result<RegistryHeader, ReadError> {
             "consume_from_count",
             "design_only_count",
             "residue_allowance_count",
+            "lint_allowance_count",
             "required_dependency_count",
             "required_dependency_live_floor",
             "asset_evidence_gap_count",
@@ -463,6 +482,7 @@ fn header_from(table: &Table) -> Result<RegistryHeader, ReadError> {
         consume_from_count: usize_field(table, "consume_from_count", ctx)?,
         design_only_count: usize_field(table, "design_only_count", ctx)?,
         residue_allowance_count: usize_field(table, "residue_allowance_count", ctx)?,
+        lint_allowance_count: usize_field(table, "lint_allowance_count", ctx)?,
         required_dependency_count: usize_field(table, "required_dependency_count", ctx)?,
         required_dependency_live_floor: get_str_array(
             table,
@@ -744,6 +764,17 @@ fn residue_allowance_from(table: &Table, index: usize) -> Result<ResidueAllowanc
     })
 }
 
+fn lint_allowance_from(table: &Table, index: usize) -> Result<LintAllowance, ReadError> {
+    let ctx = format!("workspace_topology.toml.lint_allowance[{index}]");
+    exact_keys(table, &["lint", "level", "reference", "basis"], &ctx)?;
+    Ok(LintAllowance {
+        lint: get_str(table, "lint", &ctx)?,
+        level: get_str(table, "level", &ctx)?,
+        reference: get_str(table, "reference", &ctx)?,
+        basis: get_str(table, "basis", &ctx)?,
+    })
+}
+
 fn asset_evidence_gap_from(table: &Table, index: usize) -> Result<AssetEvidenceGap, ReadError> {
     let ctx = format!("workspace_topology.toml.asset_evidence_gap[{index}]");
     exact_keys(
@@ -801,6 +832,7 @@ pub fn topology_from(root: &Table) -> Result<TopologyRegistry, ReadError> {
             "required_dependency",
             "dependency_narrowing",
             "residue_allowance",
+            "lint_allowance",
             "asset_evidence_gap",
             "capability",
         ],
@@ -820,6 +852,7 @@ pub fn topology_from(root: &Table) -> Result<TopologyRegistry, ReadError> {
         required_dependencies: rows(root, "required_dependency", required_dependency_from)?,
         dependency_narrowings: rows(root, "dependency_narrowing", dependency_narrowing_from)?,
         residue_allowances: rows(root, "residue_allowance", residue_allowance_from)?,
+        lint_allowances: rows(root, "lint_allowance", lint_allowance_from)?,
         asset_evidence_gaps: rows(root, "asset_evidence_gap", asset_evidence_gap_from)?,
         capabilities: rows(root, "capability", capability_from)?,
     })
@@ -926,6 +959,10 @@ pub struct WorkspaceScan {
     /// `[workspace] members`, verbatim and sorted.
     pub members: Vec<String>,
     pub workspace_unsafe_lint: String,
+    /// Every other `[workspace.lints.<tool>]` entry as (`tool::name`, level),
+    /// sorted. A table-form entry is recorded with level `table`, which no
+    /// registry row may admit, so it cannot slip past the law unread.
+    pub workspace_lints: Vec<(String, String)>,
     pub toolchain_channel: String,
     pub crates: Vec<ScannedCrate>,
 }
@@ -1221,6 +1258,28 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
         })
         .unwrap_or_default();
 
+    let mut workspace_lints = Vec::new();
+    if let Some(Value::Table(workspace)) = manifest.get("workspace")
+        && let Some(Value::Table(lints)) = workspace.get("lints")
+    {
+        for (tool, entries) in lints {
+            let Value::Table(entries) = entries else {
+                workspace_lints.push((tool.clone(), "table".to_owned()));
+                continue;
+            };
+            for (name, level) in entries {
+                if tool == "rust" && name == "unsafe_code" {
+                    continue; // governed by workspace_unsafe_lint
+                }
+                let level = match level {
+                    Value::Str(text) => text.clone(),
+                    _ => "table".to_owned(),
+                };
+                workspace_lints.push((format!("{tool}::{name}"), level));
+            }
+        }
+    }
+
     let toolchain_path = root.join("rust-toolchain.toml");
     let toolchain_channel = match fs::read_to_string(&toolchain_path) {
         Ok(text) => parse(&text)
@@ -1307,6 +1366,7 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
     Ok(WorkspaceScan {
         members,
         workspace_unsafe_lint,
+        workspace_lints,
         toolchain_channel,
         crates,
     })
@@ -2114,6 +2174,12 @@ pub fn id_table(registry: &TopologyRegistry) -> Vec<String> {
     );
     ids.extend(
         registry
+            .lint_allowances
+            .iter()
+            .map(|row| format!("lint_allowance:{}", row.lint)),
+    );
+    ids.extend(
+        registry
             .asset_evidence_gaps
             .iter()
             .map(|row| format!("asset_evidence_gap:{}", row.capability_id)),
@@ -2226,6 +2292,9 @@ pub fn recompute_semantic_contract_hash(registry: &TopologyRegistry) -> String {
     }
     for row in &registry.residue_allowances {
         lines.push(format!("allowance|{}|{}", row.id, row.text));
+    }
+    for row in &registry.lint_allowances {
+        lines.push(format!("lint_allowance|{}|{}", row.lint, row.level));
     }
     for row in &registry.asset_evidence_gaps {
         lines.push(format!(
@@ -2352,6 +2421,13 @@ fn validate_header(registry: &TopologyRegistry, violations: &mut Vec<Violation>)
         header.residue_allowance_count,
         registry.residue_allowances.len(),
         "§18.2",
+        violations,
+    );
+    check_count(
+        "lint_allowance_count",
+        header.lint_allowance_count,
+        registry.lint_allowances.len(),
+        "§1 constraint 2",
         violations,
     );
     check_count(
@@ -3367,6 +3443,66 @@ pub fn live_tree_violations(
             ),
         ));
     }
+    // Every workspace lint level is a registered, referenced decision, and
+    // every registered decision is still in the manifest
+    // (fgdb-gate-weakening-rollback-mthlh).
+    for (lint, level) in &scan.workspace_lints {
+        let admitted = registry
+            .lint_allowances
+            .iter()
+            .any(|row| &row.lint == lint && &row.level == level);
+        if !admitted {
+            violations.push(Violation::new(
+                "workspace_lint_unregistered",
+                lint,
+                "§1 constraint 2",
+                format!(
+                    "Cargo.toml [workspace.lints] sets {lint} = {level:?} with no matching \
+                     lint_allowance row; register it with a reference, or fix the sites"
+                ),
+            ));
+        }
+    }
+    for row in &registry.lint_allowances {
+        let present = scan
+            .workspace_lints
+            .iter()
+            .any(|(lint, level)| lint == &row.lint && level == &row.level);
+        if !present {
+            violations.push(Violation::new(
+                "workspace_lint_registration_stale",
+                &row.lint,
+                "§1 constraint 2",
+                format!(
+                    "lint_allowance {} = {:?} is not in Cargo.toml [workspace.lints]; delete \
+                     the row once the entry is gone",
+                    row.lint, row.level
+                ),
+            ));
+        }
+    }
+    let mut registered_lints = BTreeSet::new();
+    for row in &registry.lint_allowances {
+        let named = ["clippy::", "rust::", "rustdoc::"]
+            .iter()
+            .any(|tool| row.lint.len() > tool.len() && row.lint.starts_with(tool));
+        let level = matches!(row.level.as_str(), "allow" | "warn" | "deny" | "forbid");
+        if !named
+            || !level
+            || row.lint == "rust::unsafe_code"
+            || row.reference.trim().is_empty()
+            || row.basis.trim().is_empty()
+            || !registered_lints.insert(row.lint.clone())
+        {
+            violations.push(Violation::new(
+                "lint_allowance_invalid",
+                &row.lint,
+                "§1 constraint 2",
+                "a lint_allowance names one tool::lint once (never rust::unsafe_code), \
+                 a level of allow/warn/deny/forbid, and a nonempty reference and basis",
+            ));
+        }
+    }
     if scan.toolchain_channel != registry.registry.toolchain_channel {
         violations.push(Violation::new(
             "toolchain_channel_drift",
@@ -4095,6 +4231,17 @@ allowances. A capability §18.2 names and this registry drops fails as leftover 
             allowance.id,
             escape_cell(&allowance.text),
             escape_cell(&allowance.reason)
+        ));
+    }
+    out.push('\n');
+    out.push_str("| Workspace lint | Level | Reference | Basis |\n|---|---|---|---|\n");
+    for row in &registry.lint_allowances {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            row.lint,
+            row.level,
+            escape_cell(&row.reference),
+            escape_cell(&row.basis)
         ));
     }
     out.push('\n');

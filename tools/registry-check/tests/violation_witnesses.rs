@@ -554,6 +554,62 @@ fn workspace_unsafe_lint_drift_is_seen_to_fire() {
     assert_code(&codes, "workspace_unsafe_lint_drift");
 }
 
+/// The workspace lint-table law (fgdb-gate-weakening-rollback-mthlh): a
+/// manifest allow without a row, a row without its manifest entry, and a
+/// malformed row are each seen to fire against the real Cargo.toml.
+#[test]
+fn workspace_lint_table_law_is_seen_to_fire() {
+    let root = repo_root();
+    let registry = topology::load_from_repo(&root).expect("unmodified topology registry loads");
+    let baseline: Vec<String> = topology::validate_topology(&registry, &root)
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect();
+    for code in [
+        "workspace_lint_unregistered",
+        "workspace_lint_registration_stale",
+        "lint_allowance_invalid",
+    ] {
+        assert!(
+            !baseline.iter().any(|seen| seen == code),
+            "{code} is already present without a mutation: {baseline:?}"
+        );
+    }
+    let fire = |mutate: &dyn Fn(&mut topology::TopologyRegistry), code: &str| {
+        let mut mutated = registry.clone();
+        mutate(&mut mutated);
+        let codes: Vec<String> = topology::validate_topology(&mutated, &root)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+        assert_code(&codes, code);
+    };
+    // A manifest allow the registry no longer admits: exactly what 89b49d38
+    // did 24 times.
+    fire(
+        &|registry| {
+            registry
+                .lint_allowances
+                .retain(|row| row.lint != "clippy::too_many_arguments")
+        },
+        "workspace_lint_unregistered",
+    );
+    // A row whose manifest entry is gone.
+    fire(
+        &|registry| {
+            let mut row = registry.lint_allowances[0].clone();
+            row.lint = "clippy::todo".to_owned();
+            registry.lint_allowances.push(row);
+        },
+        "workspace_lint_registration_stale",
+    );
+    // A row with no reference justifies nothing.
+    fire(
+        &|registry| registry.lint_allowances[0].reference.clear(),
+        "lint_allowance_invalid",
+    );
+}
+
 #[test]
 fn security_identity_wire_tag_collision_is_seen_to_fire() {
     let root = repo_root();

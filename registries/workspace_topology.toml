@@ -118,6 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
+lint_allowance_count = 13
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -128,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:dfa5456a147b1dc7"
-semantic_contract_hash = "fnv1a64:62c130cf01dd3c93"
+id_table_hash = "fnv1a64:952fc4a9a07d0500"
+semantic_contract_hash = "fnv1a64:2a08ab32522f3fdd"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1920,6 +1921,91 @@ reason = "The attribution tail for the two fnx rows."
 id = "moat-rationale"
 text = "The closed-universe constraint, which sounds like an albatross, is the moat: the entire dependency surface is auditable, deterministic under lab, and owned."
 reason = "Rationale sentence, not an inventory item. Pinned verbatim so this allowance cannot be widened to hide a capability."
+
+# -----------------------------------------------------------------------------
+# Workspace lint levels (fgdb-gate-weakening-rollback-mthlh). Every entry in
+# Cargo.toml [workspace.lints.*] except rust::unsafe_code (workspace_unsafe_lint)
+# has exactly one row here and every row has its entry, so a workspace-wide
+# allow cannot land without a reviewed reference. 89b49d38 added 24 unreviewed.
+# -----------------------------------------------------------------------------
+
+[[lint_allowance]]
+lint = "rust::recursion_depth_exceeding_limit"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 8 sites / 8 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::double_must_use"
+level = "allow"
+reference = "088e510f"
+basis = "Toolchain bump: #[must_use] on functions already returning a must_use type; cosmetic."
+
+[[lint_allowance]]
+lint = "clippy::needless_range_loop"
+level = "allow"
+reference = "088e510f"
+basis = "Toolchain bump: index walks over parallel slices by one counter; an iterator rewrite obscures the arithmetic."
+
+[[lint_allowance]]
+lint = "clippy::result_large_err"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 263 sites / 48 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::unusual_byte_groupings"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 44 sites / 11 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::collapsible_if"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 38 sites / 34 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::type_complexity"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::err_expect"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 30 sites / 9 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::unnecessary_mut_passed"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 18 sites / 6 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::unnecessary_literal_unwrap"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 15 sites / 3 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::manual_is_multiple_of"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 14 sites / 14 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::manual_noop_waker"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 21ccbfd7: 13 sites / 13 files at 2026-09-25."
+
+[[lint_allowance]]
+lint = "clippy::too_many_arguments"
+level = "allow"
+reference = "fgdb-gate-weakening-rollback-mthlh"
+basis = "Measured residual from 89b49d38: 9 sites / 7 files at 2026-09-25."
 
 # --- build_here (23) ----------------------------------------------------------
 

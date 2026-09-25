@@ -6,7 +6,7 @@
 # Builds topology-check, validates the frozen map twice for determinism, proves
 # the published document is generated rather than hand-authored, asserts the
 # structured event stream is complete against the registry's own declared
-# cardinalities, and then seeds six deliberate violations into a scratch copy —
+# cardinalities, and then seeds seven deliberate violations into a scratch copy —
 # each of which must fail with its exact violation code.
 #
 # The seeded fixtures are the point. A checker that has only ever been green is
@@ -187,7 +187,7 @@ PY
 }
 
 # 1. An external dependency in a live manifest: the closed universe's whole
-#    point, and the one fixture that mutates the TREE rather than the registry.
+#    point. It and fixture 7 are the two that mutate the TREE, not the registry.
 EXTERNAL_DIR="$(new_fixture external-dependency)"
 python3 - "$EXTERNAL_DIR/crates/fgdb-resource/Cargo.toml" <<'PY'
 import sys
@@ -240,6 +240,21 @@ activation_status = "planned"'
 #    and it must fire independently of the backwards-transition fixture.
 seed_fixture empty-live-edge-floor required_edge_floor_vacuous \
   'required_dependency_live_floor = ["calibrate-over-asupersync", "prism-over-fnx"]=>required_dependency_live_floor = []'
+
+# 7. A workspace-wide allow added to the manifest with no lint_allowance row:
+#    what 89b49d38 did 24 times (fgdb-gate-weakening-rollback-mthlh). The Rust
+#    witness mutates only the registry; this fixture is the one that proves the
+#    manifest scan sees a new entry.
+LINT_DIR="$(new_fixture unregistered-workspace-lint)"
+python3 - "$LINT_DIR/Cargo.toml" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "[workspace.lints.clippy]\n"
+assert text.count(anchor) == 1, f"fixture anchor {anchor!r} occurs {text.count(anchor)} times"
+open(path, "w", encoding="utf-8").write(text.replace(anchor, anchor + 'todo = "allow"\n', 1))
+PY
+expect_failure unregistered-workspace-lint workspace_lint_unregistered "$LINT_DIR"
 
 echo "==> evidence retained at $EVIDENCE_DIR"
 gate_pass "g0_topology_e2e"
