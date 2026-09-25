@@ -228,9 +228,15 @@ fn multipart_authorized_reads_mask_every_source_and_recheck_reused_templates() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+// Authorized sessions are single-task by design (!Send;
+// fgdb-authorized-cursor-send-qbfn1). This law holds one across a write's
+// .await, so it runs on the real runtime's block_on, which accepts a non-Send
+// future, instead of the Send-only lab runner. The body is unchanged.
 #[test]
 fn multipart_authorized_session_pins_sources_but_not_credential_lifetime() {
-    let ((), report) = run_async_under_lab(0xa681_0004, |root| async move {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    runtime.block_on(async {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -268,7 +274,6 @@ fn multipart_authorized_session_pins_sources_but_not_credential_lifetime() {
         ));
         assert!(session.is_closed());
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -276,7 +281,7 @@ fn source_free_and_single_source_native_aggregate_lanes_remain_usable() {
     let ((), report) = run_async_under_lab(0xa681_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
-        let db = database(&contexts.commit()).await;
+        let mut db = database(&contexts.commit()).await;
         let txn = db.begin(&contexts.txn()).unwrap();
         let view = db.read_session().unwrap();
         let issuer = authority();

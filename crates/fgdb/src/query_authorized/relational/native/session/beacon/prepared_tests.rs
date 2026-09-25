@@ -240,9 +240,11 @@ fn reuse_does_not_rescan_and_cannot_widen_frozen_or_host_limits() {
             &c.query(), &issuer, &token, "main", catalog, host(), || NOW,
         ).unwrap();
         let prepared = session.prepare_beacon_index(&c.query(), &options()).unwrap();
-        let mut request = ReadPolicy::default();
-        request.max_source_scratch = 0;
-        request.max_staging_rows = 0;
+        let mut request = ReadPolicy {
+            max_source_scratch: 0,
+            max_staging_rows: 0,
+            ..ReadPolicy::default()
+        };
         assert_eq!(session.search_beacon_index(&c.query(), &prepared, queries()[2], request).unwrap().len(), 3);
         request.max_work_units = 0;
         assert!(matches!(session.search_beacon_index(&c.query(), &prepared, queries()[2], request),

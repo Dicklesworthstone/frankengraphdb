@@ -105,7 +105,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     |label| scope.allows_label(label),
                     |key| scope.allows_property(key),
                     |relation| scope.allows_relation(relation),
-                    || record(),
+                    record,
                 )
             })();
             let result = settle(work, result)?;
