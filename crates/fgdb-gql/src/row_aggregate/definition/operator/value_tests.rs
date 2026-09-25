@@ -245,7 +245,7 @@ fn dynamic_numeric_operands_keep_nine_exact_results_and_do_not_hide_invalid_inpu
         .unwrap()
         .commit();
     let output = candidate.rows().iter().next().unwrap().0;
-    assert_eq!(output.keys(), &[key.clone()]);
+    assert_eq!(output.keys(), std::slice::from_ref(&key));
     assert_eq!(
         &output.values()[..3],
         &[Value::Count(8), Value::Count(3), Value::Count(2)]
@@ -325,7 +325,7 @@ fn typed_schema_and_bounded_payloads_refuse_without_relaxing_graph_source_admiss
             .unwrap()
             .commit();
         let result = candidate.rows().iter().next().unwrap().0;
-        assert_eq!(result.keys(), &[value.clone()]);
+        assert_eq!(result.keys(), std::slice::from_ref(&value));
         assert_eq!(
             result.values(),
             &[

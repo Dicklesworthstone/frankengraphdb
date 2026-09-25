@@ -140,7 +140,7 @@ fn actual_transfer_stepdown_cancels_reads_and_keeps_write_unknown_after_later_ap
         .unwrap();
     let stepped_down = immediate(nodes[0].member.step(Event::Receive(request))).unwrap();
     assert_eq!(stepped_down.consensus.role, Role::Follower);
-    assert_eq!(stepped_down.leadership_lost, [read_id.clone()]);
+    assert_eq!(stepped_down.leadership_lost, std::slice::from_ref(&read_id));
     assert!(nodes[0].member.leadership_transfer().unwrap().is_none());
     match nodes[0].member.try_write(&submitted.id).unwrap() {
         WriteState::Unknown(unknown) => assert_eq!(unknown.reason(), UnknownReason::LeadershipLost),

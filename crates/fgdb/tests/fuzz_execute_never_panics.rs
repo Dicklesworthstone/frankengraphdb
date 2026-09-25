@@ -417,7 +417,7 @@ fn execute_random_statements_under_lab_never_panics() {
 #[test]
 fn mutated_statements_prepared_and_executed_never_panic() {
     let mut corpus = Vec::new();
-    let mut rng = fuzz_gen::Rng::new(0x46_55_5A_32);
+    let mut rng = fuzz_gen::Rng::new(0x4655_5A32);
     for _ in 0..ITERATIONS {
         let base = fuzz_gen::Corpus::new(rng.next_u64()).unmutated_statement();
         corpus.push(fuzz_gen::Corpus::new(rng.next_u64()).mutate(&base));

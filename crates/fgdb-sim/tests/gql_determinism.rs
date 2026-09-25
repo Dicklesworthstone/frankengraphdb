@@ -383,7 +383,7 @@ fn seeded_histories_are_byte_identical_across_repeats_databases_batchings_and_se
                     .await
                     .expect("big");
                 let all: Vec<_> = (0..UNITS).collect();
-                apply(&mut big, &commit, &[all.clone()], graph_seed).await;
+                apply(&mut big, &commit, std::slice::from_ref(&all), graph_seed).await;
                 assert!(
                     big.frontier().expect("big frontier")
                         < reopened.frontier().expect("small frontier"),

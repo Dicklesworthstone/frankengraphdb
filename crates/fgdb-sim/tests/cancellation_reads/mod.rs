@@ -51,6 +51,8 @@ impl Failure {
     }
 }
 
+// One prepared statement per test case, never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 enum Prepared {
     Pattern(PreparedGraphPattern<GraphValueRow>),
     Aggregate(PreparedGraphAggregate),

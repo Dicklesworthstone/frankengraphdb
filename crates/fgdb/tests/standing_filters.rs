@@ -310,7 +310,7 @@ fn schema_owner_and_snapshot_limits_survive_compaction_and_reopen() {
             right: GraphSetOperand::Column(1),
         };
         let filter = db
-            .register_standing_filter(&cx, &source, &[equal.clone()], policy())
+            .register_standing_filter(&cx, &source, std::slice::from_ref(&equal), policy())
             .unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
         add(&mut seed, 0, None);
@@ -322,7 +322,7 @@ fn schema_owner_and_snapshot_limits_survive_compaction_and_reopen() {
             db.register_standing_filter(
                 &cx,
                 &source,
-                &[equal.clone()],
+                std::slice::from_ref(&equal),
                 GqlQueryPolicy::new(1, 100, 20_000_000, 20_000_000)
             ),
             Err(StandingQueryError::Maintenance(

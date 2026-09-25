@@ -54,7 +54,7 @@ impl Json {
     fn get(&self, name: &str) -> &Json {
         match self.object().get(name) {
             Some(value) => value,
-            None => Option::<&Json>::None.expect(&format!("missing {name:?} in JSON object")),
+            None => panic!("missing {name:?} in JSON object"),
         }
     }
 }

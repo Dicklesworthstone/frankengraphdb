@@ -83,6 +83,8 @@ impl<V> ApplicationRead<V> {
     }
 }
 
+// A poll result handed to the caller one at a time, never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 pub enum ReadState<V> {
     PendingQuorum,
     PendingApplication { required: u64, applied: u64 },

@@ -1568,16 +1568,15 @@ fn bound_edges<'a, E, Row>(
                 as_of,
                 control,
                 |entry, block, row, control| {
-                    if !selected.contains_key(&entry.eid) {
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        selected.entry(entry.eid)
+                    {
                         control(SourceEvent::SnapshotRecord)?;
                         control(SourceEvent::ScratchEntry)?;
-                        selected.insert(
-                            entry.eid,
-                            (
-                                (entry.eid, entry.src, entry.relation, entry.dst),
-                                edge_properties_at(&snapshot.block_props, block, row),
-                            ),
-                        );
+                        slot.insert((
+                            (entry.eid, entry.src, entry.relation, entry.dst),
+                            edge_properties_at(&snapshot.block_props, block, row),
+                        ));
                         for endpoint in [entry.src, entry.dst] {
                             if !frontier.contains(&endpoint) {
                                 control(SourceEvent::ScratchEntry)?;

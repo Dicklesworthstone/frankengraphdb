@@ -136,6 +136,8 @@ impl VisibleWrite {
     }
 }
 
+// A poll result handed to the caller one at a time, never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum WriteState {
     PendingCommit { required: u64, committed: u64 },

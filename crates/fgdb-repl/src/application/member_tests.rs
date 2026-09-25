@@ -427,7 +427,7 @@ fn losing_leadership_cancels_even_already_confirmed_unpinned_reads() {
         },
     };
     let output = immediate(nodes[0].step(Event::Receive(message))).unwrap();
-    assert_eq!(output.leadership_lost, [id.clone()]);
+    assert_eq!(output.leadership_lost, std::slice::from_ref(&id));
     assert_eq!(nodes[0].pending_reads(), 0);
     assert!(matches!(
         immediate(nodes[0].try_read(&id)),

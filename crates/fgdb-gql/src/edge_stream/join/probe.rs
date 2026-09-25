@@ -333,17 +333,19 @@ impl Probe {
                     match ids[expansion.source] {
                         None => None, // Even *0 cannot turn a NULL correlation into a vertex.
                         Some(from) => {
-                            if !walks.contains_key(&depth) {
-                                let cursor =
-                                    walk::Endpoints::new(from, bounds, search, source, control)?;
-                                control(GlaExecutionEvent::ScratchEntry)?;
-                                walks.insert(depth, cursor);
-                            }
-                            walks
-                                .get_mut(&depth)
-                                .expect("initialized atom")
-                                .next(expansion, source, control, record)?
-                                .map(Some)
+                            let walk = match walks.entry(depth) {
+                                std::collections::btree_map::Entry::Occupied(slot) => {
+                                    slot.into_mut()
+                                }
+                                std::collections::btree_map::Entry::Vacant(slot) => {
+                                    let cursor = walk::Endpoints::new(
+                                        from, bounds, search, source, control,
+                                    )?;
+                                    control(GlaExecutionEvent::ScratchEntry)?;
+                                    slot.insert(cursor)
+                                }
+                            };
+                            walk.next(expansion, source, control, record)?.map(Some)
                         }
                     }
                 }

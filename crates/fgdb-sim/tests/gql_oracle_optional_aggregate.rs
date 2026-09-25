@@ -315,7 +315,7 @@ fn summarize(graph: &ReferenceGraph, scopes: &[Scope]) -> Row {
 fn check_families(db: &Database<MemVfs>, cx: &QueryCx, graph: &ReferenceGraph, seed: u64) {
     assert!(graph.vertex(VId(8)).is_none() && graph.vertex(VId(107)).is_none());
     assert!(graph.edge(EId(90)).is_none() && graph.edge(EId(92)).is_none());
-    assert!(graph.vertex(VId(105)).unwrap().props.get(&VALUE).is_none());
+    assert!(!graph.vertex(VId(105)).unwrap().props.contains_key(&VALUE));
     assert_eq!(
         graph.vertex(VId(106)).unwrap().props.get(&VALUE),
         Some(&CanonicalScalar::Null)

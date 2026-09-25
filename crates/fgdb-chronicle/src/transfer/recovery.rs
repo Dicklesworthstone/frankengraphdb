@@ -31,6 +31,9 @@ pub(super) struct Recovery {
     pub(super) passes: Vec<u32>,
 }
 
+// One step's result, returned and matched at once, never stored in bulk:
+// boxing the verified object would add an allocation per completed recovery.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Advance {
     Progress,
     AwaitingSymbols,
