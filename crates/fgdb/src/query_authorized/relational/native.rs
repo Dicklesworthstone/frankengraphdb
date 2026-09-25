@@ -62,9 +62,9 @@ fn native_at<Clock: FnMut() -> u64>(
             ))
         }
         PreparedNativeRead::PipelineAggregate(prepared) => {
-            // Exactly the native classifier's source-free distinction. A real
-            // row pipeline is never reduced to its first MATCH leaf.
-            let rows = if prepared.is_source_free() {
+            // Zero/multiple graph leaves require the complete relation. Every
+            // leaf retains this same scope, permit and snapshot coordinate.
+            let rows = if prepared.requires_relational_input() {
                 let query = prepared
                     .bind_relation_parameters(params)
                     .map_err(QueryError::PipelineText)?;

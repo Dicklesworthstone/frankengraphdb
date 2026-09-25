@@ -87,9 +87,9 @@ impl PreparedNativeRead {
                 ))
             }
             Self::PipelineAggregate(prepared) => {
-                // Source-free does not mean owner-free. The existing adapter
-                // still validates the transaction even when no leaf is read.
-                let result = if prepared.is_source_free() {
+                // Keep every graph leaf on this transaction's pinned overlay.
+                // Zero-source plans still validate ownership and lifecycle.
+                let result = if prepared.requires_relational_input() {
                     let query = prepared
                         .bind_relation_parameters(params)
                         .map_err(QueryError::PipelineText)?;
