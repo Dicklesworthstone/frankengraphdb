@@ -281,8 +281,12 @@ impl StoredObjectKind {
 
 /// Objects a publication batch stages before it flushes them. It bounds the
 /// descriptors a batch holds open, and is the most inode syncs one flush has
-/// in flight at once.
-pub const BATCH_SYNCS_IN_FLIGHT: usize = 64;
+/// in flight at once. A bulk chunk commit stages hundreds of objects, and
+/// every flush round is one more serial journal commit: measured 2026-09-25,
+/// fgdb-bench bulk-load median 411 edges/s at 64 vs 656 at 256 (same
+/// invocation, interleaved). 256 open staging inodes plus the database's own
+/// descriptors stay well under the common 1024 soft limit.
+pub const BATCH_SYNCS_IN_FLIGHT: usize = 256;
 
 /// One batch object whose inode is fully written but not yet synced.
 struct StagedObject<F> {
