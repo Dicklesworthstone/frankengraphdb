@@ -1,9 +1,12 @@
 //! Parse a complete multi-part read with one lexer and parameter table.
 //! WITH is a real relational boundary. A later MATCH becomes a new governed
 //! graph leaf joined BEFORE its projection/filter/page, never an AST evaluator.
+//! OPTIONAL continuations use the same left-join kernel: correlation is part
+//! of matching, and only new bindings are null-extended. Carried values stay
+//! on the left. Project their properties before entering an optional part.
 
 use super::*;
-use crate::row_join::RowJoinSpec;
+use crate::row_join::{RowJoinKind, RowJoinSpec};
 use crate::set_text::TextToken;
 use crate::set_text::multipart::{BoundContinuation, BoundReadInput, has_continuation};
 
@@ -167,7 +170,7 @@ impl<'a> Parser<'a> {
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
         let mut incoming = Vec::new();
         let first = if self.is_word("MATCH") {
-            let (input, next, terminal, _) = self.multipart_graph_part(statement, &incoming)?;
+            let (input, next, terminal, _) = self.multipart_graph_part(statement, &incoming, None)?;
             if terminal {
                 return Err(expected(self.current.at, "WITH before the next MATCH"));
             }
@@ -178,8 +181,8 @@ impl<'a> Parser<'a> {
             // the existing row stages, not a manufactured graph carrier.
             let (pipeline, next, _) = self.row_pipeline_prefix(Vec::new())?;
             incoming = next;
-            if !self.is_word("MATCH") {
-                return Err(expected(self.current.at, "MATCH after the leading row stages"));
+            if !(self.is_word("MATCH") || self.is_word("OPTIONAL")) {
+                return Err(expected(self.current.at, "MATCH or OPTIONAL MATCH after row stages"));
             }
             let syntax = self.take_part_syntax()?;
             UnresolvedGraphText {
@@ -189,10 +192,16 @@ impl<'a> Parser<'a> {
         };
         let mut result = UnresolvedReadInput { first, continuations: Vec::new() };
         loop {
+            let kind = if self.take_word("OPTIONAL")? {
+                RowJoinKind::Left
+            } else {
+                RowJoinKind::Inner
+            };
             if !self.is_word("MATCH") {
-                return Err(expected(self.current.at, "required MATCH after WITH"));
+                return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
             }
-            let (input, next, terminal, join) = self.multipart_graph_part(statement, &incoming)?;
+            let (input, next, terminal, join) =
+                self.multipart_graph_part(statement, &incoming, Some(kind))?;
             result.continuations.push(UnresolvedContinuation {
                 input,
                 join: join.expect("a continuation has an incoming relation"),
@@ -242,10 +251,19 @@ impl<'a> Parser<'a> {
         &mut self,
         statement: &'a str,
         incoming: &RowSchema<'a>,
+        kind: Option<RowJoinKind>,
     ) -> Result<(UnresolvedGraphText<'a>, RowSchema<'a>, bool, Option<RowJoinSpec>), GraphSetTextError> {
         let at = self.current.at;
+        let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.parse_match_prefix()?;
+        // Wrapping several independently scoped clauses in one left join
+        // would move their null-extension boundary. Keep this continuation a
+        // positive pattern; another WITH may begin the next required/optional
+        // part. Existing required-part scoped semantics are unchanged.
+        if optional && !self.syntax.scopes.is_empty() {
+            return Err(expected(at, "WITH between an OPTIONAL continuation and scoped clauses"));
+        }
         let mut inputs = Vec::new();
         let mut keys = Vec::new();
         for (left, &(name, kind)) in incoming.iter().enumerate() {
@@ -290,10 +308,10 @@ impl<'a> Parser<'a> {
                 keys.push((left, right));
             }
         }
-        let mut head = if incoming.is_empty() {
+        let mut head = if kind.is_none() {
             self.graph_projection_head()?
         } else {
-            self.multipart_head(incoming, inputs)?
+            self.multipart_head(incoming, inputs, optional)?
         };
         if head.inputs.is_empty() {
             // A constant projection still emits once per graph occurrence.
@@ -305,8 +323,12 @@ impl<'a> Parser<'a> {
         let schema: RowSchema<'a> = head.outputs.iter().map(|(name, value)| {
             (*name, value.column_type(&types, &self.syntax.parameters))
         }).collect();
-        let join = if incoming.is_empty() { None } else {
-            Some(join_spec(incoming, &head.inputs, &keys, at)?)
+        // A continuation joins its incoming relation even when its schema is
+        // empty; column count is not evidence that there was no earlier part.
+        let join = if let Some(kind) = kind {
+            Some(join_spec(incoming, &head.inputs, &keys, at)?.with_kind(kind))
+        } else {
+            None
         };
         let mut terminal = !head.with;
         let (mut pipeline, mut next) = if head.with {
@@ -349,6 +371,7 @@ impl<'a> Parser<'a> {
         &mut self,
         incoming: &RowSchema<'a>,
         mut inputs: Vec<Projection<'a>>,
+        optional: bool,
     ) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
         let with = self.take_word("WITH")?;
         if !with { self.word("RETURN")?; }
@@ -378,6 +401,22 @@ impl<'a> Parser<'a> {
                         if ["labels", "type", "length", "path_length", "nodes", "edges", "relationships"]
                             .iter().any(|name| word.eq_ignore_ascii_case(name))
                         {
+                            // A graph-function read of an imported value is
+                            // not a read of the nullable right-hand copy. Until
+                            // that read has its own source, require a saved
+                            // left-hand expression instead of returning NULL.
+                            if optional {
+                                let mut lookahead = parser.lexer.clone();
+                                lookahead.next()?; // opening parenthesis
+                                let argument = lookahead.next()?;
+                                if matches!(argument.kind, TokenKind::Word(name)
+                                    if incoming.iter().any(|(binding, _)| binding.text == name))
+                                {
+                                    return Err(error(argument.at, GraphPatternTextErrorKind::Expected(
+                                        "project carried graph functions before OPTIONAL MATCH",
+                                    )));
+                                }
+                            }
                             let Operand::Column(column) = parser.mutation_operand(&mut inputs)? else {
                                 unreachable!("graph function resolves a source column");
                             };
@@ -390,6 +429,13 @@ impl<'a> Parser<'a> {
                     {
                         parser.advance()?;
                         return Ok(Some(column));
+                    }
+                    if optional && matches!(next.kind, TokenKind::Punct(b'.'))
+                        && incoming.iter().any(|(name, _)| name.text == word)
+                    {
+                        return Err(error(parser.current.at, GraphPatternTextErrorKind::Expected(
+                            "project carried vertex properties before OPTIONAL MATCH",
+                        )));
                     }
                     let graph = parser.visible_graph_bindings().any(|name| name.text == word);
                     if !graph { return Ok(None); }
