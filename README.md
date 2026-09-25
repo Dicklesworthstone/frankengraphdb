@@ -233,6 +233,10 @@ fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
 
+# Beacon retrieval: BM25 text, exact/ANN vector, or exact-RRF hybrid over one sequence
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
+  --text "graph memory" --text-property title --vector 0.5 --vector-property x --k 5
+
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 

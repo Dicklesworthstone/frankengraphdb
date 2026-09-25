@@ -25,6 +25,7 @@ machine-readable contract that the tests freeze.
 | `import-csv --input <file.csv\|-> (--query-file <f> \| <gql>)` | Bind a native write script once per CSV record, and commit every record in ONE transaction or none. |
 | `compact` | Publish a consolidated storage generation. Answers at every retained sequence are unchanged, and the frontier does not move. |
 | `scrub` | Verify every capsule the history names and every published block. Damaged capsule redundancy is repaired in place, restoring the exact bytes. Each damaged object gets a `scrub` record; any loss exits 5 after the records, and lost objects are never overwritten. Damage beyond repair that already exists when the database opens is refused at open, naming the object. |
+| `search` | Beacon text, vector or exact-fusion hybrid retrieval over one committed sequence (see Retrieval). |
 | `robot schema`, `help` | Need no database or keys. |
 
 Every database command takes `--db <dir> --key-file <file>`.
@@ -112,6 +113,55 @@ and triangle counts are exact `int`s, and scores and weighted distances are
 fgdb --robot query --db ./graph --key-file ./graph.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected \
   'CALL fnx.connected_components() YIELD vertex, component'
+```
+
+## Retrieval: `search`
+
+`fgdb search` runs Beacon text, vector, or hybrid retrieval over one committed
+sequence, through the same `Database::beacon_search` the library exposes. The
+corpus is an explicit projection chosen by flags:
+
+- Text lane: `--text <query> --text-property <property>`, BM25 over that text
+  property. `--text-match any|all|phrase` defaults to `any`.
+- Vector lane: `--vector <x,y,...>` with one `--vector-property <property>` per
+  coordinate, in order. It finds nearest neighbours over those numeric
+  properties. `--metric l2|cosine|dot` defaults to `l2`. The search is exact
+  unless `--ann <ef_search>` asks for the approximate HNSW walk.
+- Both lanes: exact reciprocal-rank fusion of `--candidates` hits per lane
+  (default `--k`). This fuses two candidate sets. It is not an exhaustive
+  hybrid answer.
+- `--k` bounds the hits (default 10).
+- `--vertex-label <label>` restricts the corpus.
+- `--as-of <seq>` searches a committed sequence (time travel). The default is
+  the frontier.
+
+The index is built for the one call from that sequence, so the result's `seq`
+is exactly the sequence searched. Output uses the ordinary `columns`, `row` and
+`result kind=searched` records:
+
+| Lanes | Columns |
+|---|---|
+| Text | `vertex`, `score` |
+| Vector | `vertex`, `distance` |
+| Both | `vertex`, `score` (an exact decimal), `vector_rank`, `text_rank`, `vector_distance`, `text_score` |
+
+A lane that did not rank a hit leaves its fields `null`. These are usage errors
+(exit 2) before the database opens:
+
+- no lane;
+- a lane flag without its lane;
+- a vector whose length differs from its `--vector-property` count;
+- a non-finite coordinate;
+- `--candidates` without both lanes;
+- an unbound symbol.
+
+Fuzzy text matching is a library option that the CLI does not expose yet.
+
+```sh
+fgdb --robot search --db ./graph --key-file ./graph.keys \
+  --property title=1 --property x=2 --property y=3 \
+  --text 'graph memory' --text-property title \
+  --vector 0.1,0.9 --vector-property x --vector-property y --k 5
 ```
 
 ## Robot mode

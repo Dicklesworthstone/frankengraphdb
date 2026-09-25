@@ -7,6 +7,7 @@ mod fnx;
 mod import;
 mod load;
 mod scrub;
+mod search;
 mod stream;
 mod transaction;
 
@@ -30,7 +31,7 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"diff_columns":["v","event","before","after","semantics","columns"],"change":["v","event","weight","cells"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream","before","after","changed_rows","inserted","retracted","snapshot_records","work_units","scratch_entries","records","objects","repaired","block_objects"],"error":["v","event","class","diagnostics"],"scrub":["v","event","object","kind","state","reason"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming","diff","analytics"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed. On Unix the file must be a regular file with no group or other permission bits (mode 0600), at most 65536 bytes.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back","diff","compacted","imported_csv","scrubbed"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"},"diff":{"command":"diff --before <seq> --after <seq> <gql>; both endpoints required, reverse/equal/zero legal","semantics":"after_minus_before_bag: complete native result net changes in one admitted history; positive weight adds occurrences, negative retracts; not write events, ordering changes, cross-branch comparison or DIFF syntax","encoding":"diff_columns then canonical change records then result kind=diff; revisions, weights and all diff counters are decimal strings; cells retain native types","delivery":"both queries and consolidation finish before diff_columns; each change is flushed; only final result plus successful exit and no error establishes complete delivery; a write/flush error may leave a partial final frame","limits":"diff-only --max-snapshot-records, --max-result-rows, --max-work-units, --max-scratch-entries; decimal u64 including zero; defaults 100000/100000/10000000/10000000; cumulative across both queries and consolidation; result rows count changed tuples","output_bytes":"--max-output-bytes is a diff-only decimal u64 transport cap, default 16777216; counts UTF-8 diff frames including newlines and final result, excludes invocation/error records; each whole frame is admitted before writing; a refused frame may follow complete changes but never implies successful completion","memory":"endpoint and consolidated results are in memory; one encoded change at a time; neither output byte cap nor execution limits are spill or an allocator-byte bound","refusals":"explicit temporal selectors, writes, --stream, --certify-to and --certificate are not supported"},"analytics":{"command":"query 'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...' runs a registered Prism procedure over an explicit projection of one committed sequence","procedures":["pagerank","single_source_shortest_path_length","single_source_dijkstra_path_length","connected_components","weakly_connected_components","strongly_connected_components","triangles","clustering_coefficient"],"projection":"--graph-label <label> and --graph-relation <relation> select induced vertices and edges (default all); --weight <property> reads edge weights (default unit) with --missing-weight reject|unit|zero (default reject); --direction directed|reversed|undirected (default directed); --parallel-edges reject|collapse|min|max|sum (default reject); --self-loops keep|drop|reject (default keep); --as-of <seq> selects a committed sequence (default frontier)","parameters":"--param name=vertex:<id>|int:<i64>|float:<f64>|bool:true|bool:false|null binds $name; literal arguments need no parameter","output":"columns, row and result kind=rows records; result seq is the analysed sequence; vertex and component cells are vertex identities, hop distances and triangle counts are int, scores and weighted distances are float","refusals":"a projection that violates the procedure's graph laws, a parallel edge under reject, an unknown procedure or argument, and an unbound symbol are refused, never reshaped; --stream and --certify-to are not supported; projection flags without a CALL fnx statement are usage errors"}}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"diff_columns":["v","event","before","after","semantics","columns"],"change":["v","event","weight","cells"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream","before","after","changed_rows","inserted","retracted","snapshot_records","work_units","scratch_entries","records","objects","repaired","block_objects"],"error":["v","event","class","diagnostics"],"scrub":["v","event","object","kind","state","reason"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming","diff","analytics","search"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed. On Unix the file must be a regular file with no group or other permission bits (mode 0600), at most 65536 bytes.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back","diff","compacted","imported_csv","scrubbed","searched"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"},"diff":{"command":"diff --before <seq> --after <seq> <gql>; both endpoints required, reverse/equal/zero legal","semantics":"after_minus_before_bag: complete native result net changes in one admitted history; positive weight adds occurrences, negative retracts; not write events, ordering changes, cross-branch comparison or DIFF syntax","encoding":"diff_columns then canonical change records then result kind=diff; revisions, weights and all diff counters are decimal strings; cells retain native types","delivery":"both queries and consolidation finish before diff_columns; each change is flushed; only final result plus successful exit and no error establishes complete delivery; a write/flush error may leave a partial final frame","limits":"diff-only --max-snapshot-records, --max-result-rows, --max-work-units, --max-scratch-entries; decimal u64 including zero; defaults 100000/100000/10000000/10000000; cumulative across both queries and consolidation; result rows count changed tuples","output_bytes":"--max-output-bytes is a diff-only decimal u64 transport cap, default 16777216; counts UTF-8 diff frames including newlines and final result, excludes invocation/error records; each whole frame is admitted before writing; a refused frame may follow complete changes but never implies successful completion","memory":"endpoint and consolidated results are in memory; one encoded change at a time; neither output byte cap nor execution limits are spill or an allocator-byte bound","refusals":"explicit temporal selectors, writes, --stream, --certify-to and --certificate are not supported"},"analytics":{"command":"query 'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...' runs a registered Prism procedure over an explicit projection of one committed sequence","procedures":["pagerank","single_source_shortest_path_length","single_source_dijkstra_path_length","connected_components","weakly_connected_components","strongly_connected_components","triangles","clustering_coefficient"],"projection":"--graph-label <label> and --graph-relation <relation> select induced vertices and edges (default all); --weight <property> reads edge weights (default unit) with --missing-weight reject|unit|zero (default reject); --direction directed|reversed|undirected (default directed); --parallel-edges reject|collapse|min|max|sum (default reject); --self-loops keep|drop|reject (default keep); --as-of <seq> selects a committed sequence (default frontier)","parameters":"--param name=vertex:<id>|int:<i64>|float:<f64>|bool:true|bool:false|null binds $name; literal arguments need no parameter","output":"columns, row and result kind=rows records; result seq is the analysed sequence; vertex and component cells are vertex identities, hop distances and triangle counts are int, scores and weighted distances are float","refusals":"a projection that violates the procedure's graph laws, a parallel edge under reject, an unknown procedure or argument, and an unbound symbol are refused, never reshaped; --stream and --certify-to are not supported; projection flags without a CALL fnx statement are usage errors"},"search":{"command":"search --text <query> --text-property <property> and/or --vector <x,y,...> with one --vector-property <property> per coordinate, over one committed sequence","lanes":"text only: BM25 over the text property (--text-match any|all|phrase, default any); vector only: nearest neighbours over the numeric properties in order (--metric l2|cosine|dot, default l2; exact unless --ann <ef_search>); both: exact reciprocal-rank fusion of --candidates hits per lane (default --k), a fusion of two candidate sets, not an exhaustive hybrid answer","corpus":"--k bounds the hits (default 10); --vertex-label <label> restricts the corpus; --as-of <seq> selects a committed sequence (default frontier); the index is built for the one call from that sequence","output":"columns, row and result kind=searched records; result seq is the searched sequence; text columns vertex,score; vector columns vertex,distance; both vertex,score,vector_rank,text_rank,vector_distance,text_score where score is an exact decimal, ranks are int and an absent lane value is null","refusals":"no lane, a lane flag without its lane, a vector whose length differs from its --vector-property count, non-finite coordinates, --candidates without both lanes and unbound symbols are usage errors; --param and --write-relation are not accepted"}}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
@@ -48,6 +49,8 @@ Usage: fgdb [--robot] <command>
   transaction --db <dir> --key-file <file> [bindings] --write <gql> --query <gql> ... [--rollback]
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
+  search --db <dir> --key-file <file> [bindings] [text lane] [vector lane] [--k N]
+         [--candidates N] [--vertex-label <label>] [--as-of <seq>]
   robot schema
   help
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
@@ -96,6 +99,15 @@ projection of one committed sequence; nothing is silently reshaped:
   --self-loops keep|drop|reject (default keep); --as-of <seq> (default frontier)
 Analytics parameters: vertex:<id>, int:<i64>, float:<f64>, bool:true|false, null.
 A projection that breaks a procedure's graph laws is refused, never converted.
+search runs Beacon retrieval over an EXPLICIT projection of one committed sequence:
+  text lane: --text <query> --text-property <property> [--text-match any|all|phrase]
+  vector lane: --vector <x,y,...> with one --vector-property <property> per coordinate,
+    in order [--metric l2|cosine|dot] [--ann <ef_search>] (default exact)
+  both lanes: exact reciprocal-rank fusion of --candidates hits per lane (default --k);
+    a fusion of the two candidate sets, not an exhaustive hybrid answer
+  --k bounds the hits (default 10); --vertex-label restricts the corpus.
+The index is built for the one call from that sequence. Columns: text vertex,score;
+vector vertex,distance; both vertex,score,vector_rank,text_rank,vector_distance,text_score.
 transaction executes ordered --write/--query steps in one native transaction.
 Each --param belongs to the preceding step; parameter maps do not leak between steps.
 Success commits once; --rollback discards all effects and results. Errors abort before commit.
@@ -204,6 +216,8 @@ struct Options {
     /// `query` text is a `CALL fnx.*` Prism call, answered by `fnx::run`.
     fnx_call: bool,
     fnx: fnx::ProjectionFlags,
+    /// `search` lanes and corpus, answered by `search::run`.
+    search: search::SearchFlags,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -293,6 +307,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut diff = diff::DiffOptions::default();
     let mut csv = import::CsvOptions::default();
     let mut fnx = fnx::ProjectionFlags::default();
+    let mut search_flags = search::SearchFlags::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--stream" {
@@ -353,7 +368,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 }
                 "--param"
                     if !create
-                        && !matches!(command, "load" | "import-csv" | "compact" | "scrub") =>
+                        && !matches!(
+                            command,
+                            "load" | "import-csv" | "compact" | "scrub" | "search"
+                        ) =>
                 {
                     let (name, raw) = value
                         .split_once('=')
@@ -398,7 +416,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     }
                     map.insert(name.to_owned(), id);
                 }
-                "--write-relation" if !matches!(command, "diff" | "compact" | "scrub") => {
+                "--write-relation"
+                    if !matches!(command, "diff" | "compact" | "scrub" | "search") =>
+                {
                     let id: u32 = value
                         .parse()
                         .map_err(|_| Failure::usage("write relation must be u32"))?;
@@ -407,10 +427,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 flag if command == "query" && fnx::ProjectionFlags::FLAGS.contains(&flag) => {
                     fnx.set(flag, value)?;
                 }
+                flag if command == "search" && search::SearchFlags::FLAGS.contains(&flag) => {
+                    search_flags.set(flag, value)?;
+                }
                 _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
             }
         } else if create
-            || matches!(command, "compact" | "scrub")
+            || matches!(command, "compact" | "scrub" | "search")
             || command == "transaction"
             || command == "replay"
             || command == "load"
@@ -458,7 +481,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
         text: if create
-            || matches!(command, "compact" | "scrub")
+            || matches!(command, "compact" | "scrub" | "search")
             || command == "replay"
             || command == "load"
             || command == "transaction"
@@ -487,6 +510,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         csv,
         fnx_call,
         fnx,
+        search: search_flags,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -691,7 +715,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
         }
         Some(
             command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"
-            | "compact" | "scrub" | "import-csv"),
+            | "compact" | "scrub" | "import-csv" | "search"),
         ) => {
             let mut options = parse(&args[1..], command)?;
             let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
@@ -717,6 +741,8 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let import = if command == "import-csv" { Some(import::prepare(&options, &contexts.query())?) } else { None };
                 // Likewise a Prism call's arguments and projection.
                 let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
+                // And a search's lanes, symbols and corpus.
+                let retrieval = if command == "search" { Some(search::prepare(&options)?) } else { None };
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
@@ -752,6 +778,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 }
                 if let Some(prepared) = analytics {
                     return fnx::run(&db, &contexts.query(), &options.text, prepared, robot, out);
+                }
+                if let Some(prepared) = &retrieval {
+                    return search::run(&db, &contexts.query(), prepared, robot, out);
                 }
                 if let Some(path) = &options.certificate {
                     contexts.query().checkpoint().map_err(Failure::io)?;

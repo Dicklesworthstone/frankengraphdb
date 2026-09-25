@@ -505,7 +505,7 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                     schema.get("exit_codes").get("success").unsigned()
                 );
                 match event.get("kind").string() {
-                    "rows" | "replayed" => {
+                    "rows" | "replayed" | "searched" => {
                         exact_fields(event, &["v", "event", "kind", "seq", "count"]);
                         assert!(columns.is_some());
                         assert_eq!(event.get("count").unsigned(), rows);
@@ -648,7 +648,10 @@ fn run(robot: bool, args: &[&str]) -> Outcome {
     }
     if let Some((subcommand, rest)) = args.split_first() {
         command.arg(subcommand);
-        if matches!(*subcommand, "create" | "write" | "query" | "replay") {
+        if matches!(
+            *subcommand,
+            "create" | "write" | "query" | "replay" | "search"
+        ) {
             command.args([
                 "--label",
                 "Person=1",
@@ -2175,4 +2178,347 @@ fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
         "{}",
         human.stdout
     );
+}
+
+/// (seq, column names, rows as (type, value) pairs; value is empty for null)
+/// of a successful `search`.
+type SearchRows = Vec<Vec<(String, String)>>;
+fn searched(db: &TestDb, args: &[&str]) -> (u64, Vec<String>, SearchRows) {
+    let output = db.command("search", args);
+    let seq = output.sequence("searched");
+    let columns = output.events[1]
+        .get("columns")
+        .array()
+        .iter()
+        .map(|column| column.string().to_owned())
+        .collect();
+    let rows: SearchRows = output
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            event
+                .get("cells")
+                .array()
+                .iter()
+                .map(|cell| {
+                    let kind = cell.get("type").string().to_owned();
+                    let value = if kind == "null" {
+                        String::new()
+                    } else {
+                        cell.get("value").string().to_owned()
+                    };
+                    (kind, value)
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(output.terminal().get("count").unsigned(), rows.len() as u64);
+    (seq, columns, rows)
+}
+
+/// `fgdb search` returns exactly what the library's `Database::beacon_search`
+/// returns over the same committed generation, for every lane and mode, and
+/// `--as-of` pins history (fgdb-fwzqa). The library is the oracle.
+#[test]
+fn search_lanes_equal_the_library_and_pin_history() {
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{Database, DatabaseKeys};
+    use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
+    use fgdb_beacon::{
+        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig, TextMatch,
+        VectorSearch,
+    };
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_types::CommitSeq;
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+
+    let db = TestDb::new("search");
+    db.create();
+    // E carries no label, so --vertex-label Person excludes it.
+    let first = db.write(&["INSERT (:Person {name:'A', team:'red apple', born:0}),\
+         (:Person {name:'B', team:'red red', born:10}),\
+         (:Person {name:'C', team:'blue', born:20}),\
+         ({name:'E', team:'red', born:4})"]);
+    let later = db.write(&["INSERT (:Person {name:'D', team:'red apple', born:5})"]);
+
+    let (text_key, vector_key, person) = (PropertyKeyId(3), PropertyKeyId(2), LabelId(1));
+    let options = |text: bool, metric: Option<DistanceMetric>, label: bool, as_of: Option<u64>| {
+        let index = IndexConfig {
+            vector: metric.map(|metric| HnswConfig::new(1, metric)),
+            ..IndexConfig::default()
+        };
+        ReadOptions::<PropertyKeyId, LabelId> {
+            as_of: as_of.map(CommitSeq),
+            vertex_label: label.then_some(person),
+            projection: Projection {
+                text: text.then_some(text_key),
+                vector: metric.map_or_else(Vec::new, |_| vec![vector_key]),
+            },
+            index,
+            policy: ReadPolicy::default(),
+        }
+    };
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let oracle = |read: ReadOptions<PropertyKeyId, LabelId>, search: Search<'_>| -> SearchRows {
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let rows = runtime.block_on(async {
+            let database = Database::open(&contexts.commit(), &db.db, keys)
+                .await
+                .unwrap();
+            database
+                .beacon_search(&contexts.query(), &read, search)
+                .unwrap()
+        });
+        let vertex = |id: fgdb_types::VId| ("vertex".to_owned(), id.0.to_string());
+        let float = |value: Option<f64>| {
+            value.map_or_else(
+                || ("null".to_owned(), String::new()),
+                |v| ("float".to_owned(), v.to_string()),
+            )
+        };
+        let rank = |value: Option<std::num::NonZeroU32>| {
+            value.map_or_else(
+                || ("null".to_owned(), String::new()),
+                |v| ("int".to_owned(), v.to_string()),
+            )
+        };
+        match rows {
+            Rows::Text(hits) => hits
+                .iter()
+                .map(|hit| vec![vertex(hit.id), float(Some(hit.score))])
+                .collect(),
+            Rows::Vector(hits) => hits
+                .iter()
+                .map(|hit| vec![vertex(hit.id), float(Some(hit.distance))])
+                .collect(),
+            Rows::Hybrid(hits) => hits
+                .iter()
+                .map(|hit| {
+                    vec![
+                        vertex(hit.id),
+                        ("decimal".to_owned(), hit.decimal_score.to_string()),
+                        rank(hit.vector_rank),
+                        rank(hit.text_rank),
+                        float(hit.vector_distance),
+                        float(hit.text_score),
+                    ]
+                })
+                .collect(),
+        }
+    };
+    let text = |query, k, mode| Search::Text { query, k, mode };
+    let vector = |query, k, mode| Search::Vector { query, k, mode };
+    let l2 = Some(DistanceMetric::SquaredEuclidean);
+    let cases: Vec<(
+        Vec<&str>,
+        &[&str],
+        ReadOptions<PropertyKeyId, LabelId>,
+        Search<'_>,
+    )> = vec![
+        (
+            vec!["--text", "red", "--text-property", "team"],
+            &["vertex", "score"],
+            options(true, None, false, None),
+            text("red", 10, TextMatch::Any),
+        ),
+        (
+            vec![
+                "--text",
+                "red apple",
+                "--text-property",
+                "team",
+                "--text-match",
+                "all",
+            ],
+            &["vertex", "score"],
+            options(true, None, false, None),
+            text("red apple", 10, TextMatch::All),
+        ),
+        (
+            vec![
+                "--text",
+                "red apple",
+                "--text-property",
+                "team",
+                "--text-match",
+                "phrase",
+                "--vertex-label",
+                "Person",
+            ],
+            &["vertex", "score"],
+            options(true, None, true, None),
+            text("red apple", 10, TextMatch::Phrase),
+        ),
+        (
+            vec!["--vector", "4", "--vector-property", "born", "--k", "3"],
+            &["vertex", "distance"],
+            options(false, l2, false, None),
+            vector(&[4.0], 3, VectorSearch::Exact),
+        ),
+        (
+            vec![
+                "--vector",
+                "4",
+                "--vector-property",
+                "born",
+                "--ann",
+                "16",
+                "--metric",
+                "dot",
+            ],
+            &["vertex", "distance"],
+            options(false, Some(DistanceMetric::NegativeDotProduct), false, None),
+            vector(&[4.0], 10, VectorSearch::Approximate { ef_search: 16 }),
+        ),
+        (
+            vec![
+                "--text",
+                "red",
+                "--text-property",
+                "team",
+                "--vector",
+                "4",
+                "--vector-property",
+                "born",
+                "--k",
+                "3",
+                "--candidates",
+                "4",
+            ],
+            &[
+                "vertex",
+                "score",
+                "vector_rank",
+                "text_rank",
+                "vector_distance",
+                "text_score",
+            ],
+            options(true, l2, false, None),
+            Search::Hybrid(ExactHybridQuery {
+                vector: &[4.0],
+                text: "red",
+                k: 3,
+                vector_candidates: 4,
+                text_candidates: 4,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            }),
+        ),
+    ];
+    for (args, columns, read, search) in cases {
+        let (seq, actual_columns, rows) = searched(&db, &args);
+        assert_eq!(seq, later, "{args:?}: the frontier is searched by default");
+        assert_eq!(actual_columns, columns, "{args:?}");
+        assert!(!rows.is_empty(), "{args:?}: the corpus has matches");
+        assert_eq!(rows, oracle(read, search), "{args:?}");
+    }
+
+    // Human mode renders the same hybrid table (run() supplies the bindings).
+    let mut human = vec!["search", "--db", &db.db, "--key-file", &db.key];
+    human.extend([
+        "--text",
+        "red",
+        "--text-property",
+        "team",
+        "--vector",
+        "4",
+        "--vector-property",
+        "born",
+    ]);
+    let human = run(false, &human);
+    human.success();
+    let header: Vec<&str> = human
+        .stdout
+        .lines()
+        .next()
+        .unwrap()
+        .split('|')
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        header,
+        [
+            "vertex",
+            "score",
+            "vector_rank",
+            "text_rank",
+            "vector_distance",
+            "text_score"
+        ]
+    );
+    assert!(
+        human.stdout.trim_end().ends_with("row(s)"),
+        "{}",
+        human.stdout
+    );
+
+    // --as-of searches the committed history: D did not exist at `first`.
+    let d = vertex_ids(&db)["D"].clone();
+    let lanes = ["--text", "red apple", "--text-property", "team"];
+    let (_, _, now) = searched(&db, &lanes);
+    assert!(now.iter().any(|row| row[0].1 == d));
+    let first_text = first.to_string();
+    let mut historical = lanes.to_vec();
+    historical.extend(["--as-of", &first_text]);
+    let (seq, _, then) = searched(&db, &historical);
+    assert_eq!(seq, first);
+    assert!(then.iter().all(|row| row[0].1 != d));
+    assert_eq!(
+        then,
+        oracle(
+            options(true, None, false, Some(first)),
+            text("red apple", 10, TextMatch::Any)
+        )
+    );
+
+    // Refusals are usage errors before any database observation.
+    for args in [
+        vec![],
+        vec!["--text", "red"],
+        vec!["--vector", "1,2", "--vector-property", "born"],
+        vec!["--vector", "NaN", "--vector-property", "born"],
+        vec!["--text", "red", "--text-property", "no_such"],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--candidates",
+            "3",
+        ],
+        vec![
+            "--vector",
+            "1",
+            "--vector-property",
+            "born",
+            "--text-match",
+            "all",
+        ],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--param",
+            "x=int:1",
+        ],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "MATCH (n) RETURN n",
+        ],
+    ] {
+        db.command("search", &args).failure(2, "usage");
+    }
 }
