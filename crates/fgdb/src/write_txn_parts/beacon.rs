@@ -4,14 +4,17 @@
 
 use super::{WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::{Database, PendingRow, VertexRow};
+use crate::{Database, PendingRow, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
 use fgdb_beacon::read::{ReadError, ReadOptions, Rows, Search};
-use fgdb_beacon::{BeaconError, BeaconIndex, WorkBudget, WorkControl};
+use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, IndexSnapshot, WorkBudget, WorkControl};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
 use fgdb_types::{CanonicalScalar, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, btree_map::Entry};
+
+#[path = "beacon_graph.rs"]
+mod graph;
 
 type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
@@ -156,6 +159,38 @@ impl WriteTxn {
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_read(
+            database,
+            cx,
+            options,
+            |work| {
+                let config = options.config_for(query)?;
+                query.validate(&config, &mut Shared(work))?;
+                Ok(config)
+            },
+            |_, _| Ok(()),
+            |index, _, work| query.execute(index, &mut Shared(work)),
+        )
+    }
+
+    // The two- and three-lane reads share owner/frontier admission, the exact
+    // same prepared vertex overlay, one work/scratch allowance and the final
+    // live gate. `selected` sees every selected vertex, including graph-only
+    // transit vertices that have neither a text nor a vector document.
+    #[allow(clippy::too_many_arguments)]
+    fn beacon_read<V: Vfs + Clone, T>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<IndexConfig, BeaconError>,
+        mut selected: impl FnMut(VId, &RefCell<Control<'_>>) -> Result<(), BeaconError>,
+        finish: impl FnOnce(
+            &IndexSnapshot,
+            &Snapshot,
+            &RefCell<Control<'_>>,
+        ) -> Result<T, BeaconError>,
+    ) -> Result<T, ReadError<WriteTxnError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(ReadError::Interrupted)?;
             self.ensure_database(database).map_err(ReadError::Read)?;
@@ -179,8 +214,7 @@ impl WriteTxn {
             });
             let result = (|| {
                 work.borrow_mut().charge(1)?;
-                let config = options.config_for(query)?;
-                query.validate(&config, &mut Shared(&work))?;
+                let config = configure(&work)?;
                 if let Some(label) = options.vertex_label {
                     if !self.scanned_vertex_labels.borrow().contains(&label) {
                         work.borrow_mut().source(SourceEvent::ScratchEntry)?;
@@ -267,6 +301,7 @@ impl WriteTxn {
                             });
                         }
                         staged += 1;
+                        selected(vid, &work)?;
                         options
                             .projection
                             .project(
@@ -287,7 +322,7 @@ impl WriteTxn {
                     .transpose()
                 });
                 let index = BeaconIndex::try_build(config.clone(), projected, &mut Shared(&work))?;
-                let result = query.execute(&index.snapshot(), &mut Shared(&work))?;
+                let result = finish(&index.snapshot(), &view.snapshot, &work)?;
                 // Native empty and zero-k paths still have a final live gate.
                 work.borrow_mut().charge(1)?;
                 Ok(result)
