@@ -4,11 +4,13 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxnError, stage};
+use crate::query::QueryError;
 use fgdb_gql::GqlQueryError;
 use fgdb_gql::insertion::{
     GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
+use std::cell::RefCell;
 
 // Keep the collector's typed resource/value errors. Its interruption carrier
 // also transports live authorization refusals from the one shared allowance.
@@ -19,17 +21,57 @@ fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphInsertError::Source(error))
 }
 
+// The masked read kernel has its existing query-error carrier. Preserve the
+// two errors produced by write controls without issuing another permit.
+fn query_control(error: WriteTxnError) -> QueryError {
+    match error {
+        WriteTxnError::Authorization(error) => QueryError::Authorization(error),
+        WriteTxnError::Interrupted(error) => {
+            QueryError::Pattern(GqlQueryError::Interrupted(error))
+        }
+        // Controls must never disclose a future native mutation error through
+        // selection. Current controls produce only the two arms above.
+        _ => QueryError::Authorization(Error::ScopeDenied),
+    }
+}
+
+fn selection_error(
+    error: GqlQueryError<crate::ReadError, QueryError>,
+) -> GqlQueryError<WriteTxnError, WriteTxnError> {
+    match error {
+        GqlQueryError::Source(error) => GqlQueryError::Source(WriteTxnError::from(error)),
+        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Interrupted(QueryError::Authorization(error)) => {
+            GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
+        }
+        GqlQueryError::Interrupted(QueryError::Pattern(GqlQueryError::Interrupted(error))) => {
+            GqlQueryError::Interrupted(WriteTxnError::Interrupted(error))
+        }
+        GqlQueryError::Interrupted(_) => {
+            GqlQueryError::Source(WriteTxnError::AuthorizedMutationRefused)
+        }
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
-    /// Execute a standalone prepared INSERT/CREATE under one write capability.
+    /// Execute prepared INSERT/CREATE under one capability and one native commit.
     ///
     /// Expressions use the ordinary GLA insertion collector. Every resulting
     /// original creation is checked before/after native staging, including
     /// relation and endpoint scope. All relation groups publish in one native
     /// commit; a denied tail, quota failure, expiry or cancellation discards the
     /// private workspace. No caller-selected identity or allocator is accepted.
-    /// MATCH-selected insertion is refused before allocation on this surface.
+    /// Standalone creation needs Write rights. MATCH-selected creation requires
+    /// ReadWrite rights and uses the SAME masked source/GLA body as authorized
+    /// reads: hidden vertices/edges never enter matching, and expressions see
+    /// only permitted properties/labels. The selection is frozen before any
+    /// creation; it does not recursively select the vertices it just inserts.
+    /// A zero-match statement allocates no IDs and completes ReadClosed without
+    /// publishing a capsule, marker or new sequence.
     ///
-    /// A single signed permit covers collection, image admission, preparation
+    /// A single signed permit covers selection, collection, image admission, preparation
     /// and final validation. The supplied native policy additionally bounds
     /// evaluator work, scratch and creation counts. This stats-only operation
     /// delivers no identity rows and works with max_rows = 0. Stats and the
@@ -120,6 +162,9 @@ impl<V: Vfs + Clone> Database<V> {
         let permit = verified
             .begin_write_at(branch, now)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        if insertion.selection().is_some() && !verified.predicates().rights().can_read() {
+            return Err(source(WriteTxnError::Authorization(Error::PermissionDenied)));
+        }
         commit_cx
             .with_restriction_async(async {
                 let mut execution = Execution {
@@ -128,24 +173,54 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 execution.checkpoint().map_err(source)?;
-                // Never route a selection through the privileged query API.
-                if insertion.selection().is_some() {
-                    return Err(source(WriteTxnError::AuthorizedMutationRefused));
-                }
                 let mut workspace = Workspace(Some(self.begin(txn_cx).map_err(|error| {
                     source(WriteTxnError::Write(error))
                 })?));
                 let proposal = query_cx.with_restriction(|| {
-                    let allocate = self.engine_allocator(query_cx).map_err(source)?;
+                    // Sequential collector callbacks share the exact write
+                    // allowance and owner. These borrows die BEFORE staging or
+                    // awaiting completion, keeping the public future Send when
+                    // its clock/host are Send. Allocation starts only after the
+                    // masked selection and all computed values are validated.
+                    let execution = RefCell::new(&mut execution);
+                    let database = RefCell::new(&mut *self);
                     insertion.execute_governed(
                         policy,
-                        |_, _| {
-                            Err(GqlQueryError::Source(WriteTxnError::AuthorizedMutationRefused))
+                        |pattern, allowance| {
+                            database.borrow().select_for_authorized_insert(
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
+                                || {
+                                    query_cx.checkpoint().map_err(|error| {
+                                        query_control(WriteTxnError::Interrupted(error))
+                                    })?;
+                                    let mut borrowed = execution.borrow_mut();
+                                    let execution = &mut **borrowed;
+                                    execution.checkpoint().map_err(query_control)?;
+                                    let now = (execution.clock)();
+                                    execution.permit.charge_nodes_at(now, 1)
+                                        .map_err(QueryError::Authorization)
+                                },
+                                || {
+                                    query_cx.checkpoint().map_err(|error| {
+                                        query_control(WriteTxnError::Interrupted(error))
+                                    })?;
+                                    execution.borrow_mut().poll().map_err(query_control)
+                                },
+                                || {
+                                    query_cx.checkpoint().map_err(|error| {
+                                        query_control(WriteTxnError::Interrupted(error))
+                                    })?;
+                                    execution.borrow_mut().checkpoint().map_err(query_control)
+                                },
+                            ).map_err(selection_error)
                         },
-                        allocate,
+                        |request| database.borrow_mut().allocate_identity(query_cx, request),
                         || {
                             query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.checkpoint()
+                            execution.borrow_mut().checkpoint()
                         },
                     )
                 })?;
@@ -153,6 +228,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
                 for intent in proposal.into_intents() {
+                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
                     execution.checkpoint().map_err(source)?;
                     // Receipt admission precedes both its allocation and native
                     // publication. The stats-only path allocates no ID vectors.
@@ -187,7 +263,10 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 let completion = workspace
                     .transaction()
-                    .complete_controlled(self, commit_cx, None, false, || execution.checkpoint())
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
                     .await
                     .map_err(source)?;
                 Ok((stats, vertices, edges, completion))

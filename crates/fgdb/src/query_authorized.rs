@@ -383,29 +383,42 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Governed<Row> {
+    pattern_at_controlled(
+        snapshot,
+        at,
+        pattern,
+        scope,
+        policy,
+        &mut || execution.borrow_mut().node(),
+        &mut || execution.borrow_mut().poll(),
+        &mut || execution.borrow_mut().checkpoint(),
+    )
+}
+
+// One source-admission and GLA body serves both reads and INSERT selection.
+// A write supplies its EXISTING permit's controls, not a newly issued read
+// allowance. Separate poll and charge callbacks keep hidden history unbilled.
+#[allow(clippy::too_many_arguments)]
+fn pattern_at_controlled<Row: GlaOutput>(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    pattern: &PreparedGraphPattern<Row>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    node: &mut impl FnMut() -> Result<(), QueryError>,
+    poll: &mut impl FnMut() -> Result<(), QueryError>,
+    checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
+) -> Governed<Row> {
     let mut usage = AdmissionUsage::default();
     let tables = Tables::admit(
         snapshot,
         pattern.plan(),
         at,
         scope,
-        || {
-            execution
-                .borrow_mut()
-                .node()
-                .map_err(GqlQueryError::Interrupted)
-        },
-        &mut |_| {
-            execution
-                .borrow_mut()
-                .poll()
-                .map_err(GqlQueryError::Interrupted)
-        },
+        || node().map_err(GqlQueryError::Interrupted),
+        &mut |_| poll().map_err(GqlQueryError::Interrupted),
         &mut |event| {
-            execution
-                .borrow_mut()
-                .checkpoint()
-                .map_err(GqlQueryError::Interrupted)?;
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )?;
@@ -419,12 +432,45 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
         |vid| Ok(tables.labels.get(&vid).map(Vec::as_slice)),
         |eid| Ok(tables.types.get(&eid)),
         usage.remaining(policy),
-        || execution.borrow_mut().checkpoint(),
+        checkpoint,
     );
     usage.finish(policy, result)
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Private selection adapter for an already authenticated, exclusively
+    /// borrowed write. The caller checks ReadWrite rights before entering and
+    /// supplies controls backed by its one live write permit. No public API
+    /// accepts a predicate program as independent execution authority.
+    /// Selection runs before any insertion is staged, so this healthy frontier
+    /// is the private transaction's pinned basis. No result is delivered here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_for_authorized_insert<Row: GlaOutput>(
+        &self,
+        cx: &QueryCx,
+        pattern: &PreparedGraphPattern<Row>,
+        scope: &PlannerPredicates,
+        policy: GqlQueryPolicy,
+        mut node: impl FnMut() -> Result<(), QueryError>,
+        mut poll: impl FnMut() -> Result<(), QueryError>,
+        mut checkpoint: impl FnMut() -> Result<(), QueryError>,
+    ) -> Governed<Row> {
+        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        self.ensure_readable().map_err(GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            pattern_at_controlled(
+                &self.snapshot,
+                self.snapshot.frontier,
+                pattern,
+                scope,
+                policy,
+                &mut node,
+                &mut poll,
+                &mut checkpoint,
+            )
+        })
+    }
+
     /// Execute a typed GQL pattern on the capability's visible induced graph.
     ///
     /// The trusted host selects its Authority and exact branch mapping; its
