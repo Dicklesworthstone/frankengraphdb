@@ -409,10 +409,22 @@ impl<'a> Parser<'a> {
         // The shared resolved-expression entry point stops before comparisons
         // and Boolean connectors. Parentheses and CASE retain their own inner
         // expressions. This callback resolves ONLY the current WITH aliases.
+        // Hidden boundary reads resolve only as `alias.property`, never by
+        // their private names.
+        let visible = self
+            .boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == schema.len())
+            .map_or(schema.len(), |boundary| boundary.visible);
         self.read_resolved_value(
             &mut |parser| {
+                if let Some(column) = parser.boundary_read(schema.len())? {
+                    return Ok(Some(column));
+                }
                 if let TokenKind::Word(word) = parser.current.kind
-                    && let Some(column) = schema.iter().position(|(name, _)| name.text == word)
+                    && let Some(column) = schema[..visible]
+                        .iter()
+                        .position(|(name, _)| name.text == word)
                 {
                     parser.advance()?;
                     return Ok(Some(column));

@@ -13,6 +13,68 @@ use crate::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp, GraphSetQ
 const MAX_FILTER_NESTING: usize = 64;
 pub(super) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
+/// Private output names for hidden boundary reads. A fixed set lets each name
+/// borrow for the statement's lifetime; a user alias that matches one is
+/// skipped, never shadowed.
+const BOUNDARY_READ_NAMES: [&str; 16] = [
+    "__fg_boundary_0",
+    "__fg_boundary_1",
+    "__fg_boundary_2",
+    "__fg_boundary_3",
+    "__fg_boundary_4",
+    "__fg_boundary_5",
+    "__fg_boundary_6",
+    "__fg_boundary_7",
+    "__fg_boundary_8",
+    "__fg_boundary_9",
+    "__fg_boundary_10",
+    "__fg_boundary_11",
+    "__fg_boundary_12",
+    "__fg_boundary_13",
+    "__fg_boundary_14",
+    "__fg_boundary_15",
+];
+
+/// Whether `word` ends the WHERE of a WITH at nesting depth zero. `WITH`
+/// after STARTS/ENDS is a text predicate, not a new clause.
+fn ends_boundary_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+    if word.eq_ignore_ascii_case("WITH") {
+        return !matches!(previous, Some(TokenKind::Word(previous))
+            if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
+    }
+    [
+        "RETURN",
+        "MATCH",
+        "OPTIONAL",
+        "UNWIND",
+        "ORDER",
+        "SKIP",
+        "OFFSET",
+        "LIMIT",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+        "CALL",
+    ]
+    .iter()
+    .any(|clause| word.eq_ignore_ascii_case(clause))
+}
+
+/// The MATCH vertex a boundary output projects unchanged, if any.
+fn boundary_binding<'a>(
+    head: &GraphProjectionHead<'a>,
+    offset: usize,
+    alias: &str,
+) -> Option<Name<'a>> {
+    let (_, ReadValueTemplate::Column(column)) =
+        head.outputs.iter().find(|(name, _)| name.text == alias)?
+    else {
+        return None;
+    };
+    let input = head.inputs.get(column.checked_sub(offset)?)?;
+    (input.property.is_none() && input.path.is_none()).then_some(input.variable)
+}
+
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
     GraphSetTextError {
         offset: at,
@@ -62,6 +124,124 @@ fn emit(
 }
 
 impl<'a> Parser<'a> {
+    /// `WITH n WHERE n.p = 3`: the WHERE of the graph-to-row boundary may read
+    /// a property of a MATCH vertex the WITH projects as-is (under its
+    /// own name or an alias). Each such read becomes a hidden column of the
+    /// boundary projection itself — the same graph read `WITH n.p AS x` makes
+    /// — which only that WHERE can resolve, and the first WHERE stage drops
+    /// the hidden columns before any page, later stage or `RETURN *` sees
+    /// them. A property is a function of its element, so hidden columns never
+    /// change DISTINCT or multiplicity. Reads after a page, in later stages,
+    /// or through computed or carried values stay refused as before.
+    /// `offset` is where this head's graph inputs start in its column space.
+    pub(super) fn hoist_boundary_reads(
+        &mut self,
+        head: &mut GraphProjectionHead<'a>,
+        offset: usize,
+    ) -> Result<(), GraphSetTextError> {
+        if !head.with || !self.is_word("WHERE") {
+            return Ok(());
+        }
+        let visible = head.outputs.len();
+        let mut reads = Vec::new();
+        let mut lexer = self.lexer.clone();
+        // The three tokens before the current one, oldest first.
+        let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
+        let mut depth = 0_usize;
+        loop {
+            let token = lexer.next()?;
+            let after_dot = matches!(window[2], Some(TokenKind::Punct(b'.')));
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = outer;
+                }
+                TokenKind::Word(word)
+                    if depth == 0 && !after_dot && ends_boundary_where(word, window[2]) =>
+                {
+                    break;
+                }
+                TokenKind::Word(property) if after_dot => {
+                    let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
+                    if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
+                        && let Some(variable) = boundary_binding(head, offset, alias)
+                        && !reads
+                            .iter()
+                            .any(|&(read, key, _)| read == alias && key == property)
+                    {
+                        let Some(&name) = BOUNDARY_READ_NAMES.iter().find(|name| {
+                            head.outputs.iter().all(|(output, _)| output.text != **name)
+                        }) else {
+                            return Err(expected(
+                                token.at,
+                                "at most 16 property reads in the WHERE of a WITH",
+                            ));
+                        };
+                        let key = Name {
+                            text: property,
+                            at: token.at,
+                        };
+                        let input =
+                            self.mutation_projection(&mut head.inputs, variable, Some(key))?;
+                        head.outputs.push((
+                            Name {
+                                text: name,
+                                at: token.at,
+                            },
+                            ReadValueTemplate::Column(offset + input),
+                        ));
+                        reads.push((alias, property, head.outputs.len() - 1));
+                    }
+                }
+                _ => {}
+            }
+            window = [window[1], window[2], Some(token.kind)];
+        }
+        if !reads.is_empty() {
+            self.boundary_reads = Some(BoundaryReads {
+                visible,
+                width: head.outputs.len(),
+                reads,
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolve `alias.property` at the current token to its hidden boundary
+    /// column when `width` is the boundary WHERE's row, consuming all three
+    /// tokens; `None` consumes nothing.
+    fn boundary_read(&mut self, width: usize) -> Result<Option<usize>, GraphPatternTextError> {
+        let (Some(boundary), TokenKind::Word(alias)) = (&self.boundary_reads, self.current.kind)
+        else {
+            return Ok(None);
+        };
+        if boundary.width != width {
+            return Ok(None);
+        }
+        let mut lookahead = self.lexer.clone();
+        if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+            return Ok(None);
+        }
+        let TokenKind::Word(property) = lookahead.next()?.kind else {
+            return Ok(None);
+        };
+        let Some(&(_, _, column)) = boundary
+            .reads
+            .iter()
+            .find(|&&(read, key, _)| read == alias && key == property)
+        else {
+            return Ok(None);
+        };
+        for _ in 0..3 {
+            self.advance()?;
+        }
+        Ok(Some(column))
+    }
+
     pub(super) fn row_pipeline(
         &mut self,
         schema: RowSchema<'a>,
@@ -113,6 +293,32 @@ impl<'a> Parser<'a> {
             }
             if self.take_word("WHERE")? {
                 self.row_selection(&schema, &mut stages, &mut depth, at)?;
+                if self
+                    .boundary_reads
+                    .as_ref()
+                    .is_some_and(|boundary| boundary.width == schema.len())
+                    && let Some(boundary) = self.boundary_reads.take()
+                {
+                    // Hidden boundary reads end with this WHERE.
+                    let projection = schema[..boundary.visible]
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, _))| ReadProjectionTemplate {
+                            name: name.text.to_owned(),
+                            value: ReadValueTemplate::Column(index),
+                        })
+                        .collect();
+                    append_stage(
+                        &mut stages,
+                        ReadStageTemplate::Project {
+                            at,
+                            projection,
+                            quantifier: GraphSetQuantifier::All,
+                        },
+                        &mut depth,
+                    )?;
+                    schema.truncate(boundary.visible);
+                }
                 // A page written after WHERE applies to the filtered rows.
                 // Keep any earlier page on its input: moving either page across
                 // this filter changes which occurrences survive.

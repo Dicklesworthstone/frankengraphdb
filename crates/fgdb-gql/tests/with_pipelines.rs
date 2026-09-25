@@ -292,6 +292,70 @@ fn computed_with_predicates_filter_the_projected_rows() {
     assert!(run(&alias, &[CanonicalScalar::Int(1)], wide(), &mut || Ok(())).is_err());
 }
 
+/// `WITH n WHERE n.p ...` reads the property through a hidden column of the
+/// graph-to-row boundary. Its rows equal the MATCH-level WHERE under the
+/// binding's own name, an alias, DISTINCT and a page after the WHERE, and the
+/// hidden column never reaches RETURN *, a later WITH *, or a lookup by its
+/// private name. Reads after a page or in a later stage stay refused.
+#[test]
+fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_columns() {
+    let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    let vertex = |vid: u128| {
+        GraphValueRow::from_owned_values(vec![fgdb_gql::algebra::GraphValue::Vertex(VId(vid))])
+    };
+    assert_eq!(
+        rows("MATCH (n) WITH n WHERE n.p = 2 RETURN n ORDER BY n"),
+        vec![vertex(1), vertex(2)]
+    );
+    for (boundary, pattern) in [
+        (
+            "MATCH (n) WITH n WHERE n.p = 2 RETURN n ORDER BY n",
+            "MATCH (n) WHERE n.p = 2 RETURN n ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n AS m WHERE m.p > 1 AND m.p < 4 RETURN m ORDER BY m",
+            "MATCH (n) WHERE n.p > 1 AND n.p < 4 WITH n AS m RETURN m ORDER BY m",
+        ),
+        (
+            "MATCH (n) WITH DISTINCT n WHERE n.p >= 2 RETURN n ORDER BY n",
+            "MATCH (n) WHERE n.p >= 2 RETURN n ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n WHERE n.p = 2 OR n.p = 4 LIMIT 2 RETURN n ORDER BY n",
+            "MATCH (n) WHERE n.p = 2 OR n.p = 4 WITH n LIMIT 2 RETURN n ORDER BY n",
+        ),
+    ] {
+        let found = rows(boundary);
+        assert!(!found.is_empty(), "{boundary}");
+        assert_eq!(found, rows(pattern), "{boundary}");
+    }
+    for text in [
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN *",
+        "MATCH (n) WITH n WHERE n.p = 2 WITH * RETURN *",
+    ] {
+        let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(template.columns(), &["n"], "{text}");
+        assert!(rows(text).iter().all(|row| row.len() == 1), "{text}");
+    }
+    for text in [
+        "MATCH (n) WITH n WHERE n.p = 2 AND __fg_boundary_0 = 2 RETURN n",
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN __fg_boundary_0",
+        "MATCH (n) WITH n LIMIT 3 WHERE n.p = 2 RETURN n",
+        "MATCH (n) WITH n WITH n WHERE n.p = 2 RETURN n",
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN n.p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog() {
     for text in [

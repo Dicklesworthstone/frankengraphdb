@@ -429,7 +429,21 @@ struct Parser<'a> {
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Name<'a>, usize)>,
+    boundary_reads: Option<BoundaryReads<'a>>,
 }
+
+/// Property reads the WHERE of a graph-to-row WITH makes through a projected
+/// MATCH binding (`WITH n WHERE n.p = 3`). Each is a hidden column appended to
+/// the boundary projection after its `visible` columns; only that first WHERE
+/// resolves `alias.property` to one, and the hidden columns are projected away
+/// right after it. `width` is that WHERE's row width, visible plus hidden; a
+/// selection over any other row (a nested scope) sees none of this.
+struct BoundaryReads<'a> {
+    visible: usize,
+    width: usize,
+    reads: Vec<(&'a str, &'a str, usize)>,
+}
+
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
         if text.len() > MAX_GRAPH_TEXT_BYTES {
@@ -453,6 +467,7 @@ impl<'a> Parser<'a> {
             parameter_types: BTreeMap::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
+            boundary_reads: None,
             syntax: Syntax {
                 variables: Vec::new(),
                 path: None,

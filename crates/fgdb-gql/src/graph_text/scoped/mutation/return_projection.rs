@@ -83,7 +83,8 @@ impl<'a> Parser<'a> {
             return self.parse_leading_pipeline(statement);
         }
         self.parse_match_prefix()?;
-        let head = self.graph_projection_head()?;
+        let mut head = self.graph_projection_head()?;
+        self.hoist_boundary_reads(&mut head, 0)?;
         let pipeline = if head.with {
             self.row_pipeline(head.schema(&self.syntax.parameters))?
         } else {
