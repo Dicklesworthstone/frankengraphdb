@@ -21,6 +21,10 @@ use std::collections::BTreeSet;
 #[path = "authorized/graph.rs"]
 mod graph;
 
+#[cfg(test)]
+#[path = "authorized/ordered_tests.rs"]
+mod ordered_tests;
+
 struct Workspace(Option<WriteTxn>);
 impl Workspace {
     fn transaction(&mut self) -> &mut WriteTxn {
@@ -204,15 +208,26 @@ fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
         .and_then(|len| len.checked_add(1))
         .ok_or(WriteTxnError::Authorization(Error::TooLarge))?;
     execution.work(prefix)?;
-    transaction
-        .write(
-            database,
-            WriteBatch {
-                relation,
-                rows: vec![row],
-            },
-        )
-        .map_err(redacted)
+    let batch = WriteBatch {
+        relation,
+        rows: vec![row],
+    };
+    if transaction
+        .staged
+        .first()
+        .is_some_and(|first| first.relation != relation)
+    {
+        // Introduce a dependent relation explicitly. Subsequent ordinary
+        // writes already retain ordered composition once the prefix spans
+        // relations. Never prepare independent groups: a later intent must
+        // observe the exact prefix whose before/after images we authorized.
+        transaction
+            .write_ordered(database, vec![batch])
+            .map_err(redacted)
+    } else {
+        // Preserve the existing single-relation evaluator and birth ordering.
+        transaction.write(database, batch).map_err(redacted)
+    }
 }
 
 fn stage<V: Vfs + Clone, Clock: FnMut() -> u64>(
@@ -284,6 +299,50 @@ impl<V: Vfs + Clone> Database<V> {
         token: &CapabilityToken,
         branch: &str,
         batch: WriteBatch,
+        clock: impl FnMut() -> u64,
+    ) -> Result<CommitSeq, WriteTxnError> {
+        self.write_ordered_authorized(
+            txn_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            vec![batch],
+            clock,
+        )
+        .await
+    }
+
+    /// Commit source-ordered, dependent relation batches under one capability.
+    ///
+    /// Later batches see earlier creations, updates and ensure aliases through
+    /// the native transaction overlay. Every original intent is authorized
+    /// before and after staging; normalization cannot hide a forbidden no-op.
+    /// Identity-addressed edge mutations authorize the edge's actual relation,
+    /// not merely the batch's default relation. No unchecked prepared write or
+    /// reusable transaction handle escapes to the caller.
+    ///
+    /// All batches share ONE execution permit, snapshot pin and native commit.
+    /// Limits, expiry and retirement are not reset at batch boundaries. A
+    /// refused tail discards the entire unpublished prefix. Completion keeps
+    /// the ordinary unknown/recovery contract; it never reports a durable
+    /// write as rolled back because authorization changed after admission.
+    /// Empty input or an empty batch is refused after capability verification.
+    /// Grouping adjacent same-relation intents does not change signed charges.
+    ///
+    /// This has the same security and residency boundaries as
+    /// [`Self::write_authorized`], including its client-selected identity
+    /// surface; it is not a zero-disclosure global uniqueness contract, a
+    /// long-lived authorized transaction, full SSI or a second commit lane.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_ordered_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        batches: Vec<WriteBatch>,
         mut clock: impl FnMut() -> u64,
     ) -> Result<CommitSeq, WriteTxnError> {
         if authority.namespace() != self.keys.namespace {
@@ -304,19 +363,30 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 execution.checkpoint()?;
-                if batch.is_empty() {
+                if batches.is_empty() {
                     return Err(WriteError::EmptyBatch.into());
                 }
+                // Poll structural input validation without making a batch
+                // boundary consume another allowance. Every intent below
+                // still pays its original authorization/preparation charges.
+                for batch in &batches {
+                    execution.poll()?;
+                    if batch.is_empty() {
+                        return Err(WriteError::EmptyBatch.into());
+                    }
+                }
                 let mut workspace = Workspace(Some(self.begin(txn_cx)?));
-                for row in batch.rows {
-                    execution.checkpoint()?;
-                    stage(
-                        workspace.transaction(),
-                        self,
-                        batch.relation,
-                        row,
-                        &mut execution,
-                    )?;
+                for batch in batches {
+                    for row in batch.rows {
+                        execution.checkpoint()?;
+                        stage(
+                            workspace.transaction(),
+                            self,
+                            batch.relation,
+                            row,
+                            &mut execution,
+                        )?;
+                    }
                 }
                 let completion = workspace
                     .transaction()
