@@ -4,7 +4,9 @@ use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphDeleteText};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphDeleteText,
+};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,9 +28,16 @@ fn authority() -> Authority {
 }
 fn grant() -> Grant {
     Grant {
-        branch: "main".into(), labels: Scope::All, relations: Scope::All,
-        properties: Scope::All, rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+        branch: "main".into(),
+        labels: Scope::All,
+        relations: Scope::All,
+        properties: Scope::All,
+        rights: Rights::ReadWrite,
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
         expires_at_ms: 10_000,
     }
 }
@@ -47,8 +56,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn deletion(text: &str) -> PreparedGraphDelete {
-    PreparedGraphDeleteText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphDeleteText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn mixed() -> PreparedGraphDelete {
     // A vertex is deliberately declared BEFORE its edges, and both endpoints
@@ -58,7 +69,9 @@ fn mixed() -> PreparedGraphDelete {
 fn authorization(error: Fault) -> Error {
     match error {
         GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
-        | GqlQueryError::Source(GraphDeleteError::Source(WriteTxnError::Authorization(error))) => error,
+        | GqlQueryError::Source(GraphDeleteError::Source(WriteTxnError::Authorization(error))) => {
+            error
+        }
         other => panic!("expected authorization refusal, got {other:?}"),
     }
 }
@@ -92,14 +105,27 @@ fn mixed_delete_reorders_edges_deduplicates_receipts_and_reopens() {
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &commit, true).await;
         let frontier = db.frontier().unwrap();
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        let (stats, vertices, edges, completion) = db.execute_graph_delete_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &mixed(), policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_delete_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &mixed(),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.selection.result_rows, 2);
         assert_eq!((stats.target_vertices, stats.target_edges), (2, 2));
         assert_eq!(vertices, vec![VId(1), VId(2)]);
@@ -108,11 +134,16 @@ fn mixed_delete_reorders_edges_deduplicates_receipts_and_reopens() {
         assert_eq!(stats.selection.snapshot_records, 6);
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+        );
         assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), seq);
         assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
         assert_eq!(txn.outstanding_obligations(), 0);
@@ -128,7 +159,12 @@ fn scoped_edge_deletion_checks_actual_relation_and_preserves_endpoints() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
         let mut other = WriteBatch::new(OTHER);
-        other.add_edge(EId(21), VId(1), VId(2), vec![(SECRET, CanonicalScalar::Int(99))]);
+        other.add_edge(
+            EId(21),
+            VId(1),
+            VId(2),
+            vec![(SECRET, CanonicalScalar::Int(99))],
+        );
         db.write(&commit, other).await.unwrap();
         let before = db.vertices().unwrap();
         let frontier = db.frontier().unwrap();
@@ -140,9 +176,20 @@ fn scoped_edge_deletion_checks_actual_relation_and_preserves_endpoints() {
         // The default coordinate R is not authorized; the actual EId belongs
         // to Other, which is authorized. Deletion must use the original edge.
         let statement = deletion("MATCH (a:Visible)-[e:Other]->(b:Visible) DELETE e");
-        let (stats, vertices, edges, _) = db.execute_graph_delete_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, _) = db
+            .execute_graph_delete_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &statement,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.target_vertices, stats.target_edges), (0, 1));
         assert!(vertices.is_empty());
         assert_eq!(edges, vec![EId(21)]);
@@ -168,20 +215,41 @@ fn every_unselected_incidence_kind_refuses_without_implicit_cascade() {
             seed(&mut db, &commit, false).await;
             if mode != 0 {
                 let mut extra = WriteBatch::new(if mode == 4 { OTHER } else { R });
-                if mode == 5 { extra.create_vertex(VId(3), vec![HIDDEN], vec![]); }
+                if mode == 5 {
+                    extra.create_vertex(VId(3), vec![HIDDEN], vec![]);
+                }
                 let (source, destination) = match mode {
                     2 => (VId(2), VId(1)), // incoming
                     3 => (VId(1), VId(1)), // self-loop
                     5 => (VId(1), VId(3)), // endpoint excluded by user MATCH
                     _ => (VId(1), VId(2)), // parallel or cross-relation
                 };
-                extra.add_edge(EId(30), source, destination, vec![(P, CanonicalScalar::Int(2))]);
+                extra.add_edge(
+                    EId(30),
+                    source,
+                    destination,
+                    vec![(P, CanonicalScalar::Int(2))],
+                );
                 db.write(&commit, extra).await.unwrap();
             }
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-            let result = db.execute_graph_delete_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-            ).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let result = db
+                .execute_graph_delete_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    policy(),
+                    || NOW,
+                )
+                .await;
             if mode == 0 {
                 let (_, vertices, edges, _) = result.unwrap();
                 assert_eq!(vertices, vec![VId(1)]);
@@ -190,8 +258,23 @@ fn every_unselected_incidence_kind_refuses_without_implicit_cascade() {
                 assert!(db.vertex(VId(2)).unwrap().is_some());
                 assert!(db.edges().unwrap().is_empty());
             } else {
-                assert!(matches!(result, Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships))), "mode={mode}");
-                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert!(
+                    matches!(
+                        result,
+                        Err(GqlQueryError::Source(
+                            GraphDeleteError::IncidentRelationships
+                        ))
+                    ),
+                    "mode={mode}"
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
             }
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -215,27 +298,58 @@ fn deletion_scope_refusal_does_not_disclose_hidden_fields_or_incidence() {
                 extra.set_edge_property(EId(11), SECRET, Some(CanonicalScalar::Int(99)));
                 db.write(&commit, extra).await.unwrap();
             }
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let mut vertex_grant = grant();
             vertex_grant.labels = Scope::only([L]);
             vertex_grant.relations = Scope::only([R]);
             let token = authority.issue_at(&vertex_grant, NOW).unwrap();
             // The visible selected edge would leave the source isolated only
             // in one fixture. Both must refuse from capability scope instead.
-            let error = db.execute_graph_delete_authorized(
-                &txn, &query, &commit, &authority, &token, "main",
-                &deletion("MATCH (a:Visible)-[e:R]->(b:Visible) DELETE a, e"), policy(), || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_delete_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &deletion("MATCH (a:Visible)-[e:R]->(b:Visible) DELETE a, e"),
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::ScopeDenied);
             let mut edge_grant = grant();
             edge_grant.properties = Scope::only([P]);
             let token = authority.issue_at(&edge_grant, NOW).unwrap();
-            let error = db.execute_graph_delete_authorized(
-                &txn, &query, &commit, &authority, &token, "main",
-                &deletion("MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e"), policy(), || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_delete_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &deletion("MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e"),
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::ScopeDenied);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -252,14 +366,38 @@ fn result_target_and_incidence_record_limits_all_precede_publication() {
         for rows in 0..=4 {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let limited = token.attenuate(Restriction::MaxRows(rows)).unwrap();
-            let result = db.execute_graph_delete_returning_authorized(
-                &txn, &query, &commit, &authority, &limited, "main", &mixed(), policy(), || NOW,
-            ).await;
+            let result = db
+                .execute_graph_delete_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &mixed(),
+                    policy(),
+                    || NOW,
+                )
+                .await;
             if rows < 4 {
-                assert_eq!(authorization(result.unwrap_err()), Error::LimitExceeded(LimitDimension::Rows));
-                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(
+                    authorization(result.unwrap_err()),
+                    Error::LimitExceeded(LimitDimension::Rows)
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
             } else {
                 let (_, vertices, edges, _) = result.unwrap();
                 assert_eq!(vertices.len() + edges.len(), 4);
@@ -268,22 +406,72 @@ fn result_target_and_incidence_record_limits_all_precede_publication() {
         }
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-        let limited = GraphDeletePolicy { max_targets: 3, ..policy() };
-        let error = db.execute_graph_delete_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &mixed(), limited, || NOW,
-        ).await.unwrap_err();
-        assert!(matches!(error, GqlQueryError::Source(GraphDeleteError::TargetLimit { limit: 3, .. })));
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let limited = GraphDeletePolicy {
+            max_targets: 3,
+            ..policy()
+        };
+        let error = db
+            .execute_graph_delete_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &mixed(),
+                limited,
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(GraphDeleteError::TargetLimit { limit: 3, .. })
+        ));
         let limited = GraphDeletePolicy::new(GqlQueryPolicy::new(5, 100, 1_000_000, 100_000), 100);
-        let error = db.execute_graph_delete_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &mixed(), limited, || NOW,
-        ).await.unwrap_err();
+        let error = db
+            .execute_graph_delete_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &mixed(),
+                limited,
+                || NOW,
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(error, GqlQueryError::Rows(_)));
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, _) = db.execute_graph_delete_authorized(
-            &txn, &query, &commit, &authority, &zero, "main", &mixed(), policy(), || NOW,
-        ).await.unwrap();
+        let (stats, _) = db
+            .execute_graph_delete_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &zero,
+                "main",
+                &mixed(),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.target_vertices, stats.target_edges), (2, 2));
         assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
         assert_eq!(txn.outstanding_obligations(), 0);
@@ -299,27 +487,66 @@ fn readwrite_rights_are_required_even_for_empty_delete_and_empty_results_read_cl
         let authority = authority();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let statement = deletion("MATCH (a:Visible) WHERE a.p = 999 DELETE a");
         for rights in [Rights::Read, Rights::Write] {
             let mut grant = grant();
             grant.rights = rights;
             grant.limits.max_work = 0;
             let token = authority.issue_at(&grant, NOW).unwrap();
-            let error = db.execute_graph_delete_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_delete_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::PermissionDenied);
         }
-        let token = authority.issue_at(&grant(), NOW).unwrap()
-            .attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, vertices, edges, completion) = db.execute_graph_delete_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-        ).await.unwrap();
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(0))
+            .unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_delete_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &statement,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.target_vertices, stats.target_edges), (0, 0));
         assert!(vertices.is_empty() && edges.is_empty());
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -350,12 +577,27 @@ fn plain_delete_uses_one_node_allowance_and_hidden_topology_does_not_change_it()
                     extra.add_edge(EId(30), VId(1), VId(3), vec![]);
                     db.write(&commit, extra).await.unwrap();
                 }
-                let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
                 let success = if mode == 0 {
                     let mut batch = WriteBatch::new(R);
                     batch.delete_edge(EId(11));
                     batch.delete_edge(EId(12));
-                    match db.write_authorized(&txn, &commit, &authority, &limited, "main", batch, || NOW).await {
+                    match db
+                        .write_authorized(
+                            &txn,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            batch,
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(WriteTxnError::Authorization(error)) => {
                             assert_eq!(error, Error::LimitExceeded(LimitDimension::Nodes));
@@ -364,27 +606,57 @@ fn plain_delete_uses_one_node_allowance_and_hidden_topology_does_not_change_it()
                         other => panic!("native witness: {other:?}"),
                     }
                 } else {
-                    match db.execute_graph_delete_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main", &statement, policy(), || NOW,
-                    ).await {
+                    match db
+                        .execute_graph_delete_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            &statement,
+                            policy(),
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(error) => {
-                            assert_eq!(authorization(error), Error::LimitExceeded(LimitDimension::Nodes));
+                            assert_eq!(
+                                authorization(error),
+                                Error::LimitExceeded(LimitDimension::Nodes)
+                            );
                             false
                         }
                     }
                 };
-                if success { high = middle; } else {
+                if success {
+                    high = middle;
+                } else {
                     low = middle + 1;
-                    assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
                 }
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
             assert!(low > 0 && low < 128);
             floors.push(low);
         }
-        assert_eq!(floors[1], floors[0] + 2, "MATCH source admissions were reset");
-        assert_eq!(floors[2], floors[1], "hidden graph changed the node refusal threshold");
+        assert_eq!(
+            floors[1],
+            floors[0] + 2,
+            "MATCH source admissions were reset"
+        );
+        assert_eq!(
+            floors[2], floors[1],
+            "hidden graph changed the node refusal threshold"
+        );
     });
 }
 
@@ -400,25 +672,61 @@ fn expiry_during_collection_proof_or_native_completion_discards_every_delete() {
         seed(&mut db, &commit, true).await;
         let calls = AtomicU64::new(0);
         db.execute_graph_delete_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &mixed(), policy(), || {
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &mixed(),
+            policy(),
+            || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 NOW
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let count = calls.load(Ordering::Relaxed);
         assert!(count > 10);
         for cutoff in [1, count / 2, count - 1] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let calls = AtomicU64::new(0);
-            let error = db.execute_graph_delete_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &mixed(), policy(), || {
-                    if calls.fetch_add(1, Ordering::Relaxed) < cutoff { NOW } else { 10_000 }
-                },
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_delete_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &mixed(),
+                    policy(),
+                    || {
+                        if calls.fetch_add(1, Ordering::Relaxed) < cutoff {
+                            NOW
+                        } else {
+                            10_000
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::Expired);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -439,17 +747,38 @@ fn isolated_vertex_delete_preserves_unrelated_topology() {
         }
         batch.add_edge(EId(11), VId(2), VId(3), vec![]);
         db.write(&commit, batch).await.unwrap();
-        let before = (db.vertex(VId(2)).unwrap(), db.vertex(VId(3)).unwrap(), db.edges().unwrap());
+        let before = (
+            db.vertex(VId(2)).unwrap(),
+            db.vertex(VId(3)).unwrap(),
+            db.edges().unwrap(),
+        );
         let frontier = db.frontier().unwrap();
-        let (stats, vertices, edges, _) = db.execute_graph_delete_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main",
-            &deletion("MATCH (a:Visible) WHERE a.p = 10 DELETE a"), policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, _) = db
+            .execute_graph_delete_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &deletion("MATCH (a:Visible) WHERE a.p = 10 DELETE a"),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.target_vertices, stats.target_edges), (1, 0));
         assert_eq!(vertices, vec![VId(1)]);
         assert!(edges.is_empty());
         assert!(db.vertex(VId(1)).unwrap().is_none());
-        assert_eq!((db.vertex(VId(2)).unwrap(), db.vertex(VId(3)).unwrap(), db.edges().unwrap()), before);
+        assert_eq!(
+            (
+                db.vertex(VId(2)).unwrap(),
+                db.vertex(VId(3)).unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
         assert_eq!(txn.outstanding_obligations(), 0);
     });

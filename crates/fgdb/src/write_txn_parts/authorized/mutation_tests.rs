@@ -34,7 +34,11 @@ fn grant() -> Grant {
         relations: Scope::only([R]),
         properties: Scope::only([P, Q]),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
         expires_at_ms: 10_000,
     }
 }
@@ -54,18 +58,24 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn mutation(text: &str) -> PreparedGraphMutation {
-    PreparedGraphMutationText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphMutationText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn update() -> PreparedGraphMutation {
-    mutation("MATCH (a:Visible)-[e:R]->(b:Visible) WHERE a.p = 10 \
+    mutation(
+        "MATCH (a:Visible)-[e:R]->(b:Visible) WHERE a.p = 10 \
         SET a.p = CASE WHEN a.secret IS NULL THEN a.p + 1 ELSE 0 END, \
-        a.q = b.p, e.p = e.p + 5")
+        a.q = b.p, e.p = e.p + 5",
+    )
 }
 fn authorization(error: Fault) -> Error {
     match error {
         GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
-        | GqlQueryError::Source(GraphMutationError::Source(WriteTxnError::Authorization(error))) => error,
+        | GqlQueryError::Source(GraphMutationError::Source(WriteTxnError::Authorization(error))) => {
+            error
+        }
         other => panic!("expected authorization failure, got {other:?}"),
     }
 }
@@ -87,13 +97,17 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool) {
         let mut labels = vec![L];
         if hidden {
             props.push((SECRET, CanonicalScalar::Int(secret)));
-            if id == 2 { labels.push(HIDDEN); }
+            if id == 2 {
+                labels.push(HIDDEN);
+            }
         }
         batch.create_vertex(VId(id), labels, props);
     }
     for (id, secret) in [(11, 81), (12, 82)] {
         let mut props = vec![(P, CanonicalScalar::Int(2))];
-        if hidden { props.push((SECRET, CanonicalScalar::Int(secret))); }
+        if hidden {
+            props.push((SECRET, CanonicalScalar::Int(secret)));
+        }
         batch.add_edge(EId(id), VId(1), VId(2), props);
     }
     if hidden {
@@ -116,36 +130,79 @@ fn masked_simultaneous_vertex_and_edge_updates_deduplicate_and_reopen() {
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &commit, true).await;
         let frontier = db.frontier().unwrap();
-        let preserved = (db.vertex(VId(2)).unwrap(), db.vertex(VId(3)).unwrap(),
-            db.edge(EId(13)).unwrap(), db.edge(EId(21)).unwrap());
+        let preserved = (
+            db.vertex(VId(2)).unwrap(),
+            db.vertex(VId(3)).unwrap(),
+            db.edge(EId(13)).unwrap(),
+            db.edge(EId(21)).unwrap(),
+        );
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        let (stats, vertices, edges, completion) = db.execute_graph_mutation_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &update(), policy(), || NOW,
-        ).await.unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_mutation_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &update(),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.selection.result_rows, 2);
-        assert_eq!((stats.target_vertices, stats.target_edges, stats.effects), (1, 2, 4));
+        assert_eq!(
+            (stats.target_vertices, stats.target_edges, stats.effects),
+            (1, 2, 4)
+        );
         assert_eq!(vertices, vec![VId(1)]);
         assert_eq!(edges, vec![EId(11), EId(12)]);
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(11)), (SECRET, CanonicalScalar::Int(71)), (Q, CanonicalScalar::Int(20))]);
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(11)),
+                (SECRET, CanonicalScalar::Int(71)),
+                (Q, CanonicalScalar::Int(20))
+            ]
+        );
         for (id, secret) in [(11, 81), (12, 82)] {
-            assert_eq!(db.edge(EId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7)), (SECRET, CanonicalScalar::Int(secret))]);
+            assert_eq!(
+                db.edge(EId(id)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(7)),
+                    (SECRET, CanonicalScalar::Int(secret))
+                ]
+            );
         }
-        assert_eq!((db.vertex(VId(2)).unwrap(), db.vertex(VId(3)).unwrap(),
-            db.edge(EId(13)).unwrap(), db.edge(EId(21)).unwrap()), preserved);
+        assert_eq!(
+            (
+                db.vertex(VId(2)).unwrap(),
+                db.vertex(VId(3)).unwrap(),
+                db.edge(EId(13)).unwrap(),
+                db.edge(EId(21)).unwrap()
+            ),
+            preserved
+        );
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), seq);
         assert_eq!(db.vertices().unwrap(), vertices);
         assert_eq!(db.edges().unwrap(), edges);
@@ -162,16 +219,44 @@ fn forbidden_field_noops_and_scope_escape_leave_no_published_prefix() {
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
         for hidden in [false, true] {
-            for tail in ["SET a.secret = a.secret", "REMOVE a.secret", "REMOVE a:Visible"] {
+            for tail in [
+                "SET a.secret = a.secret",
+                "REMOVE a.secret",
+                "REMOVE a:Visible",
+            ] {
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 seed(&mut db, &commit, hidden).await;
-                let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-                let statement = mutation(&format!("MATCH (a:Visible) WHERE a.p = 10 SET a.p = 11 {tail}"));
-                let error = db.execute_graph_mutation_authorized(
-                    &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-                ).await.unwrap_err();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let statement = mutation(&format!(
+                    "MATCH (a:Visible) WHERE a.p = 10 SET a.p = 11 {tail}"
+                ));
+                let error = db
+                    .execute_graph_mutation_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &statement,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
                 assert_eq!(authorization(error), Error::ScopeDenied);
-                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
         }
@@ -189,14 +274,38 @@ fn receipt_quota_counts_distinct_targets_and_refuses_before_publication() {
         for rows in [0, 1, 2, 3] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let limited = token.attenuate(Restriction::MaxRows(rows)).unwrap();
-            let result = db.execute_graph_mutation_returning_authorized(
-                &txn, &query, &commit, &authority, &limited, "main", &update(), policy(), || NOW,
-            ).await;
+            let result = db
+                .execute_graph_mutation_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &update(),
+                    policy(),
+                    || NOW,
+                )
+                .await;
             if rows < 3 {
-                assert_eq!(authorization(result.unwrap_err()), Error::LimitExceeded(LimitDimension::Rows));
-                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(
+                    authorization(result.unwrap_err()),
+                    Error::LimitExceeded(LimitDimension::Rows)
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
             } else {
                 let (stats, vertices, edges, _) = result.unwrap();
                 assert_eq!(stats.effects, 4);
@@ -208,9 +317,20 @@ fn receipt_quota_counts_distinct_targets_and_refuses_before_publication() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
         let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, _) = db.execute_graph_mutation_authorized(
-            &txn, &query, &commit, &authority, &zero, "main", &update(), policy(), || NOW,
-        ).await.unwrap();
+        let (stats, _) = db
+            .execute_graph_mutation_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &zero,
+                "main",
+                &update(),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.effects, 4);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -225,27 +345,66 @@ fn rights_precede_source_access_and_empty_matches_close_without_a_commit() {
         let authority = authority();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let statement = mutation("MATCH (a:Visible) WHERE a.p = 999 SET a.p = 1");
         for rights in [Rights::Read, Rights::Write] {
             let mut grant = grant();
             grant.rights = rights;
             grant.limits.max_work = 0;
             let token = authority.issue_at(&grant, NOW).unwrap();
-            let error = db.execute_graph_mutation_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_mutation_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::PermissionDenied);
         }
-        let token = authority.issue_at(&grant(), NOW).unwrap()
-            .attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, vertices, edges, completion) = db.execute_graph_mutation_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-        ).await.unwrap();
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(0))
+            .unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_mutation_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &statement,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.effects, 0);
         assert!(vertices.is_empty() && edges.is_empty());
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -260,18 +419,60 @@ fn conflicting_assignments_and_effect_limits_refuse_the_complete_statement() {
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let statement = mutation("MATCH (a:Visible) WHERE a.p = 10 SET a.p = 1, a.p = 2");
-        let error = db.execute_graph_mutation_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-        ).await.unwrap_err();
-        assert!(matches!(error, GqlQueryError::Source(GraphMutationError::ConflictingAssignment { .. })));
-        let limited = GraphMutationPolicy { max_effects: 3, ..policy() };
-        let error = db.execute_graph_mutation_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &update(), limited, || NOW,
-        ).await.unwrap_err();
-        assert!(matches!(error, GqlQueryError::Source(GraphMutationError::EffectLimit { limit: 3, .. })));
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        let error = db
+            .execute_graph_mutation_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &statement,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(GraphMutationError::ConflictingAssignment { .. })
+        ));
+        let limited = GraphMutationPolicy {
+            max_effects: 3,
+            ..policy()
+        };
+        let error = db
+            .execute_graph_mutation_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &update(),
+                limited,
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(GraphMutationError::EffectLimit { limit: 3, .. })
+        ));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -288,23 +489,59 @@ fn detach_delete_cannot_probe_hidden_incidence_but_unrestricted_cascades_are_ato
         for hidden in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, hidden).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-            let error = db.execute_graph_mutation_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &statement, policy(), || NOW,
-            ).await.unwrap_err();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let error = db
+                .execute_graph_mutation_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::ScopeDenied);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             let mut grant = grant();
             grant.labels = Scope::All;
             grant.relations = Scope::All;
             grant.properties = Scope::All;
             let full = authority.issue_at(&grant, NOW).unwrap();
-            let (stats, vertices, edges, _) = db.execute_graph_mutation_returning_authorized(
-                &txn, &query, &commit, &authority, &full, "main", &statement, policy(), || NOW,
-            ).await.unwrap();
+            let (stats, vertices, edges, _) = db
+                .execute_graph_mutation_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &full,
+                    "main",
+                    &statement,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
             assert_eq!(stats.effects, 1);
             assert_eq!(vertices, vec![VId(1)]);
-            assert!(edges.is_empty(), "cascade edges are not explicit proposal targets");
+            assert!(
+                edges.is_empty(),
+                "cascade edges are not explicit proposal targets"
+            );
             assert!(db.vertex(VId(1)).unwrap().is_none());
             assert!(db.edges().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
@@ -325,25 +562,61 @@ fn expiry_in_selection_staging_or_final_admission_never_publishes_a_prefix() {
         seed(&mut db, &commit, true).await;
         let calls = AtomicU64::new(0);
         db.execute_graph_mutation_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &update(), policy(), || {
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &update(),
+            policy(),
+            || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 NOW
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let count = calls.load(Ordering::Relaxed);
         assert!(count > 10);
         for cutoff in [1, count / 2, count - 1] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let calls = AtomicU64::new(0);
-            let error = db.execute_graph_mutation_returning_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &update(), policy(), || {
-                    if calls.fetch_add(1, Ordering::Relaxed) < cutoff { NOW } else { 10_000 }
-                },
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_mutation_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &update(),
+                    policy(),
+                    || {
+                        if calls.fetch_add(1, Ordering::Relaxed) < cutoff {
+                            NOW
+                        } else {
+                            10_000
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::Expired);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -365,14 +638,32 @@ fn selection_and_mutation_share_the_native_node_allowance() {
                 let limited = token.attenuate(Restriction::MaxNodes(middle)).unwrap();
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 seed(&mut db, &commit, false).await;
-                let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
                 let success = if matched {
-                    match db.execute_graph_mutation_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main", &update(), policy(), || NOW,
-                    ).await {
+                    match db
+                        .execute_graph_mutation_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            &update(),
+                            policy(),
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(error) => {
-                            assert_eq!(authorization(error), Error::LimitExceeded(LimitDimension::Nodes));
+                            assert_eq!(
+                                authorization(error),
+                                Error::LimitExceeded(LimitDimension::Nodes)
+                            );
                             false
                         }
                     }
@@ -384,7 +675,18 @@ fn selection_and_mutation_share_the_native_node_allowance() {
                     batch.set_vertex_property(VId(1), Q, Some(CanonicalScalar::Int(20)));
                     batch.set_edge_property(EId(11), P, Some(CanonicalScalar::Int(7)));
                     batch.set_edge_property(EId(12), P, Some(CanonicalScalar::Int(7)));
-                    match db.write_authorized(&txn, &commit, &authority, &limited, "main", batch, || NOW).await {
+                    match db
+                        .write_authorized(
+                            &txn,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            batch,
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok(_) => true,
                         Err(WriteTxnError::Authorization(error)) => {
                             assert_eq!(error, Error::LimitExceeded(LimitDimension::Nodes));
@@ -397,14 +699,25 @@ fn selection_and_mutation_share_the_native_node_allowance() {
                     high = middle;
                 } else {
                     low = middle + 1;
-                    assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
                 }
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
             assert!(low > 0 && low < 128);
             floors.push(low);
         }
-        assert_eq!(floors[1], floors[0] + 2, "MATCH must add the two visible source admissions");
+        assert_eq!(
+            floors[1],
+            floors[0] + 2,
+            "MATCH must add the two visible source admissions"
+        );
     });
 }
 
@@ -430,17 +743,42 @@ fn hidden_fields_topology_and_relations_do_not_change_signed_refusal_thresholds(
                     let limited = token.attenuate(restriction).unwrap();
                     let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                     seed(&mut db, &commit, hidden).await;
-                    let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-                    match db.execute_graph_mutation_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main", &update(), policy(), || NOW,
-                    ).await {
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
+                    match db
+                        .execute_graph_mutation_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &limited,
+                            "main",
+                            &update(),
+                            policy(),
+                            || NOW,
+                        )
+                        .await
+                    {
                         Ok((stats, _)) => {
-                            assert_eq!((stats.target_vertices, stats.target_edges, stats.effects), (1, 2, 4));
+                            assert_eq!(
+                                (stats.target_vertices, stats.target_edges, stats.effects),
+                                (1, 2, 4)
+                            );
                             high = middle;
                         }
                         Err(error) => {
                             assert_eq!(authorization(error), Error::LimitExceeded(dimension));
-                            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                            assert_eq!(
+                                (
+                                    db.frontier().unwrap(),
+                                    db.vertices().unwrap(),
+                                    db.edges().unwrap()
+                                ),
+                                before
+                            );
                             low = middle + 1;
                         }
                     }
@@ -449,7 +787,10 @@ fn hidden_fields_topology_and_relations_do_not_change_signed_refusal_thresholds(
                 assert!(low > 0 && low < 8192);
                 floors.push(low);
             }
-            assert_eq!(floors[0], floors[1], "hidden data changed {dimension:?} refusal threshold");
+            assert_eq!(
+                floors[0], floors[1],
+                "hidden data changed {dimension:?} refusal threshold"
+            );
         }
     });
 }

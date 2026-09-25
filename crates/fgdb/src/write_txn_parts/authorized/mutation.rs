@@ -13,7 +13,12 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 type Fault = GqlQueryError<GraphMutationError<WriteTxnError>, WriteTxnError>;
-type Receipt = (GraphMutationStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion);
+type Receipt = (
+    GraphMutationStats,
+    Vec<VId>,
+    Vec<EId>,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphMutationError::Source(error))
@@ -61,8 +66,7 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphMutationStats, EmbeddedTxnCompletion), Fault> {
         self.mutation_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, mutation, policy, clock,
-            false,
+            txn_cx, query_cx, commit_cx, authority, token, branch, mutation, policy, clock, false,
         )
         .await
         .map(|(stats, _, _, completion)| (stats, completion))
@@ -89,8 +93,7 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<Receipt, Fault> {
         self.mutation_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, mutation, policy, clock,
-            true,
+            txn_cx, query_cx, commit_cx, authority, token, branch, mutation, policy, clock, true,
         )
         .await
     }
@@ -120,15 +123,22 @@ impl<V: Vfs + Clone> Database<V> {
             .begin_write_at(branch, now)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
         if !verified.predicates().rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
         commit_cx
             .with_restriction_async(async {
-                let mut execution = Execution { cx: commit_cx, permit, clock };
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
                 execution.checkpoint().map_err(source)?;
-                let mut workspace = Workspace(Some(self.begin(txn_cx).map_err(|error| {
-                    source(WriteTxnError::Write(error))
-                })?));
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| source(WriteTxnError::Write(error)))?,
+                ));
                 let proposal = query_cx.with_restriction(|| {
                     // These sequential callback borrows end before staging and
                     // before any await. No RefCell or query result escapes.
@@ -137,7 +147,11 @@ impl<V: Vfs + Clone> Database<V> {
                         policy,
                         |pattern, allowance| {
                             selection::select(
-                                self, query_cx, pattern, verified.predicates(), allowance,
+                                self,
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
                                 &execution,
                             )
                         },
@@ -150,7 +164,10 @@ impl<V: Vfs + Clone> Database<V> {
                 let stats = proposal.stats();
                 let mut targets = BTreeSet::new();
                 for intent in proposal.into_intents() {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+                    query_cx
+                        .checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(source)?;
                     execution.checkpoint().map_err(source)?;
                     let mut batch = WriteBatch::new(mutation.relation());
                     let target = match intent {
@@ -162,7 +179,11 @@ impl<V: Vfs + Clone> Database<V> {
                             batch.set_edge_property(edge, key, value);
                             ElementId::Edge(edge)
                         }
-                        GraphMutationIntent::Label { vertex, label, present } => {
+                        GraphMutationIntent::Label {
+                            vertex,
+                            label,
+                            present,
+                        } => {
                             batch.set_vertex_label(vertex, label, present);
                             ElementId::Vertex(vertex)
                         }
@@ -177,14 +198,22 @@ impl<V: Vfs + Clone> Database<V> {
                         let work = (usize::BITS - targets.len().leading_zeros()).max(1);
                         execution.work(u64::from(work)).map_err(source)?;
                         if !targets.contains(&target) {
-                            execution.permit.charge_rows_at((execution.clock)(), 1)
+                            execution
+                                .permit
+                                .charge_rows_at((execution.clock)(), 1)
                                 .map_err(|error| source(WriteTxnError::Authorization(error)))?;
                             targets.insert(target);
                         }
                     }
                     for row in batch.rows {
-                        stage(workspace.transaction(), self, batch.relation, row, &mut execution)
-                            .map_err(source)?;
+                        stage(
+                            workspace.transaction(),
+                            self,
+                            batch.relation,
+                            row,
+                            &mut execution,
+                        )
+                        .map_err(source)?;
                     }
                 }
                 // Build the complete private receipt before commit admission.
@@ -192,14 +221,18 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut vertices = Vec::new();
                 let mut edges = Vec::new();
                 for target in targets {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+                    query_cx
+                        .checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(source)?;
                     execution.checkpoint().map_err(source)?;
                     match target {
                         ElementId::Vertex(vertex) => vertices.push(vertex),
                         ElementId::Edge(edge) => edges.push(edge),
                     }
                 }
-                let completion = workspace.transaction()
+                let completion = workspace
+                    .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
                         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         execution.checkpoint()
