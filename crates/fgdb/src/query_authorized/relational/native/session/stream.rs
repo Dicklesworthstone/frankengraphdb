@@ -5,7 +5,7 @@
 use super::*;
 use fgdb_gql::GlaExecutionEvent;
 use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
-use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanRow};
+use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanPlan, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
     VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
@@ -20,6 +20,13 @@ mod aggregate;
 type Shared<'q> = Rc<RefCell<Execution<'q, 'q, Box<dyn FnMut() -> u64 + 'q>>>>;
 type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;
 type Opened<'q, Row, Metadata> = Result<(AuthorizedRowCursor<'q, Row>, Metadata), QueryError>;
+
+// The bound GLA root chooses one physical source before any candidate read.
+// Failure in that profile cannot fall back to a different or eager executor.
+enum RowPlan {
+    Vertex(VertexScanPlan<GraphValueRow>),
+    Edge(EdgeScanPlan),
+}
 
 // The pin slot is disjoint from the borrowed capability/clock. Arming before
 // callbacks makes unwind close this session even if a caller catches the panic
@@ -44,11 +51,12 @@ impl Drop for PinGuard<'_> {
 /// One signed allowance and one native meter span opening and all pulls (native
 /// work/scratch begin at physical execution). Nodes count permitted vertices
 /// examined before user predicates, including repeated endpoint/property
-/// admissions inside probes; native snapshot records count candidate
-/// histories, including invisible/forbidden candidates. Signed rows count only
-/// delivered occurrences after SKIP/LIMIT. Private source counters are not
-/// exported. At most one masked record and one projected row are needed in the
-/// root path, outside the resident immutable generation and caller-owned rows.
+/// admissions inside probes; native snapshot records count admitted candidate
+/// examinations, including re-examinations under distinct bindings. Signed rows
+/// count only delivered occurrences after SKIP/LIMIT. Private source counters are not
+/// exported. Root vertex scans retain one masked record; root edge scans retain
+/// the admitted edge and its endpoints. Each keeps one projected row outside
+/// the resident immutable generation and caller-owned rows.
 /// Fixed probes add definition-bounded frames and temporary masked records;
 /// finite variable-length probes retain governed traversal/support state.
 /// The aggregate factory uses this same lifecycle with completed group rows;
@@ -511,9 +519,21 @@ fn plan_error(error: VertexScanBuildError) -> QueryError {
 }
 fn compile(
     pattern: &PreparedGraphPattern<GraphValueRow>,
-) -> Result<VertexScanPlan<GraphValueRow>, QueryError> {
+) -> Result<RowPlan, QueryError> {
+    if matches!(
+        pattern.plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        return EdgeScanPlan::compile(pattern.plan())
+            .map(RowPlan::Edge)
+            .map_err(|error| {
+                QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(error)))
+            });
+    }
     admit_source_profile(pattern)?;
-    VertexScanPlan::compile(pattern.plan()).map_err(plan_error)
+    VertexScanPlan::compile(pattern.plan())
+        .map(RowPlan::Vertex)
+        .map_err(plan_error)
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
@@ -534,7 +554,7 @@ fn bind(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
-) -> Result<(VertexScanPlan<GraphValueRow>, CommitSeq, Vec<String>), QueryError> {
+) -> Result<(RowPlan, CommitSeq, Vec<String>), QueryError> {
     match prepared {
         PreparedNativeRead::Pattern(prepared) => {
             let query = prepared
@@ -646,13 +666,25 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
 }
 
 fn build_rows<'q>(
-    selected: (VertexScanPlan<GraphValueRow>, CommitSeq, Vec<String>),
+    selected: (RowPlan, CommitSeq, Vec<String>),
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     execution: Shared<'q>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphValueRow, ()> {
     let (plan, at, columns) = selected;
+    let plan = match plan {
+        RowPlan::Edge(plan) => {
+            return AuthorizedRowCursor::from_edge_plan(
+                (plan, at, columns),
+                view,
+                cx,
+                execution,
+                policy,
+            );
+        }
+        RowPlan::Vertex(plan) => plan,
+    };
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
     let source = ScopedSource {
         inner,
@@ -684,11 +716,16 @@ fn build_rows<'q>(
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
-    /// Open a prepared root-vertex stream under this session's fixed policy and
-    /// capability. The projection must lead with its unique VId; following cells
-    /// may be its properties/repeated identity. Ordinary local predicates and
-    /// SKIP/LIMIT reuse the checked native cursor. Temporal patterns retain their
-    /// exact cut, no later than the session's pin.
+    /// Open a prepared vertex or fixed-edge stream under this session's policy
+    /// and capability. Vertex projection must lead with its unique VId. Edge
+    /// projection must lead with the captured root EId and root-source VId;
+    /// connected fixed joins then name each appended EId in traversal order.
+    /// These prefixes prove native canonical ordering and ALL/DISTINCT semantics
+    /// without a result bag or seen-set. Remaining edge columns may project
+    /// endpoints, masked vertex/edge properties and admitted fixed-path values.
+    /// Both orientations of an undirected edge remain separate occurrences;
+    /// a self-loop is emitted once. SKIP/LIMIT act on accepted occurrences.
+    /// Temporal patterns keep their exact cut, no later than the session's pin.
     ///
     /// Opening authenticates before binding/profile/source admission and scans
     /// no candidate. Correlated/independent EXISTS and NOT EXISTS, with fixed
@@ -699,9 +736,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// usage includes repeated admitted endpoint/property reads, without a new
     /// permit per probe. Work and candidate records remain cumulative.
     ///
-    /// Captured/nested/optional probes, root edges, aggregates, compound relations
-    /// and alternate ordering refuse before source access; no eager fallback.
-    /// Native candidate-history accounting differs from eager table admission.
+    /// The selected native compiler refuses unsupported projections, optional
+    /// or nested scopes, variable-length outer joins, catalog-name outputs and
+    /// alternate ordering before source access; no eager or privileged fallback.
+    /// Root-vertex probes retain their anonymous-edge restriction. Aggregates
+    /// use stream_aggregate; compound relations are not admitted here.
+    /// Native candidate accounting differs from eager full-table admission.
     /// The writer remains independent, but this borrows the session until the
     /// cursor is dropped so its trusted clock and capability cannot be replaced.
     pub fn stream<'q>(

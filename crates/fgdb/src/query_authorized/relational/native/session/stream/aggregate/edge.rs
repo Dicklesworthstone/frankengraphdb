@@ -1,10 +1,12 @@
-//! Scoped fixed-edge/join inputs for the existing exact aggregate cursor.
+//! Scoped fixed-edge/join inputs shared by native row and aggregate cursors.
 //! Both readers own the same already-admitted generation and selected cut.
 //! Root enumeration owns one EId position; probes keep their own positions.
 
 use super::*;
 use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregateError, EdgeAggregatePlan};
-use fgdb_gql::edge_stream::{EdgeScanRecord, EdgeScanSource, EdgeScanSourceError, EdgeScanState};
+use fgdb_gql::edge_stream::{
+    EdgeScanCursor, EdgeScanPlan, EdgeScanRecord, EdgeScanSource, EdgeScanSourceError, EdgeScanState,
+};
 
 struct Source<'q, Edges, Vertices> {
     edges: Edges,
@@ -240,6 +242,65 @@ fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
+fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> QueryError {
+    match error {
+        GqlQueryError::Interrupted(error) => error,
+        GqlQueryError::Source(error) => source_error(error),
+        GqlQueryError::Rows(error) => QueryError::EdgeStream(GqlQueryError::Rows(error)),
+        GqlQueryError::Evaluator(error) => QueryError::EdgeStream(GqlQueryError::Evaluator(error)),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            QueryError::EdgeStream(GqlQueryError::IdentifiedEdgesRequired)
+        }
+    }
+}
+
+impl<'q> AuthorizedRowCursor<'q> {
+    // An inherent factory lets the enclosing stream dispatcher reuse this
+    // private source without exporting it or changing the aggregate interface.
+    // Source and permit ownership never escape to the calling application.
+    pub(in super::super) fn from_edge_plan(
+        selected: (EdgeScanPlan, CommitSeq, Vec<String>),
+        view: &EmbeddedReadView,
+        cx: &'q QueryCx,
+        execution: Shared<'q>,
+        policy: GqlQueryPolicy,
+    ) -> Opened<'q, GraphValueRow, ()> {
+        let (plan, at, columns) = selected;
+        let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
+        let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+        let source = Source {
+            edges,
+            vertices: ScopedSource {
+                inner,
+                execution: Rc::clone(&execution),
+            },
+            after: None,
+        };
+        let control = Rc::clone(&execution);
+        let mut cursor = EdgeScanCursor::new(source, plan, policy, move || {
+            control.borrow_mut().checkpoint()
+        });
+        execution.borrow_mut().checkpoint()?;
+        let driver = Box::new(move || {
+            let row = cursor.next().transpose().map_err(row_error)?;
+            // Delivery is charged only after matching, projection and native
+            // admission. Natural EOF and LIMIT 0 still recheck live authority.
+            execution.borrow_mut().deliver(usize::from(row.is_some()))?;
+            Ok((row, cursor.state() != EdgeScanState::Open))
+        });
+        Ok((
+            AuthorizedRowCursor {
+                driver: Some(driver),
+                guard: None,
+                columns,
+                snapshot_seq: at,
+                state: VertexScanState::Open,
+            },
+            (),
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build<'q>(
     plan: EdgeAggregatePlan, at: CommitSeq, columns: Vec<String>, layout: Layout,
@@ -270,3 +331,7 @@ pub(super) fn build<'q>(
 #[cfg(test)]
 #[path = "edge/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "edge/row_tests.rs"]
+mod row_tests;
