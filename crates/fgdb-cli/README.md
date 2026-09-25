@@ -122,7 +122,11 @@ sequence, through the same `Database::beacon_search` the library exposes. The
 corpus is an explicit projection chosen by flags:
 
 - Text lane: `--text <query> --text-property <property>`, BM25 over that text
-  property. `--text-match any|all|phrase` defaults to `any`.
+  property. `--text-match any|all|phrase` defaults to `any`. The typo-tolerant
+  modes `fuzzy1`, `fuzzy2`, `fuzzy1-all` and `fuzzy2-all` match within that
+  edit distance, any term or every term. They expand to at most
+  `--max-expansions` vocabulary terms (default 64), and a query beyond the
+  bound is refused rather than truncated.
 - Vector lane: `--vector <x,y,...>` with one `--vector-property <property>` per
   coordinate, in order. It finds nearest neighbours over those numeric
   properties. `--metric l2|cosine|dot` defaults to `l2`. The search is exact
@@ -153,9 +157,9 @@ A lane that did not rank a hit leaves its fields `null`. These are usage errors
 - a vector whose length differs from its `--vector-property` count;
 - a non-finite coordinate;
 - `--candidates` without both lanes;
+- `--max-expansions` without a fuzzy mode;
 - an unbound symbol.
 
-Fuzzy text matching is a library option that the CLI does not expose yet.
 
 ```sh
 fgdb --robot search --db ./graph --key-file ./graph.keys \

@@ -2226,8 +2226,8 @@ fn search_lanes_equal_the_library_and_pin_history() {
     use fgdb::{Database, DatabaseKeys};
     use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
     use fgdb_beacon::{
-        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig, TextMatch,
-        VectorSearch,
+        DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
+        TextMatch, VectorSearch,
     };
     use fgdb_delta_types::{LabelId, PropertyKeyId};
     use fgdb_types::CommitSeq;
@@ -2356,6 +2356,51 @@ fn search_lanes_equal_the_library_and_pin_history() {
             &["vertex", "score"],
             options(true, None, true, None),
             text("red apple", 10, TextMatch::Phrase),
+        ),
+        (
+            // One typo: "rex" matches "red" at edit distance one.
+            vec![
+                "--text",
+                "rex",
+                "--text-property",
+                "team",
+                "--text-match",
+                "fuzzy1",
+            ],
+            &["vertex", "score"],
+            options(true, None, false, None),
+            text(
+                "rex",
+                10,
+                TextMatch::Fuzzy {
+                    distance: EditDistance::One,
+                    require_all: false,
+                    max_expansions: 64,
+                },
+            ),
+        ),
+        (
+            vec![
+                "--text",
+                "rex appel",
+                "--text-property",
+                "team",
+                "--text-match",
+                "fuzzy2-all",
+                "--max-expansions",
+                "8",
+            ],
+            &["vertex", "score"],
+            options(true, None, false, None),
+            text(
+                "rex appel",
+                10,
+                TextMatch::Fuzzy {
+                    distance: EditDistance::Two,
+                    require_all: true,
+                    max_expansions: 8,
+                },
+            ),
         ),
         (
             vec!["--vector", "4", "--vector-property", "born", "--k", "3"],
@@ -2518,7 +2563,30 @@ fn search_lanes_equal_the_library_and_pin_history() {
             "team",
             "MATCH (n) RETURN n",
         ],
+        vec![
+            "--text",
+            "red",
+            "--text-property",
+            "team",
+            "--max-expansions",
+            "3",
+        ],
     ] {
         db.command("search", &args).failure(2, "usage");
     }
+    // A fuzzy match beyond its expansion bound is refused, never truncated.
+    db.command(
+        "search",
+        &[
+            "--text",
+            "rex",
+            "--text-property",
+            "team",
+            "--text-match",
+            "fuzzy1",
+            "--max-expansions",
+            "0",
+        ],
+    )
+    .failure(3, "query");
 }

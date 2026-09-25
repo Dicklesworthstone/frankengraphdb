@@ -3,7 +3,10 @@
 //!
 //! The corpus is an EXPLICIT projection chosen by flags, never inferred:
 //! - `--text <query>` with `--text-property <property>` runs BM25 over that
-//!   text property (`--text-match any|all|phrase`, default any);
+//!   text property (`--text-match any|all|phrase`, default any, or the
+//!   typo-tolerant `fuzzy1|fuzzy2` / `fuzzy1-all|fuzzy2-all` within that edit
+//!   distance, bounded by `--max-expansions <n>` vocabulary terms, default
+//!   64; exceeding the bound refuses rather than truncating);
 //! - `--vector <x,y,...>` with one `--vector-property <property>` per
 //!   coordinate, in order, runs a nearest-neighbour search over those numeric
 //!   properties (`--metric l2|cosine|dot`, default l2; exact unless
@@ -21,8 +24,8 @@ use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{
-    DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig, TextMatch,
-    VectorSearch,
+    DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
+    TextMatch, VectorSearch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -36,6 +39,7 @@ pub(super) struct SearchFlags {
     text: Option<String>,
     text_property: Option<String>,
     text_match: Option<TextMatch>,
+    max_expansions: Option<usize>,
     vector: Option<Vec<f32>>,
     vector_properties: Vec<String>,
     metric: Option<DistanceMetric>,
@@ -46,11 +50,16 @@ pub(super) struct SearchFlags {
     as_of: Option<CommitSeq>,
 }
 
+/// Vocabulary terms a fuzzy text match may expand to unless
+/// `--max-expansions` says otherwise. Beacon refuses a query that exceeds it.
+const DEFAULT_MAX_EXPANSIONS: usize = 64;
+
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 11] = [
+    pub(super) const FLAGS: [&str; 12] = [
         "--text",
         "--text-property",
         "--text-match",
+        "--max-expansions",
         "--vector",
         "--vector-property",
         "--metric",
@@ -79,13 +88,32 @@ impl SearchFlags {
             "--text" => once(&mut self.text, value.to_owned(), flag),
             "--text-property" => once(&mut self.text_property, value.to_owned(), flag),
             "--text-match" => {
+                let fuzzy = |distance, require_all| TextMatch::Fuzzy {
+                    distance,
+                    require_all,
+                    max_expansions: DEFAULT_MAX_EXPANSIONS,
+                };
                 let mode = match value {
                     "any" => TextMatch::Any,
                     "all" => TextMatch::All,
                     "phrase" => TextMatch::Phrase,
-                    _ => return Err(Failure::usage("--text-match is any, all or phrase")),
+                    "fuzzy1" => fuzzy(EditDistance::One, false),
+                    "fuzzy2" => fuzzy(EditDistance::Two, false),
+                    "fuzzy1-all" => fuzzy(EditDistance::One, true),
+                    "fuzzy2-all" => fuzzy(EditDistance::Two, true),
+                    _ => {
+                        return Err(Failure::usage(
+                            "--text-match is any, all, phrase, fuzzy1, fuzzy2, fuzzy1-all or fuzzy2-all",
+                        ));
+                    }
                 };
                 once(&mut self.text_match, mode, flag)
+            }
+            "--max-expansions" => {
+                let bound = value
+                    .parse()
+                    .map_err(|_| Failure::usage("--max-expansions must be a count"))?;
+                once(&mut self.max_expansions, bound, flag)
             }
             "--vector" => {
                 let coordinates = value
@@ -216,7 +244,29 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                 .ok_or_else(|| Failure::usage(format!("unbound label {name:?}")))
         })
         .transpose()?;
-    let text_mode = flags.text_match.unwrap_or(TextMatch::Any);
+    let text_mode = match (
+        flags.text_match.unwrap_or(TextMatch::Any),
+        flags.max_expansions,
+    ) {
+        (
+            TextMatch::Fuzzy {
+                distance,
+                require_all,
+                ..
+            },
+            Some(max_expansions),
+        ) => TextMatch::Fuzzy {
+            distance,
+            require_all,
+            max_expansions,
+        },
+        (mode, None) => mode,
+        (_, Some(_)) => {
+            return Err(Failure::usage(
+                "--max-expansions applies only to a fuzzy --text-match",
+            ));
+        }
+    };
     let vector_mode =
         flags
             .ann
