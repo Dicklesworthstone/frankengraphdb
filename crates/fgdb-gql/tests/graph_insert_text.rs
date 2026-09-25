@@ -188,7 +188,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         ),
         (11, 22, 33)
     );
-    for (row, intents) in result.intents().chunks_exact(5).enumerate() {
+    for (row, intents) in result.intents().as_chunks::<5>().0.iter().enumerate() {
         let x = VId(100 + row as u128 * 16);
         let y = VId(x.0 + 1);
         assert!(

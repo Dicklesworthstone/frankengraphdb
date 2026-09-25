@@ -463,14 +463,14 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                     ),
                     Err(GqlQueryError::Rows(_))
                 ));
-                assert!(matches!(
+                assert!(
                     db.execute_graph_pattern_governed(
                         &cx,
                         &range,
                         GqlQueryPolicy::new(2, 2, u64::MAX, u64::MAX)
-                    ),
-                    Ok(_)
-                ));
+                    )
+                    .is_ok()
+                );
                 // Mail 979, condition 3: preserve the full-domain scan twin.
                 // The independent OPTIONAL domain defeats single-domain index
                 // eligibility; identity correlation and DISTINCT preserve n.

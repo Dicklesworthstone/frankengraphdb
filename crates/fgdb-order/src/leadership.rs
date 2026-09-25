@@ -79,14 +79,13 @@ pub(super) fn validate_event<C: Clone + Eq>(raft: &Raft<C>, event: &Event<C>) ->
                 return Err(Error::LeadershipTransferInProgress);
             }
         }
-        Event::AbortLeadershipTransfer(id) => {
+        Event::AbortLeadershipTransfer(id)
             if !raft
                 .handoff
                 .as_ref()
-                .is_some_and(|pending| &pending.id == id)
-            {
-                return Err(Error::StaleLeadershipTransfer);
-            }
+                .is_some_and(|pending| &pending.id == id) =>
+        {
+            return Err(Error::StaleLeadershipTransfer);
         }
         _ => {}
     }

@@ -83,6 +83,8 @@ pub(super) fn keeps(
     meter: &mut Meter<'_>,
 ) -> Result<bool, StandingQueryFailure> {
     for op in operators {
+        // Each arm charges the work meter; a guard would hide that side effect.
+        #[allow(clippy::collapsible_match)]
         match op {
             GlaOperator::Select { slot, predicates } => {
                 let (_, state) = binding

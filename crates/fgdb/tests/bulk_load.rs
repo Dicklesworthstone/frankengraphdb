@@ -326,7 +326,7 @@ async fn native_create(db: &mut Database, contexts: &PurposeContexts, rows: &[Bu
                     ),
                 )
                 .unwrap();
-            assert_eq!(stats.completed_statements as usize, chunk.len());
+            assert_eq!(stats.completed_statements, chunk.len());
             assert_eq!(
                 (stats.created_vertices + stats.created_edges) as usize,
                 chunk.len()

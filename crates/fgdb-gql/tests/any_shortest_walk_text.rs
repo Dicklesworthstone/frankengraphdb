@@ -232,7 +232,7 @@ fn any_scripts_and_parameter_batches_lower_all_write_selections_without_reparsin
     let args = GqlParameters::new().with_int64("key", 1).unwrap();
     let batch = script.bind_parameter_sets(&[args.clone(), args]).unwrap();
     assert_eq!(batch.argument_sets(), 2);
-    for group in batch.program().statements().chunks_exact(3) {
+    for group in batch.program().statements().as_chunks::<3>().0 {
         let [
             GraphWriteStatement::Insert(insert),
             GraphWriteStatement::Mutation(update),

@@ -1508,7 +1508,7 @@ async fn truncates(opts: &OpenOptions) -> io::Result<bool> {
         }
     };
     let opened = opts.clone().create_new(false).open(&path).await?;
-    Ok(opened.metadata().await?.len() == 0)
+    Ok(opened.metadata().await?.is_empty())
 }
 
 impl<V: Vfs> AsyncRead for FaultFile<V> {

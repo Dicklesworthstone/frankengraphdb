@@ -633,7 +633,7 @@ async fn read_keys(
         if line.len() != 64 || !line.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Failure::open("key lines require 64 hexadecimal characters"));
         }
-        for (byte, pair) in key.iter_mut().zip(line.as_bytes().chunks_exact(2)) {
+        for (byte, pair) in key.iter_mut().zip(line.as_bytes().as_chunks::<2>().0) {
             let digit = |b: u8| {
                 if b.is_ascii_digit() {
                     b - b'0'

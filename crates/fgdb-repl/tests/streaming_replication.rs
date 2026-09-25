@@ -572,18 +572,13 @@ impl<'a> CatalogTransport<'a> {
 impl SymbolTransport for CatalogTransport<'_> {
     type Error = &'static str;
 
-    fn request(
-        &self,
-        request: PullRequest,
-    ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
-        async move {
-            let transport = self
-                .objects
-                .iter()
-                .find(|transport| transport.fixture.encoding.object_id() == request.object_id)
-                .ok_or("transport has no authorized object route")?;
-            transport.request(request).await
-        }
+    async fn request(&self, request: PullRequest) -> Result<ReplyOutcome, Self::Error> {
+        let transport = self
+            .objects
+            .iter()
+            .find(|transport| transport.fixture.encoding.object_id() == request.object_id)
+            .ok_or("transport has no authorized object route")?;
+        transport.request(request).await
     }
 }
 

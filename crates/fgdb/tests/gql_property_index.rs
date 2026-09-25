@@ -50,7 +50,7 @@ impl Rng {
     }
 }
 
-/// >=6 commits mixing property updates, label flips and vertex deletes on a
+/// At least 6 commits mixing property updates, label flips and vertex deletes on a
 /// shared vertex domain, so every commit changes what equality can observe.
 async fn generated(
     seed: u64,

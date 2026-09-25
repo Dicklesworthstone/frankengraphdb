@@ -50,36 +50,32 @@ edition = "2024"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Measured residual (fgdb-gate-weakening-rollback-mthlh): 8 sites / 8 files.
 recursion_depth_exceeding_limit = "allow"
 
 [workspace.lints.clippy]
-# Absorbs lint families newer nightlies fire on unchanged, correct code here.
-# Correctness/suspicious/perf stay denied via the CI `-D warnings` gate.
+# Justified by the 08-27 toolchain bump (088e510f):
 # #[must_use] on functions already returning a must_use type; cosmetic.
 double_must_use = "allow"
 # Index walks over parallel slices by a single counter; an iterator rewrite would
 # obscure the arithmetic without changing behaviour.
 needless_range_loop = "allow"
-# Result errors can exceed 128 bytes due to rich diagnostic context in enum variants.
-result_large_err = "allow"
-# Style lints newer nightlies fire on unchanged, correct code
-type_complexity = "allow"
-too_many_arguments = "allow"
-collapsible_if = "allow"
-collapsible_match = "allow"
-manual_is_multiple_of = "allow"
-chunks_exact_to_as_chunks = "allow"
-single_char_add_str = "allow"
-unusual_byte_groupings = "allow"
-unnecessary_mut_passed = "allow"
-redundant_pattern_matching = "allow"
-unnecessary_literal_unwrap = "allow"
-unnecessary_cast = "allow"
-doc_lazy_continuation = "allow"
-manual_next_back = "allow"
-len_zero = "allow"
-match_like_matches_macro = "allow"
-err_expect = "allow"
-manual_noop_waker = "allow"
-manual_async_fn = "allow"
+# MEASURED RESIDUAL, not a justification (fgdb-gate-weakening-rollback-mthlh).
+# 89b49d38 and 21ccbfd7 added 27 workspace allows without evidence. 8ae77715
+# removed the six correctness/suspicious/perf ones; the next commit removed the
+# ten other style lints with at most 3 sites each (manual_next_back had none),
+# each site fixed or allowed locally with a reason. These 10 remain because each
+# fires at 9-263 existing sites (unique sites at 2026-09-25, workspace
+# --all-targets). Each is to become fixed code or a site-local allow with a
+# reason, never a new workspace entry.
+result_large_err = "allow" # 263 sites / 48 files
+unusual_byte_groupings = "allow" # 44 / 11
+collapsible_if = "allow" # 38 / 34
+type_complexity = "allow" # 34 / 24
+err_expect = "allow" # 30 / 9
+unnecessary_mut_passed = "allow" # 18 / 6
+unnecessary_literal_unwrap = "allow" # 15 / 3
+manual_is_multiple_of = "allow" # 14 / 14
+manual_noop_waker = "allow" # 13 / 13
+too_many_arguments = "allow" # 9 / 7
 

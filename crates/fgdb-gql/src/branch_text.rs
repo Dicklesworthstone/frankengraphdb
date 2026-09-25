@@ -416,6 +416,8 @@ fn tokens(text: &str) -> Result<Vec<Token<'_>>, GraphBranchTextError> {
             }
         } else {
             at += ch.len_utf8();
+            // Every closer must pop the stack; a guard would hide that side effect.
+            #[allow(clippy::collapsible_match)]
             match byte {
                 b'(' => stack.push((b')', start)),
                 b'[' => stack.push((b']', start)),

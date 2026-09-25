@@ -45,7 +45,7 @@ impl Rng {
     }
 }
 
-/// >=5 commits mixing vertex creates, edge creates, edge deletes and property
+/// At least 5 commits mixing vertex creates, edge creates, edge deletes and property
 /// updates. Property updates keep exactly one vertex per seed bound to the
 /// property value the queries select on, so bounded answers stay stable.
 async fn generated(

@@ -261,7 +261,7 @@ mod fuzz_gen {
                     );
                 }
                 2 => {
-                    text.insert_str(start, "(");
+                    text.insert(start, '(');
                 }
                 3 => {
                     let boundaries: Vec<_> = input.char_indices().map(|(at, _)| at).collect();

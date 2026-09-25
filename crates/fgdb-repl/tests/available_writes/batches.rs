@@ -27,54 +27,52 @@ impl PayloadBatchAuthority<u64> for Backend {
         = BatchPermit<'a>
     where
         Self: 'a;
-    fn acquire_batch<'a>(
+    async fn acquire_batch<'a>(
         &'a mut self,
         batch: AssessedBatch<'_, u64>,
-    ) -> impl Future<Output = Result<Self::Permit<'a>, Self::Error>> {
-        async move {
-            let mode = {
-                let mut s = self.0.borrow_mut();
-                s.acquires += 1;
-                s.trace.push("batch-acquire");
-                s.acquire
-            };
-            if mode == Mode::Suspend {
-                pending::<()>().await;
-            }
-            if mode == Mode::Refuse {
-                return Err("authority unavailable");
-            }
-            if mode == Mode::Panic {
-                panic!("batch authority panic");
-            }
+    ) -> Result<Self::Permit<'a>, Self::Error> {
+        let mode = {
             let mut s = self.0.borrow_mut();
-            // Independent expected commands live in the modeled authoritative
-            // store, not in the driver's submitted range or assessment vector.
-            let root = s.root.as_ref().unwrap();
-            let last = root.snapshot().map_or(0, |cut| cut.index()) + root.entries().len() as u64;
-            if batch.range().len() != s.batch_commands.len() {
-                return Err("group mismatch");
-            }
-            for (offset, (position, command, assessment)) in batch.entries().enumerate() {
-                if *command != s.batch_commands[offset]
-                    || assessment.input() != &s.expected
-                    || position.index != last + offset as u64 + 1
-                    || position.term != root.term()
-                    || position.configuration != root.configuration().identity()
-                    || position.domain != root.configuration().domain()
-                {
-                    return Err("ordered command authority mismatch");
-                }
-            }
-            let commands = s.batch_commands.clone();
-            s.active_permits += 1;
-            drop(s);
-            Ok(BatchPermit {
-                backend: self,
-                positions: batch.range(),
-                commands,
-            })
+            s.acquires += 1;
+            s.trace.push("batch-acquire");
+            s.acquire
+        };
+        if mode == Mode::Suspend {
+            pending::<()>().await;
         }
+        if mode == Mode::Refuse {
+            return Err("authority unavailable");
+        }
+        if mode == Mode::Panic {
+            panic!("batch authority panic");
+        }
+        let mut s = self.0.borrow_mut();
+        // Independent expected commands live in the modeled authoritative
+        // store, not in the driver's submitted range or assessment vector.
+        let root = s.root.as_ref().unwrap();
+        let last = root.snapshot().map_or(0, |cut| cut.index()) + root.entries().len() as u64;
+        if batch.range().len() != s.batch_commands.len() {
+            return Err("group mismatch");
+        }
+        for (offset, (position, command, assessment)) in batch.entries().enumerate() {
+            if *command != s.batch_commands[offset]
+                || assessment.input() != &s.expected
+                || position.index != last + offset as u64 + 1
+                || position.term != root.term()
+                || position.configuration != root.configuration().identity()
+                || position.domain != root.configuration().domain()
+            {
+                return Err("ordered command authority mismatch");
+            }
+        }
+        let commands = s.batch_commands.clone();
+        s.active_permits += 1;
+        drop(s);
+        Ok(BatchPermit {
+            backend: self,
+            positions: batch.range(),
+            commands,
+        })
     }
 }
 impl RaftPublisher<u64> for BatchPermit<'_> {

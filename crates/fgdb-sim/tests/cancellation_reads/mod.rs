@@ -29,25 +29,25 @@ enum Failure {
 
 impl Failure {
     fn interrupted(&self) -> bool {
-        match self {
+        matches!(
+            self,
             Self::PatternDb(GqlQueryError::Interrupted(_))
-            | Self::PatternTxn(GqlQueryError::Interrupted(_))
-            | Self::AggregateDb(GqlQueryError::Interrupted(_))
-            | Self::AggregateTxn(GqlQueryError::Interrupted(_))
-            | Self::SetDb(GqlQueryError::Interrupted(_))
-            | Self::SetTxn(GqlQueryError::Interrupted(_))
-            | Self::PatternTxn(GqlQueryError::Source(WriteTxnError::Interrupted(_)))
-            | Self::AggregateTxn(GqlQueryError::Source(GraphAggregateError::Source(
-                WriteTxnError::Interrupted(_),
-            )))
-            | Self::AggregateTxn(GqlQueryError::Source(GraphAggregateError::InputRelation(
-                GraphSetExecutionError::Source(WriteTxnError::Interrupted(_)),
-            )))
-            | Self::SetTxn(GqlQueryError::Source(GraphSetExecutionError::Source(
-                WriteTxnError::Interrupted(_),
-            ))) => true,
-            _ => false,
-        }
+                | Self::PatternTxn(GqlQueryError::Interrupted(_))
+                | Self::AggregateDb(GqlQueryError::Interrupted(_))
+                | Self::AggregateTxn(GqlQueryError::Interrupted(_))
+                | Self::SetDb(GqlQueryError::Interrupted(_))
+                | Self::SetTxn(GqlQueryError::Interrupted(_))
+                | Self::PatternTxn(GqlQueryError::Source(WriteTxnError::Interrupted(_)))
+                | Self::AggregateTxn(GqlQueryError::Source(GraphAggregateError::Source(
+                    WriteTxnError::Interrupted(_),
+                )))
+                | Self::AggregateTxn(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                    GraphSetExecutionError::Source(WriteTxnError::Interrupted(_)),
+                )))
+                | Self::SetTxn(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    WriteTxnError::Interrupted(_),
+                )))
+        )
     }
 }
 

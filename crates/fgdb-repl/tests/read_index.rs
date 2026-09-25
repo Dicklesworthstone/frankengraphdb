@@ -663,23 +663,18 @@ impl SeedCatalog for SeedFixture {
 
 impl SymbolTransport for SeedFixture {
     type Error = &'static str;
-    fn request(
-        &self,
-        request: PullRequest,
-    ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
-        async move {
-            if request.donor == DonorId(1) {
-                return Ok(ReplyOutcome::Unavailable);
-            }
-            let fixture = self
-                .0
-                .iter()
-                .find(|item| item.encoding.object_id() == request.object_id)
-                .ok_or("unknown fixture route")?;
-            Ok(ReplyOutcome::Record(
-                fixture.records[request.esi as usize].clone(),
-            ))
+    async fn request(&self, request: PullRequest) -> Result<ReplyOutcome, Self::Error> {
+        if request.donor == DonorId(1) {
+            return Ok(ReplyOutcome::Unavailable);
         }
+        let fixture = self
+            .0
+            .iter()
+            .find(|item| item.encoding.object_id() == request.object_id)
+            .ok_or("unknown fixture route")?;
+        Ok(ReplyOutcome::Record(
+            fixture.records[request.esi as usize].clone(),
+        ))
     }
 }
 
