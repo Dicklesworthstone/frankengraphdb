@@ -8,15 +8,16 @@ use crate::write_txn::{collect_vertex_merge, vertex_upsert_actions};
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
     GqlQueryError, GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
-    GraphVertexMergeStats, GraphVertexUpsertError, GraphVertexUpsertPolicy,
-    GraphVertexUpsertStats, PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
+    GraphVertexMergeStats, GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
+    PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
 };
 use fgdb_types::QueryCx;
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 type MergeFault = GqlQueryError<GraphVertexMergeError<WriteTxnError, WriteTxnError>, WriteTxnError>;
-type UpsertFault = GqlQueryError<GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+type UpsertFault =
+    GqlQueryError<GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 
 // Both public program entry points verify ReadWrite rights before opening the
 // private workspace. No internal proposal, match or permit escapes these steps.
@@ -42,7 +43,13 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
             policy,
             |pattern, budget| {
                 selection::select_overlay(
-                    transaction, &database.borrow(), cx, pattern, scope, budget, &controls,
+                    transaction,
+                    &database.borrow(),
+                    cx,
+                    pattern,
+                    scope,
+                    budget,
+                    &controls,
                 )
             },
             |request| database.borrow_mut().allocate_identity(cx, request),
@@ -54,11 +61,18 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
     })?;
     if let Some(creation) = proposal.creation {
         for intent in creation.into_intents() {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
                 .map_err(|error| GqlQueryError::Source(GraphVertexMergeError::Source(error)))?;
-            execution.checkpoint()
+            execution
+                .checkpoint()
                 .map_err(|error| GqlQueryError::Source(GraphVertexMergeError::Source(error)))?;
-            let GraphInsertIntent::Vertex { vertex, labels, properties } = intent else {
+            let GraphInsertIntent::Vertex {
+                vertex,
+                labels,
+                properties,
+            } = intent
+            else {
                 unreachable!("validated vertex MERGE contains no edge creation")
             };
             let mut batch = WriteBatch::new(merge.relation());
@@ -72,9 +86,8 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
     if returning {
         // The fixed-size private creation identity was NOT a delivered row.
         // Both Created and Matched now pay exactly one final receipt unit.
-        deliver(execution).map_err(|error| {
-            GqlQueryError::Source(GraphVertexMergeError::Source(error))
-        })?;
+        deliver(execution)
+            .map_err(|error| GqlQueryError::Source(GraphVertexMergeError::Source(error)))?;
     }
     Ok((proposal.stats, proposal.outcome))
 }
@@ -91,18 +104,34 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
     returning: bool,
 ) -> Result<(GraphVertexUpsertStats, GraphVertexMergeOutcome), UpsertFault> {
     let (merge_stats, outcome) = merge(
-        transaction, database, cx, upsert.merge(), policy.merge, scope, execution, false,
-    ).map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
+        transaction,
+        database,
+        cx,
+        upsert.merge(),
+        policy.merge,
+        scope,
+        execution,
+        false,
+    )
+    .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
     let (stats, batch) = cx.with_restriction(|| {
-        vertex_upsert_actions::<WriteTxnError, WriteTxnError, _>(upsert, policy, merge_stats, outcome, || {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            execution.checkpoint()
-        })
+        vertex_upsert_actions::<WriteTxnError, WriteTxnError, _>(
+            upsert,
+            policy,
+            merge_stats,
+            outcome,
+            || {
+                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                execution.checkpoint()
+            },
+        )
     })?;
     for row in batch.rows {
-        cx.checkpoint().map_err(WriteTxnError::Interrupted)
+        cx.checkpoint()
+            .map_err(WriteTxnError::Interrupted)
             .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
-        execution.checkpoint()
+        execution
+            .checkpoint()
             .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
         // Every selected original field is checked, including forbidden no-ops
         // and label changes that would remove the vertex from the visible scope.
@@ -111,9 +140,8 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
             .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
     }
     if returning {
-        deliver(execution).map_err(|error| {
-            GqlQueryError::Source(GraphVertexUpsertError::Staging(error))
-        })?;
+        deliver(execution)
+            .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
     }
     Ok((stats, outcome))
 }
@@ -122,6 +150,8 @@ fn deliver<Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
     execution.checkpoint()?;
-    execution.permit.charge_rows_at((execution.clock)(), 1)
+    execution
+        .permit
+        .charge_rows_at((execution.clock)(), 1)
         .map_err(WriteTxnError::Authorization)
 }

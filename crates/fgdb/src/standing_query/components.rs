@@ -5,10 +5,10 @@
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeTuple};
-use fgdb_delta_types::zset::components::{ComponentError, ComponentUpdate, IncrementalComponents};
 use fgdb_delta_types::zset::components::strong::{
     IncrementalStrongComponents, StrongComponentUpdate,
 };
+use fgdb_delta_types::zset::components::{ComponentError, ComponentUpdate, IncrementalComponents};
 use fgdb_delta_types::{DeltaRow, LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
@@ -50,16 +50,32 @@ trait PreparedMembership {
     fn commit(self) -> ZSet<Pair>;
 }
 impl PreparedMembership for ComponentUpdate<'_, VId> {
-    fn delta(&self) -> &ZSet<Pair> { ComponentUpdate::delta(self) }
-    fn vertex_count(&self) -> usize { ComponentUpdate::vertex_count(self) }
-    fn affected_vertices(&self) -> usize { ComponentUpdate::affected_vertices(self) }
-    fn commit(self) -> ZSet<Pair> { ComponentUpdate::commit(self) }
+    fn delta(&self) -> &ZSet<Pair> {
+        ComponentUpdate::delta(self)
+    }
+    fn vertex_count(&self) -> usize {
+        ComponentUpdate::vertex_count(self)
+    }
+    fn affected_vertices(&self) -> usize {
+        ComponentUpdate::affected_vertices(self)
+    }
+    fn commit(self) -> ZSet<Pair> {
+        ComponentUpdate::commit(self)
+    }
 }
 impl PreparedMembership for StrongComponentUpdate<'_, VId> {
-    fn delta(&self) -> &ZSet<Pair> { StrongComponentUpdate::delta(self) }
-    fn vertex_count(&self) -> usize { StrongComponentUpdate::vertex_count(self) }
-    fn affected_vertices(&self) -> usize { StrongComponentUpdate::affected_vertices(self) }
-    fn commit(self) -> ZSet<Pair> { StrongComponentUpdate::commit(self) }
+    fn delta(&self) -> &ZSet<Pair> {
+        StrongComponentUpdate::delta(self)
+    }
+    fn vertex_count(&self) -> usize {
+        StrongComponentUpdate::vertex_count(self)
+    }
+    fn affected_vertices(&self) -> usize {
+        StrongComponentUpdate::affected_vertices(self)
+    }
+    fn commit(self) -> ZSet<Pair> {
+        StrongComponentUpdate::commit(self)
+    }
 }
 
 fn accept_membership(
@@ -67,8 +83,8 @@ fn accept_membership(
     rows: Option<&mut ZSet<Pair>>,
     meter: &mut Meter<'_>,
 ) -> Result<ZSet<Pair>, StandingQueryFailure> {
-    meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
-        .map_err(|_| StandingQueryFailure::Arithmetic)?;
+    meter.stats.affected_vertices =
+        u64::try_from(pending.affected_vertices()).map_err(|_| StandingQueryFailure::Arithmetic)?;
     // Final membership size, not the transient retraction/insertion prefix.
     result_bound(pending.vertex_count(), meter.policy)?;
     if let Some(rows) = rows {
@@ -102,13 +118,15 @@ impl Kernel {
     ) -> Result<ZSet<Pair>, StandingQueryFailure> {
         match self {
             Self::Weak(kernel) => {
-                let pending = kernel.prepare(vertices, edges, LIMBS,
-                    &mut |event| meter.charge(event)).map_err(component_error)?;
+                let pending = kernel
+                    .prepare(vertices, edges, LIMBS, &mut |event| meter.charge(event))
+                    .map_err(component_error)?;
                 accept_membership(pending, rows, meter)
             }
             Self::Strong(kernel) => {
-                let pending = kernel.prepare(vertices, edges, LIMBS,
-                    &mut |event| meter.charge(event)).map_err(component_error)?;
+                let pending = kernel
+                    .prepare(vertices, edges, LIMBS, &mut |event| meter.charge(event))
+                    .map_err(component_error)?;
                 accept_membership(pending, rows, meter)
             }
         }
@@ -223,7 +241,9 @@ impl State {
             .map_err(input_error)?;
         let vertices = vertex_delta(batch, meter)?;
         let edges = project(input.delta(), self.relation.edge_type(), meter)?;
-        let _ = self.components.apply(&vertices, &edges, Some(&mut self.rows), meter)?;
+        let _ = self
+            .components
+            .apply(&vertices, &edges, Some(&mut self.rows), meter)?;
         // All recoverable work is done. No callbacks separate these publications.
         let _ = input.commit();
         Ok(())
@@ -342,7 +362,8 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let state = self.prepare_standing_components(cx, ComponentRelation::Weak(relation), policy)?;
+        let state =
+            self.prepare_standing_components(cx, ComponentRelation::Weak(relation), policy)?;
         Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
     }
 
@@ -375,7 +396,8 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let state = self.prepare_standing_components(cx, ComponentRelation::Strong(relation), policy)?;
+        let state =
+            self.prepare_standing_components(cx, ComponentRelation::Strong(relation), policy)?;
         Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
     }
 
@@ -449,6 +471,6 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod strong_tests;
+#[cfg(test)]
+mod tests;

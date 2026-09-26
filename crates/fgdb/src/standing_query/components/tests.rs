@@ -147,7 +147,11 @@ fn every_composed_refusal_and_exact_budget_preserves_atomic_publication() {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            let result = State::from_snapshot(&db.snapshot, ComponentRelation::Weak(RelationId(1)), &mut meter);
+            let result = State::from_snapshot(
+                &db.snapshot,
+                ComponentRelation::Weak(RelationId(1)),
+                &mut meter,
+            );
             if records == physical as u64 {
                 assert_eq!(result.unwrap().rows, expected.rows);
             } else {
