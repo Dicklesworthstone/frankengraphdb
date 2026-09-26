@@ -159,6 +159,19 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let name = self.name()?;
+            // openCypher startNode(r)/endNode(r) of a directed single-hop edge
+            // is the endpoint vertex the pattern already binds (fgdb-j687q):
+            // the same column as naming that vertex.
+            let start = name.text.eq_ignore_ascii_case("startNode");
+            if start || name.text.eq_ignore_ascii_case("endNode") {
+                self.punct(b'(', "(")?;
+                let edge = self.edge_variable()?;
+                self.punct(b')', ")")?;
+                let vertex = self.edge_endpoint(edge, start)?;
+                return self
+                    .mutation_projection(columns, vertex, None)
+                    .map(Operand::Column);
+            }
             let function = Self::path_function(name)?;
             self.punct(b'(', "(")?;
             let variable = match function {

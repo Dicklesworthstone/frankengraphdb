@@ -180,3 +180,79 @@ fn shortest_ties_parallel_edges_and_zero_hops_retain_identity() {
         assert!(path.edges().next().is_none());
     }
 }
+
+/// fgdb-j687q: openCypher startNode(r)/endNode(r) of a directed single-hop
+/// edge is the endpoint vertex the pattern binds, the identical plan to
+/// naming it, in either written direction and for an anonymous endpoint. An
+/// undirected or quantified edge has no static endpoint and refuses.
+#[test]
+fn opencypher_start_and_end_node_are_the_bound_endpoints() {
+    use fgdb_gql::GqlParameters;
+    let plan = |text: &str| {
+        PreparedGraphText::prepare(text, symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    for (cypher, named) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN startNode(r) AS s, endNode(r) AS e",
+            "MATCH (a)-[r:R]->(b) RETURN a AS s, b AS e",
+        ),
+        (
+            "MATCH (a)<-[r:R]-(b) RETURN STARTNODE(r) AS s, endnode(r) AS e",
+            "MATCH (a)<-[r:R]-(b) RETURN b AS s, a AS e",
+        ),
+    ] {
+        assert_eq!(plan(cypher), plan(named), "{cypher}");
+    }
+    // The relational (set-text) RETURN resolves them the same way.
+    let set_plan = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    assert_eq!(
+        set_plan("MATCH (a)<-[r:R]-(b) RETURN DISTINCT startNode(r) AS s, endNode(r) AS e"),
+        set_plan("MATCH (a)<-[r:R]-(b) RETURN DISTINCT b AS s, a AS e")
+    );
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{EId, VId};
+    let edges = [(EId(91), VId(1), RelationId(1), VId(2))];
+    for (text, start, end) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN startNode(r) AS s, endNode(r) AS e",
+            1,
+            2,
+        ),
+        (
+            "MATCH (b)<-[r:R]-(a) RETURN startNode(r) AS s, endNode(r) AS e",
+            1,
+            2,
+        ),
+        (
+            "MATCH ()-[r:R]->() RETURN startNode(r) AS s, endNode(r) AS e",
+            1,
+            2,
+        ),
+    ] {
+        let rows = execute(text, &edges);
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphValue::Vertex(VId(start)), GraphValue::Vertex(VId(end))],
+            "{text}"
+        );
+    }
+    for text in [
+        "MATCH (a)-[r:R]-(b) RETURN startNode(r) AS s",
+        "MATCH (a)-[r:R*1..2]->(b) RETURN endNode(r) AS e",
+        "MATCH (a)-[r:R]->(b) RETURN startNode(a) AS s",
+        "MATCH (a)-[r:R]->(b) RETURN startNode(q) AS s",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}

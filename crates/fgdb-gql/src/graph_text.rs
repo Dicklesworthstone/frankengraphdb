@@ -1019,7 +1019,16 @@ impl<'a> Parser<'a> {
                     PatternLimitDimension::Columns,
                 )?;
                 let expression = self.name()?;
-                let (variable, property, path) = if self.is_punct(b'(') {
+                let start = expression.text.eq_ignore_ascii_case("startNode");
+                let (variable, property, path) = if self.is_punct(b'(')
+                    && (start || expression.text.eq_ignore_ascii_case("endNode"))
+                {
+                    // openCypher startNode(r)/endNode(r): the bound endpoint.
+                    self.advance()?;
+                    let edge = self.edge_variable()?;
+                    self.punct(b')', ")")?;
+                    (self.edge_endpoint(edge, start)?, None, None)
+                } else if self.is_punct(b'(') {
                     let function = Self::path_function(expression)?;
                     self.advance()?;
                     let variable = match function {
@@ -1135,6 +1144,40 @@ impl<'a> Parser<'a> {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
         Ok(name)
+    }
+
+    /// The vertex a directed single-hop pattern edge starts (`start`) or ends
+    /// at. `(a)-[r]->(b)` starts at `a`; `(a)<-[r]-(b)` starts at `b`. An
+    /// undirected or quantified edge has no statically known endpoint.
+    fn edge_endpoint(
+        &self,
+        edge: Name<'a>,
+        start: bool,
+    ) -> Result<Name<'a>, GraphPatternTextError> {
+        let found = self
+            .syntax
+            .edges
+            .iter()
+            .find(|e| e.variable.is_some_and(|v| v.text == edge.text))
+            .ok_or_else(|| error(edge.at, GraphPatternTextErrorKind::UnknownVariable))?;
+        match (found.direction, found.walk) {
+            (GlaDirection::Forward, None) => Ok(if start {
+                found.source
+            } else {
+                found.destination
+            }),
+            (GlaDirection::Reverse, None) => Ok(if start {
+                found.destination
+            } else {
+                found.source
+            }),
+            _ => Err(error(
+                edge.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a directed single-hop edge for startNode/endNode",
+                ),
+            )),
+        }
     }
 
     fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
