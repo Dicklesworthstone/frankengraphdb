@@ -505,10 +505,20 @@ mod snapshot_refresh_tests {
                         txn.savepoint(&database, "kept").unwrap();
                     }
                     let template = txn.prepared.as_ref().map(|p| p.template.clone());
-                    let prepared = database.prepare_write(set_vertex(6, 60)).unwrap();
-                    assert!(database.commit_template(
-                        &cx, prepared.template, crash, failure, None,
-                    ).await.is_err());
+                    // Commit through the ordinary write path, which installs the
+                    // first-committer-wins validator for this basis. A bare
+                    // commit_template kept the seed's validator, which refused
+                    // this update of vertex 6 before the injected fault.
+                    let committed = database.write_with_faults(
+                        &cx, set_vertex(6, 60), crash, failure, None,
+                    ).await;
+                    // The fence cases below require the injected failure itself,
+                    // not an earlier refusal that leaves the handle Healthy.
+                    assert!(
+                        matches!(committed, Err(WriteError::CommitOutcomeUnknown { .. }))
+                            || failure.is_some() && committed.is_err(),
+                        "the commit must fail at its injected point: {committed:?}"
+                    );
                     let state = database.state();
                     let mut work = 0;
                     let result = txn.refresh_snapshot_controlled(&database, &mut || {
