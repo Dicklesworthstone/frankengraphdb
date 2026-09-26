@@ -65,6 +65,13 @@ pub enum WriteTxnError {
     },
     /// The compound command cannot assign distinct u64 intent-visit ordinals.
     AtomicOrdinalOverflow,
+    /// Ordered preparation would exceed its admitted evaluator-input rows.
+    /// Counts include repeated vertex instructions, not just net effects.
+    /// This is a row-replication bound, not a byte or storage-work quota.
+    OrderedWriteBudgetExceeded {
+        limit: u64,
+        required: u128,
+    },
     /// Re-staging would give two created elements the same birth ordinal once
     /// the prefix's observed births are retained. Retention never renumbers,
     /// so this refuses instead of publishing ambiguous births.
@@ -116,6 +123,10 @@ impl core::fmt::Display for WriteTxnError {
             Self::AtomicOrdinalOverflow => {
                 formatter.write_str("atomic write intent ordinal overflow")
             }
+            Self::OrderedWriteBudgetExceeded { limit, required } => write!(
+                formatter,
+                "ordered write requires {required} evaluator-input rows, exceeding limit {limit}"
+            ),
             Self::BirthOrdinalCollision => formatter
                 .write_str("retained birth ordinals would collide with newly assigned births"),
             Self::IdentityExhausted => formatter.write_str("element identity domain exhausted"),
@@ -149,6 +160,7 @@ impl core::error::Error for WriteTxnError {
             | Self::AtomicRelationConflict { .. }
             | Self::RelationMismatch { .. }
             | Self::AtomicOrdinalOverflow
+            | Self::OrderedWriteBudgetExceeded { .. }
             | Self::BirthOrdinalCollision
             | Self::IdentityExhausted
             | Self::UnsupportedAtomicMutation => None,

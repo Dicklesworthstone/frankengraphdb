@@ -118,6 +118,15 @@ fn restore_ordinal(row: &mut DeltaRow, visits: &[u64]) -> Result<(), WriteTxnErr
     Ok(())
 }
 
+fn admit_expanded_rows(limit: Option<u64>, required: u128) -> Result<(), WriteTxnError> {
+    if let Some(limit) = limit
+        && required > u128::from(limit)
+    {
+        return Err(WriteTxnError::OrderedWriteBudgetExceeded { limit, required });
+    }
+    Ok(())
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Prepare dependent, source-ordered writes spanning edge relations.
     ///
@@ -142,9 +151,54 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         batches: Vec<WriteBatch>,
     ) -> Result<PreparedWrite, WriteTxnError> {
+        self.prepare_ordered_writes_admitted(batches, None)
+    }
+
+    /// Prepare ordered writes with a limit on decomposed evaluator-input rows.
+    ///
+    /// A single-relation program charges each input row once. A mixed program
+    /// charges each edge instruction once and each vertex instruction once per
+    /// relation slice, including slices introduced by identity-addressed writes
+    /// to existing edges. Conditional no-ops count before normalization.
+    /// Equality with the limit succeeds. Refusal precedes cloning any relation
+    /// slice or evaluating its mutations, and never publishes a partial write.
+    ///
+    /// Input-count admission precedes routing allocations and storage lookups;
+    /// exact expansion admission follows routing, before mutation evaluation.
+    /// Ownership conflicts can therefore precede the expansion-budget error.
+    /// Both admitted paths use the same evaluator, dependencies and template as
+    /// `prepare_ordered_writes`; this method does not truncate the program.
+    ///
+    /// This governs row replication, not variable-size payload bytes, storage
+    /// scans (including cascades/ensure), total CPU work, cancellation or spill.
+    /// The caller already owns the input allocation. It is not a memory quota.
+    pub fn prepare_ordered_writes_bounded(
+        &mut self,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: u64,
+    ) -> Result<PreparedWrite, WriteTxnError> {
+        self.prepare_ordered_writes_admitted(batches, Some(max_expanded_rows))
+    }
+
+    fn prepare_ordered_writes_admitted(
+        &mut self,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: Option<u64>,
+    ) -> Result<PreparedWrite, WriteTxnError> {
         self.ensure_writable()?;
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
+        }
+        // Every input row appears in at least one evaluator slice. Reject this
+        // lower bound before building edge ownership or routing metadata.
+        let input_rows = max_expanded_rows.map(|_| {
+            batches
+                .iter()
+                .map(|batch| batch.rows.len() as u128)
+                .sum::<u128>()
+        });
+        if let Some(input_rows) = input_rows {
+            admit_expanded_rows(max_expanded_rows, input_rows)?;
         }
         let first = batches[0].relation;
         if batches.iter().all(|batch| batch.relation == first) {
@@ -172,6 +226,14 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 routed.push((ordinal, target, pending));
             }
+        }
+        if let Some(input_rows) = input_rows {
+            let vertex_rows = routed
+                .iter()
+                .filter(|(_, target, _)| target.is_none())
+                .count() as u128;
+            let expanded_rows = input_rows - vertex_rows + vertex_rows * relations.len() as u128;
+            admit_expanded_rows(max_expanded_rows, expanded_rows)?;
         }
         let mut coordinates: BTreeMap<RelationId, CoordinateEntry> = BTreeMap::new();
         let mut shared_vertices: Option<Vec<DeltaRow>> = None;
@@ -266,6 +328,18 @@ impl<V: Vfs + Clone> Database<V> {
         batches: Vec<WriteBatch>,
     ) -> Result<CommitSeq, WriteTxnError> {
         let prepared = self.prepare_ordered_writes(batches)?;
+        self.commit_prepared(cx, prepared).await.map_err(Into::into)
+    }
+
+    /// Admit all expanded input rows before publishing one ordered commit.
+    /// The limit has the same scope as `prepare_ordered_writes_bounded`.
+    pub async fn write_ordered_bounded(
+        &mut self,
+        cx: &CommitCx,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: u64,
+    ) -> Result<CommitSeq, WriteTxnError> {
+        let prepared = self.prepare_ordered_writes_bounded(batches, max_expanded_rows)?;
         self.commit_prepared(cx, prepared).await.map_err(Into::into)
     }
 }
@@ -371,3 +445,215 @@ fn birth(row: &DeltaRow) -> Option<(ElementId, u64)> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::{DatabaseKeys, MemVfs, WriteMismatchPolicy};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+
+    const P: PropertyKeyId = PropertyKeyId(1);
+
+    async fn seeded(cx: &CommitCx) -> Database<MemVfs> {
+        let keys = DatabaseKeys::new(
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            [0xb3; 32],
+        );
+        let mut db = Database::open_memory(cx, keys).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 1..=2 {
+            batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(0))]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, batch).await.unwrap();
+        db
+    }
+
+    fn program() -> Vec<WriteBatch> {
+        let mut first = WriteBatch::new(RelationId(9));
+        first.create_vertex(VId(5), vec![], vec![]);
+        first.add_edge(EId(50), VId(1), VId(5), vec![]);
+        let mut second = WriteBatch::new(RelationId(2));
+        second.set_vertex_property(VId(5), P, Some(CanonicalScalar::Int(7)));
+        second.add_edge(EId(60), VId(5), VId(2), vec![]);
+        vec![first, second]
+    }
+
+    #[test]
+    fn exact_expansion_boundary_preserves_template_and_publishes_once() {
+        let ((), report) = run_async_under_lab(0x6f62_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let expected = db.prepare_ordered_writes(program()).unwrap();
+            for (limit, required) in [(0, 4), (3, 4), (4, 6), (5, 6)] {
+                assert!(matches!(
+                    db.prepare_ordered_writes_bounded(program(), limit),
+                    Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                        limit: actual_limit,
+                        required: actual_required,
+                    }) if actual_limit == limit && actual_required == required
+                ));
+                assert_eq!(db.frontier().unwrap(), basis);
+                assert!(db.vertex(VId(5)).unwrap().is_none());
+            }
+            for limit in [6, 7, u64::MAX] {
+                let admitted = db.prepare_ordered_writes_bounded(program(), limit).unwrap();
+                assert_eq!(admitted.template, expected.template);
+                assert_eq!(admitted.basis(), expected.basis());
+            }
+            let seq = db.write_ordered_bounded(&cx, program(), 6).await.unwrap();
+            assert_eq!(seq, CommitSeq(basis.0 + 1));
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+            assert_eq!(
+                db.vertex(VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(7))]
+            );
+            assert_eq!(
+                db.edge(EId(50)).unwrap().unwrap().entry.relation,
+                RelationId(9)
+            );
+            assert_eq!(
+                db.edge(EId(60)).unwrap().unwrap().entry.relation,
+                RelationId(2)
+            );
+            assert!(pinned.vertex(VId(5)).unwrap().is_none());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn routed_existing_edge_relation_and_noops_are_charged() {
+        let ((), report) = run_async_under_lab(0x6f62_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let mut vertex = WriteBatch::new(RelationId(9));
+            vertex.ensure_vertex(VId(1), vec![], vec![]);
+            let mut edge = WriteBatch::new(RelationId(2));
+            edge.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(4)));
+            let batches = vec![vertex, edge];
+            // Relation 1 is not a declared batch type but needs its own slice.
+            // The no-op vertex instruction is repeated in all three slices.
+            assert!(matches!(
+                db.prepare_ordered_writes_bounded(batches.clone(), 3),
+                Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                    limit: 3,
+                    required: 4,
+                })
+            ));
+            let expected = db.prepare_ordered_writes(batches.clone()).unwrap();
+            let admitted = db.prepare_ordered_writes_bounded(batches, 4).unwrap();
+            assert_eq!(admitted.template, expected.template);
+
+            let mut first = WriteBatch::new(RelationId(9));
+            first.ensure_vertex(VId(1), vec![], vec![]);
+            let mut second = WriteBatch::new(RelationId(2));
+            second.ensure_vertex(VId(2), vec![], vec![]);
+            assert!(matches!(
+                db.prepare_ordered_writes_bounded(vec![first.clone(), second.clone()], 3),
+                Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                    limit: 3,
+                    required: 4,
+                })
+            ));
+            let admitted = db.prepare_ordered_writes_bounded(vec![first, second], 4).unwrap();
+            assert!(
+                admitted
+                    .template
+                    .coordinate_entries()
+                    .iter()
+                    .all(|entry| entry.rows.is_empty())
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn budget_refusal_precedes_guard_evaluation_and_preserves_live_state() {
+        let ((), report) = run_async_under_lab(0x6f62_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let basis = db.frontier().unwrap();
+            let mut first = WriteBatch::new(RelationId(9));
+            first.compare_and_set_vertex_property(
+                VId(1),
+                P,
+                Some(CanonicalScalar::Int(999)),
+                CanonicalScalar::Int(8),
+                WriteMismatchPolicy::AbortWrite,
+            );
+            let mut second = WriteBatch::new(RelationId(2));
+            second.add_edge(EId(60), VId(1), VId(2), vec![]);
+            let batches = vec![first, second];
+            assert!(matches!(
+                db.write_ordered_bounded(&cx, batches.clone(), 2).await,
+                Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                    limit: 2,
+                    required: 3,
+                })
+            ));
+            assert!(matches!(
+                db.write_ordered_bounded(&cx, batches, 3).await,
+                Err(WriteTxnError::Write(_))
+            ));
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.edge(EId(60)).unwrap().is_none());
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(0))]
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn single_relation_fast_path_charges_raw_input_only() {
+        let ((), report) = run_async_under_lab(0x6f62_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = seeded(&cx).await;
+            let mut first = WriteBatch::new(RelationId(9));
+            first.ensure_vertex(VId(1), vec![], vec![]);
+            let mut second = WriteBatch::new(RelationId(9));
+            second.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(4)));
+            let batches = vec![first, second];
+            assert!(matches!(
+                db.prepare_ordered_writes_bounded(batches.clone(), 1),
+                Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                    limit: 1,
+                    required: 2,
+                })
+            ));
+            let expected = db.prepare_ordered_writes(batches.clone()).unwrap();
+            let admitted = db.prepare_ordered_writes_bounded(batches, 2).unwrap();
+            assert_eq!(admitted.template, expected.template);
+            assert!(matches!(
+                db.prepare_ordered_writes_bounded(vec![], 0),
+                Err(WriteTxnError::Write(WriteError::EmptyBatch))
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn budget_arithmetic_never_truncates_a_requirement_above_u64() {
+        let required = u128::from(u64::MAX) + 1;
+        assert!(matches!(
+            admit_expanded_rows(Some(u64::MAX), required),
+            Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                limit: u64::MAX,
+                required: actual,
+            })
+                if actual == required
+        ));
+        assert!(admit_expanded_rows(None, required).is_ok());
+        assert!(admit_expanded_rows(Some(0), 0).is_ok());
+    }
+}
