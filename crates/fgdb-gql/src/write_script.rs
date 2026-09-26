@@ -205,6 +205,25 @@ impl PreparedGraphWriteScript {
         self.program.parameter_schema()
     }
 
+    /// Structural read requirement before parameter binding. Only standalone
+    /// INSERT/CREATE has unit input; every other current statement family may
+    /// inspect graph state even when its eventual selection is empty. This is
+    /// definition metadata, not a grant or a replacement for source admission.
+    #[must_use]
+    pub fn requires_read(&self) -> bool {
+        self.statements().iter().any(|statement| match statement {
+            GraphWriteTemplateStatement::Insert(input) => {
+                matches!(&input.input, crate::insertion_text::InsertTextInput::Match(_))
+            }
+            GraphWriteTemplateStatement::Mutation(_)
+            | GraphWriteTemplateStatement::Delete(_)
+            | GraphWriteTemplateStatement::VertexMerge(_)
+            | GraphWriteTemplateStatement::VertexUpsert(_)
+            | GraphWriteTemplateStatement::EdgeMerge(_)
+            | GraphWriteTemplateStatement::EdgeUpsert(_) => true,
+        })
+    }
+
     /// No reparsing, catalog access, identity allocation, database observation
     /// or staging. A failure discards every already-bound private statement.
     pub fn bind_parameters(
@@ -259,6 +278,40 @@ impl core::error::Error for GraphWriteScriptBatchError {
             Self::Arguments { source, .. } => Some(source),
             Self::Definition(source) => Some(source),
             Self::Empty | Self::TooManyStatements { .. } => None,
+        }
+    }
+}
+
+/// A value/shape refusal or a caller-owned cancellation/authorization refusal
+/// while binding a private batch. Neither arm returns a bound prefix. The
+/// control source is retained exactly, never converted to a parameter error.
+#[derive(Debug)]
+pub enum GraphWriteScriptBatchBindError<C> {
+    Binding(GraphWriteScriptBatchError),
+    /// Some(i) precedes argument set i. None is the allocation or final
+    /// acceptance boundary and must not be attributed to an input record.
+    Interrupted {
+        argument_set: Option<usize>,
+        source: C,
+    },
+}
+impl<C: core::fmt::Display> core::fmt::Display for GraphWriteScriptBatchBindError<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Binding(source) => source.fmt(f),
+            Self::Interrupted { argument_set, source } => {
+                write!(f, "graph write batch binding interrupted at {argument_set:?}: {source}")
+            }
+        }
+    }
+}
+impl<C: core::error::Error + 'static> core::error::Error
+    for GraphWriteScriptBatchBindError<C>
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Binding(source) => Some(source),
+            Self::Interrupted { source, .. } => Some(source),
         }
     }
 }
@@ -420,30 +473,217 @@ impl PreparedGraphWriteScript {
         arguments: &[GqlParameters],
         max_statements: usize,
     ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError> {
+        match self.bind_parameter_sets_controlled(arguments, max_statements, |_| {
+            Ok::<_, core::convert::Infallible>(())
+        }) {
+            Ok(batch) => Ok(batch),
+            Err(GraphWriteScriptBatchBindError::Binding(error)) => Err(error),
+            Err(GraphWriteScriptBatchBindError::Interrupted { source, .. }) => match source {},
+        }
+    }
+
+    /// Bind the entire batch through the ordinary value binder with caller
+    /// controls before expanded allocation, before EACH argument set, and after
+    /// construction but before returning the complete batch. Some(i) denotes
+    /// argument set i; None denotes allocation or final acceptance. A shape
+    /// refusal precedes every callback and allocation, as on the pure API.
+    ///
+    /// Controls may poll a purpose context, reauthorize a live permit or charge
+    /// a host-defined binding allowance. No source text is parsed and no graph
+    /// identity is allocated here. A refusal/unwind drops the private prefix;
+    /// this definition and the supplied argument maps remain reusable.
+    ///
+    /// One record contains at most 64 already-prepared statements. Its native
+    /// binding remains synchronous: these are record boundaries, not per-byte
+    /// allocation preemption or a streaming/byte-bounded ingestion claim.
+    pub fn bind_parameter_sets_controlled<C>(
+        &self,
+        arguments: &[GqlParameters],
+        max_statements: usize,
+        mut checkpoint: impl FnMut(Option<usize>) -> Result<(), C>,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError<C>> {
+        use GraphWriteScriptBatchBindError as Error;
         if arguments.is_empty() {
-            return Err(GraphWriteScriptBatchError::Empty);
+            return Err(Error::Binding(GraphWriteScriptBatchError::Empty));
         }
         let observed = arguments.len() as u128 * self.spans.len() as u128;
         let limit = max_statements.min(Self::MAX_BATCH_STATEMENTS);
         if observed > limit as u128 {
-            return Err(GraphWriteScriptBatchError::TooManyStatements { limit, observed });
+            return Err(Error::Binding(GraphWriteScriptBatchError::TooManyStatements {
+                limit,
+                observed,
+            }));
         }
+        checkpoint(None).map_err(|source| Error::Interrupted { argument_set: None, source })?;
         let mut statements = Vec::with_capacity(observed as usize);
         for (argument_set, values) in arguments.iter().enumerate() {
+            checkpoint(Some(argument_set)).map_err(|source| Error::Interrupted {
+                argument_set: Some(argument_set),
+                source,
+            })?;
             let program = self.bind_parameters(values).map_err(|source| {
-                GraphWriteScriptBatchError::Arguments {
+                Error::Binding(GraphWriteScriptBatchError::Arguments {
                     argument_set,
                     source,
-                }
+                })
             })?;
             statements.extend(program.into_statements().into_vec());
         }
         let program = PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
-            .map_err(GraphWriteScriptBatchError::Definition)?;
-        Ok(BoundGraphWriteScriptBatch {
+            .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        let batch = BoundGraphWriteScriptBatch {
             program,
             argument_sets: arguments.len(),
             spans: self.spans.clone(),
-        })
+        };
+        checkpoint(None).map_err(|source| Error::Interrupted { argument_set: None, source })?;
+        Ok(batch)
+    }
+}
+
+#[cfg(test)]
+mod controlled_binding_tests {
+    use super::*;
+    use crate::{GraphSymbol, GraphSymbolKind};
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+
+    fn script() -> PreparedGraphWriteScript {
+        PreparedGraphWriteScript::prepare(
+            "CREATE (n {p:$key}); MATCH (n) WHERE n.p=$key SET n.p=$key",
+            RelationId(1),
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Property, "p") => {
+                    Some(GraphSymbol::Property(PropertyKeyId(1)))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+    }
+    fn values(key: i64) -> GqlParameters {
+        GqlParameters::new().with_int64("key", key).unwrap()
+    }
+
+    #[test]
+    fn read_requirement_comes_from_typed_input_not_parameter_values_or_spelling() {
+        for (text, reads) in [
+            ("CREATE (n)", false),
+            ("CREATE (n); INSERT (m)", false),
+            ("MATCH (n) INSERT (m)", true),
+            ("CREATE (n); MATCH (m) DETACH DELETE m", true),
+            ("MATCH (n) DELETE n", true),
+            ("MERGE (n)", true),
+        ] {
+            let prepared = PreparedGraphWriteScript::prepare(text, RelationId(1), |_, _| None)
+                .unwrap();
+            assert_eq!(prepared.requires_read(), reads, "{text}");
+        }
+        assert!(script().requires_read()); // unbound $key cannot erase the MATCH
+    }
+
+    #[test]
+    fn controlled_binding_preserves_record_order_and_exact_definitions() {
+        let script = script();
+        let arguments = [values(30), values(10), values(30)];
+        let mut events = Vec::new();
+        let batch = script.bind_parameter_sets_controlled(&arguments, 6, |at| {
+            events.push(at);
+            Ok::<_, ()>(())
+        }).unwrap();
+        assert_eq!(events, vec![None, Some(0), Some(1), Some(2), None]);
+        // Independent assembly from separately bound records, not the legacy
+        // batch wrapper (which intentionally delegates to the controlled loop).
+        let expected = PreparedGraphWriteProgram::prepare(
+            arguments.iter().flat_map(|input| {
+                script.bind_parameters(input).unwrap().into_statements().into_vec()
+            }).collect(),
+        ).unwrap();
+        assert_eq!(batch.program().canonical_bytes(), expected.canonical_bytes());
+        for flat in 0..6 {
+            let location = batch.location(flat).unwrap();
+            assert_eq!((location.argument_set, location.statement), (flat / 2, flat % 2));
+            assert_eq!(location.span, script.statement_span(flat % 2).unwrap());
+        }
+        assert_eq!(batch.location(6), None);
+    }
+
+    #[test]
+    fn each_control_boundary_refuses_without_returning_a_prefix() {
+        let script = script();
+        let arguments = [values(1), values(2), values(3)];
+        let expected = [None, Some(0), Some(1), Some(2), None];
+        for cutoff in 0..expected.len() {
+            let mut visited = Vec::new();
+            let result = script.bind_parameter_sets_controlled(&arguments, 6, |at| {
+                visited.push(at);
+                if visited.len() == cutoff + 1 { Err(cutoff) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GraphWriteScriptBatchBindError::Interrupted {
+                argument_set, source,
+            }) if argument_set == expected[cutoff] && source == cutoff));
+            assert_eq!(visited, expected[..=cutoff]);
+            assert_eq!(script.bind_parameter_sets(&arguments).unwrap().argument_sets(), 3);
+        }
+    }
+
+    #[test]
+    fn shape_admission_precedes_controls_and_late_bad_values_stop_binding() {
+        let script = script();
+        let inputs = [values(1), GqlParameters::new(), values(3)];
+        let mut events = Vec::new();
+        let too_small = script.bind_parameter_sets_controlled(&inputs, 5, |at| {
+            events.push(at);
+            Ok::<_, ()>(())
+        });
+        assert!(matches!(too_small, Err(GraphWriteScriptBatchBindError::Binding(
+            GraphWriteScriptBatchError::TooManyStatements { limit: 5, observed: 6 }
+        ))));
+        assert!(events.is_empty());
+        let empty = script.bind_parameter_sets_controlled(&[], usize::MAX, |_| {
+            panic!("empty input must refuse before controls")
+        });
+        assert!(matches!(empty, Err(GraphWriteScriptBatchBindError::<()>::Binding(
+            GraphWriteScriptBatchError::Empty
+        ))));
+        let result = script.bind_parameter_sets_controlled(&inputs, 6, |at| {
+            events.push(at);
+            Ok::<_, ()>(())
+        });
+        assert!(matches!(result, Err(GraphWriteScriptBatchBindError::Binding(
+            GraphWriteScriptBatchError::Arguments { argument_set: 1, .. }
+        ))));
+        assert_eq!(events, vec![None, Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn admitted_expansion_can_exceed_64_but_not_the_hard_ceiling() {
+        let script = script();
+        let inputs = (0..40).map(values).collect::<Vec<_>>();
+        let batch = script.bind_parameter_sets_controlled(&inputs, 80, |_| Ok::<_, ()>(()))
+            .unwrap();
+        assert_eq!(batch.program().statements().len(), 80);
+        assert_eq!(batch.statement_range(39), Some(78..80));
+        let too_many = vec![GqlParameters::new(); PreparedGraphWriteScript::MAX_BATCH_STATEMENTS / 2 + 1];
+        let result = script.bind_parameter_sets_controlled(&too_many, usize::MAX, |_| {
+            panic!("hard count admission must precede values and controls")
+        });
+        assert!(matches!(result, Err(GraphWriteScriptBatchBindError::<()>::Binding(
+            GraphWriteScriptBatchError::TooManyStatements { limit: 65_536, observed: 65_538 }
+        ))));
+    }
+
+    #[test]
+    fn unwind_drops_the_private_expansion_and_leaves_the_definition_reusable() {
+        let script = script();
+        let inputs = [values(1), values(2)];
+        let baseline = script.bind_parameter_sets(&inputs).unwrap().program().canonical_bytes();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script.bind_parameter_sets_controlled(&inputs, 4, |at| {
+                assert_ne!(at, Some(1), "injected bind unwind after one complete record");
+                Ok::<_, ()>(())
+            })
+        }));
+        assert!(failure.is_err());
+        assert_eq!(script.bind_parameter_sets(&inputs).unwrap().program().canonical_bytes(), baseline);
     }
 }
