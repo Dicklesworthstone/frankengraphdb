@@ -48,6 +48,7 @@ fn static_text(root: Option<&ParsedOp>) -> bool {
                 | GraphIntegerOp::Trim
                 | GraphIntegerOp::Substring
                 | GraphIntegerOp::Concat
+                | GraphIntegerOp::ToText
         ),
         _ => false,
     }
@@ -596,6 +597,10 @@ impl<'a> Parser<'a> {
                 Some(GraphIntegerOp::Lower)
             } else if function.eq_ignore_ascii_case("TRIM") {
                 Some(GraphIntegerOp::Trim)
+            } else if function.eq_ignore_ascii_case("TOSTRING") {
+                Some(GraphIntegerOp::ToText)
+            } else if function.eq_ignore_ascii_case("TOINTEGER") {
+                Some(GraphIntegerOp::ToInteger)
             } else if spelled(["CHAR_LENGTH", "SIZE"]) {
                 Some(GraphIntegerOp::CharLength)
             } else {

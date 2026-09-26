@@ -78,7 +78,9 @@ fn prepare_root(
             | Op::Upper
             | Op::Lower
             | Op::Trim
-            | Op::CharLength => 1,
+            | Op::CharLength
+            | Op::ToText
+            | Op::ToInteger => 1,
             Op::Binary(_)
             | Op::Coalesce
             | Op::Compare(_)
@@ -183,7 +185,9 @@ fn prepare_root(
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains => Kind::Boolean,
-            Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat => Kind::Text,
+            Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
+                Kind::Text
+            }
             _ => Kind::Integer,
         };
         let peak = match op {
@@ -295,6 +299,8 @@ fn prepare_root(
                     Op::Lower => Some(Instruction::Lower),
                     Op::Trim => Some(Instruction::Trim),
                     Op::CharLength => Some(Instruction::CharLength),
+                    Op::ToText => Some(Instruction::ToText),
+                    Op::ToInteger => Some(Instruction::ToInteger),
                     _ => None,
                 };
                 if let Some(op) = unary {
@@ -362,6 +368,8 @@ fn prepare_root(
                     | Op::Lower
                     | Op::Trim
                     | Op::CharLength
+                    | Op::ToText
+                    | Op::ToInteger
                     | Op::Concat
                     | Op::StartsWith
                     | Op::EndsWith

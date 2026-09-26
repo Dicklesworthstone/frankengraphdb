@@ -48,12 +48,19 @@ pub enum GraphIntegerOp {
     Lower,
     Trim,
     CharLength,
+    /// openCypher toString: NULL, integer, Boolean or text to text.
+    ToText,
+    /// openCypher toInteger: NULL, integer, Boolean or integer text to an
+    /// integer; other text is NULL, as in openCypher.
+    ToInteger,
     Substring,
     Concat,
     StartsWith,
     EndsWith,
     Contains,
-    InList { members: usize },
+    InList {
+        members: usize,
+    },
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
@@ -64,7 +71,9 @@ pub enum GraphIntegerOp {
     And,
     Or,
     Case,
-    SimpleCase { alternatives: usize },
+    SimpleCase {
+        alternatives: usize,
+    },
 }
 
 impl GraphIntegerOp {
@@ -139,6 +148,8 @@ impl GraphIntegerOp {
             Self::Lower => bytes.push(18),
             Self::Trim => bytes.push(19),
             Self::CharLength => bytes.push(20),
+            Self::ToText => bytes.push(30),
+            Self::ToInteger => bytes.push(31),
             Self::Substring => bytes.push(21),
             Self::Concat => bytes.push(22),
             Self::StartsWith => bytes.push(23),
@@ -168,6 +179,8 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Lower => f.write_str("Lower"),
             Self::Trim => f.write_str("Trim"),
             Self::CharLength => f.write_str("CharLength"),
+            Self::ToText => f.write_str("ToText"),
+            Self::ToInteger => f.write_str("ToInteger"),
             Self::Substring => f.write_str("Substring"),
             Self::Concat => f.write_str("Concat"),
             Self::StartsWith => f.write_str("StartsWith"),
@@ -340,6 +353,8 @@ enum Instruction {
     Lower,
     Trim,
     CharLength,
+    ToText,
+    ToInteger,
     Substring,
     Concat,
     StartsWith,
@@ -592,6 +607,11 @@ impl GraphIntegerExpression {
                         Some(false)
                     };
                     *left = boolean_scalar(result).into();
+                }
+                Instruction::ToText | Instruction::ToInteger => {
+                    let value = stack.last_mut().expect("validated conversion operand");
+                    let result = convert(value, matches!(op, Instruction::ToText), at, control)?;
+                    *value = result.into();
                 }
                 Instruction::Upper
                 | Instruction::Lower
@@ -847,6 +867,8 @@ impl GraphIntegerExpression {
                 Instruction::Lower => bytes.push(18),
                 Instruction::Trim => bytes.push(19),
                 Instruction::CharLength => bytes.push(20),
+                Instruction::ToText => bytes.push(27),
+                Instruction::ToInteger => bytes.push(28),
                 Instruction::Substring => bytes.push(21),
                 Instruction::Concat => bytes.push(22),
                 Instruction::StartsWith => bytes.push(23),
@@ -918,6 +940,57 @@ fn charge_payload<E>(
         }
     }
     Ok(())
+}
+
+/// openCypher toString / toInteger (fgdb-j687q). NULL stays NULL. Text that
+/// is not an i64 literal converts to NULL under toInteger, as openCypher
+/// defines it. Decimal, float, timestamp, bytes and average cells are a typed
+/// failure, never a guessed rendering.
+fn convert<E>(
+    cell: &ExpressionCell<'_>,
+    to_text: bool,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    let number = match cell {
+        ExpressionCell::Count(value) => i128::from(*value),
+        ExpressionCell::Integer(value) => *value,
+        ExpressionCell::Average(_) => {
+            return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+        }
+        ExpressionCell::Scalar(value) => match value.as_ref() {
+            CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
+            CanonicalScalar::Int(value) => i128::from(*value),
+            CanonicalScalar::Bool(value) => {
+                return if to_text {
+                    make_text(if *value { "true" } else { "false" }, instruction, control)
+                } else {
+                    Ok(CanonicalScalar::Int(i64::from(*value)))
+                };
+            }
+            CanonicalScalar::Text(text) => {
+                let text = text.as_str();
+                return if to_text {
+                    make_text(text, instruction, control)
+                } else {
+                    charge_payload(text.len(), false, control)?;
+                    Ok(text
+                        .parse::<i64>()
+                        .map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                };
+            }
+            _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+        },
+    };
+    if to_text {
+        make_text(&number.to_string(), instruction, control)
+    } else {
+        i64::try_from(number)
+            .map(CanonicalScalar::Int)
+            .map_err(|_| failure(GraphIntegerErrorKind::Overflow))
+    }
 }
 
 fn make_text<E>(

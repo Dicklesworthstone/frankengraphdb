@@ -481,3 +481,79 @@ fn opencypher_plus_over_text_is_concatenation() {
         );
     }
 }
+
+/// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
+/// stays NULL; toInteger of text that is not an i64 literal is NULL, as
+/// openCypher defines it; a float or other domain is a typed failure, never a
+/// guessed rendering. toString is static text, so `+` concatenates it, and an
+/// aggregate count converts through the result projection.
+#[test]
+fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
+    let input = text("42");
+    for (expression, expected) in [
+        ("toString(n.text)", text("42")),
+        ("toInteger(n.text)", CanonicalScalar::Int(42)),
+        ("toInteger(n.text) + 1", CanonicalScalar::Int(43)),
+        ("TOSTRING(-7)", text("-7")),
+        ("toString(TRUE)", text("true")),
+        ("toInteger(FALSE)", CanonicalScalar::Int(0)),
+        ("toInteger('x')", CanonicalScalar::Null),
+        ("toInteger('3.9')", CanonicalScalar::Null),
+        ("toInteger('9223372036854775808')", CanonicalScalar::Null),
+        ("'n=' + toString(toInteger(n.text) * 2)", text("n=84")),
+        // Only toString makes these text: `+` must still concatenate.
+        ("toString(1) + toString(2)", text("12")),
+    ] {
+        assert_eq!(scalar(expression, &input), expected, "{expression}");
+    }
+    assert_eq!(
+        scalar("toString(n.text)", &CanonicalScalar::Null),
+        CanonicalScalar::Null
+    );
+    let float = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5));
+    for expression in ["toString(n.text)", "toInteger(n.text)"] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(execute(&query, &float, policy()).is_err(), "{expression}");
+    }
+    // toString is text: adding it to an integer is the typed Concat refusal.
+    assert!(
+        PreparedGraphSetText::prepare("MATCH (n) RETURN 1 + toString(2) AS value", symbols)
+            .is_err()
+    );
+    // toInteger reads its text: one unit of work per payload unit, isolated
+    // by differencing against a plain read of the same property.
+    let parse = prepare("MATCH (n) RETURN toInteger(n.text) AS value");
+    let plain = prepare("MATCH (n) RETURN n.text AS value");
+    let work = |query: &PreparedGraphSet, input: &CanonicalScalar| {
+        execute(query, input, policy())
+            .unwrap()
+            .evaluator
+            .work_units
+    };
+    let (short, long) = (text("1"), text(&"1".repeat(1024)));
+    assert_eq!(
+        (work(&parse, &long) - work(&plain, &long)) - (work(&parse, &short) - work(&plain, &short)),
+        1024 / 64 - 1
+    );
+    let counted = fgdb_gql::PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN toString(COUNT(*)) AS c",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+    .execute_governed(
+        1,
+        [VId(1)],
+        [],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(Some(&input)),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(
+        counted.value[0].values()[0].as_value().cloned(),
+        Some(fgdb_gql::algebra::GraphValue::Scalar(text("1")))
+    );
+}
