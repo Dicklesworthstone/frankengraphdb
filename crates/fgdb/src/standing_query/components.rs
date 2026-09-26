@@ -2,6 +2,7 @@
 //! CommittedEdgeInput validates EId lifetimes, cascades and source succession;
 //! the shared component kernel owns connectivity. No second log or graph store.
 
+mod relation;
 mod rows;
 
 use super::*;
@@ -23,19 +24,36 @@ type MembershipSinks<'a> = (&'a mut ZSet<Pair>, &'a mut rows::State);
 pub(super) enum ComponentRelation {
     Weak(RelationId),
     Strong(RelationId),
+    WeakRows(relation::Definition),
+    StrongRows(relation::Definition),
 }
 impl ComponentRelation {
-    fn edge_type(self) -> RelationId {
+    fn edge_type(self) -> Option<RelationId> {
         match self {
-            Self::Weak(relation) | Self::Strong(relation) => relation,
+            Self::Weak(relation) | Self::Strong(relation) => Some(relation),
+            Self::WeakRows(_) | Self::StrongRows(_) => None,
+        }
+    }
+    fn selected(self) -> Option<relation::Definition> {
+        match self {
+            Self::WeakRows(definition) | Self::StrongRows(definition) => Some(definition),
+            Self::Weak(_) | Self::Strong(_) => None,
         }
     }
     fn empty_kernel(self) -> Kernel {
         match self {
-            Self::Weak(_) => Kernel::Weak(IncrementalComponents::new()),
-            Self::Strong(_) => Kernel::Strong(IncrementalStrongComponents::new()),
+            Self::Weak(_) | Self::WeakRows(_) => Kernel::Weak(IncrementalComponents::new()),
+            Self::Strong(_) | Self::StrongRows(_) => {
+                Kernel::Strong(IncrementalStrongComponents::new())
+            }
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Graph(CommittedEdgeInput),
+    Selected(relation::VertexSupport),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -154,7 +172,7 @@ impl Kernel {
 }
 
 pub(crate) struct State {
-    input: CommittedEdgeInput,
+    input: Input,
     components: Kernel,
     rows: ZSet<Pair>,
     relational: rows::State,
@@ -251,17 +269,23 @@ impl State {
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        if self.frontier != self.input.frontier() {
+        let Input::Graph(source) = &mut self.input else {
+            return Err(StandingQueryFailure::InvalidDelta);
+        };
+        let relation = self
+            .relation
+            .edge_type()
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
+        if self.frontier != source.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         recursive::observe_batch(batch, meter)?;
         // Validate the whole batch BEFORE filtering its topology or vertices.
-        let input = self
-            .input
+        let input = source
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(input_error)?;
         let vertices = vertex_delta(batch, meter)?;
-        let edges = project(input.delta(), self.relation.edge_type(), meter)?;
+        let edges = project(input.delta(), relation, meter)?;
         let _ = self.components.apply(
             &vertices,
             &edges,
@@ -278,18 +302,21 @@ impl State {
         relation: ComponentRelation,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
+        let edge_type = relation
+            .edge_type()
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
         let TopologyInput {
             input,
             vertices,
             edges,
-        } = topology_input(snapshot, relation.edge_type(), meter)?;
+        } = topology_input(snapshot, edge_type, meter)?;
         let mut components = relation.empty_kernel();
         let rows = components.apply(&vertices, &edges, None, meter)?;
         // This kernel is still private. A failed native bootstrap drops the
         // entire candidate without replacing a registered view or its policy.
         let relational = rows::State::from_membership(&rows, meter)?;
         Ok(Self {
-            input,
+            input: Input::Graph(input),
             components,
             rows,
             relational,
@@ -469,8 +496,12 @@ impl<V: Vfs + Clone> Database<V> {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            State::from_snapshot(&self.snapshot, relation, &mut meter)
-                .map_err(StandingQueryError::Maintenance)
+            let state = if let Some(definition) = relation.selected() {
+                self.prepare_selected_components(definition, relation, &mut meter)
+            } else {
+                State::from_snapshot(&self.snapshot, relation, &mut meter)
+            };
+            state.map_err(StandingQueryError::Maintenance)
         })
     }
 

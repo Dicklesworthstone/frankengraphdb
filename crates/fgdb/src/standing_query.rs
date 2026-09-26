@@ -822,7 +822,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
-            StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Components(query) => {
+                query.maintain_with_sources(cx, batch, prior, &mut meter)
+            }
             StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
