@@ -13,6 +13,10 @@ use crate::download::SnapshotDownload;
 use crate::driver::{RaftPublisher, SeedDriveError, SeedPublisher};
 use crate::replica::ReplicaOutput;
 
+/// The member seed error that download composition returns for `A` over `C`.
+type DownloadSeedError<C, A> =
+    MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>;
+
 impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> AppliedReplica<C, A> {
     /// Admit a download while retaining ownership of the voter/application.
     /// Poll download.recover_next independently and continue step/apply_next.
@@ -22,10 +26,7 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C> + SeedPublisher<C>> App
         namespace: DatabaseSecurityNamespaceId,
         transfer: SnapshotTransfer,
         plan: SeedPlan,
-    ) -> Result<
-        SnapshotDownload,
-        MemberSeedError<Infallible, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>,
-    > {
+    ) -> Result<SnapshotDownload, DownloadSeedError<C, A>> {
         self.available()
             .map_err(|error| MemberSeedError::Application(error.into()))?;
         if plan.anchor().publication_generation <= self.application.progress.publication_generation

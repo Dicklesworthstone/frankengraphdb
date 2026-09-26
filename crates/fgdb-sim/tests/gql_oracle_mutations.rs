@@ -247,15 +247,19 @@ fn case(text: String, op: Op, family: usize) -> Case {
         allocation: None,
     }
 }
+type VertexRecord = (VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+type EdgeRecord = (
+    EId,
+    VId,
+    RelationId,
+    VId,
+    Vec<(PropertyKeyId, CanonicalScalar)>,
+);
+// Initial vertices, initial (edge, source, destination) triples, and cases.
+type GeneratedWorkload = (Vec<VertexRecord>, Vec<(EId, VId, VId)>, Vec<Case>);
 // Three disjoint components allow destructive operations in every round, not
 // just one cascade followed by dozens of vacuous no-op statements.
-fn generated(
-    seed: u64,
-) -> (
-    Vec<(VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>,
-    Vec<(EId, VId, VId)>,
-    Vec<Case>,
-) {
+fn generated(seed: u64) -> GeneratedWorkload {
     let mut rng = Rng(seed);
     let mut vertices = Vec::new();
     let mut edges = Vec::new();
@@ -389,14 +393,8 @@ fn generated(
 }
 #[derive(Debug, PartialEq, Eq)]
 struct State {
-    vertices: Vec<(VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>,
-    edges: Vec<(
-        EId,
-        VId,
-        RelationId,
-        VId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
-    )>,
+    vertices: Vec<VertexRecord>,
+    edges: Vec<EdgeRecord>,
 }
 fn actual(db: &Database<MemVfs>) -> State {
     State {

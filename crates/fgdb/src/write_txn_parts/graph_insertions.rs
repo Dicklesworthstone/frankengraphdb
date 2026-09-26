@@ -11,7 +11,7 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
     ) -> Result<
         fgdb_gql::insertion::GraphInsertStats,
-        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>>,
     > {
         let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
         self.ensure_database(database).map_err(source)?;
@@ -27,8 +27,8 @@ impl WriteTxn {
         insertion: &fgdb_gql::insertion::PreparedGraphInsert,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
     ) -> Result<
-        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>>,
     > {
         let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
         self.ensure_database(database).map_err(source)?;
@@ -59,7 +59,7 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
         fgdb_gql::insertion::GraphInsertStats,
-        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
         self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, false)
             .map(|(stats, _, _)| stats)
@@ -85,8 +85,8 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
         self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, true)
     }
@@ -100,8 +100,8 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
         retain_identities: bool,
     ) -> Result<
-        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::GqlQueryError;

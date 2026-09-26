@@ -25,7 +25,7 @@ impl WriteTxn {
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
         fgdb_gql::GraphMutationStats,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, false)
             .map(|(stats, _, _)| stats)
@@ -48,8 +48,8 @@ impl WriteTxn {
         mutation: &fgdb_gql::PreparedGraphMutation,
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::GraphMutationStats>,
+        TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, true)
     }
@@ -62,8 +62,8 @@ impl WriteTxn {
         policy: fgdb_gql::GraphMutationPolicy,
         retain_targets: bool,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::GraphMutationStats>,
+        TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
         use fgdb_gql::{GraphMutationError, GraphMutationIntent, GqlQueryError};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));

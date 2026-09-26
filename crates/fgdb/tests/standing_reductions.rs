@@ -29,6 +29,8 @@ type Signature = (
     Option<(i128, i128)>,
 );
 type Summaries = BTreeMap<Signature, i128>;
+// Group key -> (total row weight, every integer value with its weight).
+type OracleGroups = BTreeMap<Vec<GraphValue>, (i128, Vec<(i128, i128)>)>;
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x61; 32],
@@ -122,7 +124,7 @@ fn outer(left: &Bag, right: &Bag) -> Bag {
 }
 // Independent full bag grouping: never invokes maintained or aggregate code.
 fn oracle(input: &Bag, keys: &[usize], column: usize) -> Summaries {
-    let mut groups: BTreeMap<Vec<GraphValue>, (i128, Vec<(i128, i128)>)> = BTreeMap::new();
+    let mut groups: OracleGroups = BTreeMap::new();
     if keys.is_empty() {
         groups.insert(vec![], (0, vec![]));
     }

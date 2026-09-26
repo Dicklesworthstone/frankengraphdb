@@ -1,5 +1,5 @@
 mod query_source {
-    use super::{BoundPlan, Database, PendingRow, WriteTxn, WriteTxnError};
+    use super::{BoundPlan, Database, PendingRow, TxnGqlError, WriteTxn, WriteTxnError};
     use crate::Snapshot;
     use crate::gql_exec::source::{self, SourceEvent};
     use asupersync::fs::Vfs;

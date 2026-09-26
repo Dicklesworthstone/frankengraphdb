@@ -71,8 +71,10 @@ fn observed(rows: &ZSet<RowAggregateRow>) -> BTreeMap<Signature, i128> {
         .map(|(row, w)| (signature(row), w.to_i128().unwrap()))
         .collect()
 }
+// Group key -> (total row weight, every integer value with its weight).
+type OracleGroups = BTreeMap<Vec<GraphValue>, (i128, Vec<(i128, i128)>)>;
 fn oracle(global: bool, input: &ZSet<GraphValueRow>) -> BTreeMap<Signature, i128> {
-    let mut groups: BTreeMap<Vec<GraphValue>, (i128, Vec<(i128, i128)>)> = BTreeMap::new();
+    let mut groups: OracleGroups = BTreeMap::new();
     if global {
         groups.insert(vec![], (0, vec![]));
     }

@@ -838,6 +838,9 @@ impl Drop for PendingLatency {
 // FaultVfs
 // ---------------------------------------------------------------------------
 
+/// Path-keyed inodes, shared by every clone of one [`FaultVfs`].
+type InodeTable<F> = Arc<Mutex<BTreeMap<PathBuf, Arc<Inode<F>>>>>;
+
 /// A [`Vfs`] that injects fsync lies, torn writes, bit flips, and ENOSPC into
 /// a backing filesystem.
 ///
@@ -846,7 +849,7 @@ impl Drop for PendingLatency {
 pub struct FaultVfs<V: Vfs = UnixVfs> {
     backing: Arc<V>,
     lab: Arc<Lab>,
-    inodes: Arc<Mutex<BTreeMap<PathBuf, Arc<Inode<V::File>>>>>,
+    inodes: InodeTable<V::File>,
 }
 
 impl<V: Vfs> std::fmt::Debug for FaultVfs<V> {

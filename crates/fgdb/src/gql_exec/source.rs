@@ -20,6 +20,8 @@ pub(crate) enum SourceEvent {
 /// Admitted topology keeps edge identity so captured paths name real edges.
 type IdentifiedEdge = (EId, VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;
+/// (property key, canonical scalar transcript) -> candidate vertex set.
+type EqualityCandidates = IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexMap<VId, ()>>;
 
 /// Immutable AVL nodes: updating a generation copies only the search path.
 /// Values stored here must themselves have cheap clones (coordinates or roots).
@@ -533,7 +535,7 @@ impl AdjacencyIndex {
 /// only authority — the caller re-checks the predicate against it.
 #[derive(Clone, Debug)]
 pub(crate) struct PropertyEqualityIndex {
-    candidates: IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexMap<VId, ()>>,
+    candidates: EqualityCandidates,
     histories: IndexMap<VId, History>,
     work: u64,
 }

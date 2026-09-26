@@ -16,10 +16,7 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
         (fgdb_gql::GraphEdgeUpsertStats, fgdb_gql::GraphEdgeMergeOutcome),
-        fgdb_gql::GqlQueryError<
-            fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>,
-            Box<asupersync::error::Error>,
-        >,
+        TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{
             GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,

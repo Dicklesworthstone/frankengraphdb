@@ -17,7 +17,7 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GraphCheapestPathStreamIterator<'cx, Box<asupersync::error::Error>>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::GraphCheapestPathError<WriteTxnError>>,
     > {
         use fgdb_gql::{GraphCheapestPathError, GqlQueryError};
         let stream = cx.with_restriction(|| {
@@ -55,7 +55,7 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GraphCheapestPathStreamIterator<'cx, Box<asupersync::error::Error>>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::GraphCheapestPathError<WriteTxnError>>,
     > {
         self.stream_graph_cheapest_paths_governed(database, cx, request.query(), request.ranked_count().unwrap_or(1), policy)
     }

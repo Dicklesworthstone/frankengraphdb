@@ -729,6 +729,10 @@ async fn stream_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
 #[test]
 fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
     use fgdb_warden::{CapabilityToken, Restriction};
+    // A signed limit restriction paired with the dimension its refusal reports.
+    type SignedLimitCase = (fn(u64) -> Restriction, LimitDimension);
+    // A native meter's name paired with a policy that sets that meter to `k`.
+    type NativeMeterCase<'a> = (&'a str, fn(u64) -> GqlQueryPolicy);
     let ((), report) = run_async_under_lab(0x5ec0_6101, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -785,7 +789,7 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
                 }
                 low
             };
-            let signed: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+            let signed: [SignedLimitCase; 3] = [
                 (Restriction::MaxWork, LimitDimension::Work),
                 (Restriction::MaxNodes, LimitDimension::Nodes),
                 (Restriction::MaxRows, LimitDimension::Rows),
@@ -810,7 +814,7 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
                     "{text}: signed {dimension:?}"
                 );
             }
-            let native: [(&str, fn(u64) -> GqlQueryPolicy); 3] = [
+            let native: [NativeMeterCase<'_>; 3] = [
                 ("snapshot records", |k| {
                     GqlQueryPolicy::new(k, 1000, 1_000_000, 1_000_000)
                 }),

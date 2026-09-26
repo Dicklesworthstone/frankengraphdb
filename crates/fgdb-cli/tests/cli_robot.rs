@@ -2240,6 +2240,14 @@ fn search_lanes_equal_the_library_and_pin_history() {
     use fgdb_types::CommitSeq;
     use fgdb_types::context::PurposeContexts;
     use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    // CLI arguments, expected columns, and the read options and search that the
+    // library oracle runs for the same case.
+    type SearchCase<'args, 'columns, 'column, 'query> = (
+        Vec<&'args str>,
+        &'columns [&'column str],
+        ReadOptions<PropertyKeyId, LabelId>,
+        Search<'query>,
+    );
 
     let db = TestDb::new("search");
     db.create();
@@ -2326,12 +2334,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
     let text = |query, k, mode| Search::Text { query, k, mode };
     let vector = |query, k, mode| Search::Vector { query, k, mode };
     let l2 = Some(DistanceMetric::SquaredEuclidean);
-    let cases: Vec<(
-        Vec<&str>,
-        &[&str],
-        ReadOptions<PropertyKeyId, LabelId>,
-        Search<'_>,
-    )> = vec![
+    let cases: Vec<SearchCase<'_, '_, '_, '_>> = vec![
         (
             vec!["--text", "red", "--text-property", "team"],
             &["vertex", "score"],

@@ -20,7 +20,7 @@ impl WriteTxn {
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
         fgdb_gql::GraphDeleteStats,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>,
     > {
         self.execute_graph_delete_returning_governed(database, cx, deletion, policy)
             .map(|(stats, _)| stats)
@@ -40,7 +40,7 @@ impl WriteTxn {
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
         (fgdb_gql::GraphDeleteStats, Vec<VId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+        TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>,
     > {
         self.execute_graph_delete_elements_returning_governed(database, cx, deletion, policy)
             .map(|(stats, vertices, _)| (stats, vertices))
@@ -55,8 +55,8 @@ impl WriteTxn {
         deletion: &fgdb_gql::PreparedGraphDelete,
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
-        (fgdb_gql::GraphDeleteStats, Vec<VId>, Vec<EId>),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+        WithAffectedIds<fgdb_gql::GraphDeleteStats>,
+        TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>,
     > {
         use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded,
             GqlBudgetDimension, GraphDeleteError, GqlQueryError};

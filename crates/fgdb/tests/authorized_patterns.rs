@@ -25,6 +25,8 @@ use fgdb_warden::{
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([7; 32]);
 const BRANCH: &str = "host-selected-branch";
+// A signed limit restriction paired with the dimension its refusal reports.
+type SignedLimitCase = (fn(u64) -> Restriction, LimitDimension);
 fn authority(seed: u64, namespace: DatabaseSecurityNamespaceId) -> Authority {
     Authority::new(
         AuthKey::from_seed(seed),
@@ -1322,7 +1324,7 @@ fn hidden_records_change_neither_results_nor_any_limit_threshold() {
         let with_hidden = noninterference_database(&commit, true).await;
         let issuer = authority(97, NS);
         let token = issuer.issue_at(&grant(), 100).unwrap();
-        let limits: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+        let limits: [SignedLimitCase; 3] = [
             (Restriction::MaxWork, LimitDimension::Work),
             (Restriction::MaxNodes, LimitDimension::Nodes),
             (Restriction::MaxRows, LimitDimension::Rows),

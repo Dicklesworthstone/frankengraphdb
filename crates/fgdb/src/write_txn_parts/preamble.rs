@@ -20,6 +20,15 @@ pub(crate) struct IdentityAllocation {
     edge: u128,
 }
 
+/// The error of a governed WriteTxn GQL entry point: the statement family's
+/// error `E` (over [`WriteTxnError`]) or the runtime's interruption. Named once
+/// so each signature states only the family it can fail with.
+pub(crate) type TxnGqlError<E> = fgdb_gql::GqlQueryError<E, Box<asupersync::error::Error>>;
+
+/// A returning write's outcome: its statistics plus the vertex and edge
+/// identities it affected, in the statement's canonical order.
+pub(crate) type WithAffectedIds<S> = (S, Vec<VId>, Vec<EId>);
+
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {

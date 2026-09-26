@@ -24,6 +24,8 @@ use fgdb_warden::{
 use std::sync::Arc;
 
 type Failure = FnxReadError<ReadError, QueryError>;
+// A signed limit restriction paired with the dimension its refusal reports.
+type SignedLimitCase = (fn(u64) -> Restriction, LimitDimension);
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x39; 32]);
 const BRANCH: &str = "host-analytics-branch";
 const BFS: &str = "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance";
@@ -1051,7 +1053,7 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
                 run(&oracle, &token, opt).unwrap(),
                 "{text}"
             );
-            let signed: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+            let signed: [SignedLimitCase; 3] = [
                 (Restriction::MaxWork, LimitDimension::Work),
                 (Restriction::MaxNodes, LimitDimension::Nodes),
                 (Restriction::MaxRows, LimitDimension::Rows),

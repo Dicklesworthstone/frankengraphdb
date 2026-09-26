@@ -41,10 +41,7 @@ impl WriteTxn {
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
         (fgdb_gql::GraphVertexMergeStats, fgdb_gql::GraphVertexMergeOutcome),
-        fgdb_gql::GqlQueryError<
-            fgdb_gql::GraphVertexMergeError<WriteTxnError, A>,
-            Box<asupersync::error::Error>,
-        >,
+        TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{
             GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,

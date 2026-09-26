@@ -33,12 +33,14 @@ fn statement(direction: GlaDirection, predicate: &str, all: bool, skip: u64, lim
         if all { "ALL " } else { "DISTINCT " }
     )
 }
+type EdgeFixtures = BTreeMap<EId, (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type VertexFixtures = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
 #[derive(Clone)]
 struct Fixture {
     ids: Vec<EId>,
     at: usize,
-    edges: BTreeMap<EId, (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>,
-    vertices: BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>,
+    edges: EdgeFixtures,
+    vertices: VertexFixtures,
     fail: Option<EId>,
     drops: Arc<AtomicUsize>,
     visits: Arc<AtomicUsize>,

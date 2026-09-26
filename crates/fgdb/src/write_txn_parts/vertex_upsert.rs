@@ -22,10 +22,7 @@ impl WriteTxn {
             fgdb_gql::GraphVertexUpsertStats,
             fgdb_gql::GraphVertexMergeOutcome,
         ),
-        fgdb_gql::GqlQueryError<
-            fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>,
-            Box<asupersync::error::Error>,
-        >,
+        TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{
             GqlQueryError, GraphVertexMergeOutcome, GraphVertexUpsertAction,

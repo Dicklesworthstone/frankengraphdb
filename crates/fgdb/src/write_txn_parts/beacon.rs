@@ -18,6 +18,8 @@ mod graph;
 
 type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
+/// A vertex created in this transaction, borrowed: its labels and properties.
+type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)]);
 
 /// All source metadata admissions, including new read witnesses, use the
 /// same conservative per-call scratch counter. It counts admissions, not RSS.
@@ -70,14 +72,14 @@ impl WorkControl for Shared<'_, '_> {
 #[derive(Default)]
 struct Overlay<'a> {
     basis: Option<&'a VertexRow>,
-    created: Option<(&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)])>,
+    created: Option<CreatedContents<'a>>,
     deleted: bool,
     labels: BTreeMap<LabelId, bool>,
     properties: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
 }
 
 impl<'a> Overlay<'a> {
-    fn contents(&self) -> Option<(&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)])> {
+    fn contents(&self) -> Option<CreatedContents<'a>> {
         if self.deleted {
             None
         } else {

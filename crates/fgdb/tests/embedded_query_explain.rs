@@ -114,12 +114,14 @@ const READS: [(&str, NativeReadClass, [&str; 2]); 7] = [
         ],
     ),
 ];
+// EXPLAIN (operator, detail) rows and the optional native certificate.
+type Explanation = (Vec<(String, String)>, Option<NativeExplainCertificate>);
 fn explain(
     db: &Database<MemVfs>,
     text: &str,
     params: &GqlParameters,
     certificate: bool,
-) -> Result<(Vec<(String, String)>, Option<NativeExplainCertificate>), QueryError> {
+) -> Result<Explanation, QueryError> {
     let (rows, cert) = db.explain(text, params, symbols, certificate)?;
     Ok((
         rows.into_iter()

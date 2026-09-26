@@ -80,6 +80,8 @@ fn definition(direction: GlaDirection, grouping: usize) -> PreparedGraphAggregat
 
 type Key = Option<VId>;
 type Summary = (u64, u64, u64, Option<i128>, Option<(i128, u64)>);
+// Group key -> every (optional child, optional amount) row in that group.
+type GroupedMatches = BTreeMap<Key, Vec<(Option<VId>, Option<i128>)>>;
 fn reduced(sum: i128, count: u64) -> (i128, u64) {
     let (mut a, mut b) = (sum.unsigned_abs(), u128::from(count));
     while b != 0 {
@@ -114,7 +116,7 @@ fn oracle(
 ) -> BTreeMap<Key, Summary> {
     let vertices = db.vertices().unwrap();
     let edges = db.edges().unwrap();
-    let mut groups: BTreeMap<Key, Vec<(Option<VId>, Option<i128>)>> = BTreeMap::new();
+    let mut groups: GroupedMatches = BTreeMap::new();
     for root in vertices.iter().filter(|row| row.labels.contains(&OWNER)) {
         let mut matches = Vec::new();
         for edge in edges.iter().filter(|edge| edge.entry.relation == R) {
