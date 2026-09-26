@@ -157,7 +157,9 @@ impl<V: Vfs> CommitCoordinator<V> {
                     }
                     Ok(_) => {
                         let mut file = self.vfs.open_read(&path).await?;
-                        if Self::existing_capsule_matches(cx, &mut file, &bytes).await? {
+                        if Self::existing_capsule_prefix_len(cx, &mut file, &bytes).await?
+                            == Some(bytes.len())
+                        {
                             Ok(Some(file))
                         } else {
                             Ok(None)

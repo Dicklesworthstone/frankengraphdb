@@ -509,13 +509,16 @@ impl<V: Vfs> CommitCoordinator<V> {
     ///
     /// This is deliberately streaming: a capsule is already materialized once
     /// for publication, and deduplication must not require another
-    /// capsule-sized allocation. A length or byte mismatch is a conflict;
-    /// genuine read failures remain I/O errors.
-    async fn existing_capsule_matches(
+    /// capsule-sized allocation. A strict exact prefix can be the residue of
+    /// an interrupted pre-D1 write; it is eligible for completion only after
+    /// the caller proves that no committed marker names it. Different bytes
+    /// and overlong files are conflicts; genuine read failures remain I/O
+    /// errors. The cursor is left at the verified prefix's end.
+    async fn existing_capsule_prefix_len(
         cx: &impl StorageReadCx,
         file: &mut V::File,
         expected: &[u8],
-    ) -> Result<bool, CommitError> {
+    ) -> Result<Option<usize>, CommitError> {
         cx.with_restriction_async(async {
             let expected_len = u64::try_from(expected.len()).map_err(|_| {
                 std::io::Error::new(
@@ -523,22 +526,26 @@ impl<V: Vfs> CommitCoordinator<V> {
                     "capsule container length does not fit u64",
                 )
             })?;
-            if file.metadata().await?.len() != expected_len {
-                return Ok(false);
+            let metadata = file.metadata().await?;
+            if !metadata.file_type().is_file() || metadata.len() > expected_len {
+                return Ok(None);
             }
+            // The preceding comparison proves this fits the expected Vec's
+            // addressable length, including on a narrower host.
+            let prefix_len = metadata.len() as usize;
 
             let mut actual = [0u8; CAPSULE_COMPARE_BUFFER_BYTES];
-            for expected_chunk in expected.chunks(actual.len()) {
+            for expected_chunk in expected[..prefix_len].chunks(actual.len()) {
                 match file.read_exact(&mut actual[..expected_chunk.len()]).await {
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     Err(error) => return Err(error.into()),
                 }
                 // ubs:ignore -- durable encrypted container bytes, not secret material.
                 if actual[..expected_chunk.len()] != expected_chunk[..] {
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
 
@@ -547,9 +554,38 @@ impl<V: Vfs> CommitCoordinator<V> {
             // protocol concern, but accepting bytes we did not compare would still
             // be wrong here.
             let mut trailing = [0u8; 1];
-            Ok(file.read(&mut trailing).await? == 0)
+            Ok((file.read(&mut trailing).await? == 0).then_some(prefix_len))
         })
         .await
+    }
+
+    /// A partial canonical pathname is still uncommitted staging, but a hard
+    /// link could alias a different, already referenced capsule. Completion
+    /// therefore requires an exclusive regular-file inode. Like Strata's
+    /// staging probe, this uses the capability-scoped host metadata because
+    /// Vfs metadata has no link count; supported lab VFSes retain real shadow
+    /// inodes. Unknown link counts fail closed.
+    fn incomplete_capsule_inode_is_exclusive(cx: &CommitCx, path: &Path) -> bool {
+        let Ok(metadata) = cx.with_restriction(|| std::fs::symlink_metadata(path)) else {
+            return false;
+        };
+        if !metadata.file_type().is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            metadata.nlink() == 1
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            metadata.number_of_links() == Some(1)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
     }
 
     /// Read a durable capsule's bytes back.
@@ -941,26 +977,35 @@ impl<V: Vfs> CommitCoordinator<V> {
                 let mut file = cx
                     .with_restriction_async(self.vfs.open_read(&capsule_path))
                     .await?;
-                if Self::existing_capsule_matches(cx, &mut file, &encoded_capsule).await? {
+                let prefix_len =
+                    Self::existing_capsule_prefix_len(cx, &mut file, &encoded_capsule).await?;
+                if prefix_len == Some(encoded_capsule.len()) {
                     file
-                } else if metadata.is_empty() && !self.capsule_is_referenced(capsule_oid) {
+                } else if prefix_len.is_some() && !self.capsule_is_referenced(capsule_oid) {
                     // `create_new` publishes the pathname before the first
-                    // write. If that write accepts zero bytes and returns an
-                    // error, exact retry finds an empty pre-D1 residue rather
-                    // than an immutable capsule object. The sole writer may
-                    // finish that incomplete creation, but only while no
-                    // committed marker names it. Non-empty mismatches and
-                    // referenced paths remain corruption/conflict evidence
-                    // and are never overwritten.
+                    // write. Failure or cancellation may leave an exact
+                    // nonempty prefix too. Finish only an unreferenced prefix,
+                    // without truncating or overwriting any accepted byte.
+                    // Revalidate the reopened handle: the earlier read-only
+                    // comparison cannot authorize writing another path target.
                     drop(file);
+                    if !Self::incomplete_capsule_inode_is_exclusive(cx, &capsule_path) {
+                        return Err(CommitError::CapsulePathConflict { capsule_oid });
+                    }
                     let mut repair = self
                         .vfs
-                        .open(
-                            &capsule_path,
-                            &OpenOptions::new().read(true).write(true).truncate(true),
-                        )
+                        .open(&capsule_path, &OpenOptions::new().read(true).write(true))
                         .await?;
-                    repair.write_all(&encoded_capsule).await?;
+                    let Some(prefix_len) =
+                        Self::existing_capsule_prefix_len(cx, &mut repair, &encoded_capsule)
+                            .await?
+                    else {
+                        return Err(CommitError::CapsulePathConflict { capsule_oid });
+                    };
+                    if !Self::incomplete_capsule_inode_is_exclusive(cx, &capsule_path) {
+                        return Err(CommitError::CapsulePathConflict { capsule_oid });
+                    }
+                    repair.write_all(&encoded_capsule[prefix_len..]).await?;
                     repair.flush().await?;
                     repair
                 } else {

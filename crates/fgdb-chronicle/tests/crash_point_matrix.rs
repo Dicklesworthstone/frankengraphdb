@@ -1598,3 +1598,442 @@ fn the_seam_judges_the_exact_draft_the_commit_publishes() {
         }
     });
 }
+
+/// Real file writes with a one-shot short-write failure or suspension. These
+/// exercise the production write_all and retry path, including dropping the
+/// outer future after a prefix escaped; a prebuilt fixture alone cannot prove
+/// those boundaries.
+mod incomplete_capsule_tests {
+    use super::*;
+    use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, UnixVfsFile, Vfs, VfsFile};
+    use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+    use std::future::{Future, poll_fn};
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    #[derive(Default)]
+    struct Injection {
+        remaining: Option<usize>,
+        park: bool,
+        stopped: bool,
+        capsule_opens: usize,
+        replacement: Option<Vec<u8>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct InjectedVfs {
+        inner: UnixVfs,
+        injection: Arc<Mutex<Injection>>,
+    }
+
+    struct InjectedFile {
+        inner: UnixVfsFile,
+        capsule: bool,
+        injection: Arc<Mutex<Injection>>,
+    }
+
+    macro_rules! delegate_async {
+        ($($name:ident($($argument:ident: $kind:ty),*) -> $output:ty;)+) => {
+            $(async fn $name(&self, $($argument: $kind),*) -> io::Result<$output> {
+                self.inner.$name($($argument),*).await
+            })+
+        };
+    }
+
+    impl Vfs for InjectedVfs {
+        type File = InjectedFile;
+
+        async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+            let capsule = path
+                .extension()
+                .is_some_and(|extension| extension == "capsule");
+            let replacement = {
+                let mut injection = self.injection.lock().expect("injection lock");
+                if capsule {
+                    injection.capsule_opens += 1;
+                }
+                if capsule && injection.capsule_opens == 3 {
+                    injection.replacement.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(bytes) = replacement {
+                // Preserve the original inode and inject a different target
+                // exactly between the read-only and writable opens.
+                std::fs::rename(path, path.with_extension("preserved-prefix"))?;
+                std::fs::write(path, bytes)?;
+            }
+            Ok(InjectedFile {
+                inner: self.inner.open(path, options).await?,
+                capsule,
+                injection: Arc::clone(&self.injection),
+            })
+        }
+
+        delegate_async! {
+            metadata(path: &Path) -> Metadata;
+            symlink_metadata(path: &Path) -> Metadata;
+            set_permissions(path: &Path, permissions: Permissions) -> ();
+            create_dir(path: &Path) -> ();
+            create_dir_all(path: &Path) -> ();
+            remove_dir(path: &Path) -> ();
+            remove_dir_all(path: &Path) -> ();
+            read_dir(path: &Path) -> ReadDir;
+            remove_file(path: &Path) -> ();
+            rename(from: &Path, to: &Path) -> ();
+            copy(from: &Path, to: &Path) -> u64;
+            hard_link(original: &Path, link: &Path) -> ();
+            canonicalize(path: &Path) -> PathBuf;
+            read_link(path: &Path) -> PathBuf;
+            read(path: &Path) -> Vec<u8>;
+            read_to_string(path: &Path) -> String;
+            write(path: &Path, contents: &[u8]) -> ();
+        }
+    }
+
+    impl VfsFile for InjectedFile {
+        delegate_async! {
+            metadata() -> Metadata;
+            sync_all() -> ();
+            sync_data() -> ();
+            set_len(size: u64) -> ();
+            set_permissions(permissions: Permissions) -> ();
+        }
+    }
+
+    impl AsyncRead for InjectedFile {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(task, buffer)
+        }
+    }
+
+    impl AsyncSeek for InjectedFile {
+        fn poll_seek(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            position: io::SeekFrom,
+        ) -> Poll<io::Result<u64>> {
+            Pin::new(&mut self.inner).poll_seek(task, position)
+        }
+    }
+
+    impl AsyncWrite for InjectedFile {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let limit = if self.capsule && !bytes.is_empty() {
+                let mut injection = self.injection.lock().expect("injection lock");
+                if injection.remaining == Some(0) {
+                    injection.stopped = true;
+                    return if injection.park {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Err(io::Error::from_raw_os_error(28)))
+                    };
+                }
+                injection.remaining
+            } else {
+                None
+            };
+            let offered = limit.map_or(bytes.len(), |remaining| remaining.min(bytes.len()));
+            let result = Pin::new(&mut self.inner).poll_write(task, &bytes[..offered]);
+            if let (Some(_), Poll::Ready(Ok(written))) = (limit, &result) {
+                let mut injection = self.injection.lock().expect("injection lock");
+                *injection.remaining.as_mut().expect("fault still armed") -= *written;
+            }
+            result
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(task)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(task)
+        }
+    }
+
+    fn encoded(plaintext: &[u8]) -> Vec<u8> {
+        fgdb_chronicle::capsule::encode_container(&keys().seal(plaintext).expect("seal fixture"))
+    }
+
+    async fn commit_payload<V: Vfs>(
+        coordinator: &mut CommitCoordinator<V>,
+        cx: &CommitCx,
+        plaintext: &[u8],
+    ) -> Result<MarkerRef, CommitError> {
+        let previous = coordinator.chain().clone();
+        coordinator
+            .commit(cx, plaintext, |seq, oid| marker_for(seq, oid, &previous))
+            .await
+    }
+
+    #[test]
+    fn short_d1_writes_resume_exactly_both_before_and_after_restart() {
+        for restart in [false, true] {
+            for cut in [1, 7, 127] {
+                let dir = scratch_dir(&format!("capsule-short-write-{restart}-{cut}"));
+                under_lab(
+                    0x51_6000 + cut as u64 + u64::from(restart),
+                    move |cx| async move {
+                        let plaintext = capsule_bytes(1);
+                        let expected = encoded(&plaintext);
+                        assert!(cut < expected.len());
+                        let vfs = InjectedVfs::default();
+                        let mut coordinator =
+                            CommitCoordinator::open_with_vfs(&cx, vfs.clone(), &dir, keys())
+                                .await
+                                .expect("open");
+                        vfs.injection.lock().expect("injection lock").remaining = Some(cut);
+                        let failed = commit_payload(&mut coordinator, &cx, &plaintext).await;
+                        assert!(matches!(failed, Err(CommitError::Io(_))), "{failed:?}");
+                        assert!(vfs.injection.lock().expect("injection lock").stopped);
+                        let path = only_capsule_path(&dir);
+                        assert_eq!(
+                            std::fs::read(&path).expect("partial bytes"),
+                            expected[..cut]
+                        );
+                        assert!(!coordinator.is_poisoned());
+                        assert!(log_bytes(&dir).is_empty());
+                        vfs.injection.lock().expect("injection lock").remaining = None;
+                        if restart {
+                            drop(coordinator);
+                            coordinator = CommitCoordinator::open_with_vfs(&cx, vfs, &dir, keys())
+                                .await
+                                .expect("restart on the uncommitted prefix");
+                        }
+                        assert_eq!(
+                            commit_payload(&mut coordinator, &cx, &plaintext)
+                                .await
+                                .expect("exact retry completes its prefix")
+                                .commit_seq,
+                            CommitSeq(1)
+                        );
+                        assert_eq!(std::fs::read(&path).expect("completed bytes"), expected);
+                        drop(coordinator);
+                        let recovered = CommitCoordinator::open(&cx, &dir, keys())
+                            .await
+                            .expect("reopen");
+                        assert_eq!(recovered.chain().len(), 1);
+                        assert_eq!(
+                            recovered
+                                .read_capsule(&cx, capsule_oid(1), &mut Vec::new())
+                                .await
+                                .expect("durable capsule"),
+                            plaintext
+                        );
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_d1_after_a_partial_write_leaves_an_exactly_resumable_prefix() {
+        let dir = scratch_dir("capsule-cancelled-prefix");
+        under_lab(0x51_6100, move |cx| async move {
+            let plaintext = capsule_bytes(1);
+            let expected = encoded(&plaintext);
+            let vfs = InjectedVfs::default();
+            let mut coordinator = CommitCoordinator::open_with_vfs(&cx, vfs.clone(), &dir, keys())
+                .await
+                .expect("open");
+            // The initial write and its resumed suffix can both be dropped.
+            // Each retry must retain every accepted byte and resume at the
+            // newly verified end, without treating any prefix as a commit.
+            for (accepted, total) in [(11, 11), (13, 24)] {
+                {
+                    let mut injection = vfs.injection.lock().expect("injection lock");
+                    injection.remaining = Some(accepted);
+                    injection.park = true;
+                    injection.stopped = false;
+                }
+                let mut pending = Box::pin(commit_payload(&mut coordinator, &cx, &plaintext));
+                poll_fn(|task| {
+                    assert!(pending.as_mut().poll(task).is_pending(), "D1 must suspend");
+                    if vfs.injection.lock().expect("injection lock").stopped {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                drop(pending);
+                assert_eq!(
+                    std::fs::read(only_capsule_path(&dir)).expect("cancelled prefix"),
+                    expected[..total]
+                );
+                assert!(!coordinator.is_poisoned());
+                assert!(log_bytes(&dir).is_empty());
+            }
+            let path = only_capsule_path(&dir);
+            drop(coordinator);
+            let mut recovered = CommitCoordinator::open(&cx, &dir, keys())
+                .await
+                .expect("restart");
+            assert_eq!(
+                commit_payload(&mut recovered, &cx, &plaintext)
+                    .await
+                    .expect("retry cancelled write")
+                    .commit_seq,
+                CommitSeq(1)
+            );
+            assert_eq!(std::fs::read(&path).expect("completed capsule"), expected);
+        });
+    }
+
+    #[test]
+    fn a_changed_prefix_and_an_overlong_capsule_are_never_completed() {
+        for overlong in [false, true] {
+            let dir = scratch_dir(&format!("capsule-invalid-prefix-{overlong}"));
+            under_lab(0x51_6200 + u64::from(overlong), move |cx| async move {
+                let plaintext = capsule_bytes(1);
+                let expected = encoded(&plaintext);
+                let mut coordinator = CommitCoordinator::open(&cx, &dir, keys())
+                    .await
+                    .expect("open");
+                let path = dir
+                    .join(CAPSULE_DIR)
+                    .join(format!("{}.capsule", hex_oid(capsule_oid(1))));
+                let mut sentinel = if overlong {
+                    expected
+                } else {
+                    expected[..17].to_vec()
+                };
+                if overlong {
+                    sentinel.push(0xa5);
+                } else {
+                    sentinel[16] ^= 0x80;
+                }
+                std::fs::write(&path, &sentinel).expect("inject conflicting residue");
+                assert!(matches!(
+                    commit_payload(&mut coordinator, &cx, &plaintext).await,
+                    Err(CommitError::CapsulePathConflict { .. })
+                ));
+                assert_eq!(std::fs::read(&path).expect("preserved bytes"), sentinel);
+                assert!(log_bytes(&dir).is_empty());
+                assert!(!coordinator.is_poisoned());
+            });
+        }
+    }
+
+    #[test]
+    fn a_committed_nonempty_prefix_is_corruption_and_is_never_extended() {
+        let dir = scratch_dir("referenced-nonempty-capsule-prefix");
+        under_lab(0x51_6300, move |cx| async move {
+            let plaintext = capsule_bytes(1);
+            let expected = encoded(&plaintext);
+            let mut coordinator = CommitCoordinator::open(&cx, &dir, keys())
+                .await
+                .expect("open");
+            commit_payload(&mut coordinator, &cx, &plaintext)
+                .await
+                .expect("commit");
+            drop(coordinator);
+            let path = only_capsule_path(&dir);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("fault inode")
+                .set_len(17)
+                .expect("truncate committed capsule");
+            let before_log = log_bytes(&dir);
+            let mut recovered = CommitCoordinator::open(&cx, &dir, keys())
+                .await
+                .expect("reopen markers");
+            assert!(matches!(
+                commit_payload(&mut recovered, &cx, &plaintext).await,
+                Err(CommitError::CapsulePathConflict { .. })
+            ));
+            assert_eq!(
+                std::fs::read(&path).expect("preserved prefix"),
+                expected[..17]
+            );
+            assert_eq!(log_bytes(&dir), before_log);
+            assert_eq!(recovered.next_commit_seq(), Ok(CommitSeq(2)));
+        });
+    }
+
+    fn hex_oid(oid: ObjectId) -> String {
+        oid.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn a_replacement_between_inspection_and_writable_open_is_rechecked() {
+        let dir = scratch_dir("capsule-prefix-replaced-before-repair");
+        under_lab(0x51_6400, move |cx| async move {
+            let plaintext = capsule_bytes(1);
+            let expected = encoded(&plaintext);
+            let vfs = InjectedVfs::default();
+            let mut coordinator = CommitCoordinator::open_with_vfs(&cx, vfs.clone(), &dir, keys())
+                .await
+                .expect("open");
+            let path = dir
+                .join(CAPSULE_DIR)
+                .join(format!("{}.capsule", hex_oid(capsule_oid(1))));
+            std::fs::write(&path, &expected[..17]).expect("initial prefix");
+            let mut sentinel = expected[..17].to_vec();
+            sentinel[16] ^= 0x80;
+            vfs.injection.lock().expect("injection lock").replacement = Some(sentinel.clone());
+            assert!(matches!(
+                commit_payload(&mut coordinator, &cx, &plaintext).await,
+                Err(CommitError::CapsulePathConflict { .. })
+            ));
+            assert!(
+                vfs.injection
+                    .lock()
+                    .expect("injection lock")
+                    .replacement
+                    .is_none(),
+                "replacement must actually have occurred"
+            );
+            assert_eq!(std::fs::read(&path).expect("replacement bytes"), sentinel);
+            assert_eq!(
+                std::fs::read(path.with_extension("preserved-prefix")).expect("original inode"),
+                expected[..17]
+            );
+            assert!(log_bytes(&dir).is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_incomplete_capsule_is_not_extended_through_an_alias() {
+        let dir = scratch_dir("capsule-prefix-hard-link");
+        under_lab(0x51_6500, move |cx| async move {
+            let plaintext = capsule_bytes(1);
+            let expected = encoded(&plaintext);
+            let mut coordinator = CommitCoordinator::open(&cx, &dir, keys())
+                .await
+                .expect("open");
+            let path = dir
+                .join(CAPSULE_DIR)
+                .join(format!("{}.capsule", hex_oid(capsule_oid(1))));
+            let alias = dir.join("retained-inode");
+            std::fs::write(&path, &expected[..17]).expect("initial prefix");
+            std::fs::hard_link(&path, &alias).expect("inject a second link");
+            assert!(matches!(
+                commit_payload(&mut coordinator, &cx, &plaintext).await,
+                Err(CommitError::CapsulePathConflict { .. })
+            ));
+            assert_eq!(
+                std::fs::read(&path).expect("canonical prefix"),
+                expected[..17]
+            );
+            assert_eq!(
+                std::fs::read(&alias).expect("aliased prefix"),
+                expected[..17]
+            );
+            assert!(log_bytes(&dir).is_empty());
+        });
+    }
+}
