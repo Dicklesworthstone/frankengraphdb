@@ -273,18 +273,9 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Word(word) => {
                     if !after_dot
-                        && [
-                            "ABS",
-                            "COALESCE",
-                            "NULLIF",
-                            "UPPER",
-                            "LOWER",
-                            "TRIM",
-                            "SUBSTRING",
-                            "CHAR_LENGTH",
-                        ]
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                        && super::SCALAR_FUNCTIONS
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
                         && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                     {
                         return Ok(true);

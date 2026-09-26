@@ -182,6 +182,21 @@ fn expression<'g, E, C>(
                     i64::try_from(values.len())
                         .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))?,
                 ),
+                // openCypher size() of text is its character count
+                // (fgdb-xakp1), charged as CHAR_LENGTH charges it.
+                Cell::Value(ValueRef::Scalar(CanonicalScalar::Text(text))) => {
+                    let text = text.as_str();
+                    for _ in 0..text
+                        .len()
+                        .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                    {
+                        control(GlaExecutionEvent::Work)?;
+                    }
+                    CanonicalScalar::Int(
+                        i64::try_from(text.chars().count())
+                            .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))?,
+                    )
+                }
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
             };
             control(GlaExecutionEvent::ScratchEntry)?;

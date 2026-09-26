@@ -28,6 +28,26 @@ use std::collections::BTreeMap;
 pub const MAX_GRAPH_TEXT_BYTES: usize = 65_536;
 pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
 
+/// Scalar function names the shared expression compiler accepts before `(`.
+/// TOUPPER, TOLOWER and SIZE are the openCypher spellings of UPPER, LOWER and
+/// CHAR_LENGTH (fgdb-xakp1): a scalar is never a list, so SIZE of one is its
+/// character count. A leading SIZE(...) row value keeps the list-or-text
+/// Size node instead. The Boolean lowering lookahead and the compiler read
+/// this one table, so a name cannot be known to one and not the other.
+const SCALAR_FUNCTIONS: [&str; 11] = [
+    "ABS",
+    "COALESCE",
+    "NULLIF",
+    "UPPER",
+    "TOUPPER",
+    "LOWER",
+    "TOLOWER",
+    "TRIM",
+    "SUBSTRING",
+    "CHAR_LENGTH",
+    "SIZE",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GraphSymbolKind {
     Relation,

@@ -261,8 +261,20 @@ fn admit(
             }
             GraphSetColumnType::Any
         }
-        GraphSetValue::Size(list) => {
-            admit_list(list, types, column, depth + 1, nodes)?;
+        // openCypher size(): a list's length or a text's character count
+        // (fgdb-xakp1). A literal that is neither refuses here; any other
+        // scalar is a typed failure when evaluated.
+        GraphSetValue::Size(value) => {
+            let literal = matches!(value.as_ref(), GraphSetValue::Literal(scalar)
+                if !matches!(scalar.value(), CanonicalScalar::Null | CanonicalScalar::Text(_)));
+            if literal
+                || !matches!(
+                    admit(value, types, column, depth + 1, nodes)?,
+                    GraphSetColumnType::List | GraphSetColumnType::Any | GraphSetColumnType::Scalar
+                )
+            {
+                return Err(Error::ListInput { column });
+            }
             GraphSetColumnType::Scalar
         }
     })
@@ -515,16 +527,25 @@ fn evaluate_value_at<E>(
         }
         GraphSetValue::Size(list) => {
             let list = operand(list, row, column, control, depth + 1, nodes)?;
-            let scalar = if list.is_null() {
-                CanonicalScalar::Null
+            let size = if list.is_null() {
+                None
+            } else if let Some(values) = list.as_list() {
+                Some(values.len())
+            } else if let GraphValue::Scalar(CanonicalScalar::Text(text)) = list.as_ref() {
+                // CHAR_LENGTH's charge: one unit of work per payload unit read.
+                let text = text.as_str();
+                for _ in 0..text.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+                }
+                Some(text.chars().count())
             } else {
-                let values = list
-                    .as_list()
-                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                CanonicalScalar::Int(
-                    i64::try_from(values.len())
-                        .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
-                )
+                return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            let scalar = match size {
+                None => CanonicalScalar::Null,
+                Some(size) => CanonicalScalar::Int(
+                    i64::try_from(size).map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                ),
             };
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(scalar)

@@ -542,14 +542,9 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
-        let function = if (self.is_word("ABS")
-            || self.is_word("COALESCE")
-            || self.is_word("NULLIF")
-            || self.is_word("UPPER")
-            || self.is_word("LOWER")
-            || self.is_word("TRIM")
-            || self.is_word("CHAR_LENGTH")
-            || self.is_word("SUBSTRING"))
+        let function = if crate::graph_text::SCALAR_FUNCTIONS
+            .iter()
+            .any(|name| self.is_word(name))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let TokenKind::Word(name) = self.current.kind else {
@@ -563,13 +558,15 @@ impl<'a> Parser<'a> {
             self.advance()?;
             self.punct(b'(', "(")?;
             self.scalar_concat(columns, depth + 1, program)?;
-            let text_op = if function.eq_ignore_ascii_case("UPPER") {
+            let spelled =
+                |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
+            let text_op = if spelled(["UPPER", "TOUPPER"]) {
                 Some(GraphIntegerOp::Upper)
-            } else if function.eq_ignore_ascii_case("LOWER") {
+            } else if spelled(["LOWER", "TOLOWER"]) {
                 Some(GraphIntegerOp::Lower)
             } else if function.eq_ignore_ascii_case("TRIM") {
                 Some(GraphIntegerOp::Trim)
-            } else if function.eq_ignore_ascii_case("CHAR_LENGTH") {
+            } else if spelled(["CHAR_LENGTH", "SIZE"]) {
                 Some(GraphIntegerOp::CharLength)
             } else {
                 None

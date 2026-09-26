@@ -299,3 +299,130 @@ fn string_construction_growth_is_charged_even_when_final_output_is_an_integer() 
         Err(GqlQueryError::Evaluator(_))
     ));
 }
+
+/// fgdb-xakp1: toUpper, toLower and size() are the openCypher spellings of
+/// UPPER, LOWER and CHAR_LENGTH. Inside a scalar expression they compile to
+/// the very same program. A leading size() is the list-or-text Size node:
+/// text counts Unicode scalars exactly as CHAR_LENGTH does, a list keeps its
+/// length, NULL stays NULL, and any other scalar is a typed failure.
+#[test]
+fn opencypher_text_function_spellings_are_the_same_operations() {
+    for (cypher, gql) in [
+        ("toUpper(n.text)", "UPPER(n.text)"),
+        ("TOLOWER(n.text)", "LOWER(n.text)"),
+        ("1 + size(n.text)", "1 + CHAR_LENGTH(n.text)"),
+    ] {
+        assert_eq!(
+            prepare(&format!("MATCH (n) RETURN {cypher} AS value")).canonical_bytes(),
+            prepare(&format!("MATCH (n) RETURN {gql} AS value")).canonical_bytes(),
+            "{cypher}"
+        );
+    }
+    let input = text("é🦀a\u{301}");
+    assert_eq!(scalar("toUpper(n.text)", &input), text("É🦀A\u{301}"));
+    assert_eq!(scalar("size(n.text)", &input), CanonicalScalar::Int(4));
+    assert_eq!(
+        scalar("size(n.text)", &input),
+        scalar("CHAR_LENGTH(n.text)", &input)
+    );
+    assert_eq!(scalar("size('héllo')", &input), CanonicalScalar::Int(5));
+    assert_eq!(
+        scalar("size([1, n.text, 'x'])", &input),
+        CanonicalScalar::Int(3)
+    );
+    assert_eq!(
+        scalar("size(n.text)", &CanonicalScalar::Null),
+        CanonicalScalar::Null
+    );
+    // The graph pattern's WHERE and a WITH's WHERE both admit the spellings.
+    for (statement, rows) in [
+        ("MATCH (n) WHERE size(n.text) = 4 RETURN n.text AS value", 1),
+        ("MATCH (n) WHERE size(n.text) = 9 RETURN n.text AS value", 0),
+        (
+            "MATCH (n) WHERE toLower(n.text) = 'é🦀a\u{301}' RETURN n.text AS value",
+            1,
+        ),
+        (
+            "MATCH (n) WITH n.text AS t WHERE size(t) = 4 RETURN t AS value",
+            1,
+        ),
+    ] {
+        let result = execute(&prepare(statement), &input, policy()).unwrap();
+        assert_eq!(result.value.len(), rows, "{statement}");
+    }
+    // Not a count of anything: a non-text scalar fails, typed, never 0.
+    let non_text = prepare("MATCH (n) RETURN size(n.text) AS value");
+    assert!(matches!(
+        execute(&non_text, &CanonicalScalar::Int(42), policy()),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::Projection { .. }
+        ))
+    ));
+    // A non-text literal refuses before execution: inside a scalar expression
+    // at preparation, as CHAR_LENGTH(FALSE) does; as a Size node at binding,
+    // where the relational projection is admitted.
+    assert!(
+        PreparedGraphSetText::prepare("MATCH (n) RETURN 1 + size(TRUE) AS value", symbols).is_err()
+    );
+    for literal in ["TRUE", "42"] {
+        let statement = format!("MATCH (n) RETURN size({literal}) AS value");
+        let template = PreparedGraphSetText::prepare(&statement, symbols).unwrap();
+        assert!(
+            template.bind_parameters(&GqlParameters::new()).is_err(),
+            "{statement}"
+        );
+    }
+    // Counting reads the text, charged like CHAR_LENGTH: one unit of work per
+    // payload unit. Differencing against a plain read of the same property
+    // isolates that charge from the source's own payload accounting.
+    let plain = prepare("MATCH (n) RETURN n.text AS value");
+    let work = |query: &PreparedGraphSet, input: &CanonicalScalar| {
+        execute(query, input, policy())
+            .unwrap()
+            .evaluator
+            .work_units
+    };
+    let (short, long) = (text("x"), text(&"x".repeat(1024)));
+    assert_eq!(
+        execute(&non_text, &long, policy()).unwrap().value[0].values()[0].as_scalar(),
+        Some(&CanonicalScalar::Int(1024))
+    );
+    let counted_long = work(&non_text, &long) - work(&plain, &long);
+    let counted_short = work(&non_text, &short) - work(&plain, &short);
+    assert_eq!(counted_long - counted_short, 1024 / 64 - 1);
+}
+
+/// fgdb-xakp1: SIZE over a text-valued aggregate runs in the aggregate result
+/// projection's own evaluator, which counts characters exactly as the row
+/// evaluator does, and still fails typed on a non-text scalar.
+#[test]
+fn size_of_a_text_aggregate_counts_characters_in_the_result_projection() {
+    let query = fgdb_gql::PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN SIZE(MIN(n.text)) AS chars, SIZE(COLLECT(n.text)) AS items",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let run = |input: &CanonicalScalar| {
+        query.execute_governed(
+            1,
+            [VId(1)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, key| Ok((key == PropertyKeyId(1)).then_some(input)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+    };
+    let result = run(&text("é🦀a\u{301}")).unwrap();
+    let values = result.value[0].values();
+    let int = |n| {
+        Some(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(
+            n,
+        )))
+    };
+    assert_eq!(values[0].as_value().cloned(), int(4));
+    assert_eq!(values[1].as_value().cloned(), int(1));
+    assert!(run(&CanonicalScalar::Int(42)).is_err());
+}
