@@ -310,12 +310,12 @@ impl<V: Vfs + Clone> Database<V> {
         if batches.clone().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        let input_rows: u128 = batches
-            .clone()
-            .map(|batch| batch.rows.len() as u128)
-            .sum();
+        let input_rows: u128 = batches.clone().map(|batch| batch.rows.len() as u128).sum();
         admit_expanded_rows(Some(max_expanded_rows), input_rows)?;
-        if batches.clone().all(|batch| batch.relation == first.relation) {
+        if batches
+            .clone()
+            .all(|batch| batch.relation == first.relation)
+        {
             return Ok(());
         }
         let declarations = edge_owners(&self.writer, batches.clone())?;
@@ -578,7 +578,9 @@ mod budget_tests {
                     required: 4,
                 })
             ));
-            let admitted = db.prepare_ordered_writes_bounded(vec![first, second], 4).unwrap();
+            let admitted = db
+                .prepare_ordered_writes_bounded(vec![first, second], 4)
+                .unwrap();
             assert!(
                 admitted
                     .template
