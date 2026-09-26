@@ -156,6 +156,13 @@ impl CapsuleDescriptor {
                 registered_repair_symbols: profile.repair_symbols,
             });
         }
+        if self.symbol_size != profile.symbol_size {
+            return Err(CapsuleError::SymbolSizeMismatch {
+                fec_profile: self.fec_profile,
+                declared_symbol_size: self.symbol_size,
+                registered_symbol_size: profile.symbol_size,
+            });
+        }
         Ok(encoding)
     }
 }
@@ -179,6 +186,20 @@ impl CapsuleProfile {
         repair_symbols: 8,
     };
 
+    /// The last registered member of the balanced family (fgdb-myldi):
+    /// fec_profile `n` in `1..=8` encodes with `256 << (n - 1)`-byte symbols
+    /// (256 B .. 32 KiB) and the same repair budget.
+    const BALANCED_FAMILY_LAST: u16 = 8;
+
+    /// The source-symbol count the writer keeps a capsule at or under. RFC
+    /// 6330 encoding solves a K x K constraint system, and asupersync's dense
+    /// elimination is roughly cubic in K: at 256-byte symbols a 1 MiB capsule
+    /// (K = 4096) took 99.8 s to encode, and at K = 256 a 64 KiB one took
+    /// 36.7 ms (fgdb-myldi). Holding K at 128 keeps any capsule's encode in
+    /// milliseconds, at the price of 8 repair symbols being up to ~6% of the
+    /// bytes instead of ~3%.
+    const TARGET_SOURCE_SYMBOLS: usize = 128;
+
     /// The currently registered full-repair capsule profile. Deliberately
     /// explicit rather than a `Default`: a durability parameter nobody chose
     /// is a durability parameter nobody reviewed.
@@ -193,19 +214,57 @@ impl CapsuleProfile {
 
     fn registered(fec_profile: u16) -> Option<Self> {
         match fec_profile {
-            1 => Some(Self::BALANCED),
+            1..=Self::BALANCED_FAMILY_LAST => Some(Self::balanced_member(fec_profile)),
             _ => None,
         }
     }
+
+    /// Member `fec_profile` of the balanced family; callers keep it in
+    /// `1..=BALANCED_FAMILY_LAST`.
+    const fn balanced_member(fec_profile: u16) -> Self {
+        Self {
+            fec_profile,
+            symbol_size: Self::BALANCED.symbol_size << (fec_profile - 1),
+            repair_symbols: Self::BALANCED.repair_symbols,
+        }
+    }
+
+    /// The registered member of this profile's family that encodes a
+    /// `protected_len`-byte object: the smallest symbol size that keeps the
+    /// source-symbol count at or under [`Self::TARGET_SOURCE_SYMBOLS`], or the
+    /// family's largest. Capsules up to 32 KiB keep fec_profile 1 and
+    /// 256-byte symbols, byte for byte as before the family existed. `None`
+    /// past [`MAX_PROTECTED_LEN_V1`].
+    fn for_protected_len(self, protected_len: usize) -> Option<Self> {
+        if protected_len > MAX_PROTECTED_LEN_V1 {
+            return None;
+        }
+        let mut member = self;
+        while member.fec_profile < Self::BALANCED_FAMILY_LAST
+            && protected_len.div_ceil(usize::from(member.symbol_size)) > Self::TARGET_SOURCE_SYMBOLS
+        {
+            member = Self::balanced_member(member.fec_profile + 1);
+        }
+        Some(member)
+    }
 }
+
+/// The largest protected (sealed) object a V1 capsule may carry: one RFC 6330
+/// source block of 256-byte symbols. Larger symbol sizes do not raise it,
+/// which keeps every registered profile's container under
+/// [`MAX_CAPSULE_CONTAINER_BYTES_V1`], the recovery allocation ceiling.
+const MAX_PROTECTED_LEN_V1: usize =
+    MAX_SOURCE_SYMBOLS_PER_BLOCK * CapsuleProfile::BALANCED.symbol_size as usize;
 
 /// Largest capsule container the closed V1 writer profile can produce.
 ///
 /// This is a recovery allocation boundary, not a product-size promise. The
-/// V1 writer emits one RFC 6330 source block, the `balanced` profile is the
-/// only registered capsule profile, and each serialized symbol has one u32
-/// container-length prefix around the fixed V1 symbol record. Recovery probes
-/// one byte beyond this ceiling before refusing an overgrown file.
+/// V1 writer emits one RFC 6330 source block, and each serialized symbol has
+/// one u32 container-length prefix around the fixed V1 symbol record. The
+/// bound is the balanced family's first member at [`MAX_PROTECTED_LEN_V1`];
+/// every larger member carries the same bytes in fewer symbols, so less
+/// per-symbol overhead (checked below). Recovery probes one byte beyond this
+/// ceiling before refusing an overgrown file.
 const MAX_CAPSULE_SYMBOLS_V1: usize =
     MAX_SOURCE_SYMBOLS_PER_BLOCK + CapsuleProfile::BALANCED.repair_symbols as usize;
 
@@ -214,6 +273,23 @@ pub const MAX_CAPSULE_CONTAINER_BYTES_V1: usize = CAPSULE_HEADER_BYTES_V1
         * (4 + HEADER_LEN_V1 as usize
             + CapsuleProfile::BALANCED.symbol_size as usize
             + SYMBOL_MAC_LEN_V1 as usize);
+
+// Every balanced member's container at the largest protected length fits the
+// recovery ceiling.
+const _: () = {
+    let mut fec_profile = 1;
+    while fec_profile <= CapsuleProfile::BALANCED_FAMILY_LAST {
+        let member = CapsuleProfile::balanced_member(fec_profile);
+        let symbol_size = member.symbol_size as usize;
+        let symbols = MAX_PROTECTED_LEN_V1.div_ceil(symbol_size) + member.repair_symbols as usize;
+        assert!(
+            CAPSULE_HEADER_BYTES_V1
+                + symbols * (4 + HEADER_LEN_V1 as usize + symbol_size + SYMBOL_MAC_LEN_V1 as usize)
+                <= MAX_CAPSULE_CONTAINER_BYTES_V1
+        );
+        fec_profile += 1;
+    }
+};
 
 /// Why sealing or recovering a capsule failed.
 #[derive(Debug)]
@@ -246,6 +322,13 @@ pub enum CapsuleError {
         fec_profile: u16,
         declared_repair_symbols: u32,
         registered_repair_symbols: u32,
+    },
+    /// The container's symbol size is not the one its authenticated
+    /// `fec_profile` registers.
+    SymbolSizeMismatch {
+        fec_profile: u16,
+        declared_symbol_size: u16,
+        registered_symbol_size: u16,
     },
     /// Recovery failed: too many symbols lost or corrupt, or the recovered
     /// bytes are not the object that was asked for.
@@ -286,6 +369,15 @@ impl core::fmt::Display for CapsuleError {
                 "capsule FEC profile {fec_profile} requires \
                  {registered_repair_symbols} repair symbols, but the container \
                  declares {declared_repair_symbols}"
+            ),
+            Self::SymbolSizeMismatch {
+                fec_profile,
+                declared_symbol_size,
+                registered_symbol_size,
+            } => write!(
+                f,
+                "capsule FEC profile {fec_profile} encodes {registered_symbol_size}-byte \
+                 symbols, but the container declares {declared_symbol_size}"
             ),
             Self::Recovery(error) => write!(f, "capsule recovery failed: {error:?}"),
         }
@@ -512,6 +604,9 @@ pub fn seal(
         .protect(dek, cipher.clone(), plaintext)
         .map_err(CapsuleError::DescriptorMismatch)?;
     let protected_len = protected.protected_bytes().len();
+    let profile = profile
+        .for_protected_len(protected_len)
+        .ok_or(CapsuleError::Recovery(SymbolizeError::InvalidParameters))?;
 
     let encoding_descriptor = EncodingDescriptor {
         fec_profile: profile.fec_profile,
@@ -646,14 +741,21 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         repair_symbols: r.u32()?,
     };
     let declared = r.u32()? as usize;
-    if let Some(registered) = CapsuleProfile::registered(descriptor.fec_profile)
-        && descriptor.repair_symbols != registered.repair_symbols
-    {
-        return Err(CapsuleError::RepairBudgetMismatch {
-            fec_profile: descriptor.fec_profile,
-            declared_repair_symbols: descriptor.repair_symbols,
-            registered_repair_symbols: registered.repair_symbols,
-        });
+    if let Some(registered) = CapsuleProfile::registered(descriptor.fec_profile) {
+        if descriptor.repair_symbols != registered.repair_symbols {
+            return Err(CapsuleError::RepairBudgetMismatch {
+                fec_profile: descriptor.fec_profile,
+                declared_repair_symbols: descriptor.repair_symbols,
+                registered_repair_symbols: registered.repair_symbols,
+            });
+        }
+        if descriptor.symbol_size != registered.symbol_size {
+            return Err(CapsuleError::SymbolSizeMismatch {
+                fec_profile: descriptor.fec_profile,
+                declared_symbol_size: descriptor.symbol_size,
+                registered_symbol_size: registered.symbol_size,
+            });
+        }
     }
     let symbol_size = u64::from(descriptor.symbol_size);
     if symbol_size == 0 {
@@ -816,5 +918,55 @@ impl<'a> Reader<'a> {
         let mut v = [0u8; 32];
         v.copy_from_slice(self.take(32)?);
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapsuleProfile, MAX_PROTECTED_LEN_V1};
+
+    /// For every protected length a V1 capsule may carry, the writer's member
+    /// is registered, keeps K at or under the target (or is the family's
+    /// last), and is the smallest that does; one byte past the maximum has
+    /// no member (fgdb-myldi).
+    #[test]
+    fn every_protected_length_selects_the_smallest_member_that_keeps_k_at_the_target() {
+        let target = CapsuleProfile::TARGET_SOURCE_SYMBOLS;
+        let last = CapsuleProfile::BALANCED_FAMILY_LAST;
+        for len in 0..=MAX_PROTECTED_LEN_V1 {
+            let member = CapsuleProfile::BALANCED
+                .for_protected_len(len)
+                .expect("every V1 protected length has a member");
+            assert_eq!(CapsuleProfile::registered(member.fec_profile), Some(member));
+            let k = |m: CapsuleProfile| len.div_ceil(usize::from(m.symbol_size));
+            assert!(k(member) <= target || member.fec_profile == last, "{len}");
+            if member.fec_profile > 1 {
+                let smaller = CapsuleProfile::balanced_member(member.fec_profile - 1);
+                assert!(k(smaller) > target, "{len}");
+            }
+        }
+        assert_eq!(
+            CapsuleProfile::BALANCED.for_protected_len(MAX_PROTECTED_LEN_V1 + 1),
+            None
+        );
+    }
+
+    /// The exact K boundary of every member: 128 symbols of a member's size
+    /// select that member, and one byte more selects the next (or stays at
+    /// the last).
+    #[test]
+    fn each_members_k_boundary_selects_it_and_one_byte_more_moves_up() {
+        let last = CapsuleProfile::BALANCED_FAMILY_LAST;
+        for fec_profile in 1..=last {
+            let member = CapsuleProfile::balanced_member(fec_profile);
+            let boundary = CapsuleProfile::TARGET_SOURCE_SYMBOLS * usize::from(member.symbol_size);
+            let at = CapsuleProfile::BALANCED.for_protected_len(boundary);
+            let past = CapsuleProfile::BALANCED.for_protected_len(boundary + 1);
+            assert_eq!(at.map(|m| m.fec_profile), Some(fec_profile));
+            assert_eq!(
+                past.map(|m| m.fec_profile),
+                Some((fec_profile + 1).min(last))
+            );
+        }
     }
 }

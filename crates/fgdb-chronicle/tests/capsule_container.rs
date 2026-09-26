@@ -349,12 +349,13 @@ fn a_rewritten_repair_symbols_is_refused() {
 
 /// Recomputing the `EncodingId` does not let a frame invent a new repair
 /// policy. The profile registry is closed independently of descriptor
-/// self-consistency.
+/// self-consistency. 9 is the first id past the registered balanced family
+/// (1..=8, fgdb-myldi).
 #[test]
 fn a_self_consistent_unregistered_fec_profile_is_refused() {
     let capsule = sealed();
     let mut descriptor = capsule.descriptor.clone();
-    descriptor.fec_profile = 2;
+    descriptor.fec_profile = 9;
 
     let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
     let protected = identified
@@ -372,7 +373,177 @@ fn a_self_consistent_unregistered_fec_profile_is_refused() {
 
     assert!(matches!(
         recover_from(&capsule.symbols, &descriptor, capsule.object_id),
-        Err(CapsuleError::UnsupportedFecProfile { fec_profile: 2 })
+        Err(CapsuleError::UnsupportedFecProfile { fec_profile: 9 })
+    ));
+}
+
+/// A REGISTERED profile id fixes its symbol size, so a self-consistent frame
+/// cannot pair it with another size: fec_profile 2 registers 512-byte
+/// symbols, and this capsule's 256-byte symbols under it are refused, both
+/// when the container is parsed and when the descriptor is validated.
+#[test]
+fn a_registered_fec_profile_with_another_symbol_size_is_refused() {
+    let capsule = sealed();
+    assert_eq!(
+        (
+            capsule.descriptor.fec_profile,
+            capsule.descriptor.symbol_size
+        ),
+        (1, 256)
+    );
+    let mut descriptor = capsule.descriptor.clone();
+    descriptor.fec_profile = 2;
+    let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
+    let protected = identified
+        .protect(&DEK, descriptor.cipher_descriptor(), &plaintext())
+        .expect("registered AEAD profile");
+    descriptor.encoding_id = protected
+        .encode(descriptor.encoding_descriptor())
+        .encoding_id()
+        .0;
+    let mismatch = |error: &CapsuleError| {
+        matches!(
+            error,
+            CapsuleError::SymbolSizeMismatch {
+                fec_profile: 2,
+                declared_symbol_size: 256,
+                registered_symbol_size: 512,
+            }
+        )
+    };
+    let refused = recover_from(&capsule.symbols, &descriptor, capsule.object_id)
+        .expect_err("a registered id with a foreign symbol size must not recover");
+    assert!(mismatch(&refused), "{refused}");
+
+    let mut forged = capsule.clone();
+    forged.descriptor = descriptor;
+    let parsed = decode_container(&encode_container(&forged))
+        .expect_err("the container parser must refuse it too");
+    assert!(mismatch(&parsed), "{parsed}");
+}
+
+/// **THE BALANCED FAMILY KEEPS K SMALL (fgdb-myldi).** RFC 6330 encoding is
+/// roughly cubic in the source-symbol count K, so the writer picks, per
+/// capsule, the smallest registered symbol size (256 << (id - 1)) that keeps K
+/// at or under 128. For every member, the smallest capsule that selects it
+/// (K = 65 above member 1, the exact K = 128 fit at member 1) names that
+/// member with its registered symbol size, serializes every symbol with the
+/// same fixed per-symbol overhead the recovery ceiling is computed from,
+/// round-trips, heals the full repair budget, and fails closed one symbol
+/// past it. The exhaustive selection laws are unit tests in `capsule.rs`.
+#[test]
+fn every_family_member_seals_round_trips_and_heals_its_budget() {
+    let probe = seal(&K_OID, NAMESPACE, &DEK, KIND, &[7u8; 1000], profile()).expect("seals");
+    let overhead = probe.descriptor.transfer_length as usize - 1000;
+    let per_symbol = probe.symbols[0].len() - 256;
+    let budget = profile().erasure_budget();
+    for fec_profile in 1..=8u16 {
+        let symbol_size = 256usize << (fec_profile - 1);
+        let transfer_length = if fec_profile == 1 {
+            128 * 256
+        } else {
+            128 * (symbol_size / 2) + 1
+        };
+        let plaintext: Vec<u8> = (0..transfer_length - overhead)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let capsule = seal(&K_OID, NAMESPACE, &DEK, KIND, &plaintext, profile()).expect("seals");
+        let d = &capsule.descriptor;
+        assert_eq!(d.transfer_length as usize, transfer_length);
+        assert_eq!(
+            (d.fec_profile, usize::from(d.symbol_size)),
+            (fec_profile, symbol_size)
+        );
+        assert_eq!(d.repair_symbols as usize, budget);
+        let k = transfer_length.div_ceil(symbol_size);
+        assert_eq!(capsule.symbols.len(), k + budget, "{fec_profile}");
+        assert!(
+            capsule
+                .symbols
+                .iter()
+                .all(|symbol| symbol.len() == symbol_size + per_symbol),
+            "{fec_profile}: the per-symbol overhead is fixed across the family"
+        );
+        let bytes = encode_container(&capsule);
+        assert_eq!(
+            bytes.len(),
+            CAPSULE_HEADER_BYTES_V1 + capsule.symbols.len() * (4 + symbol_size + per_symbol),
+            "{fec_profile}"
+        );
+        let (descriptor, symbols) = decode_container(&bytes).expect("container round trip");
+        assert_eq!(
+            recover_from(&symbols, &descriptor, capsule.object_id).expect("recovers"),
+            plaintext,
+            "{fec_profile}"
+        );
+        assert_eq!(
+            recover_from(&symbols[budget..], &descriptor, capsule.object_id)
+                .expect("heals the full budget"),
+            plaintext,
+            "{fec_profile}"
+        );
+        assert!(
+            matches!(
+                recover_from(&symbols[budget + 1..], &descriptor, capsule.object_id),
+                Err(CapsuleError::Recovery(_))
+            ),
+            "{fec_profile}: one symbol past the budget fails closed"
+        );
+    }
+}
+
+/// Capsules up to 32 KiB are byte-identical to what the encoder wrote before
+/// the balanced family existed: a 2,000-byte object and the largest object
+/// whose sealed bytes fit 128 symbols of 256 bytes each (transfer length
+/// 32,768) hash to the container digests captured from the pre-family
+/// encoder at 87992018 (fgdb-myldi). Stores written before the family keep
+/// reading and writing the same bytes for every commit at or under that size.
+#[test]
+fn capsules_up_to_32_kib_are_byte_identical_to_the_pre_family_encoding() {
+    let probe = seal(&K_OID, NAMESPACE, &DEK, KIND, &[7u8; 1000], profile()).expect("seals");
+    let overhead = probe.descriptor.transfer_length as usize - 1000;
+    for (len, transfer_length, container_len, digest) in [
+        (
+            2000,
+            2016,
+            6986,
+            "48e6ad9d7cb64ffdaf59e368265634a5aa1bb9a00083fb87d1d6ca6db3a17f75",
+        ),
+        (
+            128 * 256 - overhead,
+            32_768,
+            58_106,
+            "0e9b273b64f4a4775ac42028c3f4cd3cc253e89dd7bd972e501034298fdea530",
+        ),
+    ] {
+        let plaintext: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let capsule = seal(&K_OID, NAMESPACE, &DEK, KIND, &plaintext, profile()).expect("seals");
+        let bytes = encode_container(&capsule);
+        assert_eq!(capsule.descriptor.transfer_length, transfer_length, "{len}");
+        assert_eq!(bytes.len(), container_len, "{len}");
+        assert_eq!(fgdb_crypto::hash(&bytes).to_hex(), digest, "{len}");
+    }
+}
+
+/// Larger symbols never raise the recovery allocation bound: a sealed object
+/// one byte past the largest a V1 capsule may carry (one source block of
+/// 256-byte symbols) is refused, as it was before the family existed, even
+/// though a 32 KiB-symbol member could encode it in 441 symbols. That every
+/// member's container at the largest length fits the ceiling is a const
+/// assertion in `capsule.rs`, computed from the per-symbol overhead the family
+/// law above pins against real containers (fgdb-myldi).
+#[test]
+fn one_byte_past_the_largest_capsule_is_refused_under_every_symbol_size() {
+    let probe = seal(&K_OID, NAMESPACE, &DEK, KIND, &[7u8; 1000], profile()).expect("seals");
+    let overhead = probe.descriptor.transfer_length as usize - 1000;
+    let one_more: Vec<u8> = (0..56_403 * 256 - overhead + 1)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    assert!(matches!(
+        seal(&K_OID, NAMESPACE, &DEK, KIND, &one_more, profile()),
+        Err(CapsuleError::Recovery(
+            fgdb_chronicle::symbolize::SymbolizeError::InvalidParameters
+        ))
     ));
 }
 
