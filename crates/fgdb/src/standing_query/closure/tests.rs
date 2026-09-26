@@ -353,7 +353,7 @@ fn keys() -> DatabaseKeys {
 
 #[test]
 fn filtered_parent_closure_nested_circuit_and_acknowledged_replay_share_commits() {
-    let ((), report) = run_async_under_lab(0x6c05_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x006c_0501, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -452,7 +452,7 @@ fn filtered_parent_closure_nested_circuit_and_acknowledged_replay_share_commits(
 
 #[test]
 fn failed_closure_never_rejects_commit_and_rebuild_resets_delta_baseline() {
-    let ((), report) = run_async_under_lab(0x6c05_02, |root| async move {
+    let ((), report) = run_async_under_lab(0x006c_0502, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -525,7 +525,7 @@ fn failed_closure_never_rejects_commit_and_rebuild_resets_delta_baseline() {
 
 #[test]
 fn empty_input_schema_is_not_inferred_from_values_and_same_slot_is_an_explicit_edge() {
-    let ((), report) = run_async_under_lab(0x6c05_03, |root| async move {
+    let ((), report) = run_async_under_lab(0x006c_0503, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -571,7 +571,7 @@ fn empty_input_schema_is_not_inferred_from_values_and_same_slot_is_an_explicit_e
 
 #[test]
 fn unavailable_parent_fences_recursion_until_parent_then_child_are_rebuilt() {
-    let ((), report) = run_async_under_lab(0x6c05_04, |root| async move {
+    let ((), report) = run_async_under_lab(0x006c_0504, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

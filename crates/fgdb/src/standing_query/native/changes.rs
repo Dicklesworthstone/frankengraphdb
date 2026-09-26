@@ -111,10 +111,10 @@ impl<V: Vfs + Clone> Database<V> {
             .ok_or(StandingQueryError::Unsupported)?;
         let frontier = query.status().1;
         let unavailable = |from| StandingQueryError::DeltaUnavailable { from, frontier };
-        if let Some(from) = from {
-            if from.checked_successor().ok() != Some(frontier) {
-                return Err(unavailable(from));
-            }
+        if let Some(from) = from
+            && from.checked_successor().ok() != Some(frontier)
+        {
+            return Err(unavailable(from));
         }
         cx.with_restriction(|| {
             let mut checkpoint = || {

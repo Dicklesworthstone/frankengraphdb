@@ -99,16 +99,14 @@ pub(super) fn validate_message<C>(message: &Message<C>) -> Result<(), Error> {
         last_index,
         last_term,
     } = message
-    {
-        if *term == 0
+        && (*term == 0
             || *term == u64::MAX
             || *round == 0
             || *last_index == u64::MAX
             || (*last_index == 0) != (*last_term == 0)
-            || last_term > term
-        {
-            return Err(Error::InvalidMessage);
-        }
+            || last_term > term)
+    {
+        return Err(Error::InvalidMessage);
     }
     Ok(())
 }

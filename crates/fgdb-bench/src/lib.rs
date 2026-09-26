@@ -1089,14 +1089,14 @@ async fn open_or_load_gql_fixture(
     name: &str,
     vertices: usize,
 ) -> Result<(Database, Model), String> {
-    if let Ok(dir) = std::env::var("FGDB_BENCH_REUSE_DB") {
-        if !dir.is_empty() {
-            let db = Database::open(cx, Path::new(&dir), keys())
-                .await
-                .map_err(|error| format!("reopen {name} from {dir}: {error}"))?;
-            let model = Model::preferential_attachment(vertices, 6, LOAD_SEED ^ 0x67_51);
-            return Ok((db, model));
-        }
+    if let Ok(dir) = std::env::var("FGDB_BENCH_REUSE_DB")
+        && !dir.is_empty()
+    {
+        let db = Database::open(cx, Path::new(&dir), keys())
+            .await
+            .map_err(|error| format!("reopen {name} from {dir}: {error}"))?;
+        let model = Model::preferential_attachment(vertices, 6, LOAD_SEED ^ 0x67_51);
+        return Ok((db, model));
     }
     load_gql_fixture(query_cx, cx, &scratch(name), vertices).await
 }

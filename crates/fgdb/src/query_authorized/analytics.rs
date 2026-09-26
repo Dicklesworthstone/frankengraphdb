@@ -274,13 +274,12 @@ fn execute<Clock: FnMut() -> u64>(
         requested,
         ..
     }) = &result
+        && *requested as u128 > u128::from(signed_rows)
     {
-        if *requested as u128 > u128::from(signed_rows) {
-            execution
-                .borrow_mut()
-                .deliver(*requested)
-                .map_err(control_error)?;
-        }
+        execution
+            .borrow_mut()
+            .deliver(*requested)
+            .map_err(control_error)?;
     }
     let result = result.map_err(|error| match error {
         FnxExecutionError::Cancelled(error) => control_error(error),

@@ -361,7 +361,7 @@ fn result_bag(result: QueryResult) -> ZSet<Vec<QueryValue>> {
 
 #[test]
 fn commit_hook_retains_every_final_output_tick_without_polling_or_graph_replay() {
-    let ((), report) = run_async_under_lab(0x6dde_61, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de61, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -460,7 +460,7 @@ fn commit_hook_retains_every_final_output_tick_without_polling_or_graph_replay()
 
 #[test]
 fn sink_overflow_isolated_from_durable_commit_and_rebuild_cannot_fabricate_history() {
-    let ((), report) = run_async_under_lab(0x6dde_62, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de62, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

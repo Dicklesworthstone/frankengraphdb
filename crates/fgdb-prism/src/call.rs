@@ -552,37 +552,35 @@ impl FnxCallSpec {
             _ => return Err(parser.error(FnxBindErrorKind::UnknownProcedure)),
         };
         let mut outputs = default_outputs(signature);
-        if parser.keyword("YIELD") {
-            if !parser.take(b'*') {
-                outputs.clear();
-                loop {
-                    let name = parser.word()?;
-                    let field = signature
-                        .outputs
-                        .iter()
-                        .copied()
-                        // ubs:ignore -- public YIELD field names, not secret material.
-                        .find(|field| field.name() == name)
-                        .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownYield))?;
-                    let alias = if parser.keyword("AS") {
-                        parser.word()?
-                    } else {
-                        name
-                    };
-                    if outputs
-                        .iter()
-                        // ubs:ignore -- public YIELD field names and aliases, not secret material.
-                        .any(|column| column.field == field || column.name == alias)
-                    {
-                        return Err(parser.error(FnxBindErrorKind::DuplicateYield));
-                    }
-                    outputs.push(FnxOutputColumn {
-                        field,
-                        name: alias.to_owned(),
-                    });
-                    if !parser.take(b',') {
-                        break;
-                    }
+        if parser.keyword("YIELD") && !parser.take(b'*') {
+            outputs.clear();
+            loop {
+                let name = parser.word()?;
+                let field = signature
+                    .outputs
+                    .iter()
+                    .copied()
+                    // ubs:ignore -- public YIELD field names, not secret material.
+                    .find(|field| field.name() == name)
+                    .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownYield))?;
+                let alias = if parser.keyword("AS") {
+                    parser.word()?
+                } else {
+                    name
+                };
+                if outputs
+                    .iter()
+                    // ubs:ignore -- public YIELD field names and aliases, not secret material.
+                    .any(|column| column.field == field || column.name == alias)
+                {
+                    return Err(parser.error(FnxBindErrorKind::DuplicateYield));
+                }
+                outputs.push(FnxOutputColumn {
+                    field,
+                    name: alias.to_owned(),
+                });
+                if !parser.take(b',') {
+                    break;
                 }
             }
         }

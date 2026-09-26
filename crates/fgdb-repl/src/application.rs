@@ -355,10 +355,11 @@ fn validate_progress<C>(
     if position_at(state, progress.applied.index) != Some(progress.applied) {
         return Err(ApplicationStateError::InvalidPosition);
     }
-    if let Some(cut) = state.snapshot() {
-        if progress.applied.index == base && progress.state_root.0 != cut.state_root() {
-            return Err(ApplicationStateError::SnapshotStateMismatch);
-        }
+    if let Some(cut) = state.snapshot()
+        && progress.applied.index == base
+        && progress.state_root.0 != cut.state_root()
+    {
+        return Err(ApplicationStateError::SnapshotStateMismatch);
     }
     Ok(())
 }

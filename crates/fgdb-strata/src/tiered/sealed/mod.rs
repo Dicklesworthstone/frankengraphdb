@@ -568,11 +568,11 @@ impl<'a> SealedCursor<'a> {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
-            if self.position.is_multiple_of(64) {
-                if let Err(error) = checkpoint() {
-                    self.finished = true;
-                    return Err(error);
-                }
+            if self.position.is_multiple_of(64)
+                && let Err(error) = checkpoint()
+            {
+                self.finished = true;
+                return Err(error);
             }
             let (entry, locator) = row
                 .incidence(self.image, self.position)

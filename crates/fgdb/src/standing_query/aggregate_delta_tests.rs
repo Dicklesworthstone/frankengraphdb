@@ -101,7 +101,7 @@ fn clone_bag<T: Ord + Clone>(rows: &ZSet<T>) -> ZSet<T> {
 
 #[test]
 fn final_deltas_integrate_plain_having_hidden_distinct_and_ranked_outputs() {
-    let ((), report) = run_async_under_lab(0x6dde_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de01, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -177,7 +177,7 @@ fn final_deltas_integrate_plain_having_hidden_distinct_and_ranked_outputs() {
 
 #[test]
 fn projected_output_refusal_never_replaces_the_accepted_source_derivative() {
-    let ((), report) = run_async_under_lab(0x6dde_02, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de02, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -268,7 +268,7 @@ fn projected_output_refusal_never_replaces_the_accepted_source_derivative() {
 
 #[test]
 fn aggregate_baseline_empty_ticks_and_failed_views_are_distinct() {
-    let ((), report) = run_async_under_lab(0x6dde_03, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de03, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

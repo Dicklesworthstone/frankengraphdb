@@ -322,6 +322,9 @@ impl Hnsw {
         }
     }
 
+    // The standard HNSW layer search inputs (query, norm, entry, layer, ef,
+    // eligibility, work budget); private, with one caller shape.
+    #[allow(clippy::too_many_arguments)]
     fn search_layer(
         &self,
         query: &[f32],

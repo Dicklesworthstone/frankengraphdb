@@ -174,10 +174,10 @@ impl<C: Clone + Eq> Raft<C> {
                 snapshot: snapshot.clone(),
             },
         };
-        if matches!(flight, InFlight::Append { .. }) {
-            if let Some(progress) = self.progress.get_mut(&peer) {
-                progress.sent_commit = self.state.commit_index;
-            }
+        if matches!(flight, InFlight::Append { .. })
+            && let Some(progress) = self.progress.get_mut(&peer)
+        {
+            progress.sent_commit = self.state.commit_index;
         }
         self.emit(peer, message, output);
         Ok(())

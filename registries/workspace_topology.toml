@@ -118,7 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
-lint_allowance_count = 9
+lint_allowance_count = 6
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -129,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:d9b39b484ec6d047"
-semantic_contract_hash = "fnv1a64:828179d7c2ae573a"
+id_table_hash = "fnv1a64:4b54044276d71724"
+semantic_contract_hash = "fnv1a64:f30acceb8ce4597c"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1954,18 +1954,6 @@ reference = "fgdb-gate-weakening-rollback-mthlh"
 basis = "Measured residual from 89b49d38: 263 sites / 48 files at 2026-09-25."
 
 [[lint_allowance]]
-lint = "clippy::unusual_byte_groupings"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 44 sites / 11 files at 2026-09-25."
-
-[[lint_allowance]]
-lint = "clippy::collapsible_if"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 38 sites / 34 files at 2026-09-25."
-
-[[lint_allowance]]
 lint = "clippy::type_complexity"
 level = "allow"
 reference = "fgdb-gate-weakening-rollback-mthlh"
@@ -1976,12 +1964,6 @@ lint = "clippy::unnecessary_literal_unwrap"
 level = "allow"
 reference = "fgdb-gate-weakening-rollback-mthlh"
 basis = "Measured residual from 89b49d38: 13 sites / 3 files at 2026-09-25, all Option::<T>::None.expect(msg) stand-ins for panic!; the fix moves the UBS panic-macro ratchet, so it is decided separately."
-
-[[lint_allowance]]
-lint = "clippy::too_many_arguments"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 9 sites / 7 files at 2026-09-25."
 
 # --- build_here (23) ----------------------------------------------------------
 

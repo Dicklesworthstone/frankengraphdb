@@ -109,10 +109,10 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Option<i64>> {
         }
     }
     for row in vertices.iter().filter(|row| row.labels.contains(&B)) {
-        if let Some(n) = scalar(row).filter(|n| *n >= 0) {
-            if let Some(count) = counts.get_mut(&n) {
-                *count = count.saturating_sub(1);
-            }
+        if let Some(n) = scalar(row).filter(|n| *n >= 0)
+            && let Some(count) = counts.get_mut(&n)
+        {
+            *count = count.saturating_sub(1);
         }
     }
     counts

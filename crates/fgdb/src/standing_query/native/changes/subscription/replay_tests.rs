@@ -44,7 +44,7 @@ fn copied(rows: &ZSet<Vec<QueryValue>>) -> ZSet<Vec<QueryValue>> {
 
 #[test]
 fn independent_consumers_share_payloads_and_replay_every_delayed_tick() {
-    let ((), report) = run_async_under_lab(0x6dde_71, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de71, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -154,7 +154,7 @@ fn independent_consumers_share_payloads_and_replay_every_delayed_tick() {
 
 #[test]
 fn evicted_pending_frame_replays_but_a_missing_successor_requires_rebaseline() {
-    let ((), report) = run_async_under_lab(0x6dde_72, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de72, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -217,7 +217,7 @@ fn evicted_pending_frame_replays_but_a_missing_successor_requires_rebaseline() {
 
 #[test]
 fn attachment_refusals_do_not_leak_sinks_or_fabricate_old_history() {
-    let ((), report) = run_async_under_lab(0x6dde_73, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de73, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -296,7 +296,7 @@ fn attachment_refusals_do_not_leak_sinks_or_fabricate_old_history() {
 
 #[test]
 fn delivery_refusal_and_shared_sink_rebuild_preserve_acknowledgements() {
-    let ((), report) = run_async_under_lab(0x6dde_74, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de74, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -360,7 +360,7 @@ fn delivery_refusal_and_shared_sink_rebuild_preserve_acknowledgements() {
 
 #[test]
 fn replay_failure_does_not_rollback_writes_or_erase_an_already_delivered_frame() {
-    let ((), report) = run_async_under_lab(0x6dde_75, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de75, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

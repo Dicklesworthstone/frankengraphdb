@@ -305,13 +305,12 @@ pub(super) fn build(
     let mut flat = reserved(count)?;
     for (block, mut props) in compacted.blocks.into_iter().zip(compacted.block_props) {
         checkpoint()?;
-        if let Some(props) = &props {
-            if props.locators.len() != block.len()
+        if let Some(props) = &props
+            && (props.locators.len() != block.len()
                 || validate_locator_sequence(&props.locators).map_err(SealedError::Property)?
-                    != props.rows.len()
-            {
-                return Err(SealedError::NonCanonical);
-            }
+                    != props.rows.len())
+        {
+            return Err(SealedError::NonCanonical);
         }
         for (at, entry) in block.into_iter().enumerate() {
             let row = if let Some(props) = props.as_mut() {

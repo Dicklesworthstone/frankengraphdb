@@ -591,7 +591,7 @@ fn mutated_seeds_never_panic_any_decoder() {
     let mut outcomes = [Outcomes::default(); DECODERS];
     let mut mutants = 0usize;
     for campaign in 0..CAMPAIGNS {
-        let mut rng = fuzz::Rng::new(0xDEC0_DE + campaign as u64);
+        let mut rng = fuzz::Rng::new(0x00DE_C0DE + campaign as u64);
         for (family, name, seed) in families(&s) {
             // Pristine keepalive: the owning decoder must still accept its
             // own real-encoder seed (Ok evidence for the anti-vacuity check).

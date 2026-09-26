@@ -582,10 +582,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 }
             }
         }
-        if let Some(limit) = max_groups {
-            if size > u128::from(limit) {
-                return Err(GroupError::ResultBudget { limit });
-            }
+        if let Some(limit) = max_groups
+            && size > u128::from(limit)
+        {
+            return Err(GroupError::ResultBudget { limit });
         }
         let delta = ZSet::from_updates(updates, limbs, control)?;
         for (row, _) in delta.iter() {

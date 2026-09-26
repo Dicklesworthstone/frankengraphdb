@@ -639,12 +639,12 @@ fn invoke(args: &[String], robot: bool, schema: &Json, secrets: &[String]) -> Ou
         // Human mode: no NDJSON event lines may appear on stdout.
         for line in stdout.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with('{') {
-                if JsonParser::parse(trimmed).is_ok_and(
+            if trimmed.starts_with('{')
+                && JsonParser::parse(trimmed).is_ok_and(
                     |value| matches!(value, Json::Object(map) if map.contains_key("event")),
-                ) {
-                    fail::<()>(&format!("NDJSON event on human stdout: {trimmed:?}"));
-                }
+                )
+            {
+                fail::<()>(&format!("NDJSON event on human stdout: {trimmed:?}"));
             }
         }
         Vec::new()

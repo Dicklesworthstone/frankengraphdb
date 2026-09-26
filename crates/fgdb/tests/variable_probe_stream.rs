@@ -186,6 +186,8 @@ fn support(
     }
     result
 }
+// One argument per axis of the fixture matrix the oracle is compared across.
+#[allow(clippy::too_many_arguments)]
 fn oracle(
     db: &Database<MemVfs>,
     cut: CommitSeq,

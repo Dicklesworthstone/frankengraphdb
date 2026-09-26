@@ -26,7 +26,7 @@ fn policy() -> GqlQueryPolicy {
 
 #[test]
 fn committed_insert_updates_registered_equality_count_and_sum() {
-    let ((), report) = run_async_under_lab(0x5c35_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x005c_3501, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let query_cx = contexts.query();
@@ -74,7 +74,7 @@ fn committed_insert_updates_registered_equality_count_and_sum() {
 
 #[test]
 fn seeded_commits_retract_restore_and_survive_compaction() {
-    for seed in [0x5c35_11, 0x5c35_22, 0x5c35_33] {
+    for seed in [0x005c_3511, 0x005c_3522, 0x005c_3533] {
         let ((), report) = run_async_under_lab(seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
@@ -279,7 +279,7 @@ fn seeded_commits_retract_restore_and_survive_compaction() {
 
 #[test]
 fn reopen_refuses_old_handle_and_registration_rebuilds_exactly() {
-    let ((), report) = run_async_under_lab(0x5c35_44, |root| async move {
+    let ((), report) = run_async_under_lab(0x005c_3544, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();
@@ -360,7 +360,7 @@ fn reopen_refuses_old_handle_and_registration_rebuilds_exactly() {
 
 #[test]
 fn constant_commit_delta_has_bounded_maintenance_on_growing_graph() {
-    let ((), report) = run_async_under_lab(0x5c35_55, |root| async move {
+    let ((), report) = run_async_under_lab(0x005c_3555, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let cx = contexts.query();

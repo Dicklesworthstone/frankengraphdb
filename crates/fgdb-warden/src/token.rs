@@ -384,10 +384,10 @@ fn encode_scope<T: Ord>(scope: &Scope<T>, ordinal: impl Fn(&T) -> u64) -> Result
 }
 
 fn validate_scope<T: Ord>(scope: &Scope<T>) -> Result<(), Error> {
-    if let Scope::Only(values) = scope {
-        if values.len() > MAX_SCOPE_ORDINALS {
-            return Err(Error::TooLarge);
-        }
+    if let Scope::Only(values) = scope
+        && values.len() > MAX_SCOPE_ORDINALS
+    {
+        return Err(Error::TooLarge);
     }
     Ok(())
 }

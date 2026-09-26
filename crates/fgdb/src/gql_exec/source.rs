@@ -943,14 +943,12 @@ fn bound_vertices<'a, E, Row>(
             snapshot
                 .property_index
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
-        {
-            if bound_predicates
+            && bound_predicates
                 .iter()
                 .all(|predicate| predicate.matches(&row.labels, &row.props))
-            {
-                control(SourceEvent::ScratchEntry)?;
-                rows.push(row);
-            }
+        {
+            control(SourceEvent::ScratchEntry)?;
+            rows.push(row);
         }
     }
     Ok(Some((rows, candidates.len() as u64)))
@@ -1018,11 +1016,10 @@ fn range_vertices<'a, E>(
             snapshot
                 .property_index
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
+            && predicates().all(|predicate| predicate.matches(&row.labels, &row.props))
         {
-            if predicates().all(|predicate| predicate.matches(&row.labels, &row.props)) {
-                control(SourceEvent::ScratchEntry)?;
-                rows.push(row);
-            }
+            control(SourceEvent::ScratchEntry)?;
+            rows.push(row);
         }
     }
     Ok(Some((rows, candidates.len() as u64)))
@@ -1206,12 +1203,11 @@ mod indexed_tests {
                 if let Some(row) = index
                     .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
                     .unwrap()
-                {
-                    if row.props.iter().any(|(key, value)| {
+                    && row.props.iter().any(|(key, value)| {
                         *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
-                    }) {
-                        winners.push(row.vid);
-                    }
+                    })
+                {
+                    winners.push(row.vid);
                 }
             }
             assert_eq!(winners, visible, "at={at}: recheck must equal the scan");

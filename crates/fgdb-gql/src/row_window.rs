@@ -288,10 +288,10 @@ impl IncrementalRowWindow {
         let changes = distinct.as_ref().map_or(&keyed, DistinctUpdate::delta);
         let window = self.window.prepare(changes, limbs, control)?;
         let next_total = window.rows().total_weight(limbs, control)?;
-        if let Some(limit) = max_result_rows {
-            if next_total > ZWeight::from_i128(i128::from(limit)) {
-                return Err(RowWindowError::ResultBudget { limit });
-            }
+        if let Some(limit) = max_result_rows
+            && next_total > ZWeight::from_i128(i128::from(limit))
+        {
+            return Err(RowWindowError::ResultBudget { limit });
         }
         let mut output = Vec::new();
         for (key, weight) in window.delta().iter() {

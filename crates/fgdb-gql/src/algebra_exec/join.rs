@@ -319,10 +319,10 @@ impl<'a> Candidates<'a> {
         debug_assert_eq!(self.right, 0);
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
-        if let Some(membership) = &mut self.membership {
-            if values.len() < membership.len() {
-                core::mem::swap(membership, &mut values);
-            }
+        if let Some(membership) = &mut self.membership
+            && values.len() < membership.len()
+        {
+            core::mem::swap(membership, &mut values);
         }
         self.additional.push(Membership {
             values,

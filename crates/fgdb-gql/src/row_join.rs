@@ -443,10 +443,10 @@ impl IncrementalRowJoin {
         if next_total < ZWeight::ZERO {
             return Err(RowJoinError::InvalidResult);
         }
-        if let Some(limit) = max_result_rows {
-            if next_total > ZWeight::from_i128(i128::from(limit)) {
-                return Err(RowJoinError::ResultBudget { limit });
-            }
+        if let Some(limit) = max_result_rows
+            && next_total > ZWeight::from_i128(i128::from(limit))
+        {
+            return Err(RowJoinError::ResultBudget { limit });
         }
         for (row, _) in delta.iter() {
             reserve_row(row, control)?;

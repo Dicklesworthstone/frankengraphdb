@@ -585,12 +585,20 @@ fn workspace_lint_table_law_is_seen_to_fire() {
         assert_code(&codes, code);
     };
     // A manifest allow the registry no longer admits: exactly what 89b49d38
-    // did 24 times.
+    // did 24 times. The anchor is double_must_use, one of the two 088e510f
+    // allows the table keeps; residual rows are retired over time, and an
+    // anchor that is gone would make this mutation remove nothing.
     fire(
         &|registry| {
+            let before = registry.lint_allowances.len();
             registry
                 .lint_allowances
-                .retain(|row| row.lint != "clippy::too_many_arguments")
+                .retain(|row| row.lint != "clippy::double_must_use");
+            assert_eq!(
+                registry.lint_allowances.len() + 1,
+                before,
+                "anchor row must exist"
+            );
         },
         "workspace_lint_unregistered",
     );

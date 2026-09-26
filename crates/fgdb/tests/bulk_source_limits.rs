@@ -101,7 +101,7 @@ fn policy() -> BulkLoadPolicy {
 
 #[test]
 fn every_preflight_decoder_failure_leaves_the_graph_and_frontier_unchanged() {
-    let ((), report) = run_async_under_lab(0xb52_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5201, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -133,7 +133,7 @@ fn every_preflight_decoder_failure_leaves_the_graph_and_frontier_unchanged() {
 
 #[test]
 fn replay_reader_errors_preserve_exact_progress_and_resume_without_duplicates() {
-    let ((), report) = run_async_under_lab(0xb52_02, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5202, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -177,7 +177,7 @@ fn replay_reader_errors_preserve_exact_progress_and_resume_without_duplicates() 
 
 #[test]
 fn source_row_and_key_bounds_are_inclusive_and_apply_before_any_commit() {
-    let ((), report) = run_async_under_lab(0xb52_03, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5203, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -244,7 +244,7 @@ fn row_bytes(row: &BulkRow) -> usize {
 
 #[test]
 fn canonical_chunk_bytes_are_exact_and_never_silently_change_transaction_boundaries() {
-    let ((), report) = run_async_under_lab(0xb52_04, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5204, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -299,7 +299,7 @@ fn canonical_chunk_bytes_are_exact_and_never_silently_change_transaction_boundar
 
 #[test]
 fn a_never_ending_source_stops_at_its_first_over_budget_row() {
-    let ((), report) = run_async_under_lab(0xb52_05, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5205, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -334,7 +334,7 @@ fn a_never_ending_source_stops_at_its_first_over_budget_row() {
 
 #[test]
 fn resume_cannot_refresh_whole_source_row_or_key_allowances() {
-    let ((), report) = run_async_under_lab(0xb52_06, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5206, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -372,7 +372,7 @@ fn resume_cannot_refresh_whole_source_row_or_key_allowances() {
 
 #[test]
 fn zero_limits_and_invalid_chunk_widths_are_checked_even_for_empty_inputs() {
-    let ((), report) = run_async_under_lab(0xb52_07, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5207, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

@@ -152,12 +152,12 @@ impl<C: Clone + Eq> Raft<C> {
         if self.role != Role::Leader || term != self.state.term {
             return;
         }
-        if let Some(quorum) = &mut self.liveness.quorum {
-            if round == quorum.round {
-                // Membership, domain, recipient and nonzero fields were checked
-                // before transition. This grants no match-index/read evidence.
-                quorum.voters.insert(from);
-            }
+        if let Some(quorum) = &mut self.liveness.quorum
+            && round == quorum.round
+        {
+            // Membership, domain, recipient and nonzero fields were checked
+            // before transition. This grants no match-index/read evidence.
+            quorum.voters.insert(from);
         }
     }
 

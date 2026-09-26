@@ -137,6 +137,9 @@ impl<'a> BondedDonor<'a> {
     /// The target's namespace/header/key must originate in the pinned canonical
     /// closure, not a requester claim. A roster is ordered: its position defines
     /// the same fixed residue used by BondedPull; membership is not inferred.
+    // Each argument is a distinct pinned authentication input, all of which
+    // must be checked before the first symbol; none is optional or derived.
+    #[allow(clippy::too_many_arguments)]
     pub fn new<E>(
         encoding: &'a EncodedObject,
         protected: &'a [u8],

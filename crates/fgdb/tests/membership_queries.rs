@@ -118,10 +118,12 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Plain> {
                 .iter()
                 .find(|row| row.vid == edge.entry.dst)
                 .unwrap();
-            if let (Some(lower), Some(value)) = (integer(owner), integer(target)) {
-                if value >= lower && value <= 35 && value != 25 {
-                    output.push((owner.vid, Some(target.vid), Some(value)));
-                }
+            if let (Some(lower), Some(value)) = (integer(owner), integer(target))
+                && value >= lower
+                && value <= 35
+                && value != 25
+            {
+                output.push((owner.vid, Some(target.vid), Some(value)));
             }
         }
         if output.len() == before {

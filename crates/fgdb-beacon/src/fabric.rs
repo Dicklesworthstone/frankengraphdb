@@ -363,21 +363,21 @@ impl Generation {
                 return Err(BeaconError::ResourceLimit { resource, limit });
             }
         }
-        if let Some(vector) = &self.config.vector {
-            if self.vector_documents > vector.max_vectors {
-                return Err(BeaconError::ResourceLimit {
-                    resource: "live vector documents",
-                    limit: vector.max_vectors,
-                });
-            }
+        if let Some(vector) = &self.config.vector
+            && self.vector_documents > vector.max_vectors
+        {
+            return Err(BeaconError::ResourceLimit {
+                resource: "live vector documents",
+                limit: vector.max_vectors,
+            });
         }
-        if let Some(text) = &self.config.text {
-            if self.corpus.documents > text.max_documents {
-                return Err(BeaconError::ResourceLimit {
-                    resource: "live text documents",
-                    limit: text.max_documents,
-                });
-            }
+        if let Some(text) = &self.config.text
+            && self.corpus.documents > text.max_documents
+        {
+            return Err(BeaconError::ResourceLimit {
+                resource: "live text documents",
+                limit: text.max_documents,
+            });
         }
         Ok(())
     }

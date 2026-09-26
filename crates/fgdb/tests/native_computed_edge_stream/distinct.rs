@@ -38,6 +38,8 @@ fn params(cut: u64, scale: i64, minimum: i64, skip: u64, take: u64) -> GqlParame
 // Fully enumerate oriented occurrences; complete all groups; sort by their
 // independent small-fixture fraction and full key; remove equal output values;
 // only then apply the page. No production heap, index, parser or GLA is called.
+// One argument per axis of the fixture matrix the oracle is compared across.
+#[allow(clippy::too_many_arguments)]
 fn expected(
     cut: u64,
     scale: i64,

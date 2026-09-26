@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn native_subscriptions_integrate_deltas_across_final_output_shapes() {
-        let ((), report) = run_async_under_lab(0x6dde_51, |root| async move {
+        let ((), report) = run_async_under_lab(0x006d_de51, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn slow_consumer_replays_pending_frame_then_requires_explicit_rebaseline() {
-        let ((), report) = run_async_under_lab(0x6dde_52, |root| async move {
+        let ((), report) = run_async_under_lab(0x006d_de52, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn statement_failures_preserve_registry_and_prepared_templates_subscribe() {
-        let ((), report) = run_async_under_lab(0x6dde_53, |root| async move {
+        let ((), report) = run_async_under_lab(0x006d_de53, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn failed_maintenance_is_not_an_empty_tick_and_rebuild_requires_a_baseline() {
-        let ((), report) = run_async_under_lab(0x6dde_54, |root| async move {
+        let ((), report) = run_async_under_lab(0x006d_de54, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();

@@ -305,11 +305,11 @@ pub async fn recover<T: SymbolTransport>(
             let count = session.flights.len();
             for offset in 0..count {
                 let index = (next_poll + offset) % count;
-                if let Some(future) = &mut session.flights[index].future {
-                    if let Poll::Ready(result) = future.as_mut().poll(cx) {
-                        next_poll = (index + 1) % count;
-                        return Poll::Ready((index, result));
-                    }
+                if let Some(future) = &mut session.flights[index].future
+                    && let Poll::Ready(result) = future.as_mut().poll(cx)
+                {
+                    next_poll = (index + 1) % count;
+                    return Poll::Ready((index, result));
                 }
             }
             Poll::Pending

@@ -195,14 +195,13 @@ impl<V: Vfs + Clone> Database<V> {
             if coordinate.relation != relation {
                 return Err(WriteTxnError::UnsupportedAtomicMutation);
             }
-            if let Some(previous) = coordinates.values().next() {
-                if previous.graph != coordinate.graph
+            if let Some(previous) = coordinates.values().next()
+                && (previous.graph != coordinate.graph
                     || previous.branch != coordinate.branch
                     || previous.schema_epoch != coordinate.schema_epoch
-                    || previous.schema_transition != coordinate.schema_transition
-                {
-                    return Err(WriteTxnError::UnsupportedAtomicMutation);
-                }
+                    || previous.schema_transition != coordinate.schema_transition)
+            {
+                return Err(WriteTxnError::UnsupportedAtomicMutation);
             }
             let mut coordinate = coordinate.clone();
             let mut vertices = Vec::new();

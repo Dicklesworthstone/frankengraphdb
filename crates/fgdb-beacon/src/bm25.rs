@@ -351,6 +351,9 @@ impl TextSegment {
     /// and each document's terms are accumulated in lexical term order.
     /// Phrase admission precedes top-k, so non-phrase hits cannot hide a lower
     /// scoring phrase. Position checks happen only for the selected generation.
+    // Each argument is an independent input to one retrieval call; a struct
+    // would only rename the list (the fuzzy sibling in bm25/fuzzy.rs is alike).
+    #[allow(clippy::too_many_arguments)]
     pub fn search_into(
         &self,
         query: &AnalyzedText,

@@ -431,14 +431,14 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         };
-        if seals.is_empty() {
-            if let Err(kind) = source::expect_end(cx, &mut source, 0) {
-                return Err(BulkLoadError {
-                    kind,
-                    committed,
-                    pending: None,
-                });
-            }
+        if seals.is_empty()
+            && let Err(kind) = source::expect_end(cx, &mut source, 0)
+        {
+            return Err(BulkLoadError {
+                kind,
+                committed,
+                pending: None,
+            });
         }
         for (index, seal) in seals.iter().enumerate() {
             let skip = seal.end() <= committed.next_row;

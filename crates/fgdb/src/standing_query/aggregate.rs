@@ -247,11 +247,11 @@ impl StandingQuery {
                 if matches!(row, DeltaRow::Schema { .. } | DeltaRow::Constraint { .. }) {
                     return Err(StandingQueryFailure::InvalidDelta);
                 }
-                if let Some(vid) = affected_vertex(&self.definition, row) {
-                    if !affected.contains(&vid) {
-                        meter.charge(ZSetEvent::ScratchEntry)?;
-                        affected.insert(vid);
-                    }
+                if let Some(vid) = affected_vertex(&self.definition, row)
+                    && !affected.contains(&vid)
+                {
+                    meter.charge(ZSetEvent::ScratchEntry)?;
+                    affected.insert(vid);
                 }
             }
         }

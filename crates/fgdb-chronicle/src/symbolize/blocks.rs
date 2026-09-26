@@ -375,6 +375,9 @@ fn decode_protected_observed(
 /// Each selected record is reauthenticated and byte-bound to its indexed key.
 /// No partial protected bytes are exposed outside Chronicle.
 #[cfg(not(target_arch = "wasm32"))]
+// Crate-private decode step; its inputs are the pull's authenticated state,
+// passed through unchanged from the one caller.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recover_indexed_block(
     encoding: &EncodedObject,
     number: u32,

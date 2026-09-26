@@ -263,6 +263,9 @@ impl<V: Vfs + Clone> Database<V> {
         )
     }
 
+    // The governed-read argument family: the non-`_at` form plus an explicit
+    // `as_of`, kept identical to the EmbeddedReadView form below.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_all_shortest_walk_governed_at(
         &self,
         cx: &QueryCx,
@@ -313,6 +316,8 @@ impl EmbeddedReadView {
         )
     }
 
+    // Same governed-read argument family as the Database form above.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_all_shortest_walk_governed_at(
         &self,
         cx: &QueryCx,
@@ -374,6 +379,9 @@ fn charge_shortest<C>(
     Ok(())
 }
 
+// Private worker for both governed-read forms: their arguments plus the
+// checkpoint closure.
+#[allow(clippy::too_many_arguments)]
 fn execute_shortest_at<C>(
     snapshot: &Snapshot,
     source: VId,

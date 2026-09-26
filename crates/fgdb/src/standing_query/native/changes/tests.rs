@@ -339,7 +339,7 @@ fn result_bag(result: QueryResult) -> ZSet<Vec<QueryValue>> {
 
 #[test]
 fn native_bags_and_derivatives_integrate_across_operator_and_aggregate_shapes() {
-    let ((), report) = run_async_under_lab(0x6dde_11, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de11, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -430,7 +430,7 @@ fn native_bags_and_derivatives_integrate_across_operator_and_aggregate_shapes() 
 
 #[test]
 fn missed_frontiers_rebuild_baselines_and_delivery_refusals_are_not_empty_ticks() {
-    let ((), report) = run_async_under_lab(0x6dde_12, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de12, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -514,7 +514,7 @@ fn missed_frontiers_rebuild_baselines_and_delivery_refusals_are_not_empty_ticks(
 
 #[test]
 fn unavailable_aggregate_does_not_export_an_old_derivative_after_durable_write() {
-    let ((), report) = run_async_under_lab(0x6dde_13, |root| async move {
+    let ((), report) = run_async_under_lab(0x006d_de13, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

@@ -340,12 +340,13 @@ impl<C: Clone + Eq> Replica<C> {
                 resolutions.push(ReadResolution::LeadershipLost(read.id));
             }
         } else {
-            if let Some((member, term, request, true)) = reply {
-                if term == state.term() && configuration.voters().contains(&member) {
-                    for read in self.reads.values_mut() {
-                        if read.term == term && request > read.after_request {
-                            read.confirmations.insert(member);
-                        }
+            if let Some((member, term, request, true)) = reply
+                && term == state.term()
+                && configuration.voters().contains(&member)
+            {
+                for read in self.reads.values_mut() {
+                    if read.term == term && request > read.after_request {
+                        read.confirmations.insert(member);
                     }
                 }
             }

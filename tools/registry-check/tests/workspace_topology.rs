@@ -36,8 +36,9 @@ use std::path::{Path, PathBuf};
 // Moved by 1207516b's new fgdb-beacon row (fgdb-topology-seven-crates-9n8ao),
 // then by the 13 lint_allowance rows (fgdb-gate-weakening-rollback-mthlh), and
 // again as each residual row is retired (manual_noop_waker: 12 rows; err_expect,
-// unnecessary_mut_passed, manual_is_multiple_of: 9 rows).
-const ID_TABLE_PIN: &str = "fnv1a64:d9b39b484ec6d047";
+// unnecessary_mut_passed, manual_is_multiple_of: 9 rows; unusual_byte_groupings,
+// collapsible_if, too_many_arguments: 6 rows).
+const ID_TABLE_PIN: &str = "fnv1a64:4b54044276d71724";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -56,8 +57,9 @@ const ID_TABLE_PIN: &str = "fnv1a64:d9b39b484ec6d047";
 // prism-over-fnx joins the required-edge live floor. Then the workspace lint
 // table became a registered contract: 13 lint_allowance (lint, level) lines
 // (fgdb-gate-weakening-rollback-mthlh), 12 once manual_noop_waker was fixed,
-// 9 once err_expect, unnecessary_mut_passed and manual_is_multiple_of were.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:828179d7c2ae573a";
+// 9 once err_expect, unnecessary_mut_passed and manual_is_multiple_of were,
+// 6 once unusual_byte_groupings, collapsible_if and too_many_arguments were.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:f30acceb8ce4597c";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -702,9 +704,11 @@ fn topology_neg_count_drift() {
 fn topology_neg_lint_allowance_level_drift() {
     // A row that registers a different level than Cargo.toml sets admits
     // neither: the manifest allow is unregistered and the row is stale.
+    // Anchored on double_must_use, a kept 088e510f allow, not a residual row
+    // that is due to be retired.
     let codes = codes_after(
-        "lint = \"clippy::too_many_arguments\"\nlevel = \"allow\"",
-        "lint = \"clippy::too_many_arguments\"\nlevel = \"warn\"",
+        "lint = \"clippy::double_must_use\"\nlevel = \"allow\"",
+        "lint = \"clippy::double_must_use\"\nlevel = \"warn\"",
     );
     assert_reports(&codes, "workspace_lint_unregistered");
     assert_reports(&codes, "workspace_lint_registration_stale");

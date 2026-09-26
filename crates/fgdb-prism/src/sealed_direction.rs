@@ -120,42 +120,41 @@ impl<'a> Incidences<'a> {
         if budget.remaining() == 0 {
             return Ok(SealedScanStep::Yield);
         }
-        if self.out_head.is_none() {
-            if let Some(cursor) = &mut self.outgoing {
-                match cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())? {
-                    SealedScanStep::Item(edge) => self.out_head = Some(edge),
-                    SealedScanStep::End => self.outgoing = None,
+        if self.out_head.is_none()
+            && let Some(cursor) = &mut self.outgoing
+        {
+            match cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())? {
+                SealedScanStep::Item(edge) => self.out_head = Some(edge),
+                SealedScanStep::End => self.outgoing = None,
+                SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
+            }
+        }
+        if self.in_head.is_none()
+            && let Some(cursor) = &mut self.incoming
+        {
+            loop {
+                let edge = cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())?;
+                match edge {
+                    // The outgoing face owns a loop. Skip its incoming copy
+                    // before property observation or any input-edge counting.
+                    SealedScanStep::Item(edge)
+                        if self.undirected && edge.entry.src == self.source =>
+                    {
+                        continue;
+                    }
+                    SealedScanStep::Item(edge) => {
+                        self.in_head = Some(edge);
+                        break;
+                    }
+                    SealedScanStep::End => break,
+                    // A loaded outgoing lookahead MUST survive while the
+                    // incoming face pauses. It cannot be emitted until both
+                    // heads (or their EOFs) determine the canonical order.
                     SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
                 }
             }
-        }
-        if self.in_head.is_none() {
-            if let Some(cursor) = &mut self.incoming {
-                loop {
-                    let edge =
-                        cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())?;
-                    match edge {
-                        // The outgoing face owns a loop. Skip its incoming copy
-                        // before property observation or any input-edge counting.
-                        SealedScanStep::Item(edge)
-                            if self.undirected && edge.entry.src == self.source =>
-                        {
-                            continue;
-                        }
-                        SealedScanStep::Item(edge) => {
-                            self.in_head = Some(edge);
-                            break;
-                        }
-                        SealedScanStep::End => break,
-                        // A loaded outgoing lookahead MUST survive while the
-                        // incoming face pauses. It cannot be emitted until both
-                        // heads (or their EOFs) determine the canonical order.
-                        SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
-                    }
-                }
-                if self.in_head.is_none() {
-                    self.incoming = None;
-                }
+            if self.in_head.is_none() {
+                self.incoming = None;
             }
         }
         let out_key = self.out_head.as_ref().map(|edge| key(edge.entry.dst, edge));

@@ -349,10 +349,10 @@ impl IncrementalRowAggregate {
         if count < ZWeight::ZERO {
             return Err(RowAggregateError::InvalidResult);
         }
-        if let Some(limit) = max_result_rows {
-            if count > ZWeight::from_i128(i128::from(limit)) {
-                return Err(RowAggregateError::ResultBudget { limit });
-            }
+        if let Some(limit) = max_result_rows
+            && count > ZWeight::from_i128(i128::from(limit))
+        {
+            return Err(RowAggregateError::ResultBudget { limit });
         }
         let output = self.rows.prepare_update(&changes, limbs, control)?;
         for (row, _) in changes.iter() {

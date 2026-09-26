@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn typed_post_recursion_join_can_feed_shared_native_subscriptions() {
-        let ((), report) = run_async_under_lab(0x6c05_11, |root| async move {
+        let ((), report) = run_async_under_lab(0x006c_0511, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn existing_native_circuit_layout_and_rebuild_ownership_are_preserved() {
-        let ((), report) = run_async_under_lab(0x6c05_12, |root| async move {
+        let ((), report) = run_async_under_lab(0x006c_0512, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn metadata_refusal_and_foreign_handles_do_not_mutate_registrations() {
-        let ((), report) = run_async_under_lab(0x6c05_13, |root| async move {
+        let ((), report) = run_async_under_lab(0x006c_0513, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn typed_filter_has_eager_pull_and_signed_delta_delivery() {
-        let ((), report) = run_async_under_lab(0x6c05_14, |root| async move {
+        let ((), report) = run_async_under_lab(0x006c_0514, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let commit = contexts.commit();

@@ -187,14 +187,14 @@ impl NativeSubscription {
         if self.pending.is_some() {
             return Err(SubscriptionError::Unacknowledged);
         }
-        if let Some(from) = self.acknowledged {
-            if from != current {
-                return Err(StandingQueryError::DeltaUnavailable {
-                    from,
-                    frontier: current,
-                }
-                .into());
+        if let Some(from) = self.acknowledged
+            && from != current
+        {
+            return Err(StandingQueryError::DeltaUnavailable {
+                from,
+                frontier: current,
             }
+            .into());
         }
         let replay = database.register_standing_replay(
             cx,

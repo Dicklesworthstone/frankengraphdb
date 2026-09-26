@@ -88,7 +88,7 @@ fn policy() -> BulkLoadPolicy {
 
 #[test]
 fn changed_vertex_fields_and_row_order_never_allocate_or_publish() {
-    let ((), report) = run_async_under_lab(0xb51_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5101, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -139,7 +139,7 @@ fn changed_vertex_fields_and_row_order_never_allocate_or_publish() {
 
 #[test]
 fn changed_edge_fields_never_publish_an_unchecked_chunk_or_panic_on_endpoints() {
-    let ((), report) = run_async_under_lab(0xb51_02, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5102, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -203,7 +203,7 @@ fn changed_edge_fields_never_publish_an_unchecked_chunk_or_panic_on_endpoints() 
 
 #[test]
 fn every_truncation_and_appended_suffix_is_a_typed_refusal() {
-    let ((), report) = run_async_under_lab(0xb51_03, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5103, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -268,7 +268,7 @@ fn every_truncation_and_appended_suffix_is_a_typed_refusal() {
 
 #[test]
 fn resume_verifies_skipped_source_prefix_and_can_continue_after_refusal() {
-    let ((), report) = run_async_under_lab(0xb51_04, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5104, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
@@ -325,7 +325,7 @@ fn resume_verifies_skipped_source_prefix_and_can_continue_after_refusal() {
 
 #[test]
 fn canonical_scalars_and_length_delimited_keys_do_not_alias() {
-    let ((), report) = run_async_under_lab(0xb51_05, |root| async move {
+    let ((), report) = run_async_under_lab(0x000b_5105, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();

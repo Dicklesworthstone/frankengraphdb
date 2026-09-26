@@ -78,10 +78,10 @@ impl<V: Vfs + Clone> Database<V> {
         // The retained writer carries the admitted block-to-patch relationship,
         // including when a block can no longer be decoded from storage.
         for block in self.writer.sealed() {
-            if objects.contains_key(&block.block_id) {
-                if let Some(patch) = &block.property_patch {
-                    objects.insert(patch.patch_id, true);
-                }
+            if objects.contains_key(&block.block_id)
+                && let Some(patch) = &block.property_patch
+            {
+                objects.insert(patch.patch_id, true);
             }
         }
         summary.block_objects = objects.len();

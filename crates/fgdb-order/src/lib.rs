@@ -879,15 +879,14 @@ impl<C: Clone + Eq> Raft<C> {
             Event::SnapshotFailed(_) => self.incoming_snapshot = None,
         }
         self.drive_handoff(&mut output, retry_handoff);
-        if let Some(previous) = previous_transfer {
-            if output.installed_snapshot.is_none()
-                && !self
-                    .incoming_snapshot
-                    .as_ref()
-                    .is_some_and(|pending| pending.transfer.id == previous)
-            {
-                output.cancelled_snapshot_transfers.push(previous);
-            }
+        if let Some(previous) = previous_transfer
+            && output.installed_snapshot.is_none()
+            && !self
+                .incoming_snapshot
+                .as_ref()
+                .is_some_and(|pending| pending.transfer.id == previous)
+        {
+            output.cancelled_snapshot_transfers.push(previous);
         }
         output.committed = self.committed_range(before);
         output.role = self.role;

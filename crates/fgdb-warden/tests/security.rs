@@ -510,12 +510,12 @@ fn every_byte_mutation_is_either_rejected_or_has_identical_authorized_semantics(
     for index in 0..bytes.len() {
         let mut changed = bytes.clone();
         changed[index] ^= 1;
-        if let Ok(candidate) = CapabilityToken::decode(&changed) {
-            if let Ok(verified) = authority.verify_at(&candidate, BRANCH, START) {
-                // Location is an unauthenticated hint; changing it is harmless
-                // only because it has no influence on Warden authorization.
-                assert_eq!(verified.predicates(), expected.predicates(), "byte {index}");
-            }
+        if let Ok(candidate) = CapabilityToken::decode(&changed)
+            && let Ok(verified) = authority.verify_at(&candidate, BRANCH, START)
+        {
+            // Location is an unauthenticated hint; changing it is harmless
+            // only because it has no influence on Warden authorization.
+            assert_eq!(verified.predicates(), expected.predicates(), "byte {index}");
         }
     }
 }

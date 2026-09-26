@@ -269,15 +269,15 @@ fn generated_edge_property_history_matches_independent_records() {
                 let mut expected = db.edges_at(before).unwrap();
                 let mut changed = 0;
                 for edge in &mut expected {
-                    if let CanonicalScalar::Int(n) = edge_property(edge) {
-                        if !remove || n > 20 {
-                            changed += 1;
-                            edge.props = if remove {
-                                vec![]
-                            } else {
-                                vec![(P, CanonicalScalar::Int(n + 7))]
-                            };
-                        }
+                    if let CanonicalScalar::Int(n) = edge_property(edge)
+                        && (!remove || n > 20)
+                    {
+                        changed += 1;
+                        edge.props = if remove {
+                            vec![]
+                        } else {
+                            vec![(P, CanonicalScalar::Int(n + 7))]
+                        };
                     }
                 }
                 assert!(changed > 0, "each seed must exercise each mutation");
