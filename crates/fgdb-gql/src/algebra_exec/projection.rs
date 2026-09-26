@@ -278,20 +278,32 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, _paths, _projected, control| {
-                if matches!(
-                    operator,
-                    crate::algebra::GlaOperator::CompareProperties { .. }
-                        | crate::algebra::GlaOperator::SelectBoolean { .. }
-                ) {
-                    return super::compare_properties(operator, bindings, &mut property, control);
-                }
-                let crate::algebra::GlaOperator::ProjectValues { columns } = operator else {
-                    unreachable!("the checked aggregate child has value projection")
-                };
-                visit(columns, bindings, &mut property, control)?;
-                Ok(false)
-            },
+            super::Projection::Visitor(
+                |operator: &GlaOperator,
+                 bindings: &[Option<fgdb_types::VId>],
+                 _paths: &[Option<crate::algebra::GraphPath>],
+                 _projected: &mut ProjectedRows<crate::algebra::GraphValueRow>,
+                 control: &mut C|
+                 -> Result<bool, E> {
+                    if matches!(
+                        operator,
+                        crate::algebra::GlaOperator::CompareProperties { .. }
+                            | crate::algebra::GlaOperator::SelectBoolean { .. }
+                    ) {
+                        return super::compare_properties(
+                            operator,
+                            bindings,
+                            &mut property,
+                            control,
+                        );
+                    }
+                    let crate::algebra::GlaOperator::ProjectValues { columns } = operator else {
+                        unreachable!("the checked aggregate child has value projection")
+                    };
+                    visit(columns, bindings, &mut property, control)?;
+                    Ok(false)
+                },
+            ),
         )?;
         debug_assert!(
             unused.is_empty(),

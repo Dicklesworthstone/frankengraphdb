@@ -523,6 +523,14 @@ struct Execution<'i, F, C, P, Row> {
     segments: [Option<GraphPath>; crate::algebra::MAX_PATTERN_BINDINGS],
     paths: [Option<GraphPath>; crate::algebra::MAX_PATTERN_IDENTITIES],
     continuations: Vec<Continuation<'i>>,
+    terminal_closure: Option<join::TerminalClosure>,
+}
+
+// Aggregate visitors may observe every occurrence. Only sealed terminal row
+// collectors can use a DISTINCT/page bound to factor repeated closing edges.
+enum Projection<P> {
+    Terminal(P),
+    Visitor(P),
 }
 
 impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
@@ -684,6 +692,27 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
             let Some(operator) = operators.get(ordinal) else {
                 continue;
             };
+            if let Some(closure) = self
+                .terminal_closure
+                .filter(|closure| closure.start == ordinal && closure.width == bindings.len())
+            {
+                self.continuations.push(Continuation::Bind {
+                    width: bindings.len(),
+                });
+                let copies = closure.bind(operators, bindings, index, &mut self.control)?;
+                for _ in 0..copies {
+                    (self.control)(GlaExecutionEvent::Work)?;
+                    let _ = (self.project)(
+                        &operators[closure.projection],
+                        bindings,
+                        &self.paths,
+                        &mut self.projected,
+                        &mut self.control,
+                    )?;
+                }
+                next = None;
+                continue;
+            }
             (self.control)(GlaExecutionEvent::Work)?;
             next = Some(ordinal + 1);
             match operator {
@@ -995,10 +1024,17 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, _paths, projected, control| {
-                Row::collect(operator, bindings, projected, control)?;
-                Ok(false)
-            },
+            Projection::Terminal(
+                |operator: &GlaOperator,
+                 bindings: &[Option<VId>],
+                 _paths: &[Option<GraphPath>],
+                 projected: &mut ProjectedRows<Row>,
+                 control: &mut _|
+                 -> Result<bool, E> {
+                    Row::collect(operator, bindings, projected, control)?;
+                    Ok(false)
+                },
+            ),
         )
     }
 }
@@ -1031,23 +1067,30 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             Some(identified),
             test_vertex,
             control,
-            |operator, bindings, paths, projected, control| {
-                if matches!(
-                    operator,
-                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
-                ) {
-                    return compare_properties(operator, bindings, &mut property, control);
-                }
-                Row::collect_properties_with_paths(
-                    operator,
-                    bindings,
-                    paths,
-                    projected,
-                    &mut property,
-                    control,
-                )?;
-                Ok(false)
-            },
+            Projection::Terminal(
+                |operator: &GlaOperator,
+                 bindings: &[Option<VId>],
+                 paths: &[Option<GraphPath>],
+                 projected: &mut ProjectedRows<Row>,
+                 control: &mut _|
+                 -> Result<bool, E> {
+                    if matches!(
+                        operator,
+                        GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                    ) {
+                        return compare_properties(operator, bindings, &mut property, control);
+                    }
+                    Row::collect_properties_with_paths(
+                        operator,
+                        bindings,
+                        paths,
+                        projected,
+                        &mut property,
+                        control,
+                    )?;
+                    Ok(false)
+                },
+            ),
         )
     }
 
@@ -1080,33 +1123,40 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             Some(identified),
             test_vertex,
             control,
-            |operator, bindings, paths, projected, control| {
-                if matches!(
-                    operator,
-                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
-                ) {
-                    return compare_element_properties(
+            Projection::Terminal(
+                |operator: &GlaOperator,
+                 bindings: &[Option<VId>],
+                 paths: &[Option<GraphPath>],
+                 projected: &mut ProjectedRows<Row>,
+                 control: &mut _|
+                 -> Result<bool, E> {
+                    if matches!(
+                        operator,
+                        GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                    ) {
+                        return compare_element_properties(
+                            operator,
+                            bindings,
+                            paths,
+                            &mut property,
+                            &mut edge_property,
+                            control,
+                        );
+                    }
+                    Row::collect_element_properties(
                         operator,
                         bindings,
                         paths,
+                        projected,
                         &mut property,
                         &mut edge_property,
+                        &mut vertex_labels,
+                        &mut edge_type,
                         control,
-                    );
-                }
-                Row::collect_element_properties(
-                    operator,
-                    bindings,
-                    paths,
-                    projected,
-                    &mut property,
-                    &mut edge_property,
-                    &mut vertex_labels,
-                    &mut edge_type,
-                    control,
-                )?;
-                Ok(false)
-            },
+                    )?;
+                    Ok(false)
+                },
+            ),
         )
     }
 
@@ -1125,23 +1175,30 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, paths, projected, control| {
-                if matches!(
-                    operator,
-                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
-                ) {
-                    return compare_properties(operator, bindings, &mut property, control);
-                }
-                Row::collect_properties_with_paths(
-                    operator,
-                    bindings,
-                    paths,
-                    projected,
-                    &mut property,
-                    control,
-                )?;
-                Ok(false)
-            },
+            Projection::Terminal(
+                |operator: &GlaOperator,
+                 bindings: &[Option<VId>],
+                 paths: &[Option<GraphPath>],
+                 projected: &mut ProjectedRows<Row>,
+                 control: &mut _|
+                 -> Result<bool, E> {
+                    if matches!(
+                        operator,
+                        GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                    ) {
+                        return compare_properties(operator, bindings, &mut property, control);
+                    }
+                    Row::collect_properties_with_paths(
+                        operator,
+                        bindings,
+                        paths,
+                        projected,
+                        &mut property,
+                        control,
+                    )?;
+                    Ok(false)
+                },
+            ),
         )
     }
 
@@ -1154,7 +1211,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: F,
         mut control: C,
-        project: P,
+        project: Projection<P>,
     ) -> Result<Vec<Row>, E>
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
@@ -1186,7 +1243,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         identified_index: Option<IdentifiedIndex>,
         test_vertex: F,
         mut control: C,
-        project: P,
+        project: Projection<P>,
     ) -> Result<Vec<Row>, E>
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
@@ -1214,6 +1271,10 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         }
         // Only the compiler-owned terminal DISTINCT selects duplicate removal.
         let distinct = matches!(operators.iter().rev().nth(2), Some(GlaOperator::Distinct));
+        let (project, terminal) = match project {
+            Projection::Terminal(project) => (project, true),
+            Projection::Visitor(project) => (project, false),
+        };
         let mut execution = Execution {
             test_vertex,
             control,
@@ -1228,6 +1289,11 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             segments: core::array::from_fn(|_| None),
             paths: core::array::from_fn(|_| None),
             continuations: Vec::with_capacity(operators.len()),
+            terminal_closure: if terminal && identified_index.is_none() {
+                join::TerminalClosure::compile(operators)
+            } else {
+                None
+            },
         };
         let mut bindings = Vec::new();
         match operators.first() {

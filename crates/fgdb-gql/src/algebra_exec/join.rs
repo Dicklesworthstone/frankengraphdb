@@ -4,14 +4,161 @@
 //! recognized below are eligible: no Select, projection, optional/probe boundary,
 //! or other observable source operation is moved or skipped. A reciprocal index
 //! is derived from the same admitted topology as the original adjacency index.
-//! The original visitor still emits every actual edge occurrence. In particular,
-//! intersection is a candidate filter, not a multiplicity estimate or DISTINCT.
+//! Intersection retains every actual occurrence. Terminal closing edges may
+//! carry exact multiplicities up to the sealed collector's retention bound;
+//! aggregate visitors and fallible property projections still see every row.
 
 use super::{GlaDirection, GlaExecutionEvent, GlaOperator, Index, RelationId, VId};
-use crate::algebra::{BindingSlot, MAX_PATTERN_EDGES};
+use crate::algebra::{BindingSlot, MAX_PATTERN_EDGES, ValueProjection};
 
 #[cfg(test)]
 mod loom_access_tests;
+
+/// Closing edges add occurrences, but no new logical vertex value. After the
+/// last fallible predicate a terminal identity projection can retain those
+/// occurrences as a product until DISTINCT or a finite page needs them.
+///
+/// This descriptor borrows no source and allocates no row state. Recognition
+/// stops at every read, scope, capture, new variable or nonterminal operator.
+/// The ordinary evaluator still reaches every preceding predicate in order.
+#[derive(Clone, Copy)]
+pub(super) struct TerminalClosure {
+    pub(super) start: usize,
+    pub(super) width: usize,
+    pub(super) projection: usize,
+    capacity: u128,
+}
+
+impl TerminalClosure {
+    pub(super) fn compile(operators: &[GlaOperator]) -> Option<Self> {
+        let GlaOperator::Limit { offset, count } = operators.last()? else {
+            return None;
+        };
+        let mut projection = operators.len().checked_sub(3)?;
+        let distinct = matches!(operators.get(projection), Some(GlaOperator::Distinct));
+        if distinct {
+            projection = projection.checked_sub(1)?;
+        }
+        let capacity = if *count == Some(0) {
+            0
+        } else if distinct {
+            1
+        } else {
+            u128::from(offset.checked_add((*count)?)?)
+        };
+        let ordered = match (
+            operators.get(projection)?,
+            operators.get(operators.len() - 2)?,
+        ) {
+            (GlaOperator::Project { .. }, GlaOperator::OrderByVertexId)
+            | (GlaOperator::ProjectBindings { .. }, GlaOperator::OrderByBindings) => true,
+            (
+                GlaOperator::ProjectValues { columns },
+                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. },
+            ) => columns
+                .iter()
+                .all(|column| matches!(column, ValueProjection::Vertex { .. })),
+            _ => false,
+        };
+        if !ordered {
+            return None;
+        }
+        let mut start = projection;
+        let mut width = None;
+        while let Some(at) = start.checked_sub(2) {
+            let Some((_, _, _, appended, _)) = closing_edge(operators, at) else {
+                break;
+            };
+            if width.is_some_and(|width| appended + 1 != width) {
+                break;
+            }
+            width = Some(appended);
+            start = at;
+        }
+        Some(Self {
+            start,
+            width: width?,
+            projection,
+            capacity,
+        })
+    }
+
+    /// Evaluate each point probe once, carrying the exact product up to the
+    /// terminal retention bound. Saturation is never a reported cardinality:
+    /// no more than offset + count identical rows can enter any finite page.
+    /// The caller owns a restoration frame before any temporary slot is added.
+    pub(super) fn bind<E>(
+        self,
+        operators: &[GlaOperator],
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<u128, E> {
+        let mut copies = 1_u128.min(self.capacity);
+        for at in (self.start..self.projection).step_by(2) {
+            control(GlaExecutionEvent::Work)?;
+            let (source, relation, direction, appended, target) =
+                closing_edge(operators, at).expect("the terminal closure was checked");
+            debug_assert_eq!(appended, bindings.len());
+            let Some((source, target)) = bindings
+                .get(source)
+                .copied()
+                .flatten()
+                .zip(bindings.get(target).copied().flatten())
+            else {
+                return Ok(0);
+            };
+            let Some(neighbors) = index
+                .get(&(relation, direction))
+                .and_then(|adjacency| adjacency.get(&source))
+            else {
+                return Ok(0);
+            };
+            let occurrences = equal_range(neighbors, target, control)?.len();
+            if occurrences == 0 {
+                return Ok(0);
+            }
+            copies = copies
+                .checked_mul(occurrences as u128)
+                .unwrap_or(self.capacity)
+                .min(self.capacity);
+            control(GlaExecutionEvent::ScratchEntry)?;
+            bindings.push(Some(target));
+        }
+        Ok(copies)
+    }
+}
+
+fn closing_edge(
+    operators: &[GlaOperator],
+    at: usize,
+) -> Option<(usize, RelationId, GlaDirection, usize, usize)> {
+    let GlaOperator::Expand {
+        source,
+        relation,
+        direction,
+    } = operators.get(at)?
+    else {
+        return None;
+    };
+    let GlaOperator::VertexIdentity {
+        left,
+        right,
+        equal: true,
+    } = operators.get(at.checked_add(1)?)?
+    else {
+        return None;
+    };
+    let appended = left.ordinal().max(right.ordinal()) as usize;
+    let target = left.ordinal().min(right.ordinal()) as usize;
+    ((source.ordinal() as usize) < appended && target < appended).then_some((
+        source.ordinal() as usize,
+        *relation,
+        *direction,
+        appended,
+        target,
+    ))
+}
 
 #[derive(Clone, Copy)]
 struct IntersectionAccess {
