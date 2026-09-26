@@ -78,9 +78,13 @@ impl WriteTxn {
     ///
     /// This explicit finalization admits SET/unset of vertex or edge properties,
     /// label membership changes, and property compare-and-set. It requires no
-    /// recorded point, negative or query reads, scans, expansion witnesses,
-    /// savepoints or active mixed-program scope. Creation/ensure/deletion intents
-    /// are ineligible even when their effects cancelled. Ordinary commit and
+    /// savepoints or active mixed-program scope. Recorded point/negative/query
+    /// reads and scan/expansion witnesses must pass the ordinary conservative
+    /// read validator at the ORIGINAL basis before re-evaluation. No reads are
+    /// repeated, narrowed or discarded. A full-element read still conflicts
+    /// with any intervening change to that element, even on another field.
+    /// Creation/ensure/deletion intents are ineligible even when their effects
+    /// cancelled. Ordinary commit and
     /// refresh_snapshot keep their existing element-level conflict behavior.
     ///
     /// Every raw property or label slot is protected, including cancelled SETs,
@@ -155,14 +159,9 @@ impl WriteTxn {
                 live: previous.basis,
             });
         }
-        if !self.read_set.borrow().is_empty()
-            || !self.match_expansions.borrow().is_empty()
-            || !self.scanned_vertex_labels.borrow().is_empty()
-            || self.scanned_vertices.get()
-            || self.scanned_edges.get()
-            || !self.savepoints.is_empty()
-            || self.program_multi_relation
-        {
+        // The common completion guard has validated every recorded read at
+        // the OLD basis. Keep those witnesses; only mutation conflicts rebase.
+        if !self.savepoints.is_empty() || self.program_multi_relation {
             return Err(WriteTxnError::FieldRebaseIneligible);
         }
         // Check the original vocabulary before normalization, routing or copies.

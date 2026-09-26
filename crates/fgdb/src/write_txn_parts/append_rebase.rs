@@ -2,7 +2,7 @@
 // mutation evaluator remains the only producer of effects and dependencies.
 
 impl WriteTxn {
-    /// Commit unobserved vertex/edge creations after explicit append rebase.
+    /// Commit vertex/edge creations after read-validated append rebase.
     ///
     /// Ordinary commit conservatively conflicts on shared endpoint vertices.
     /// This opt-in finalization can admit independent appends to the same
@@ -10,10 +10,15 @@ impl WriteTxn {
     /// against the current healthy writer and then uses ordinary FCW validation
     /// and ONE Chronicle publication. No source text is parsed or retried.
     ///
-    /// Eligibility requires only unconditional creates, no recorded point or
-    /// query reads (including negative reads), no scan/expansion witnesses, no
-    /// savepoints and no active mixed-program scope. ENSURE, CAS, updates and
-    /// deletes are refused, even when their net effect was a no-op. The complete
+    /// Eligibility requires only unconditional creates, no savepoints and no
+    /// active mixed-program scope. Recorded reads are allowed only after the
+    /// ordinary conservative point/negative/scan/expansion validator proves
+    /// their entire original-basis interval unchanged. Reads are not repeated
+    /// or dropped, and a changed read refuses under FG-LAW-FCW-READ-01. Full
+    /// vertex observations still conflict with changed incidence or fields;
+    /// this does not infer narrower predicates from returned values.
+    /// ENSURE, CAS, updates and deletes are refused even when their net effect
+    /// was a no-op. The complete
     /// retained history is required. Schema/constraint or unknown delta families,
     /// writes to proposed identities and retirement of any endpoint all refuse.
     /// Reusing an identity that was concurrently created then deleted is refused
@@ -86,14 +91,9 @@ impl WriteTxn {
                 live: previous.basis,
             });
         }
-        if !self.read_set.borrow().is_empty()
-            || !self.match_expansions.borrow().is_empty()
-            || !self.scanned_vertex_labels.borrow().is_empty()
-            || self.scanned_vertices.get()
-            || self.scanned_edges.get()
-            || !self.savepoints.is_empty()
-            || self.program_multi_relation
-        {
+        // The common completion guard has validated every recorded read at
+        // the OLD basis. Keep those witnesses; only mutation conflicts rebase.
+        if !self.savepoints.is_empty() || self.program_multi_relation {
             return Err(WriteTxnError::AppendRebaseIneligible);
         }
         // Reject conditional/raw decisions BEFORE looking at the new writer.

@@ -42,6 +42,9 @@ async fn drifted(cx: &CommitCx, txcx: &TxnCx) -> (Database<MemVfs>, WriteTxn) {
     let mut database = Database::open_memory(cx, keys()).await.unwrap();
     seed(&mut database, cx).await;
     let mut transaction = database.begin(txcx).unwrap();
+    // A real, unchanged point read makes the checkpoint/crash/owner controls
+    // exercise original-basis read validation, not only blind append replay.
+    transaction.vertex(&database, VId(2)).unwrap();
     transaction.write(&mut database, edge(50, 2)).unwrap();
     database.write(cx, edge(10, 3)).await.unwrap();
     (database, transaction)
@@ -225,7 +228,7 @@ fn raw_conditionals_updates_and_deletes_never_become_blind_appends() {
 }
 
 #[test]
-fn point_negative_scan_and_savepoint_observations_refuse_rebase() {
+fn unchanged_negative_reads_pass_but_stale_reads_and_savepoints_refuse() {
     let ((), report) = run_async_under_lab(0xa99e_0004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
@@ -259,15 +262,24 @@ fn point_negative_scan_and_savepoint_observations_refuse_rebase() {
                     transaction.savepoint(&database, "keep").unwrap();
                 }
             }
-            assert!(matches!(
-                transaction
-                    .commit_append_only_rebased(&mut database, &cx, 10)
-                    .await,
-                Err(WriteTxnError::AppendRebaseIneligible)
-            ));
-            assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
-            assert_eq!(database.frontier().unwrap(), frontier);
-            assert!(database.edge(EId(50)).unwrap().is_none());
+            let result = transaction
+                .commit_append_only_rebased(&mut database, &cx, 10)
+                .await;
+            if case == 1 {
+                assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+                assert!(database.edge(EId(50)).unwrap().is_some());
+            } else {
+                if case == 5 {
+                    assert!(matches!(result, Err(WriteTxnError::AppendRebaseIneligible)));
+                } else {
+                    assert!(matches!(result, Err(WriteTxnError::Write(
+                        WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }
+                    ))));
+                }
+                assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(database.frontier().unwrap(), frontier);
+                assert!(database.edge(EId(50)).unwrap().is_none());
+            }
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
     });

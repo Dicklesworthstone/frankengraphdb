@@ -3,6 +3,11 @@ enum RebasePreparation {
     DisjointFields(u64),
 }
 
+enum ConflictScope {
+    Reads,
+    ReadsAndWrites,
+}
+
 // Completion owns cleanup across returns, Rust unwinding and dropped futures.
 // It never performs durable work in Drop or turns an unknown marker into abort.
 struct TxnCompletionGuard<'txn, 'db, V: Vfs + Clone> {
@@ -224,6 +229,26 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
+        // A new apply basis must never erase the interval over which earlier
+        // point, negative and query observations need validation. Reuse the
+        // ordinary witness checker BEFORE either policy can replace the basis.
+        // Only write conflicts receive policy-specific independence rules.
+        if rebase.is_some()
+            && let Some((law, element, committed_at)) = attempt.transaction.transaction_conflict_in(
+                attempt.database,
+                ConflictScope::Reads,
+                &mut checkpoint,
+            )?
+        {
+            return Err(WriteError::FirstCommitterWins {
+                law,
+                detail: format!(
+                    "rebase read {element:?} changed at {committed_at:?} after pinned basis {:?}",
+                    attempt.transaction.basis
+                ),
+            }
+            .into());
+        }
         match rebase {
             Some(RebasePreparation::Append(limit)) => attempt.transaction.prepare_append_rebase(
                 attempt.database,
@@ -368,10 +393,25 @@ impl WriteTxn {
         database: &Database<V>,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
+        self.transaction_conflict_in(database, ConflictScope::ReadsAndWrites, checkpoint)
+    }
+
+    // One witness interpretation for ordinary completion, refresh and rebase.
+    // Reads are never refined to just output identities or to current values:
+    // every original positive/negative observation and intervening write counts.
+    fn transaction_conflict_in<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        scope: ConflictScope,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
         let read_set = self.read_set.borrow();
         let match_expansions = self.match_expansions.borrow();
         let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
-        let mutation_footprint = self.mutation_footprint(checkpoint)?;
+        let mutation_footprint = match scope {
+            ConflictScope::Reads => std::collections::BTreeSet::new(),
+            ConflictScope::ReadsAndWrites => self.mutation_footprint(checkpoint)?,
+        };
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         if read_set.is_empty()

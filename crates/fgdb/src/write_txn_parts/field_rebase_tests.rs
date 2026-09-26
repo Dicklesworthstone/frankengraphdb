@@ -45,6 +45,8 @@ async fn drifted(cx: &CommitCx, txcx: &TxnCx) -> (Database<MemVfs>, WriteTxn) {
     let mut database = Database::open_memory(cx, keys()).await.unwrap();
     seed(&mut database, cx).await;
     let mut transaction = database.begin(txcx).unwrap();
+    // The existing interruption/unwind/crash matrix also covers a retained read.
+    transaction.vertex(&database, VId(3)).unwrap();
     transaction.write(&mut database, edit(P, 7)).unwrap();
     database.write(cx, edit(Q, 8)).await.unwrap();
     (database, transaction)
@@ -292,7 +294,7 @@ fn target_retirement_including_cascades_never_rebases() {
 }
 
 #[test]
-fn reads_savepoints_and_non_field_instructions_stay_ineligible() {
+fn unchanged_reads_pass_and_changed_reads_or_ineligible_work_refuse() {
     let ((), report) = run_async_under_lab(0xf1e1_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
@@ -318,19 +320,31 @@ fn reads_savepoints_and_non_field_instructions_stay_ineligible() {
                 8 => { transaction.program_multi_relation = true; }
                 _ => {}
             }
-            database.write(&cx, edit(Q, 8)).await.unwrap();
+            let mut concurrent = edit(Q, 8);
+            if case == 3 {
+                concurrent.set_edge_property(EId(10), Q, Some(CanonicalScalar::Int(8)));
+            }
+            database.write(&cx, concurrent).await.unwrap();
             let frontier = database.frontier().unwrap();
-            assert!(matches!(
-                transaction
-                    .commit_disjoint_fields_rebased(&mut database, &cx, 10)
-                    .await,
-                Err(WriteTxnError::FieldRebaseIneligible)
-            ));
-            assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
-            assert_eq!(database.frontier().unwrap(), frontier);
+            let result = transaction
+                .commit_disjoint_fields_rebased(&mut database, &cx, 10)
+                .await;
+            if case == 1 {
+                assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+            } else {
+                if case <= 3 {
+                    assert!(matches!(result, Err(WriteTxnError::Write(
+                        WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }
+                    ))));
+                } else {
+                    assert!(matches!(result, Err(WriteTxnError::FieldRebaseIneligible)));
+                }
+                assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(database.frontier().unwrap(), frontier);
+            }
             assert_eq!(
                 database.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(0)
+                CanonicalScalar::Int(if case == 1 { 7 } else { 0 })
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
@@ -589,4 +603,226 @@ fn field_domains_keep_kinds_and_keys_distinct_and_refuse_unknown_history() {
         footprint.conflicts(&schema, &mut || Ok(())),
         Err(WriteTxnError::FieldRebaseIneligible)
     ));
+}
+
+fn observed_write(append: bool, value: i64) -> WriteBatch {
+    if append {
+        let mut batch = WriteBatch::new(R);
+        batch.add_edge(EId(50), VId(1), VId(2), vec![(P, CanonicalScalar::Int(value))]);
+        batch
+    } else {
+        edit(P, value)
+    }
+}
+
+async fn finish_observed(
+    transaction: &mut WriteTxn,
+    database: &mut Database<MemVfs>,
+    cx: &CommitCx,
+    append: bool,
+) -> Result<CommitSeq, WriteTxnError> {
+    if append {
+        transaction.commit_append_only_rebased(database, cx, 1).await
+    } else {
+        transaction.commit_disjoint_fields_rebased(database, cx, 1).await
+    }
+}
+
+#[test]
+fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() {
+    let ((), report) = run_async_under_lab(0xf1e1_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for append in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut database = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await.unwrap();
+            seed(&mut database, &cx).await;
+            let pinned = database.read_session().unwrap();
+            let mut transaction = database.begin(&txcx).unwrap();
+            let basis = transaction.basis();
+            let read = transaction.vertex(&database, VId(3)).unwrap().unwrap();
+            let CanonicalScalar::Int(value) = &read.props[0].1 else {
+                panic!("integer fixture");
+            };
+            assert!(transaction.vertex(&database, VId(99)).unwrap().is_none());
+            let staged = observed_write(append, *value + 7);
+            transaction.write(&mut database, staged.clone()).unwrap();
+            let original = transaction.prepared.as_ref().unwrap().template.clone();
+            let mut ordinary = database.begin(&txcx).unwrap();
+            ordinary.write(&mut database, staged.clone()).unwrap();
+            let concurrent = edit(Q, 8);
+            let frontier = database.write(&cx, concurrent.clone()).await.unwrap();
+            // The conflict is real on the normal path, not an unrelated write
+            // that would already commit. Only the staged write domain relaxes.
+            assert_conflict(ordinary.commit(&mut database, &cx).await);
+            assert_eq!(transaction.basis(), basis);
+            assert_eq!(transaction.vertex(&database, VId(3)).unwrap(), Some(read));
+            let seq = finish_observed(&mut transaction, &mut database, &cx, append)
+                .await.unwrap();
+            assert_eq!(seq, CommitSeq(frontier.0 + 1));
+            {
+                let tail = database.delta_since(frontier).unwrap().collect::<Vec<_>>();
+                assert_eq!(tail.len(), 1);
+                assert_eq!(tail[0].coordinate_entries(), original.coordinate_entries());
+            }
+            assert_eq!(pinned.vertex(VId(1)).unwrap().unwrap().props[1].1, CanonicalScalar::Int(0));
+            let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
+            seed(&mut serial, &cx).await;
+            serial.write(&cx, concurrent).await.unwrap();
+            serial.write(&cx, staged).await.unwrap();
+            assert_eq!(database.vertices().unwrap(), serial.vertices().unwrap());
+            assert_eq!(database.edges().unwrap(), serial.edges().unwrap());
+            drop(database);
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            assert_eq!(reopened.frontier().unwrap(), seq);
+            assert_eq!(reopened.vertices().unwrap(), serial.vertices().unwrap());
+            assert_eq!(reopened.edges().unwrap(), serial.edges().unwrap());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_rebase() {
+    let ((), report) = run_async_under_lab(0xf1e1_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for append in [false, true] {
+            for case in 0..9 {
+                let mut database = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut database, &cx).await;
+                let mut transaction = database.begin(&txcx).unwrap();
+                transaction.write(&mut database, observed_write(append, 7)).unwrap();
+                // Do not add an unrelated endpoint/field change here: each
+                // negative must be rejected by its named read dependency.
+                let mut concurrent = WriteBatch::new(R);
+                match case {
+                    0 => {
+                        transaction.vertex(&database, VId(3)).unwrap();
+                        concurrent.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+                    }
+                    1 => {
+                        assert!(transaction.vertex(&database, VId(99)).unwrap().is_none());
+                        concurrent.create_vertex(VId(99), vec![LabelId(8)], vec![]);
+                    }
+                    2 => {
+                        assert!(transaction.edge(&database, EId(99)).unwrap().is_none());
+                        concurrent.add_edge(EId(99), VId(2), VId(3), vec![]);
+                    }
+                    3 | 4 => {
+                        assert!(transaction.execute_gql(
+                            &database,
+                            "MATCH (n:Missing) RETURN n",
+                            &RelationBind::new().with_label("Missing", LabelId(9)),
+                        ).unwrap().is_empty());
+                        if case == 3 {
+                            concurrent.create_vertex(VId(99), vec![LabelId(9)], vec![]);
+                        } else {
+                            concurrent.set_vertex_label(VId(3), LabelId(9), true);
+                        }
+                    }
+                    5 => {
+                        transaction.edges(&database).unwrap();
+                        concurrent.add_edge(EId(99), VId(2), VId(3), vec![]);
+                    }
+                    6 => {
+                        transaction.edge(&database, EId(10)).unwrap();
+                        concurrent.delete_vertex(VId(2));
+                    }
+                    7 => {
+                        transaction.vertices(&database).unwrap();
+                        concurrent.create_vertex(VId(99), vec![LabelId(8)], vec![]);
+                    }
+                    _ => {
+                        transaction.savepoint(&database, "before-read").unwrap();
+                        transaction.vertex(&database, VId(3)).unwrap();
+                        transaction.rollback_to_savepoint(&database, "before-read").unwrap();
+                        transaction.release_savepoint(&database, "before-read").unwrap();
+                        concurrent.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+                    }
+                }
+                database.write(&cx, concurrent).await.unwrap();
+                if case == 0 {
+                    // Equality against the latest value would miss this ABA.
+                    let mut restore = WriteBatch::new(R);
+                    restore.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(0)));
+                    database.write(&cx, restore).await.unwrap();
+                    assert_eq!(transaction.vertex(&database, VId(3)).unwrap(), database.vertex(VId(3)).unwrap());
+                }
+                let frontier = database.frontier().unwrap();
+                let expected_vertices = database.vertices().unwrap();
+                let expected_edges = database.edges().unwrap();
+                assert!(matches!(
+                    finish_observed(&mut transaction, &mut database, &cx, append).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01", ..
+                    }))
+                ), "append={append}, read case={case}");
+                assert_eq!(database.frontier().unwrap(), frontier);
+                assert_eq!(database.vertices().unwrap(), expected_vertices);
+                assert_eq!(database.edges().unwrap(), expected_edges);
+                assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
+                assert!(transaction.prepared.is_none());
+                assert!(transaction.pin.is_none());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn read_write_skew_cannot_hide_behind_independent_rebase_domains() {
+    let ((), report) = run_async_under_lab(0xf1e1_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        for append in [false, true] {
+            for reverse in [false, true] {
+                let mut database = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut database, &cx).await;
+                let mut left = database.begin(&txcx).unwrap();
+                let mut right = database.begin(&txcx).unwrap();
+                let left_write = observed_write(append, 1);
+                let mut right_write = WriteBatch::new(R);
+                if append {
+                    assert!(left.edge(&database, EId(60)).unwrap().is_none());
+                    assert!(right.edge(&database, EId(50)).unwrap().is_none());
+                    right_write.add_edge(EId(60), VId(1), VId(2), vec![]);
+                } else {
+                    assert_eq!(left.vertex(&database, VId(2)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(0));
+                    assert_eq!(right.vertex(&database, VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(0));
+                    right_write.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
+                }
+                left.write(&mut database, left_write).unwrap();
+                right.write(&mut database, right_write).unwrap();
+                if reverse {
+                    core::mem::swap(&mut left, &mut right);
+                }
+                let seq = finish_observed(&mut left, &mut database, &cx, append).await.unwrap();
+                assert!(matches!(
+                    finish_observed(&mut right, &mut database, &cx, append).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01", ..
+                    }))
+                ));
+                assert_eq!(database.frontier().unwrap(), seq);
+                if append {
+                    assert_ne!(database.edge(EId(50)).unwrap().is_some(), database.edge(EId(60)).unwrap().is_some());
+                } else {
+                    let left_row = database.vertex(VId(1)).unwrap().unwrap();
+                    let right_row = database.vertex(VId(2)).unwrap().unwrap();
+                    assert_eq!(left_row.props[0].1, CanonicalScalar::Int(if reverse { 0 } else { 1 }));
+                    assert_eq!(right_row.props[0].1, CanonicalScalar::Int(if reverse { 1 } else { 0 }));
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
