@@ -1,5 +1,10 @@
 // Reusable native scripts enter the SAME prepared-program and completion paths.
 // Binding is pure and complete before any program step or allocator can run.
+//
+// Each entry point returns once per script or batch. Its Err keeps the failing
+// record's location next to the full program error on purpose, so the
+// result_large_err allows below are deliberate: the size costs nothing on
+// those paths, and boxing would only hide that report behind an indirection.
 
 impl WriteTxn {
     /// Bind every script argument and stage the complete native program with
@@ -11,6 +16,7 @@ impl WriteTxn {
     /// The existing program executor owns database/health/basis preflight,
     /// context restriction, cancellation and identity-allocation ordering.
     /// Binding is bounded definition work, not charged query/operator work.
+    #[allow(clippy::result_large_err)] // once-per-script report (file header)
     pub fn execute_graph_write_script_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -43,6 +49,7 @@ impl<V: Vfs + Clone> Database<V> {
     // Keep all three purpose contexts and the argument map explicit at this
     // application boundary rather than borrowing ambient execution authority.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-script report (file header)
     pub async fn execute_graph_write_script_autocommit_governed<A>(
         &mut self,
         txcx: &TxnCx,
@@ -75,6 +82,7 @@ impl WriteTxn {
     /// invocations. Issued identities are never reclaimed by rollback. Requests
     /// retain flat statement indices; batch.location() maps them to input records.
     /// Receipts are transaction-local until explicit finish/commit succeeds.
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
     pub fn execute_bound_graph_write_script_batch_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -96,6 +104,7 @@ impl WriteTxn {
     /// limit; the native binder applies its hard ceiling. The execution policy
     /// is independent and shared across the entire batch.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
     pub fn execute_graph_write_script_batch_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -120,6 +129,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// No per-record commit, retry, or fallback occurs. The complete receipt is
     /// withheld until finish succeeds; finish errors retain their original typed
     /// committed/unknown outcomes and have no fabricated input-record location.
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
     pub async fn execute_bound_graph_write_script_batch_autocommit_governed<A>(
         &mut self,
         txcx: &TxnCx,
@@ -142,6 +152,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// database observation, durable marker or partial result. Execution then
     /// uses one shared policy and one ordinary completion for the entire batch.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
     pub async fn execute_graph_write_script_batch_autocommit_governed<A>(
         &mut self,
         txcx: &TxnCx,

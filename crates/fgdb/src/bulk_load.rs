@@ -185,6 +185,9 @@ impl core::error::Error for BulkLoadError {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    // BulkLoadError is a resume report (kind plus committed and pending
+    // checkpoints) returned once per load, not per row: its size is immaterial.
+    #[allow(clippy::result_large_err)]
     pub async fn bulk_load<I>(
         &mut self,
         cx: &QueryCx,
@@ -203,6 +206,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Production path with the existing commit crash seam at an absolute,
     /// zero-based chunk index. Faults do not introduce another writer.
     #[doc(hidden)]
+    #[allow(clippy::result_large_err)] // once-per-load resume report, as above
     pub async fn bulk_load_with_crash<I>(
         &mut self,
         cx: &QueryCx,
@@ -224,6 +228,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// chunk in `committed` and no `pending` candidate. The hook must not label
     /// an unacknowledged write as committed.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-load resume report, as above
     pub async fn bulk_load_with_checkpoint<I, F>(
         &mut self,
         cx: &QueryCx,
@@ -253,6 +258,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// or buffering an entire decoded input. All preflight source failures leave
     /// this invocation's graph unchanged. Replay failures preserve the completed
     /// prefix and never mint a pending candidate for an unread or unchecked chunk.
+    #[allow(clippy::result_large_err)] // once-per-load resume report, as above
     pub async fn try_bulk_load<I, E>(
         &mut self,
         cx: &QueryCx,
@@ -272,6 +278,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Fallible counterpart of bulk_load_with_checkpoint, using the very same
     /// preparation/publication loop, limits and acknowledgement boundary.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-load resume report, as above
     pub async fn try_bulk_load_with_checkpoint<I, E, F>(
         &mut self,
         cx: &QueryCx,

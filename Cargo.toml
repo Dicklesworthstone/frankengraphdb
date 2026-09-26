@@ -60,19 +60,10 @@ double_must_use = "allow"
 # Index walks over parallel slices by a single counter; an iterator rewrite would
 # obscure the arithmetic without changing behaviour.
 needless_range_loop = "allow"
-# MEASURED RESIDUAL, not a justification (fgdb-gate-weakening-rollback-mthlh).
-# 89b49d38 and 21ccbfd7 added 27 workspace allows without evidence. 8ae77715
-# removed the six correctness/suspicious/perf ones; the next commit removed the
-# ten other style lints with at most 3 sites each (manual_next_back had none),
-# each site fixed or allowed locally with a reason. manual_noop_waker (13 sites),
-# then err_expect (30), unnecessary_mut_passed (18), manual_is_multiple_of (14),
-# unusual_byte_groupings (44) and collapsible_if (38) followed as fixed code, and
-# too_many_arguments (9) as site-local allows with reasons.
-# unnecessary_literal_unwrap (13) followed: 11 fixed, and two documented `fail`
-# test helpers were allowed locally. type_complexity (34) followed as named
-# aliases (one TxnGqlError<E> for the WriteTxn error family). What remains is
-# result_large_err (unique sites at 2026-09-25, workspace --all-targets), which
-# is to become boxed errors or site-local allows with reasons, never a new
-# workspace entry.
-result_large_err = "allow" # 263 sites / 48 files
+# No other clippy lint is allowed workspace-wide (fgdb-gate-weakening-rollback-
+# mthlh): the 26 clippy allows 89b49d38 and 21ccbfd7 added without evidence were
+# each removed by fixing their sites or allowing a named site locally with a
+# reason. (89b49d38's rustc recursion_depth_exceeding_limit allow is the one left,
+# above.) A new entry here needs a lint_allowance row in
+# registries/workspace_topology.toml.
 

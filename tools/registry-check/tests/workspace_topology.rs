@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 // again as each residual row is retired (manual_noop_waker: 12 rows; err_expect,
 // unnecessary_mut_passed, manual_is_multiple_of: 9 rows; unusual_byte_groupings,
 // collapsible_if, too_many_arguments: 6 rows; unnecessary_literal_unwrap: 5;
-// type_complexity: 4).
-const ID_TABLE_PIN: &str = "fnv1a64:fbd64914d6128fed";
+// type_complexity: 4; result_large_err: 3, the last residual).
+const ID_TABLE_PIN: &str = "fnv1a64:402b8d82252fa635";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -60,8 +60,9 @@ const ID_TABLE_PIN: &str = "fnv1a64:fbd64914d6128fed";
 // (fgdb-gate-weakening-rollback-mthlh), 12 once manual_noop_waker was fixed,
 // 9 once err_expect, unnecessary_mut_passed and manual_is_multiple_of were,
 // 6 once unusual_byte_groupings, collapsible_if and too_many_arguments were,
-// 5 once unnecessary_literal_unwrap was, 4 once type_complexity was.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:24dca31b6c701c73";
+// 5 once unnecessary_literal_unwrap was, 4 once type_complexity was, 3 once
+// result_large_err was (the two kept 088e510f allows plus rustc recursion).
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:8c1cfbecfb827890";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

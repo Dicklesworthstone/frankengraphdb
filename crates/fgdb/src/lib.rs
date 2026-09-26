@@ -604,15 +604,20 @@ pub enum WriteError {
     /// Refused during preparation, before Chronicle can consume a sequence.
     /// Larger scalars remain canonical; this storage representation cannot
     /// materialize them as an indivisible row.
+    ///
+    /// The storage and commit sources below are boxed, like the CAS mismatch
+    /// above: each was larger than every other arm, and WriteError rides inside
+    /// WriteTxnError and every WriteTxn GQL error family, so an inline source
+    /// set the size of all of them on every successful Result.
     VertexStorageAdmission {
         vid: VId,
-        source: fgdb_strata::vertex::VertexPatchError,
+        source: Box<fgdb_strata::vertex::VertexPatchError>,
     },
     /// The final edge property row cannot fit one stored sidecar. The handle
     /// and its published frontier remain unchanged, as for vertex admission.
     EdgeStorageAdmission {
         eid: EId,
-        source: fgdb_strata::edge_props::EdgePropertyPatchError,
+        source: Box<fgdb_strata::edge_props::EdgePropertyPatchError>,
     },
     /// [`WriteBatch::extend`] was handed a batch over a different relation
     /// (fgdb-w4-g1-txn-core-qpmg.2). The relation is the batch's template
@@ -644,12 +649,12 @@ pub enum WriteError {
     /// Chronicle failed before the marker could have become durable. Unlike
     /// [`WriteError::CommitOutcomeUnknown`], retrying after correcting the
     /// named cause cannot duplicate an unobserved commit.
-    Commit(CommitError),
+    Commit(Box<CommitError>),
     /// Chronicle may or may not have made the marker durable. The live handle
     /// is fenced immediately; reopen is the only authority that can decide.
     CommitOutcomeUnknown {
         published_frontier: CommitSeq,
-        source: CommitError,
+        source: Box<CommitError>,
     },
     /// A prior call left the handle unable to speak for Chronicle's head.
     HandleCommitOutcomeUnknown {
@@ -673,12 +678,13 @@ pub enum WriteError {
 /// Why a read could not be served.
 #[derive(Debug)]
 pub enum ReadError {
-    Root(RootError),
+    /// Boxed: RootError is 96 bytes against 40 for every other arm, and
+    /// ReadError rides inside most query error types, so an inline RootError
+    /// set their size (128-byte QueryError) on every successful Result.
+    Root(Box<RootError>),
     /// Chronicle may have advanced, so the retained snapshot cannot be
     /// presented as current until an authoritative reopen resolves the log.
-    CommitOutcomeUnknown {
-        published_frontier: CommitSeq,
-    },
+    CommitOutcomeUnknown { published_frontier: CommitSeq },
     /// Chronicle definitely advanced past the retained derived snapshot.
     RecoveryRequired(RecoveryRequired),
     /// A time-travel read asked about a sequence the published partition has
@@ -732,9 +738,17 @@ from_error!(
     SlotGenerationExhausted
 );
 from_error!(WriteError, Canonical, CanonicalError);
-from_error!(WriteError, Commit, CommitError);
+impl From<CommitError> for WriteError {
+    fn from(error: CommitError) -> Self {
+        Self::Commit(Box::new(error))
+    }
+}
 from_error!(WriteError, SlotGenerationExhausted, SlotGenerationExhausted);
-from_error!(ReadError, Root, RootError);
+impl From<RootError> for ReadError {
+    fn from(error: RootError) -> Self {
+        Self::Root(Box::new(error))
+    }
+}
 
 impl core::fmt::Display for OpenError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -3332,13 +3346,21 @@ impl<V: Vfs + Clone> Database<V> {
         // writes. FCW protects these after-images across intervening commits;
         // fixed-width lifetime fields cannot change their encoded size.
         for (vid, (labels, props)) in &prefix_content {
-            fgdb_strata::vertex::admit_row_content(labels, props)
-                .map_err(|source| WriteError::VertexStorageAdmission { vid: *vid, source })?;
+            fgdb_strata::vertex::admit_row_content(labels, props).map_err(|source| {
+                WriteError::VertexStorageAdmission {
+                    vid: *vid,
+                    source: Box::new(source),
+                }
+            })?;
         }
         for (eid, props) in &prefix_edge_rows {
             if !prefix_deleted_edges.contains(eid) {
-                fgdb_strata::edge_props::admitted_row_bytes(props)
-                    .map_err(|source| WriteError::EdgeStorageAdmission { eid: *eid, source })?;
+                fgdb_strata::edge_props::admitted_row_bytes(props).map_err(|source| {
+                    WriteError::EdgeStorageAdmission {
+                        eid: *eid,
+                        source: Box::new(source),
+                    }
+                })?;
             }
         }
         Ok(template)
@@ -3385,7 +3407,7 @@ impl<V: Vfs + Clone> Database<V> {
             Err(source) if self.coordinator.is_poisoned() => {
                 return Err(WriteError::CommitOutcomeUnknown {
                     published_frontier,
-                    source,
+                    source: Box::new(source),
                 });
             }
             Err(source) => {
@@ -3405,7 +3427,7 @@ impl<V: Vfs + Clone> Database<V> {
                             detail: rejection.detail,
                         }
                     }
-                    other => WriteError::Commit(other),
+                    other => WriteError::Commit(Box::new(other)),
                 });
             }
         };

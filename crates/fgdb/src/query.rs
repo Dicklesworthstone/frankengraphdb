@@ -308,6 +308,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// allocator remain explicit, exactly as in the existing native script API.
     /// A single statement is a one-step program; scripts share one work budget.
     #[allow(clippy::too_many_arguments)]
+    // Returns once per statement/script and wraps the script execution error,
+    // whose record location plus program error is deliberate (write_scripts).
+    #[allow(clippy::result_large_err)]
     pub async fn query_write<A>(
         &mut self,
         txcx: &TxnCx,
@@ -348,6 +351,7 @@ impl WriteTxn {
     /// Stage a native statement/script atomically inside this transaction.
     /// The caller alone decides when to finish the outer transaction.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
