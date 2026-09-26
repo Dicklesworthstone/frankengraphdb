@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Entry-point differentials against the specific native text facades and governed engines.
 
 use asupersync::lab::run_async_under_lab;

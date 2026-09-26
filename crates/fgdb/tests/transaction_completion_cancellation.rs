@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Drop the PUBLIC completion future while real VFS operations are suspended.
 //! The wrapper changes only scheduling, never bytes, durability or graph state.
 

@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Parameter batches cross one real transaction boundary, even beyond 64 steps.
 
 use asupersync::lab::run_async_under_lab;

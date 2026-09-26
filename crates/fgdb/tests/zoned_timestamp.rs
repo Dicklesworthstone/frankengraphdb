@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Pinned zoned values survive native/GQL writes and both recovery paths.
 //! Missing artifacts refuse before publication, including erased batch inputs.
 

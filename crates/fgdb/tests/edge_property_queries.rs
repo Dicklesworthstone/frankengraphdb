@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Relationship properties preserve the edge identity domain (fgdb-r02v).
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

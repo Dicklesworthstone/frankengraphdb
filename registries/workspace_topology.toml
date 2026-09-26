@@ -118,7 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
-lint_allowance_count = 3
+lint_allowance_count = 2
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -129,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:402b8d82252fa635"
-semantic_contract_hash = "fnv1a64:8c1cfbecfb827890"
+id_table_hash = "fnv1a64:71f859dac5846052"
+semantic_contract_hash = "fnv1a64:994d8c3eaf43401e"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1928,12 +1928,6 @@ reason = "Rationale sentence, not an inventory item. Pinned verbatim so this all
 # has exactly one row here and every row has its entry, so a workspace-wide
 # allow cannot land without a reviewed reference. 89b49d38 added 24 unreviewed.
 # -----------------------------------------------------------------------------
-
-[[lint_allowance]]
-lint = "rust::recursion_depth_exceeding_limit"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 8 sites / 8 files at 2026-09-25."
 
 [[lint_allowance]]
 lint = "clippy::double_must_use"

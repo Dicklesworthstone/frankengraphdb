@@ -50,8 +50,6 @@ edition = "2024"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-# Measured residual (fgdb-gate-weakening-rollback-mthlh): 8 sites / 8 files.
-recursion_depth_exceeding_limit = "allow"
 
 [workspace.lints.clippy]
 # Justified by the 08-27 toolchain bump (088e510f):
@@ -60,10 +58,9 @@ double_must_use = "allow"
 # Index walks over parallel slices by a single counter; an iterator rewrite would
 # obscure the arithmetic without changing behaviour.
 needless_range_loop = "allow"
-# No other clippy lint is allowed workspace-wide (fgdb-gate-weakening-rollback-
-# mthlh): the 26 clippy allows 89b49d38 and 21ccbfd7 added without evidence were
-# each removed by fixing their sites or allowing a named site locally with a
-# reason. (89b49d38's rustc recursion_depth_exceeding_limit allow is the one left,
-# above.) A new entry here needs a lint_allowance row in
-# registries/workspace_topology.toml.
+# No other lint is allowed workspace-wide (fgdb-gate-weakening-rollback-mthlh):
+# the 26 clippy allows and 1 rustc allow that 89b49d38 and 21ccbfd7 added without
+# evidence were each removed by fixing their sites or allowing a named site
+# locally with a reason. A new entry in either table needs a lint_allowance row
+# in registries/workspace_topology.toml.
 

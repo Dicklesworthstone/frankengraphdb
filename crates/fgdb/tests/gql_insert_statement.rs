@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! INSERT must preserve CREATE's native program, receipts and complete graph state.
 
 use asupersync::lab::run_async_under_lab;

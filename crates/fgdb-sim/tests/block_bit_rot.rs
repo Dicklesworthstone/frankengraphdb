@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Published FGSB/FGSP one-bit damage: cached answers are not storage verification.
 //! Every record is printed only after its path's exact assertions have passed.
 
