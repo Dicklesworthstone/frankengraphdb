@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Ordered MATCH chains use retained storage, canonical overlays and real commits.
 
 use asupersync::lab::run_async_under_lab;

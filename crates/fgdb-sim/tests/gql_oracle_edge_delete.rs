@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Storage edge retirement matches an independently constructed reference delta.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch};

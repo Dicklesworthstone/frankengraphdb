@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Predicate-only outer correlations execute against real snapshots and transactions.
 
 use asupersync::lab::run_async_under_lab;

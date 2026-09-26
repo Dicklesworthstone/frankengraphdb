@@ -1,3 +1,6 @@
+// The lab body's Send check nests past the default depth (next trait solver).
+#![recursion_limit = "256"]
+
 //! Native atomic replacement and explicit non-cascading cleanup through scripts.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
