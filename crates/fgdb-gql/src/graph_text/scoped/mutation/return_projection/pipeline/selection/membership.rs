@@ -130,7 +130,7 @@ mod tests {
         );
         let rows = execute(
             "UNWIND [1, NULL] AS n WITH n, [] AS allowed \
-             WHERE n NOT IN allowed RETURN n",
+             WHERE n NOT IN allowed RETURN n ORDER BY n NULLS LAST",
         );
         assert_eq!(
             rows,
@@ -410,5 +410,23 @@ mod tests {
             result.value,
             vec![GraphValueRow::from_owned_values(vec![GraphValue::Vertex(high)])]
         );
+    }
+
+    #[test]
+    fn an_explicit_null_rhs_parameter_keeps_unknown_under_negation() {
+        let template = PreparedGraphSetText::prepare_with_parameter_types(
+            "UNWIND [1, NULL] AS n WITH n WHERE n NOT IN $ids RETURN n",
+            &[("ids", GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null))],
+            |_, _| None,
+        )
+        .unwrap();
+        let mut arguments = GqlParameters::new();
+        arguments
+            .insert(
+                "ids",
+                GqlParameterValue::Scalar(GqlScalarParameter::new(CanonicalScalar::Null).unwrap()),
+            )
+            .unwrap();
+        assert!(run(&template.bind_parameters(&arguments).unwrap()).is_empty());
     }
 }

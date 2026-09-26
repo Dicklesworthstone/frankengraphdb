@@ -1,7 +1,7 @@
 //! Borrowed, governed membership for evaluated native lists. Scalar equality
 //! retains the row-predicate law (including UNKNOWN for incompatible domains),
-//! not the total ordering used to consolidate Z-set keys. Admitted list values
-//! are bounded by GraphValue's depth/node limits before entering this kernel.
+//! not the total ordering used to consolidate Z-set keys. Nested comparisons
+//! use governed heap frames rather than relying on process-stack depth.
 
 use crate::GlaExecutionEvent;
 use crate::algebra::{GraphValue, IntegerComparison};
@@ -29,51 +29,88 @@ fn equal<E>(
     right: &GraphValue,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<bool>, E> {
-    control(GlaExecutionEvent::Work)?;
-    for value in [left, right] {
-        if let GraphValue::Scalar(value) = value {
-            crate::algebra_exec::charge_payload(value, control)?;
-        }
+    struct ListFrame<'a> {
+        left: &'a [GraphValue],
+        right: &'a [GraphValue],
+        next: usize,
+        result: Option<bool>,
     }
-    if left.is_null() || right.is_null() {
-        return Ok(None);
-    }
-    Ok(match (left, right) {
-        (GraphValue::Scalar(left), GraphValue::Scalar(right))
-            if core::mem::discriminant(left) == core::mem::discriminant(right) =>
-        {
-            Some(IntegerComparison::Equal.accepts_scalar_pair(Some(left), Some(right)))
-        }
-        (GraphValue::Vertex(left), GraphValue::Vertex(right)) => Some(left == right),
-        (GraphValue::Edge(left), GraphValue::Edge(right)) => Some(left == right),
-        (GraphValue::Path(left), GraphValue::Path(right)) => {
-            let steps = equal_sequence(left.steps(), right.steps(), control)?;
-            Some(left.start() == right.start() && steps)
-        }
-        (GraphValue::Vertices(left), GraphValue::Vertices(right)) => {
-            Some(equal_sequence(left, right, control)?)
-        }
-        (GraphValue::Edges(left), GraphValue::Edges(right)) => {
-            Some(equal_sequence(left, right, control)?)
-        }
-        (GraphValue::List(left), GraphValue::List(right)) => {
-            if left.len() != right.len() {
-                return Ok(Some(false));
-            }
-            let mut result = Some(true);
-            for (left, right) in left.iter().zip(right.iter()) {
-                // A definite mismatch dominates an unknown child, independent
-                // of element order: [NULL, 1] = [NULL, 2] is FALSE, not UNKNOWN.
-                match equal(left, right, control)? {
-                    Some(false) => result = Some(false),
-                    None if result != Some(false) => result = None,
-                    _ => {}
+
+    let mut pending = Some((left, right));
+    let mut frames: Vec<ListFrame<'_>> = Vec::new();
+    let mut result = Some(true);
+    loop {
+        if let Some((left, right)) = pending.take() {
+            control(GlaExecutionEvent::Work)?;
+            for value in [left, right] {
+                if let GraphValue::Scalar(value) = value {
+                    crate::algebra_exec::charge_payload(value, control)?;
                 }
             }
-            result
+            result = if left.is_null() || right.is_null() {
+                None
+            } else {
+                match (left, right) {
+                    (GraphValue::Scalar(left), GraphValue::Scalar(right))
+                        if core::mem::discriminant(left) == core::mem::discriminant(right) =>
+                    {
+                        Some(IntegerComparison::Equal.accepts_scalar_pair(Some(left), Some(right)))
+                    }
+                    (GraphValue::Vertex(left), GraphValue::Vertex(right)) => Some(left == right),
+                    (GraphValue::Edge(left), GraphValue::Edge(right)) => Some(left == right),
+                    (GraphValue::Path(left), GraphValue::Path(right)) => {
+                        let steps = equal_sequence(left.steps(), right.steps(), control)?;
+                        Some(left.start() == right.start() && steps)
+                    }
+                    (GraphValue::Vertices(left), GraphValue::Vertices(right)) => {
+                        Some(equal_sequence(left, right, control)?)
+                    }
+                    (GraphValue::Edges(left), GraphValue::Edges(right)) => {
+                        Some(equal_sequence(left, right, control)?)
+                    }
+                    (GraphValue::List(left), GraphValue::List(right)) => {
+                        if left.len() != right.len() {
+                            Some(false)
+                        } else if left.is_empty() {
+                            Some(true)
+                        } else {
+                            // Reserve before growing storage. One frame per
+                            // live nesting level; no copies of the list payload.
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            frames.push(ListFrame {
+                                left,
+                                right,
+                                next: 1,
+                                result: Some(true),
+                            });
+                            pending = Some((&left[0], &right[0]));
+                            continue;
+                        }
+                    }
+                    _ => None,
+                }
+            };
         }
-        _ => None,
-    })
+        let Some(mut frame) = frames.pop() else {
+            return Ok(result);
+        };
+        // A definite mismatch dominates an unknown child, independent of
+        // element order. Do not skip later governed children after a mismatch.
+        match result {
+            Some(false) => frame.result = Some(false),
+            None if frame.result != Some(false) => frame.result = None,
+            _ => {}
+        }
+        if frame.next < frame.left.len() {
+            pending = Some((&frame.left[frame.next], &frame.right[frame.next]));
+            frame.next += 1;
+            // Reuse the already-reserved slot just popped above. This cannot
+            // grow the vector's capacity or introduce another live frame.
+            frames.push(frame);
+        } else {
+            result = frame.result;
+        }
+    }
 }
 
 fn equal_sequence<T: PartialEq, E>(
@@ -284,5 +321,76 @@ mod tests {
         let mut column_bytes = Vec::new();
         GraphSetValue::Column(0).append_canonical_bytes(&mut column_bytes);
         assert_eq!(column_bytes, [vec![0], 0_u64.to_be_bytes().to_vec()].concat());
+    }
+
+    #[test]
+    fn deep_comparisons_use_governed_heap_frames_without_recursive_cleanup() {
+        const DEPTH: usize = 4096;
+        let mut left = int(1);
+        let mut right = int(1);
+        for _ in 0..DEPTH {
+            left = list(vec![left]);
+            right = list(vec![right]);
+        }
+        let mut scratch = 0;
+        let result = evaluate(&left, core::slice::from_ref(&right), &mut |event| {
+            if matches!(event, GlaExecutionEvent::ScratchEntry) {
+                scratch += 1;
+            }
+            Ok::<_, usize>(())
+        });
+        assert_eq!(result, Ok(Some(true)));
+        assert_eq!(scratch, DEPTH);
+        let mut scratch = 0;
+        let result = evaluate(&left, core::slice::from_ref(&right), &mut |event| {
+            if matches!(event, GlaExecutionEvent::ScratchEntry) {
+                if scratch == 8 {
+                    return Err(8);
+                }
+                scratch += 1;
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(8));
+        assert_eq!(scratch, 8);
+        // The test owns deliberately deep public values. Release each unary
+        // wrapper iteratively too, so their destructor is not the stack test.
+        for mut value in [left, right] {
+            while let GraphValue::List(children) = value {
+                let mut children = children.into_vec();
+                assert_eq!(children.len(), 1);
+                value = children.pop().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn nested_comparisons_preserve_every_work_and_frame_refusal() {
+        let candidate = list(vec![list(vec![null(), int(1)]), list(vec![int(2)])]);
+        let members = [
+            list(vec![list(vec![null(), int(9)]), list(vec![int(2)])]),
+            list(vec![list(vec![null(), int(1)]), list(vec![int(2)])]),
+        ];
+        let mut events = 0;
+        assert_eq!(
+            evaluate(&candidate, &members, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            }),
+            Ok(None)
+        );
+        for stop in 0..events {
+            let mut seen = 0;
+            let result = evaluate(&candidate, &members, &mut |_| {
+                if seen == stop {
+                    Err(stop)
+                } else {
+                    seen += 1;
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(seen, stop);
+        }
     }
 }
