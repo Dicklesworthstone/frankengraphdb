@@ -34,6 +34,25 @@ enum ParsedOp {
     Bound(GraphIntegerOp),
 }
 
+/// Whether a postfix operand's root is text before binding: a text literal
+/// or a text-producing function or concatenation.
+fn static_text(root: Option<&ParsedOp>) -> bool {
+    match root {
+        Some(ParsedOp::Atom(Operand::Literal(value), _)) => {
+            matches!(value.value(), CanonicalScalar::Text(_))
+        }
+        Some(ParsedOp::Bound(op)) => matches!(
+            op,
+            GraphIntegerOp::Upper
+                | GraphIntegerOp::Lower
+                | GraphIntegerOp::Trim
+                | GraphIntegerOp::Substring
+                | GraphIntegerOp::Concat
+        ),
+        _ => false,
+    }
+}
+
 fn failure(at: usize, kind: GraphMutationTextErrorKind) -> GraphMutationTextError {
     GraphMutationTextError { offset: at, kind }
 }
@@ -476,8 +495,19 @@ impl<'a> Parser<'a> {
             } else {
                 break;
             };
+            let right = program.len();
             self.integer_product(columns, depth, program)?;
-            emit(program, ParsedOp::Binary(op), at)?;
+            // openCypher `+` concatenates when either operand is statically
+            // text (fgdb-j687q), compiling to exactly the program `||` does.
+            // An operand of unknown type keeps integer addition, and a
+            // text/integer mix is the typed Concat operand refusal.
+            let concat = matches!(op, GraphIntegerBinary::Add)
+                && (static_text(program[..right].last()) || static_text(program.last()));
+            if concat {
+                emit(program, ParsedOp::Bound(GraphIntegerOp::Concat), at)?;
+            } else {
+                emit(program, ParsedOp::Binary(op), at)?;
+            }
         }
         Ok(())
     }

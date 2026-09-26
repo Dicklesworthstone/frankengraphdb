@@ -426,3 +426,58 @@ fn size_of_a_text_aggregate_counts_characters_in_the_result_projection() {
     assert_eq!(values[1].as_value().cloned(), int(1));
     assert!(run(&CanonicalScalar::Int(42)).is_err());
 }
+
+/// fgdb-j687q: openCypher `+` concatenates when either operand is statically
+/// text, compiling to the same program `||` does, in RETURN and WHERE and
+/// through chains. An operand of unknown type keeps integer addition, and a
+/// text literal added to an integer is refused at preparation, as `'a' || 1`
+/// is.
+#[test]
+fn opencypher_plus_over_text_is_concatenation() {
+    for (cypher, gql) in [
+        ("n.text + '!'", "n.text || '!'"),
+        ("'<' + n.text + '>'", "'<' || n.text || '>'"),
+        ("toUpper(n.text) + n.text", "UPPER(n.text) || n.text"),
+    ] {
+        assert_eq!(
+            prepare(&format!("MATCH (n) RETURN {cypher} AS value")).canonical_bytes(),
+            prepare(&format!("MATCH (n) RETURN {gql} AS value")).canonical_bytes(),
+            "{cypher}"
+        );
+    }
+    let input = text("ab");
+    assert_eq!(scalar("'<' + n.text + '>'", &input), text("<ab>"));
+    assert_eq!(scalar("1 + 2", &input), CanonicalScalar::Int(3));
+    let rows = |statement: &str| {
+        execute(&prepare(statement), &input, policy())
+            .unwrap()
+            .value
+            .len()
+    };
+    assert_eq!(
+        rows("MATCH (n) WHERE n.text + '!' = 'ab!' RETURN n.text AS value"),
+        1
+    );
+    assert_eq!(
+        rows("MATCH (n) WHERE n.text + '?' = 'ab!' RETURN n.text AS value"),
+        0
+    );
+    // A column of unknown type is not guessed: text + integer fails typed.
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN n.text + 1 AS value"),
+            &input,
+            policy()
+        )
+        .is_err()
+    );
+    for statement in [
+        "MATCH (n) RETURN 'a' + 1 AS value",
+        "MATCH (n) RETURN 'a' - 'b' AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
