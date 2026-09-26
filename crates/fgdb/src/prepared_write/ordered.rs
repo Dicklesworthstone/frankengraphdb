@@ -24,9 +24,9 @@ use std::sync::Arc;
 /// A request identity cannot be declared under two relation types in one
 /// ordered program. Reject even ambiguous ENSURE declarations: their requested
 /// ID may be unused, but must never authorize a cross-type identity collision.
-fn edge_owners(
+fn edge_owners<'a>(
     writer: &BlockWriter,
-    batches: &[WriteBatch],
+    batches: impl IntoIterator<Item = &'a WriteBatch>,
 ) -> Result<BTreeMap<EId, RelationId>, WriteTxnError> {
     let mut owners = BTreeMap::new();
     for batch in batches {
@@ -151,54 +151,9 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         batches: Vec<WriteBatch>,
     ) -> Result<PreparedWrite, WriteTxnError> {
-        self.prepare_ordered_writes_admitted(batches, None)
-    }
-
-    /// Prepare ordered writes with a limit on decomposed evaluator-input rows.
-    ///
-    /// A single-relation program charges each input row once. A mixed program
-    /// charges each edge instruction once and each vertex instruction once per
-    /// relation slice, including slices introduced by identity-addressed writes
-    /// to existing edges. Conditional no-ops count before normalization.
-    /// Equality with the limit succeeds. Refusal precedes cloning any relation
-    /// slice or evaluating its mutations, and never publishes a partial write.
-    ///
-    /// Input-count admission precedes routing allocations and storage lookups;
-    /// exact expansion admission follows routing, before mutation evaluation.
-    /// Ownership conflicts can therefore precede the expansion-budget error.
-    /// Both admitted paths use the same evaluator, dependencies and template as
-    /// `prepare_ordered_writes`; this method does not truncate the program.
-    ///
-    /// This governs row replication, not variable-size payload bytes, storage
-    /// scans (including cascades/ensure), total CPU work, cancellation or spill.
-    /// The caller already owns the input allocation. It is not a memory quota.
-    pub fn prepare_ordered_writes_bounded(
-        &mut self,
-        batches: Vec<WriteBatch>,
-        max_expanded_rows: u64,
-    ) -> Result<PreparedWrite, WriteTxnError> {
-        self.prepare_ordered_writes_admitted(batches, Some(max_expanded_rows))
-    }
-
-    fn prepare_ordered_writes_admitted(
-        &mut self,
-        batches: Vec<WriteBatch>,
-        max_expanded_rows: Option<u64>,
-    ) -> Result<PreparedWrite, WriteTxnError> {
         self.ensure_writable()?;
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
-        }
-        // Every input row appears in at least one evaluator slice. Reject this
-        // lower bound before building edge ownership or routing metadata.
-        let input_rows = max_expanded_rows.map(|_| {
-            batches
-                .iter()
-                .map(|batch| batch.rows.len() as u128)
-                .sum::<u128>()
-        });
-        if let Some(input_rows) = input_rows {
-            admit_expanded_rows(max_expanded_rows, input_rows)?;
         }
         let first = batches[0].relation;
         if batches.iter().all(|batch| batch.relation == first) {
@@ -226,14 +181,6 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 routed.push((ordinal, target, pending));
             }
-        }
-        if let Some(input_rows) = input_rows {
-            let vertex_rows = routed
-                .iter()
-                .filter(|(_, target, _)| target.is_none())
-                .count() as u128;
-            let expanded_rows = input_rows - vertex_rows + vertex_rows * relations.len() as u128;
-            admit_expanded_rows(max_expanded_rows, expanded_rows)?;
         }
         let mut coordinates: BTreeMap<RelationId, CoordinateEntry> = BTreeMap::new();
         let mut shared_vertices: Option<Vec<DeltaRow>> = None;
@@ -318,6 +265,75 @@ impl<V: Vfs + Clone> Database<V> {
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
         })
+    }
+
+    /// Prepare ordered writes with a limit on decomposed evaluator-input rows.
+    ///
+    /// A single-relation program charges each input row once. A mixed program
+    /// charges each edge instruction once and each vertex instruction once per
+    /// relation slice, including slices introduced by identity-addressed writes
+    /// to existing edges. Conditional no-ops count before normalization.
+    /// Equality with the limit succeeds. Refusal precedes cloning any relation
+    /// slice or evaluating its mutations, and never publishes a partial write.
+    ///
+    /// Input-count admission precedes routing allocations and storage lookups;
+    /// exact expansion admission follows routing, before mutation evaluation.
+    /// Ownership conflicts can therefore precede the expansion-budget error.
+    /// Both admitted paths use the same evaluator, dependencies and template as
+    /// `prepare_ordered_writes`; this method does not truncate the program.
+    ///
+    /// This governs row replication, not variable-size payload bytes, storage
+    /// scans (including cascades/ensure), total CPU work, cancellation or spill.
+    /// The caller already owns the input allocation. It is not a memory quota.
+    pub fn prepare_ordered_writes_bounded(
+        &mut self,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: u64,
+    ) -> Result<PreparedWrite, WriteTxnError> {
+        self.ensure_writable()?;
+        self.admit_ordered_write_rows(batches.iter(), max_expanded_rows)?;
+        self.prepare_ordered_writes(batches)
+    }
+
+    /// Borrow the complete program so transaction admission does not first
+    /// clone an arbitrarily large staged prefix. Callers admit owner/health
+    /// before entering. Routing shares the evaluator's ownership law; this
+    /// preflight never interprets a mutation or clones its scalar payload.
+    pub(crate) fn admit_ordered_write_rows<'a>(
+        &self,
+        batches: impl Iterator<Item = &'a WriteBatch> + Clone,
+        max_expanded_rows: u64,
+    ) -> Result<(), WriteTxnError> {
+        let Some(first) = batches.clone().next() else {
+            return Err(WriteError::EmptyBatch.into());
+        };
+        if batches.clone().any(WriteBatch::is_empty) {
+            return Err(WriteError::EmptyBatch.into());
+        }
+        let input_rows: u128 = batches
+            .clone()
+            .map(|batch| batch.rows.len() as u128)
+            .sum();
+        admit_expanded_rows(Some(max_expanded_rows), input_rows)?;
+        if batches.clone().all(|batch| batch.relation == first.relation) {
+            return Ok(());
+        }
+        let declarations = edge_owners(&self.writer, batches.clone())?;
+        let mut relations = BTreeSet::new();
+        let mut vertex_rows = 0_u128;
+        for batch in batches {
+            relations.insert(batch.relation);
+            for pending in &batch.rows {
+                match route(&self.writer, &declarations, batch.relation, pending) {
+                    Some(relation) => {
+                        relations.insert(relation);
+                    }
+                    None => vertex_rows += 1,
+                }
+            }
+        }
+        let expanded_rows = input_rows - vertex_rows + vertex_rows * relations.len() as u128;
+        admit_expanded_rows(Some(max_expanded_rows), expanded_rows)
     }
 
     /// Publish a dependent ordered program as ONE commit. Preparation never

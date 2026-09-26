@@ -14,6 +14,7 @@ mod native_query;
 
 include!("write_txn_parts/preamble.rs");
 include!("write_txn_parts/lifecycle.rs");
+include!("write_txn_parts/bounded_ordered.rs");
 include!("write_txn_parts/savepoints.rs");
 include!("write_txn_parts/refresh.rs");
 include!("write_txn_parts/vertex_reads.rs");
