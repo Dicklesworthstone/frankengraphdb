@@ -61,6 +61,9 @@ impl PreparedGraphSet {
             // A set pattern wrapper sorts the already-selected pattern bag,
             // even if the pattern's own output used a different ordering.
             SetNode::Pattern(_) => Some((&[], None)),
+            // Batch grouping is canonical, but no maintained row-domain
+            // conversion contract is admitted by this window profile yet.
+            SetNode::Aggregate(_) => None,
             SetNode::Join { left, right, spec } => {
                 use crate::row_join::RowJoinKind;
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);

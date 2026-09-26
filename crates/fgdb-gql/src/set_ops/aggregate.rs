@@ -2,6 +2,7 @@
 //! The source-aware type cannot accidentally execute only the first graph leaf.
 
 mod rows;
+mod stage;
 
 use super::*;
 use crate::{
@@ -177,6 +178,7 @@ impl PreparedGraphSet {
     pub(crate) fn first_pattern_input(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
+            SetNode::Aggregate(summary) => summary.input().first_pattern_input(),
             SetNode::Values => None,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }

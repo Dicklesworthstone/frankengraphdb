@@ -279,6 +279,27 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     Ok(match &query.node {
+        SetNode::Aggregate(summary) => {
+            // Finish the complete child once under this SAME source owner and
+            // allowance. Groups are private rows, not external result rows.
+            // Both native grouping and checked conversion precede downstream
+            // filters/pages, including a parent LIMIT 0.
+            let input = run(summary.input(), source, meter, operand)?;
+            summary
+                .summarize_value_rows(&input, &mut |event| {
+                    let event = if event == GlaExecutionEvent::ResultRow {
+                        GlaExecutionEvent::Work
+                    } else {
+                        event
+                    };
+                    meter
+                        .event(event)
+                        .map_err(|error| error.map_source(crate::GraphAggregateError::InputRelation))
+                })
+                .map_err(|error| {
+                    error.map_source(|error| GraphSetExecutionError::Aggregate(Box::new(error)))
+                })?
+        }
         SetNode::Values => {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vec![GraphValueRow::unit()]

@@ -126,6 +126,9 @@ pub enum GraphSetExecutionError<E> {
     /// Native join refusal after source admission; control errors keep their
     /// original outer GqlQueryError instead of being hidden inside this arm.
     Join(crate::row_join::RowJoinError<core::convert::Infallible>),
+    /// Native grouping or checked row-domain output failed after its complete
+    /// input succeeded. Boxing keeps nested relational/aggregate errors finite.
+    Aggregate(Box<crate::GraphAggregateError<E>>),
     InputSchema {
         operand: usize,
     },
@@ -147,6 +150,9 @@ impl<E> GraphSetExecutionError<E> {
         match self {
             Self::Source(source) => GraphSetExecutionError::Source(map(source)),
             Self::Join(error) => GraphSetExecutionError::Join(error),
+            Self::Aggregate(error) => {
+                GraphSetExecutionError::Aggregate(Box::new((*error).map_source(map)))
+            }
             Self::InputSchema { operand } => GraphSetExecutionError::InputSchema { operand },
             Self::InvalidSourceStatistics { operand } => {
                 GraphSetExecutionError::InvalidSourceStatistics { operand }
@@ -165,6 +171,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::Join(error) => error.fmt(f),
+            Self::Aggregate(error) => write!(f, "aggregate row stage: {error}"),
             Self::InputSchema { operand } => {
                 write!(f, "set operand {operand} returned an incompatible row")
             }
@@ -186,6 +193,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphSetExecutionEr
         match self {
             Self::Source(error) => Some(error),
             Self::Join(error) => Some(error),
+            Self::Aggregate(error) => Some(error.as_ref()),
             Self::Projection { error, .. } => Some(error),
             _ => None,
         }
@@ -197,6 +205,7 @@ type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>
 #[derive(Clone, PartialEq, Eq)]
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
+    Aggregate(Box<PreparedGraphSetAggregate>),
     Values,
     Unwind {
         input: Box<PreparedGraphSet>,
@@ -385,7 +394,7 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            SetNode::Pattern(_) | SetNode::Join { .. } => false,
+            SetNode::Pattern(_) | SetNode::Aggregate(_) | SetNode::Join { .. } => false,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
@@ -530,6 +539,12 @@ impl PreparedGraphSet {
                 let input = pattern.canonical_bytes();
                 bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
                 bytes.extend_from_slice(&input);
+            }
+            SetNode::Aggregate(summary) => {
+                bytes.push(9);
+                let definition = summary.canonical_bytes();
+                bytes.extend_from_slice(&(definition.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
             SetNode::Unwind { input, value } => {

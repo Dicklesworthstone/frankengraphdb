@@ -89,6 +89,21 @@ impl PreparedGraphAggregate {
         self.relational_input.as_ref()
     }
 
+    /// Reuse native grouping inside a relational operator whose COMPLETE
+    /// input has already executed under the caller's meter. The caller must
+    /// retain that input and its checked schema through result materialization.
+    /// No source admission or fresh allowance is introduced at this seam.
+    pub(crate) fn summarize_relation_rows<E, C>(
+        &self,
+        input: &[GraphValueRow],
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        debug_assert!(self.relational_input.is_some());
+        self.summarize_projected_rows(input, control)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_relational_governed<'a, E, C>(
         &self,
