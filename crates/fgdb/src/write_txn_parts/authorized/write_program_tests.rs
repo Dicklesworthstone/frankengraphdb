@@ -534,14 +534,13 @@ fn plain_delete_proves_incidence_from_staged_creations_and_prior_deletions() {
 }
 
 #[test]
-fn whole_program_rights_and_unsupported_tail_are_checked_before_allocating() {
+fn whole_program_rights_are_checked_before_allocating() {
     lab(0xa986, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
         let txn = contexts.txn();
         let authority = authority();
-        let full = authority.issue_at(&grant(), NOW).unwrap();
-        for mode in 0..3 {
+        for mode in 0..4 {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
             let mut write = grant();
@@ -551,20 +550,28 @@ fn whole_program_rights_and_unsupported_tail_are_checked_before_allocating() {
             let tail = match mode {
                 0 => mutation("MATCH (a:Visible) WHERE a.p = 999 SET a.p = 1"),
                 1 => insert("MATCH (a:Visible) WHERE a.p = 999 INSERT (b:Visible)"),
-                _ => PreparedGraphEdgeMergeText::prepare(
-                    "MATCH (a:Visible), (b:Visible) MERGE (a)-[:R]->(b)",
-                    R,
-                    symbols,
-                )
-                .unwrap()
-                .bind_parameters(&GqlParameters::new())
-                .unwrap()
-                .into(),
+                _ => {
+                    let merge = PreparedGraphEdgeMergeText::prepare(
+                        "MATCH (a:Visible), (b:Visible) MERGE (a)-[:R]->(b)",
+                        R,
+                        symbols,
+                    )
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+                    if mode == 2 {
+                        merge.into()
+                    } else {
+                        fgdb_gql::PreparedGraphEdgeUpsert::prepare(merge, Vec::new(), Vec::new())
+                            .unwrap()
+                            .into()
+                    }
+                }
             };
             let program =
                 PreparedGraphWriteProgram::prepare(vec![insert("INSERT (a:Visible {p:10})"), tail])
                     .unwrap();
-            let token = if mode == 2 { &full } else { &write_only };
+            let token = &write_only;
             let error = db
                 .execute_graph_write_program_authorized(
                     &txn,
@@ -579,16 +586,7 @@ fn whole_program_rights_and_unsupported_tail_are_checked_before_allocating() {
                 )
                 .await
                 .unwrap_err();
-            if mode == 2 {
-                assert!(matches!(
-                    error,
-                    Fault::Program(GraphMutationProgramError::Preflight(
-                        WriteTxnError::AuthorizedMutationRefused
-                    ))
-                ));
-            } else {
-                assert_eq!(authorization(error), Error::PermissionDenied);
-            }
+            assert_eq!(authorization(error), Error::PermissionDenied);
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(

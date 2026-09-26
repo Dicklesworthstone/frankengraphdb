@@ -3,15 +3,18 @@
 
 use super::super::super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
-    deletion, insert, mutation,
+    deletion, edge_merge, insert, mutation,
 };
 use fgdb_gql::{
-    GqlQueryError, GraphMutationError, GraphMutationProgramError, GraphWriteProgramError,
+    GraphMutationProgramError, GraphWriteProgramError,
     GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStatement,
     GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use std::cell::RefCell;
+
+#[cfg(test)]
+use fgdb_gql::{GqlQueryError, GraphMutationError};
 
 #[path = "edge_upsert.rs"]
 mod edge_upsert;
@@ -27,7 +30,7 @@ fn preflight(error: WriteTxnError) -> Fault {
 impl<V: Vfs + Clone> Database<V> {
     /// Execute an atomic authorized CRUD program over the canonical native
     /// transaction overlay. Supports INSERT/CREATE, SET/REMOVE/DETACH DELETE
-    /// plain DELETE, unique vertex MERGE and ON MATCH/ON CREATE vertex actions.
+    /// plain DELETE, vertex/relationship MERGE and ON MATCH/ON CREATE actions.
     /// A later statement observes preceding checked effects;
     /// each individual statement still freezes its MATCH and expressions before
     /// staging. Every field/image and every plain-DELETE incidence proof uses
@@ -49,9 +52,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// The ordinary native reducer decides the branch once; only the chosen
     /// ON MATCH/ON CREATE actions are lowered and authorized. Both outcomes
     /// cost one delivered identity, not one row per action or creation callback.
-    /// Relationship MERGE/upsert remain refused during whole-program preflight,
-    /// before any database read, pin or identity reservation. No privileged
-    /// existence/uniqueness path is used as an authorization fallback.
+    /// Relationship MERGE/upsert require ReadWrite and the requested relation
+    /// during whole-program preflight, even for NoInput. Their existing native
+    /// reducer sees only the selected authorized directed pair. Parallel EIds
+    /// refuse; NoInput executes neither branch, allocates no identity and costs
+    /// no result row. No privileged existence path is an authorization fallback.
     /// Relation coordinates can differ; native ordered composition remains the
     /// only writer. No caller-selected identity or allocator callback is exposed.
     ///
@@ -158,8 +163,8 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 // Validate the COMPLETE immutable shape before even opening a
-                // workspace. A valid prefix cannot allocate IDs ahead of an
-                // unsupported tail, and zero work cannot bypass required rights.
+                // workspace. A valid prefix cannot allocate IDs ahead of a
+                // denied tail, and zero work cannot bypass required rights.
                 query_cx.with_restriction(|| {
                     for statement in program.statements() {
                         query_cx
@@ -172,14 +177,22 @@ impl<V: Vfs + Clone> Database<V> {
                             GraphWriteStatement::Mutation(_)
                             | GraphWriteStatement::Delete(_)
                             | GraphWriteStatement::VertexMerge(_)
-                            | GraphWriteStatement::VertexUpsert(_) => true,
-                            GraphWriteStatement::EdgeMerge(_)
-                            | GraphWriteStatement::EdgeUpsert(_) => {
-                                return Err(preflight(WriteTxnError::AuthorizedMutationRefused));
-                            }
+                            | GraphWriteStatement::VertexUpsert(_)
+                            | GraphWriteStatement::EdgeMerge(_)
+                            | GraphWriteStatement::EdgeUpsert(_) => true,
                         };
                         if reads && !verified.predicates().rights().can_read() {
                             return Err(refusal(Error::PermissionDenied));
+                        }
+                        let relation = match statement {
+                            GraphWriteStatement::EdgeMerge(input) => Some(input.relation()),
+                            GraphWriteStatement::EdgeUpsert(input) => Some(input.merge().relation()),
+                            _ => None,
+                        };
+                        if relation.is_some_and(|relation| {
+                            !verified.predicates().allows_relation(relation)
+                        }) {
+                            return Err(refusal(Error::ScopeDenied));
                         }
                     }
                     Ok(())
@@ -285,16 +298,39 @@ impl<V: Vfs + Clone> Database<V> {
                                         GraphWriteStepReceipt::VertexUpsert { outcome },
                                     )
                                 }
-                                GraphWriteStatement::EdgeMerge(_)
-                                | GraphWriteStatement::EdgeUpsert(_) => {
-                                    // Preflight excludes these immutable arms. Keep
-                                    // the dispatch fail-closed, never a privileged
-                                    // fallback, even if its caller is later changed.
-                                    return Err(GraphWriteStepError::Mutation(
-                                        GqlQueryError::Source(GraphMutationError::Source(
-                                            WriteTxnError::AuthorizedMutationRefused,
-                                        )),
-                                    ));
+                                GraphWriteStatement::EdgeMerge(input) => {
+                                    let (stats, outcome) = edge_merge::apply(
+                                        workspace.transaction(),
+                                        self,
+                                        query_cx,
+                                        input,
+                                        remaining.edge_merge_policy(),
+                                        verified.predicates(),
+                                        execution,
+                                        returning,
+                                    )
+                                    .map_err(GraphWriteStepError::EdgeMerge)?;
+                                    (
+                                        GraphWriteStepStats::EdgeMerge(stats),
+                                        GraphWriteStepReceipt::EdgeMerge { outcome },
+                                    )
+                                }
+                                GraphWriteStatement::EdgeUpsert(input) => {
+                                    let (stats, outcome) = edge_upsert::apply(
+                                        workspace.transaction(),
+                                        self,
+                                        query_cx,
+                                        input,
+                                        remaining.edge_upsert_policy(),
+                                        verified.predicates(),
+                                        execution,
+                                        returning,
+                                    )
+                                    .map_err(GraphWriteStepError::EdgeUpsert)?;
+                                    (
+                                        GraphWriteStepStats::EdgeUpsert(stats),
+                                        GraphWriteStepReceipt::EdgeUpsert { outcome },
+                                    )
                                 }
                             };
                             if returning {
