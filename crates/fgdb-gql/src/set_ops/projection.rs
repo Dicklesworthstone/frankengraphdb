@@ -1,6 +1,8 @@
 //! Typed relational projection over complete GLA/set rows. Expressions see the
 //! original row, never another output alias. No graph is traversed a second time.
 
+mod membership;
+
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
     check_depth,
@@ -29,6 +31,13 @@ pub enum GraphSetValue {
         index: Box<GraphSetValue>,
     },
     Size(Box<GraphSetValue>),
+    /// Three-valued membership in an evaluated native list. Both operands
+    /// address the original row and execute once. Empty lists yield FALSE,
+    /// NULL lists yield UNKNOWN, and non-list values are expression errors.
+    In {
+        value: Box<GraphSetValue>,
+        list: Box<GraphSetValue>,
+    },
     Value(GraphValue),
 }
 impl GraphSetValue {
@@ -261,6 +270,28 @@ fn admit(
             }
             GraphSetColumnType::Any
         }
+        GraphSetValue::In { value, list } => {
+            admit(value, types, column, depth + 1, nodes)?;
+            let kind = admit(list, types, column, depth + 1, nodes)?;
+            let nonnull_literal = match list.as_ref() {
+                GraphSetValue::Literal(value) => !matches!(value.value(), CanonicalScalar::Null),
+                GraphSetValue::Value(GraphValue::Scalar(value)) => {
+                    !matches!(value, CanonicalScalar::Null)
+                }
+                _ => false,
+            };
+            // A scalar column can carry NULL. Every nonnull scalar RHS still
+            // fails in the shared evaluator, never silently filters out a row.
+            if nonnull_literal
+                || !matches!(
+                    kind,
+                    GraphSetColumnType::List | GraphSetColumnType::Any | GraphSetColumnType::Scalar
+                )
+            {
+                return Err(Error::ListInput { column });
+            }
+            GraphSetColumnType::Scalar
+        }
         // openCypher size(): a list's length or a text's character count
         // (fgdb-xakp1). A literal that is neither refuses here; any other
         // scalar is a typed failure when evaluated.
@@ -336,6 +367,11 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
                 .expect("value encoding admitted during preparation");
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
             bytes.extend_from_slice(&value);
+        }
+        GraphSetValue::In { value, list } => {
+            bytes.push(7);
+            append_value_transcript(value, bytes);
+            append_value_transcript(list, bytes);
         }
     }
 }
@@ -524,6 +560,21 @@ fn evaluate_value_at<E>(
                     }
                 }
             }
+        }
+        GraphSetValue::In { value, list } => {
+            let value = operand(value, row, column, control, depth + 1, nodes)?;
+            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let truth = if list.is_null() {
+                None
+            } else {
+                let members = list
+                    .as_list()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                membership::evaluate(value.as_ref(), members, control)
+                    .map_err(ProjectionFailure::Control)?
+            };
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
         GraphSetValue::Size(list) => {
             let list = operand(list, row, column, control, depth + 1, nodes)?;
