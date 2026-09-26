@@ -158,14 +158,22 @@ mod snapshot_refresh_tests {
     const P: PropertyKeyId = PropertyKeyId(1);
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0x51; 32], DatabaseSecurityNamespaceId([0x52; 32]), [0x53; 32])
+        DatabaseKeys::new(
+            [0x51; 32],
+            DatabaseSecurityNamespaceId([0x52; 32]),
+            [0x53; 32],
+        )
     }
 
     async fn seeded(cx: &CommitCx) -> Database<MemVfs> {
         let mut database = Database::open_memory(cx, keys()).await.unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
         for id in 1..=6 {
-            seed.create_vertex(VId(id), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(10))]);
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(10))],
+            );
         }
         seed.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(10))]);
         database.write(cx, seed).await.unwrap();
@@ -188,28 +196,47 @@ mod snapshot_refresh_tests {
             let immutable = database.read_session().unwrap();
             let mut txn = database.begin(&txcx).unwrap();
             let original = txn.basis();
-            assert_eq!(txn.vertex(&database, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10));
+            assert_eq!(
+                txn.vertex(&database, VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
             database.write(&cx, set_vertex(6, 60)).await.unwrap();
             let frontier = database.frontier().unwrap();
-            assert!(matches!(txn.write(&mut database, set_vertex(1, 11)),
-                Err(WriteTxnError::SnapshotAdvanced { .. })));
+            assert!(matches!(
+                txn.write(&mut database, set_vertex(1, 11)),
+                Err(WriteTxnError::SnapshotAdvanced { .. })
+            ));
             assert_eq!(txn.basis(), original);
             assert_eq!(txn.refresh_snapshot(&database, &txcx).unwrap(), frontier);
             assert_eq!(txn.basis(), frontier);
-            assert_eq!(database.frontier().unwrap(), frontier, "refresh never commits");
+            assert_eq!(
+                database.frontier().unwrap(),
+                frontier,
+                "refresh never commits"
+            );
             assert_eq!(txcx.outstanding_obligations(), 1);
-            assert_eq!(immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10));
-            assert_eq!(txn.vertex(&database, VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60));
+            assert_eq!(
+                immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
+            assert_eq!(
+                txn.vertex(&database, VId(6)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(60)
+            );
             txn.write(&mut database, set_vertex(1, 11)).unwrap();
-            assert_eq!(txn.commit(&mut database, &cx).await.unwrap(), CommitSeq(frontier.0 + 1));
+            assert_eq!(
+                txn.commit(&mut database, &cx).await.unwrap(),
+                CommitSeq(frontier.0 + 1)
+            );
             let recovered = database.recover_authoritatively(&cx).await.unwrap();
-            assert_eq!(recovered.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(11));
-            assert_eq!(recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60));
+            assert_eq!(
+                recovered.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(11)
+            );
+            assert_eq!(
+                recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(60)
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -229,7 +256,8 @@ mod snapshot_refresh_tests {
             let mut second = WriteBatch::new(RelationId(2));
             second.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(2)));
             second.add_edge(EId(21), VId(20), VId(2), vec![]);
-            txn.write_ordered(&mut database, vec![first, second]).unwrap();
+            txn.write_ordered(&mut database, vec![first, second])
+                .unwrap();
             txn.savepoint(&database, "kept").unwrap();
             let saved = txn.prepared.as_ref().unwrap().template.clone();
             let created = txn.vertex(&database, VId(20)).unwrap().unwrap();
@@ -242,25 +270,45 @@ mod snapshot_refresh_tests {
             assert_eq!(txn.prepared.as_ref().unwrap().template, full);
             assert_eq!(txn.prepared.as_ref().unwrap().basis(), frontier);
             assert_eq!(txn.savepoints[0].prepared.as_ref().unwrap().template, saved);
-            assert_eq!(txn.savepoints[0].prepared.as_ref().unwrap().basis(), frontier);
+            assert_eq!(
+                txn.savepoints[0].prepared.as_ref().unwrap().basis(),
+                frontier
+            );
             assert_eq!(*txn.read_set.borrow(), reads);
-            assert_eq!(txn.vertex(&database, VId(20)).unwrap().unwrap().birth_ordinal,
-                created.birth_ordinal);
+            assert_eq!(
+                txn.vertex(&database, VId(20))
+                    .unwrap()
+                    .unwrap()
+                    .birth_ordinal,
+                created.birth_ordinal
+            );
             txn.rollback_to_savepoint(&database, "kept").unwrap();
             assert_eq!(txn.prepared.as_ref().unwrap().template, saved);
             assert_eq!(txn.basis(), frontier);
-            assert_eq!(txn.vertex(&database, VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10));
+            assert_eq!(
+                txn.vertex(&database, VId(3)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
             let mut suffix = WriteBatch::new(RelationId(4));
             suffix.add_edge(EId(22), VId(20), VId(3), vec![]);
             txn.write_ordered(&mut database, vec![suffix]).unwrap();
             txn.commit(&mut database, &cx).await.unwrap();
-            assert_eq!(database.neighbours(VId(20), RelationId(2)).unwrap(), vec![VId(2)]);
-            assert_eq!(database.neighbours(VId(20), RelationId(4)).unwrap(), vec![VId(3)]);
-            assert_eq!(database.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10));
-            assert_eq!(database.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60));
+            assert_eq!(
+                database.neighbours(VId(20), RelationId(2)).unwrap(),
+                vec![VId(2)]
+            );
+            assert_eq!(
+                database.neighbours(VId(20), RelationId(4)).unwrap(),
+                vec![VId(3)]
+            );
+            assert_eq!(
+                database.vertex(VId(3)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
+            assert_eq!(
+                database.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(60)
+            );
             assert_eq!(database.frontier().unwrap(), CommitSeq(frontier.0 + 1));
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -277,7 +325,10 @@ mod snapshot_refresh_tests {
                 let mut txn = database.begin(&txcx).unwrap();
                 let basis = txn.basis();
                 let winner = match case {
-                    0 => { txn.vertex(&database, VId(1)).unwrap(); set_vertex(1, 11) }
+                    0 => {
+                        txn.vertex(&database, VId(1)).unwrap();
+                        set_vertex(1, 11)
+                    }
                     1 => {
                         assert!(txn.vertex(&database, VId(99)).unwrap().is_none());
                         let mut batch = WriteBatch::new(RelationId(1));
@@ -291,16 +342,24 @@ mod snapshot_refresh_tests {
                         batch
                     }
                     3 => {
-                        assert!(txn.in_neighbours(&database, VId(3), RelationId(1)).unwrap().is_empty());
+                        assert!(
+                            txn.in_neighbours(&database, VId(3), RelationId(1))
+                                .unwrap()
+                                .is_empty()
+                        );
                         let mut batch = WriteBatch::new(RelationId(1));
                         batch.add_edge(EId(99), VId(4), VId(3), vec![]);
                         batch
                     }
                     4 => {
                         let mut batch = WriteBatch::new(RelationId(1));
-                        batch.compare_and_set_vertex_property(VId(1), P,
-                            Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(11),
-                            WriteMismatchPolicy::NoOp);
+                        batch.compare_and_set_vertex_property(
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(999)),
+                            CanonicalScalar::Int(11),
+                            WriteMismatchPolicy::NoOp,
+                        );
                         txn.write(&mut database, batch).unwrap();
                         set_vertex(1, 12)
                     }
@@ -317,8 +376,13 @@ mod snapshot_refresh_tests {
                 let reads = txn.read_set.borrow().clone();
                 database.write(&cx, winner).await.unwrap();
                 let frontier = database.frontier().unwrap();
-                assert!(matches!(txn.refresh_snapshot(&database, &txcx),
-                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))), "case {case}");
+                assert!(
+                    matches!(
+                        txn.refresh_snapshot(&database, &txcx),
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ),
+                    "case {case}"
+                );
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(txn.prepared.as_ref().map(|p| p.template.clone()), template);
                 assert_eq!(*txn.read_set.borrow(), reads);
@@ -351,13 +415,19 @@ mod snapshot_refresh_tests {
             let basis = txn.basis();
             txn.write(&mut database, set_vertex(3, 30)).unwrap();
             database.write(&cx, set_vertex(1, 12)).await.unwrap();
-            assert!(matches!(txn.refresh_snapshot(&database, &txcx),
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+            assert!(matches!(
+                txn.refresh_snapshot(&database, &txcx),
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ));
             assert_eq!(txn.basis(), basis);
-            assert!(matches!(txn.finish(&mut database, &cx).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
-            assert_eq!(database.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10));
+            assert!(matches!(
+                txn.finish(&mut database, &cx).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ));
+            assert_eq!(
+                database.vertex(VId(3)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -385,15 +455,24 @@ mod snapshot_refresh_tests {
             txn.refresh_snapshot_controlled(&database, &mut || {
                 total += 1;
                 Ok(())
-            }).unwrap();
-            assert!(total > 10, "exercise reads, raw writes, history and saved dependencies");
+            })
+            .unwrap();
+            assert!(
+                total > 10,
+                "exercise reads, raw writes, history and saved dependencies"
+            );
             txn.abort();
             for stop in 1..=total {
                 let (database, mut txn) = pending_refresh(&cx, &txcx).await;
                 let basis = txn.basis();
                 let frontier = database.frontier().unwrap();
                 let template = txn.prepared.as_ref().unwrap().template.clone();
-                let saved = txn.savepoints[0].prepared.as_ref().unwrap().template.clone();
+                let saved = txn.savepoints[0]
+                    .prepared
+                    .as_ref()
+                    .unwrap()
+                    .template
+                    .clone();
                 let reads = txn.read_set.borrow().clone();
                 let mut seen = 0;
                 let result = txn.refresh_snapshot_controlled(&database, &mut || {
@@ -408,7 +487,10 @@ mod snapshot_refresh_tests {
                         Ok(())
                     }
                 });
-                assert!(matches!(result, Err(WriteTxnError::Interrupted(_))), "stop={stop}");
+                assert!(
+                    matches!(result, Err(WriteTxnError::Interrupted(_))),
+                    "stop={stop}"
+                );
                 assert_eq!(seen, stop);
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(txn.prepared.as_ref().unwrap().basis(), basis);
@@ -451,7 +533,9 @@ mod snapshot_refresh_tests {
                 // Exercise the real window retirement primitive as a missing-
                 // history injection. This does not authorize GC under a pin.
                 let retired = std::sync::Arc::make_mut(&mut database.snapshot)
-                    .delta_index.retire_prefix(frontier).unwrap();
+                    .delta_index
+                    .retire_prefix(frontier)
+                    .unwrap();
                 assert!(!retired.is_empty());
                 let mut work = 0;
                 let result = txn.refresh_snapshot_controlled(&database, &mut || {
@@ -466,14 +550,21 @@ mod snapshot_refresh_tests {
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(txn.prepared.as_ref().map(|p| p.template.clone()), template);
                 assert!(txn.prepared.iter().all(|p| p.basis() == basis));
-                assert!(txn.savepoints.iter().filter_map(|s| s.prepared.as_ref())
-                    .all(|p| p.basis() == basis));
+                assert!(
+                    txn.savepoints
+                        .iter()
+                        .filter_map(|s| s.prepared.as_ref())
+                        .all(|p| p.basis() == basis)
+                );
                 assert_eq!(txn.state(), EmbeddedTxnState::Active);
                 assert_eq!(txcx.outstanding_obligations(), 1);
                 // The exact retained boundary is valid, not a blanket refusal
                 // merely because some earlier history has been retired.
                 let mut current = database.begin(&txcx).unwrap();
-                assert_eq!(current.refresh_snapshot(&database, &txcx).unwrap(), frontier);
+                assert_eq!(
+                    current.refresh_snapshot(&database, &txcx).unwrap(),
+                    frontier
+                );
                 current.abort();
                 txn.abort();
                 assert_eq!(txcx.outstanding_obligations(), 0);
@@ -509,9 +600,9 @@ mod snapshot_refresh_tests {
                     // first-committer-wins validator for this basis. A bare
                     // commit_template kept the seed's validator, which refused
                     // this update of vertex 6 before the injected fault.
-                    let committed = database.write_with_faults(
-                        &cx, set_vertex(6, 60), crash, failure, None,
-                    ).await;
+                    let committed = database
+                        .write_with_faults(&cx, set_vertex(6, 60), crash, failure, None)
+                        .await;
                     // The fence cases below require the injected failure itself,
                     // not an earlier refusal that leaves the handle Healthy.
                     assert!(
@@ -526,16 +617,20 @@ mod snapshot_refresh_tests {
                         Ok(())
                     });
                     match (state, result) {
-                        (DatabaseState::CommitOutcomeUnknown { published_frontier },
+                        (
+                            DatabaseState::CommitOutcomeUnknown { published_frontier },
                             Err(WriteTxnError::Read(ReadError::CommitOutcomeUnknown {
                                 published_frontier: observed,
-                            }))) => {
+                            })),
+                        ) => {
                             assert_eq!(published_frontier, basis);
                             assert_eq!(observed, basis);
                             assert!(failure.is_none());
                         }
-                        (DatabaseState::NeedsAuthoritativeRecovery(expected),
-                            Err(WriteTxnError::Read(ReadError::RecoveryRequired(observed)))) => {
+                        (
+                            DatabaseState::NeedsAuthoritativeRecovery(expected),
+                            Err(WriteTxnError::Read(ReadError::RecoveryRequired(observed))),
+                        ) => {
                             assert_eq!(observed, expected);
                             assert_eq!(observed.published_frontier, basis);
                             assert_eq!(observed.durable_frontier, CommitSeq(basis.0 + 1));
@@ -550,15 +645,22 @@ mod snapshot_refresh_tests {
                     assert_eq!(txn.state(), EmbeddedTxnState::Active);
                     assert_eq!(txcx.outstanding_obligations(), 1);
                     assert_eq!(database.state(), state);
-                    assert_eq!(immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(10));
+                    assert_eq!(
+                        immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(10)
+                    );
                     txn.abort();
                     let recovered = database.recover_authoritatively(&cx).await.unwrap();
-                    assert_eq!(recovered.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(10), "refresh must not publish staged writes");
+                    assert_eq!(
+                        recovered.vertex(VId(3)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(10),
+                        "refresh must not publish staged writes"
+                    );
                     if failure.is_some() {
-                        assert_eq!(recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                            CanonicalScalar::Int(60));
+                        assert_eq!(
+                            recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                            CanonicalScalar::Int(60)
+                        );
                     }
                     assert_eq!(txcx.outstanding_obligations(), 0);
                 }
@@ -578,10 +680,13 @@ mod snapshot_refresh_tests {
             let basis = txn.basis();
             let template = txn.prepared.as_ref().unwrap().template.clone();
             let mut work = 0;
-            assert!(matches!(txn.refresh_snapshot_controlled(&foreign, &mut || {
-                work += 1;
-                Ok(())
-            }), Err(WriteTxnError::WrongDatabase)));
+            assert!(matches!(
+                txn.refresh_snapshot_controlled(&foreign, &mut || {
+                    work += 1;
+                    Ok(())
+                }),
+                Err(WriteTxnError::WrongDatabase)
+            ));
             assert_eq!(work, 0);
             assert_eq!(txn.basis(), basis);
             assert_eq!(txn.prepared.as_ref().unwrap().template, template);
@@ -600,10 +705,13 @@ mod snapshot_refresh_tests {
             txn.abort();
             let mut terminal = database.begin(&txcx).unwrap();
             terminal.finish(&mut database, &cx).await.unwrap();
-            assert!(matches!(terminal.refresh_snapshot_controlled(&database, &mut || {
-                work += 1;
-                Ok(())
-            }), Err(WriteTxnError::Finished)));
+            assert!(matches!(
+                terminal.refresh_snapshot_controlled(&database, &mut || {
+                    work += 1;
+                    Ok(())
+                }),
+                Err(WriteTxnError::Finished)
+            ));
             assert_eq!(work, 0);
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -626,20 +734,29 @@ mod snapshot_refresh_tests {
                     txn.rollback_to_savepoint(&database, "empty").unwrap();
                 } else {
                     let mut refused = WriteBatch::new(RelationId(1));
-                    refused.compare_and_set_vertex_property(VId(1), P,
-                        Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(11),
-                        WriteMismatchPolicy::AbortWrite);
-                    assert!(matches!(txn.write(&mut database, refused),
-                        Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))));
+                    refused.compare_and_set_vertex_property(
+                        VId(1),
+                        P,
+                        Some(CanonicalScalar::Int(999)),
+                        CanonicalScalar::Int(11),
+                        WriteMismatchPolicy::AbortWrite,
+                    );
+                    assert!(matches!(
+                        txn.write(&mut database, refused),
+                        Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))
+                    ));
                 }
                 assert!(txn.staged.is_empty());
                 assert!(txn.prepared.is_none());
                 assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))));
                 database.write(&cx, set_vertex(1, 12)).await.unwrap();
-                assert!(matches!(txn.refresh_snapshot(&database, &txcx),
+                assert!(matches!(
+                    txn.refresh_snapshot(&database, &txcx),
                     Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01", ..
-                    }))));
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
                 assert_eq!(txn.basis(), basis);
                 assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))));
                 assert_eq!(txn.state(), EmbeddedTxnState::Active);

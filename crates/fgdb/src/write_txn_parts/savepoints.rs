@@ -76,7 +76,9 @@ impl WriteTxn {
             // The latest successful preparation includes the whole raw prefix,
             // even observations erased from its canonical net effects. Failed
             // preparations already preserve their own observations in write().
-            prepared.dependencies.retain_observations(self.read_set.get_mut());
+            prepared
+                .dependencies
+                .retain_observations(self.read_set.get_mut());
         }
         Ok(())
     }
@@ -148,12 +150,18 @@ mod savepoint_tests {
             let mut edit = creation(2);
             edit.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(11)));
             txn.write(&mut db, edit).unwrap();
-            assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(11));
+            assert_eq!(
+                txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(11)
+            );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_some());
 
             txn.rollback_to_savepoint(&db, "edit").unwrap();
             assert_eq!(txn.prepared.as_ref().unwrap().template, saved_template);
-            assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(10));
+            assert_eq!(
+                txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_none());
             assert!(txn.vertex(&db, VId(777)).unwrap().is_some());
             assert_eq!(db.frontier().unwrap(), basis);
@@ -162,7 +170,10 @@ mod savepoint_tests {
             assert_eq!(committed, CommitSeq(basis.0 + 1));
             assert!(db.vertex(VId(777)).unwrap().is_some());
             assert!(db.vertex(VId(2)).unwrap().is_none());
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(10));
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(10)
+            );
             assert!(txn.savepoints.is_empty());
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -189,12 +200,18 @@ mod savepoint_tests {
             assert!(txn.vertex(&db, VId(1)).unwrap().is_some());
             assert!(txn.vertex(&db, VId(2)).unwrap().is_none());
             assert!(txn.vertex(&db, VId(3)).unwrap().is_none());
-            assert!(matches!(txn.rollback_to_savepoint(&db, "inner"), Err(WriteTxnError::UnknownSavepoint)));
+            assert!(matches!(
+                txn.rollback_to_savepoint(&db, "inner"),
+                Err(WriteTxnError::UnknownSavepoint)
+            ));
             txn.write(&mut db, creation(4)).unwrap();
             txn.release_savepoint(&db, "step").unwrap();
             assert_eq!(txn.savepoints.len(), 1);
             assert!(txn.vertex(&db, VId(4)).unwrap().is_some());
-            assert!(matches!(txn.rollback_to_savepoint(&db, "Step"), Err(WriteTxnError::UnknownSavepoint)));
+            assert!(matches!(
+                txn.rollback_to_savepoint(&db, "Step"),
+                Err(WriteTxnError::UnknownSavepoint)
+            ));
             txn.rollback_to_savepoint(&db, "step").unwrap();
             assert!(txn.prepared.is_none());
             assert!(txn.staged.is_empty());
@@ -228,10 +245,13 @@ mod savepoint_tests {
             winner.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(11)));
             db.write(&commit, winner).await.unwrap();
             // No intervening query may repair a lost preparation witness.
-            assert!(matches!(txn.commit(&mut db, &commit).await,
+            assert!(matches!(
+                txn.commit(&mut db, &commit).await,
                 Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                    law: "FG-LAW-FCW-READ-01", ..
-                }))));
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
             assert!(db.vertex(VId(777)).unwrap().is_none());
             assert!(txn.savepoints.is_empty());
             assert!(txn.pin.is_none());
@@ -252,10 +272,13 @@ mod savepoint_tests {
             txn.rollback_to_savepoint(&db, "scan").unwrap();
             db.write(&commit, creation(1)).await.unwrap();
             let frontier = db.frontier().unwrap();
-            assert!(matches!(txn.finish(&mut db, &commit).await,
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await,
                 Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                    law: "FG-LAW-FCW-READ-01", ..
-                }))));
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(txn.savepoints.is_empty());
         });
@@ -274,19 +297,40 @@ mod savepoint_tests {
             txn.savepoint(&db, "owner").unwrap();
             txn.write(&mut db, creation(1)).unwrap();
             let before = txn.prepared.as_ref().unwrap().template.clone();
-            assert!(matches!(txn.savepoint(&other, "foreign"), Err(WriteTxnError::WrongDatabase)));
-            assert!(matches!(txn.rollback_to_savepoint(&other, "owner"), Err(WriteTxnError::WrongDatabase)));
-            assert!(matches!(txn.release_savepoint(&other, "owner"), Err(WriteTxnError::WrongDatabase)));
-            assert!(matches!(txn.release_savepoint(&db, "absent"), Err(WriteTxnError::UnknownSavepoint)));
+            assert!(matches!(
+                txn.savepoint(&other, "foreign"),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.rollback_to_savepoint(&other, "owner"),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.release_savepoint(&other, "owner"),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.release_savepoint(&db, "absent"),
+                Err(WriteTxnError::UnknownSavepoint)
+            ));
             assert_eq!(txn.savepoints.len(), 1);
             assert_eq!(txn.staged.len(), 1);
             assert_eq!(txn.prepared.as_ref().unwrap().template, before);
             txn.rollback_to_savepoint(&db, "owner").unwrap();
             txn.finish(&mut db, &commit).await.unwrap();
             assert!(txn.savepoints.is_empty());
-            assert!(matches!(txn.savepoint(&db, "new"), Err(WriteTxnError::Finished)));
-            assert!(matches!(txn.rollback_to_savepoint(&db, "owner"), Err(WriteTxnError::Finished)));
-            assert!(matches!(txn.release_savepoint(&db, "owner"), Err(WriteTxnError::Finished)));
+            assert!(matches!(
+                txn.savepoint(&db, "new"),
+                Err(WriteTxnError::Finished)
+            ));
+            assert!(matches!(
+                txn.rollback_to_savepoint(&db, "owner"),
+                Err(WriteTxnError::Finished)
+            ));
+            assert!(matches!(
+                txn.release_savepoint(&db, "owner"),
+                Err(WriteTxnError::Finished)
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

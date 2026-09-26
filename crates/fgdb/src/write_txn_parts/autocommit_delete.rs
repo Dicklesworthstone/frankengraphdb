@@ -14,22 +14,28 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
         (fgdb_gql::GraphDeleteStats, EmbeddedTxnCompletion),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphDeleteError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GqlQueryError, GraphDeleteError};
         let infrastructure = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_delete_governed(
-            self, query_cx, deletion, policy,
-        ) {
-            Ok(stats) => stats,
-            Err(error) => {
-                transaction.abort();
-                return Err(error);
-            }
-        };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let stats =
+            match transaction.execute_graph_delete_governed(self, query_cx, deletion, policy) {
+                Ok(stats) => stats,
+                Err(error) => {
+                    transaction.abort();
+                    return Err(error);
+                }
+            };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -45,22 +51,29 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
         (fgdb_gql::GraphDeleteStats, Vec<VId>, EmbeddedTxnCompletion),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphDeleteError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GqlQueryError, GraphDeleteError};
         let infrastructure = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, targets) = match transaction.execute_graph_delete_returning_governed(
-            self, query_cx, deletion, policy,
-        ) {
+        let (stats, targets) = match transaction
+            .execute_graph_delete_returning_governed(self, query_cx, deletion, policy)
+        {
             Ok(result) => result,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, targets, completion))
     }
 }

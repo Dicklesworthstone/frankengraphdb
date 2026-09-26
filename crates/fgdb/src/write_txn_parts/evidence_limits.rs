@@ -8,10 +8,8 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         bytes: &[u8],
-    ) -> Result<
-        fgdb_gql::GqlPreparedResultArtifact,
-        fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlPreparedResultArtifact, fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>>
+    {
         self.audit_prepared_query_artifact_with_limits(
             query,
             bytes,
@@ -25,10 +23,8 @@ impl<V: Vfs + Clone> Database<V> {
         query: &fgdb_gql::PreparedGqlQuery,
         bytes: &[u8],
         limits: fgdb_gql::GqlEvidenceLimits,
-    ) -> Result<
-        fgdb_gql::GqlPreparedResultArtifact,
-        fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlPreparedResultArtifact, fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>>
+    {
         limits
             .preflight_prepared(bytes)
             .map_err(fgdb_gql::GqlEvidenceLimitedAuditError::Limit)?;
@@ -44,10 +40,8 @@ impl crate::EmbeddedReadView {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         bytes: &[u8],
-    ) -> Result<
-        fgdb_gql::GqlPreparedResultArtifact,
-        fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlPreparedResultArtifact, fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>>
+    {
         self.audit_prepared_query_artifact_with_limits(
             query,
             bytes,
@@ -62,10 +56,8 @@ impl crate::EmbeddedReadView {
         query: &fgdb_gql::PreparedGqlQuery,
         bytes: &[u8],
         limits: fgdb_gql::GqlEvidenceLimits,
-    ) -> Result<
-        fgdb_gql::GqlPreparedResultArtifact,
-        fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlPreparedResultArtifact, fgdb_gql::GqlEvidenceLimitedAuditError<GqlError>>
+    {
         limits
             .preflight_prepared(bytes)
             .map_err(fgdb_gql::GqlEvidenceLimitedAuditError::Limit)?;
@@ -77,9 +69,7 @@ impl crate::EmbeddedReadView {
 impl WriteTxn {
     /// Audit raw staged-overlay bytes under the default untrusted-input policy
     /// and this transaction's current basis and staged-effect authority.
-    pub fn audit_untrusted_prepared_query_overlay_artifact<
-        V: Vfs + Clone,
-    >(
+    pub fn audit_untrusted_prepared_query_overlay_artifact<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
@@ -98,9 +88,7 @@ impl WriteTxn {
 
     /// Audit raw staged-overlay bytes under caller-supplied resource limits and
     /// this transaction's current basis and staged-effect authority.
-    pub fn audit_prepared_query_overlay_artifact_with_limits<
-        V: Vfs + Clone,
-    >(
+    pub fn audit_prepared_query_overlay_artifact_with_limits<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
@@ -113,9 +101,7 @@ impl WriteTxn {
         limits
             .preflight_overlay(bytes)
             .map_err(fgdb_gql::GqlEvidenceLimitedAuditError::Limit)?;
-        self.audit_prepared_query_overlay_artifact(
-            database, query, bytes,
-        )
-        .map_err(fgdb_gql::GqlEvidenceLimitedAuditError::Audit)
+        self.audit_prepared_query_overlay_artifact(database, query, bytes)
+            .map_err(fgdb_gql::GqlEvidenceLimitedAuditError::Audit)
     }
 }

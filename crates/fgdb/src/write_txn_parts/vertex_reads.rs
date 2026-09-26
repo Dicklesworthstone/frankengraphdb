@@ -152,7 +152,10 @@ impl WriteTxn {
                         DeltaRow::CreateVertex { vid, .. }
                         | DeltaRow::DeleteVertex { vid, .. }
                         | DeltaRow::LabelMembership { vid, .. }
-                        | DeltaRow::Property { elem: ElementId::Vertex(vid), .. } => *vid,
+                        | DeltaRow::Property {
+                            elem: ElementId::Vertex(vid),
+                            ..
+                        } => *vid,
                         _ => continue,
                     };
                     let mut overlay = basis.remove(&vid);
@@ -163,7 +166,9 @@ impl WriteTxn {
                 }
             }
         }
-        self.read_set.borrow_mut().extend(basis.keys().copied().map(ElementId::Vertex));
+        self.read_set
+            .borrow_mut()
+            .extend(basis.keys().copied().map(ElementId::Vertex));
         // BTreeMap already supplies canonical identity order. Each net effect
         // is visited once; no per-vertex replay or additional sort is needed.
         Ok(basis.into_values().collect())
@@ -194,25 +199,35 @@ mod vertex_overlay_tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
             for vid in (1..=128).rev() {
-                seed.create_vertex(VId(vid), vec![LabelId(1)],
-                    vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]);
+                seed.create_vertex(
+                    VId(vid),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+                );
             }
             db.write(&commit, seed).await.unwrap();
             let mut txn = db.begin(&txcx).unwrap();
             let mut changes = WriteBatch::new(RelationId(1));
             for vid in 1..=128 {
                 match vid % 4 {
-                    0 => { changes.delete_vertex(VId(vid)); }
+                    0 => {
+                        changes.delete_vertex(VId(vid));
+                    }
                     1 => {
-                        changes.set_vertex_property(VId(vid), PropertyKeyId(1),
-                            Some(CanonicalScalar::Int(20)));
+                        changes.set_vertex_property(
+                            VId(vid),
+                            PropertyKeyId(1),
+                            Some(CanonicalScalar::Int(20)),
+                        );
                         changes.set_vertex_label(VId(vid), LabelId(2), true);
                     }
                     2 => {
                         changes.set_vertex_property(VId(vid), PropertyKeyId(1), None);
                         changes.set_vertex_label(VId(vid), LabelId(1), false);
                     }
-                    _ => { changes.ensure_vertex(VId(vid), vec![LabelId(99)], vec![]); }
+                    _ => {
+                        changes.ensure_vertex(VId(vid), vec![LabelId(99)], vec![]);
+                    }
                 }
             }
             for vid in (200..232).rev() {
@@ -235,12 +250,21 @@ mod vertex_overlay_tests {
                     match row.vid.0 % 4 {
                         1 => {
                             assert_eq!(row.labels, vec![LabelId(1), LabelId(2)]);
-                            assert_eq!(row.props, vec![(PropertyKeyId(1), CanonicalScalar::Int(20))]);
+                            assert_eq!(
+                                row.props,
+                                vec![(PropertyKeyId(1), CanonicalScalar::Int(20))]
+                            );
                         }
-                        2 => { assert!(row.labels.is_empty()); assert!(row.props.is_empty()); }
+                        2 => {
+                            assert!(row.labels.is_empty());
+                            assert!(row.props.is_empty());
+                        }
                         3 => {
                             assert_eq!(row.labels, vec![LabelId(1)]);
-                            assert_eq!(row.props, vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]);
+                            assert_eq!(
+                                row.props,
+                                vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]
+                            );
                         }
                         _ => panic!("deleted vertex was materialized"),
                     }
@@ -251,7 +275,10 @@ mod vertex_overlay_tests {
             assert!(txn.vertex(&db, VId(999)).unwrap().is_none());
             assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(999))));
             txn.commit(&mut db, &commit).await.unwrap();
-            assert_eq!(db.vertices_at(db.frontier().unwrap()).unwrap().len(), rows.len());
+            assert_eq!(
+                db.vertices_at(db.frontier().unwrap()).unwrap().len(),
+                rows.len()
+            );
             for row in rows {
                 let committed = db.vertex(row.vid).unwrap().unwrap();
                 assert_eq!(committed.birth_ordinal, row.birth_ordinal);
@@ -274,7 +301,11 @@ mod vertex_overlay_tests {
             let mut missing = WriteBatch::new(RelationId(1));
             missing.delete_vertex_if_present(VId(50));
             txn.write(&mut db, missing).unwrap();
-            assert!(txn.vertices_for_scan(&db, Some(LabelId(9))).unwrap().is_empty());
+            assert!(
+                txn.vertices_for_scan(&db, Some(LabelId(9)))
+                    .unwrap()
+                    .is_empty()
+            );
             assert!(!txn.scanned_vertices.get());
             assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(50))));
             txn.rollback_to_savepoint(&db, "before-read").unwrap();
@@ -283,10 +314,13 @@ mod vertex_overlay_tests {
             // reject this insertion even after its no-op preparation is gone.
             winner.create_vertex(VId(50), vec![LabelId(7)], vec![]);
             db.write(&commit, winner).await.unwrap();
-            assert!(matches!(txn.finish(&mut db, &commit).await,
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await,
                 Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                    law: "FG-LAW-FCW-READ-01", ..
-                }))));
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -303,20 +337,32 @@ mod vertex_overlay_tests {
                 seed.create_vertex(VId(1), vec![LabelId(9)], vec![]);
                 db.write(&commit, seed).await.unwrap();
                 let mut txn = db.begin(&txcx).unwrap();
-                assert_eq!(txn.vertices_for_scan(&db, Some(LabelId(9))).unwrap().len(), 1);
+                assert_eq!(
+                    txn.vertices_for_scan(&db, Some(LabelId(9))).unwrap().len(),
+                    1
+                );
                 assert!(!txn.scanned_vertices.get());
                 let mut winner = WriteBatch::new(RelationId(1));
-                winner.create_vertex(VId(2),
-                    vec![LabelId(if matching_label { 9 } else { 7 })], vec![]);
+                winner.create_vertex(
+                    VId(2),
+                    vec![LabelId(if matching_label { 9 } else { 7 })],
+                    vec![],
+                );
                 db.write(&commit, winner).await.unwrap();
                 let result = txn.finish(&mut db, &commit).await;
                 if matching_label {
-                    assert!(matches!(result,
+                    assert!(matches!(
+                        result,
                         Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                            law: "FG-LAW-FCW-READ-01", ..
-                        }))));
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
                 } else {
-                    assert!(matches!(result, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+                    assert!(matches!(
+                        result,
+                        Ok(EmbeddedTxnCompletion::ReadClosed { .. })
+                    ));
                 }
             });
             assert!(report.lab_test_passed(), "{report:?}");
@@ -368,9 +414,7 @@ mod bulk_vertex_overlay_tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let txn_cx = contexts.txn();
-            let mut database = Database::open_memory(&commit, keys())
-                .await
-                .expect("open");
+            let mut database = Database::open_memory(&commit, keys()).await.expect("open");
             let mut seed = WriteBatch::new(RelationId(1));
             for vid in [VId(1), VId(2), VId(3)] {
                 seed.create_vertex(
@@ -457,9 +501,7 @@ mod bulk_vertex_overlay_tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let txn_cx = contexts.txn();
-            let mut database = Database::open_memory(&commit, keys())
-                .await
-                .expect("open");
+            let mut database = Database::open_memory(&commit, keys()).await.expect("open");
             let mut transaction = database.begin(&txn_cx).expect("begin");
             let mut first = WriteBatch::new(RelationId(9));
             first.create_vertex(VId(20), vec![LabelId(2)], vec![]);
@@ -472,12 +514,8 @@ mod bulk_vertex_overlay_tests {
             transaction
                 .write_ordered(&mut database, vec![first, second, third])
                 .expect("ordered relation groups");
-            let mut rows = compare_with_points(
-                &transaction,
-                &database,
-                &[VId(10), VId(20), VId(30)],
-                None,
-            );
+            let mut rows =
+                compare_with_points(&transaction, &database, &[VId(10), VId(20), VId(30)], None);
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[1].props, vec![(PROPERTY, CanonicalScalar::Int(42))]);
             let committed_at = transaction
@@ -499,14 +537,14 @@ mod bulk_vertex_overlay_tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let txn_cx = contexts.txn();
-            let mut database = Database::open_memory(&commit, keys())
-                .await
-                .expect("open");
+            let mut database = Database::open_memory(&commit, keys()).await.expect("open");
             let mut transaction = database.begin(&txn_cx).expect("begin");
             let mut staged = WriteBatch::new(RelationId(1));
             staged.create_vertex(VId(9), vec![], vec![]);
             staged.delete_vertex(VId(9));
-            transaction.write(&mut database, staged).expect("stage no-op");
+            transaction
+                .write(&mut database, staged)
+                .expect("stage no-op");
             assert!(
                 transaction
                     .vertices_for_scan(&database, Some(LabelId(77)))

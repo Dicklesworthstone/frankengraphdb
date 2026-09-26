@@ -15,11 +15,15 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GqlQueryExecution<fgdb_gql::GraphAggregateRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphAggregateError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphAggregateError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
-        use fgdb_gql::{GraphAggregateError, GqlQueryError};
+        use fgdb_gql::{GqlQueryError, GraphAggregateError};
         cx.with_restriction(|| {
-            let snapshot = self.query_snapshot(database)
+            let snapshot = self
+                .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut usage = crate::gql_exec::AdmissionUsage::default();
@@ -60,17 +64,23 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphSetExecutionError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
-        use fgdb_gql::{GraphSetExecutionError, GqlQueryError};
+        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
         cx.with_restriction(|| {
             // Wrong ownership/health/frontier is a source error even when a
             // zero query allowance would otherwise reject before the first leaf.
-            let _ = self.query_snapshot(database)
+            let _ = self
+                .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
             query.execute_governed(
                 policy,
-                |pattern, allowance| self.execute_graph_pattern_governed(database, cx, pattern, allowance),
+                |pattern, allowance| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                },
                 || cx.checkpoint(),
             )
         })
@@ -89,7 +99,10 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphCheapestPathError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         self.execute_cheapest_paths_over(database, cx, query, None, policy)
     }
@@ -107,7 +120,10 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphCheapestPathError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         self.execute_cheapest_paths_over(database, cx, query, Some(count), policy)
     }
@@ -123,11 +139,15 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<
         fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphCheapestPathError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
-        use fgdb_gql::{GraphCheapestPathError, GqlQueryError};
+        use fgdb_gql::{GqlQueryError, GraphCheapestPathError};
         cx.with_restriction(|| {
-            let snapshot = self.query_snapshot(database)
+            let snapshot = self
+                .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut usage = crate::gql_exec::AdmissionUsage::default();

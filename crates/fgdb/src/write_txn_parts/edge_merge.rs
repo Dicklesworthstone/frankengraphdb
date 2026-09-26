@@ -22,7 +22,10 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeMergePolicy,
         mut allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::GraphEdgeMergeStats, fgdb_gql::GraphEdgeMergeOutcome),
+        (
+            fgdb_gql::GraphEdgeMergeStats,
+            fgdb_gql::GraphEdgeMergeOutcome,
+        ),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{
@@ -33,13 +36,22 @@ impl WriteTxn {
         let infrastructure = |error| GqlQueryError::Source(GraphEdgeMergeError::Source(error));
 
         self.ensure_database(database).map_err(infrastructure)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(infrastructure)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(infrastructure)?;
         if live != self.basis {
-            return Err(infrastructure(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(infrastructure(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && merge.relation() != first.relation
         {
             return Err(infrastructure(WriteTxnError::RelationMismatch {
@@ -49,14 +61,13 @@ impl WriteTxn {
         }
 
         cx.with_restriction(|| {
-            let selected = self.execute_graph_pattern_governed(
-                database,
-                cx,
-                merge.selection(),
-                policy.query,
-            ).map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
+            let selected = self
+                .execute_graph_pattern_governed(database, cx, merge.selection(), policy.query)
+                .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
             if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
-                return Err(GqlQueryError::Source(GraphEdgeMergeError::InvalidSourceStatistics));
+                return Err(GqlQueryError::Source(
+                    GraphEdgeMergeError::InvalidSourceStatistics,
+                ));
             }
 
             let mut evaluator = selected.evaluator;
@@ -69,8 +80,16 @@ impl WriteTxn {
                 let scratch = u128::from(evaluator.scratch_entries)
                     + u128::from(kind == GlaExecutionEvent::ScratchEntry);
                 for (observed, limit, dimension) in [
-                    (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-                    (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+                    (
+                        work,
+                        policy.query.evaluator.max_work_units,
+                        GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        scratch,
+                        policy.query.evaluator.max_scratch_entries,
+                        GlaLimitDimension::ScratchEntries,
+                    ),
                 ] {
                     if observed > u128::from(limit) {
                         return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
@@ -98,9 +117,13 @@ impl WriteTxn {
                         column: row.len().min(width),
                     }));
                 }
-                let endpoint = |column: usize| -> Result<VId, GqlQueryError<
-                    GraphEdgeMergeError<WriteTxnError, A>, Box<asupersync::error::Error>
-                >> {
+                let endpoint = |column: usize| -> Result<
+                    VId,
+                    GqlQueryError<
+                        GraphEdgeMergeError<WriteTxnError, A>,
+                        Box<asupersync::error::Error>,
+                    >,
+                > {
                     let value = &row.values()[column];
                     if value.is_null() {
                         return Err(GqlQueryError::Source(GraphEdgeMergeError::NullEndpoint {
@@ -123,9 +146,11 @@ impl WriteTxn {
             }
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             if pairs.len() > 1 {
-                return Err(GqlQueryError::Source(GraphEdgeMergeError::AmbiguousEndpointPairs {
-                    observed: pairs.len() as u64,
-                }));
+                return Err(GqlQueryError::Source(
+                    GraphEdgeMergeError::AmbiguousEndpointPairs {
+                        observed: pairs.len() as u64,
+                    },
+                ));
             }
             let Some((source, destination)) = pairs.into_iter().next() else {
                 return Ok((
@@ -144,10 +169,14 @@ impl WriteTxn {
             // witness needed to reject a concurrent relationship insertion.
             let edges = self.edges(database).map_err(infrastructure)?;
             let overlay_edges = u64::try_from(edges.len()).expect("in-memory edge count fits u64");
-            let cumulative_records = selected.rows.snapshot_records
+            let cumulative_records = selected
+                .rows
+                .snapshot_records
                 .checked_add(overlay_edges)
                 .expect("two in-memory source counts fit u64");
-            policy.query.rows
+            policy
+                .query
+                .rows
                 .check(GqlBudgetDimension::SnapshotRecords, cumulative_records)
                 .map_err(GqlQueryError::Rows)?;
 
@@ -163,9 +192,11 @@ impl WriteTxn {
                     }
                     matching.push(edge.entry.eid);
                     if matching.len() > 1 {
-                        return Err(GqlQueryError::Source(GraphEdgeMergeError::AmbiguousRelationships {
-                            observed: matching.len() as u64,
-                        }));
+                        return Err(GqlQueryError::Source(
+                            GraphEdgeMergeError::AmbiguousRelationships {
+                                observed: matching.len() as u64,
+                            },
+                        ));
                     }
                 }
             }
@@ -199,8 +230,9 @@ impl WriteTxn {
                 properties.push((*key, value.value().clone()));
             }
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let identity = allocate(GraphEdgeMergeRequest)
-                .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
+            let identity = allocate(GraphEdgeMergeRequest).map_err(|error| {
+                GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error))
+            })?;
             let ElementId::Edge(edge) = identity else {
                 return Err(GqlQueryError::Source(GraphEdgeMergeError::IdentityKind));
             };

@@ -6,11 +6,13 @@ fn merge_remaining_budget(
     used: fgdb_gql::GqlExecutionStats,
 ) -> fgdb_gql::GqlExecutionBudget {
     let snapshot = original.max_snapshot_records().map(|limit| {
-        limit.checked_sub(used.snapshot_records)
+        limit
+            .checked_sub(used.snapshot_records)
             .expect("successful match selection is within its snapshot limit")
     });
     let results = original.max_result_rows().map(|limit| {
-        limit.checked_sub(used.result_rows)
+        limit
+            .checked_sub(used.result_rows)
             .expect("successful match selection is within its result limit")
     });
     match (snapshot, results) {
@@ -202,24 +204,37 @@ impl WriteTxn {
         policy: fgdb_gql::GraphVertexMergePolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::GraphVertexMergeStats, fgdb_gql::GraphVertexMergeOutcome),
+        (
+            fgdb_gql::GraphVertexMergeStats,
+            fgdb_gql::GraphVertexMergeOutcome,
+        ),
         TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
     > {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(infrastructure)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(infrastructure)?;
         if live != self.basis {
-            return Err(infrastructure(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(infrastructure(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && merge.relation() != first.relation
         {
             return Err(infrastructure(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: merge.relation(),
+                expected: first.relation,
+                found: merge.relation(),
             }));
         }
         cx.with_restriction(|| {

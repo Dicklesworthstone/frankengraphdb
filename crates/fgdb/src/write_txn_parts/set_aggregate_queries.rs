@@ -3,8 +3,8 @@
 mod set_aggregate_queries {
     use super::*;
     use fgdb_gql::{
-        GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateError,
-        GraphAggregateRow, PreparedGraphSetAggregate,
+        GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateError, GraphAggregateRow,
+        PreparedGraphSetAggregate,
     };
     use fgdb_types::QueryCx;
 
@@ -18,10 +18,14 @@ mod set_aggregate_queries {
         /// Native set/WITH inputs may be bound separately and reused. Counts,
         /// i128 sums and rational averages retain their exact result domains.
         pub fn execute_graph_set_aggregate_governed(
-            &self, cx: &QueryCx, query: &PreparedGraphSetAggregate, policy: GqlQueryPolicy,
+            &self,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            policy: GqlQueryPolicy,
         ) -> ResultRows<GqlError> {
-            let as_of = self.frontier().map_err(|error|
-                GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error))))?;
+            let as_of = self.frontier().map_err(|error| {
+                GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
+            })?;
             self.execute_graph_set_aggregate_governed_at(cx, query, as_of, policy)
         }
 
@@ -30,15 +34,26 @@ mod set_aggregate_queries {
         /// even for empty differences, zero output pages or a zero allowance.
         /// All operand visits, relational stages and grouping share one budget.
         pub fn execute_graph_set_aggregate_governed_at(
-            &self, cx: &QueryCx, query: &PreparedGraphSetAggregate,
-            as_of: CommitSeq, policy: GqlQueryPolicy,
+            &self,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            as_of: CommitSeq,
+            policy: GqlQueryPolicy,
         ) -> ResultRows<GqlError> {
-            self.ensure_readable().and_then(|()| self.snapshot.check_frontier(as_of))
-                .map_err(|error|
-                    GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error))))?;
-            cx.with_restriction(|| query.execute_governed(policy,
-                |pattern, remaining| self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining),
-                || cx.checkpoint()))
+            self.ensure_readable()
+                .and_then(|()| self.snapshot.check_frontier(as_of))
+                .map_err(|error| {
+                    GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
+                })?;
+            cx.with_restriction(|| {
+                query.execute_governed(
+                    policy,
+                    |pattern, remaining| {
+                        self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    || cx.checkpoint(),
+                )
+            })
         }
     }
 
@@ -47,7 +62,10 @@ mod set_aggregate_queries {
         /// while the live database advances or compacts. No live writer lookup
         /// supplies a later operand, nor can a filtered row release the pin.
         pub fn execute_graph_set_aggregate_governed(
-            &self, cx: &QueryCx, query: &PreparedGraphSetAggregate, policy: GqlQueryPolicy,
+            &self,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            policy: GqlQueryPolicy,
         ) -> ResultRows<GqlError> {
             self.execute_graph_set_aggregate_governed_at(cx, query, self.frontier(), policy)
         }
@@ -55,14 +73,24 @@ mod set_aggregate_queries {
         /// Historical execution is confined to this view's retained frontier.
         /// Only fully accepted final groups escape; input rows stay private.
         pub fn execute_graph_set_aggregate_governed_at(
-            &self, cx: &QueryCx, query: &PreparedGraphSetAggregate,
-            as_of: CommitSeq, policy: GqlQueryPolicy,
+            &self,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            as_of: CommitSeq,
+            policy: GqlQueryPolicy,
         ) -> ResultRows<GqlError> {
-            self.snapshot.check_frontier(as_of).map_err(|error|
-                GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error))))?;
-            cx.with_restriction(|| query.execute_governed(policy,
-                |pattern, remaining| self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining),
-                || cx.checkpoint()))
+            self.snapshot.check_frontier(as_of).map_err(|error| {
+                GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
+            })?;
+            cx.with_restriction(|| {
+                query.execute_governed(
+                    policy,
+                    |pattern, remaining| {
+                        self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    || cx.checkpoint(),
+                )
+            })
         }
     }
 
@@ -77,14 +105,24 @@ mod set_aggregate_queries {
         /// it does not finish, commit, retry or replace the caller's workspace.
         /// Ordinary finish/commit still validates the retained observations.
         pub fn execute_graph_set_aggregate_governed<V: Vfs + Clone>(
-            &self, database: &Database<V>, cx: &QueryCx,
-            query: &PreparedGraphSetAggregate, policy: GqlQueryPolicy,
+            &self,
+            database: &Database<V>,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            policy: GqlQueryPolicy,
         ) -> ResultRows<WriteTxnError> {
-            let _ = self.query_snapshot(database)
+            let _ = self
+                .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
-            cx.with_restriction(|| query.execute_governed(policy,
-                |pattern, remaining| self.execute_graph_pattern_governed(database, cx, pattern, remaining),
-                || cx.checkpoint()))
+            cx.with_restriction(|| {
+                query.execute_governed(
+                    policy,
+                    |pattern, remaining| {
+                        self.execute_graph_pattern_governed(database, cx, pattern, remaining)
+                    },
+                    || cx.checkpoint(),
+                )
+            })
         }
     }
 }

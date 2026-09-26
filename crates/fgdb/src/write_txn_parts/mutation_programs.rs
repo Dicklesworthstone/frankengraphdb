@@ -19,7 +19,13 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         // still needed by the first statement's canonical overlay selection.
         let prepared = txn.prepared.clone();
         let program_multi_relation = txn.program_multi_relation;
-        Self { txn, staged_len, prepared, program_multi_relation, accepted: false }
+        Self {
+            txn,
+            staged_len,
+            prepared,
+            program_multi_relation,
+            accepted: false,
+        }
     }
     fn accept(mut self) {
         self.accepted = true;
@@ -29,7 +35,9 @@ impl Drop for MutationProgramWorkspace<'_> {
     fn drop(&mut self) {
         // Scope permission never escapes, including accepted or nested workspaces.
         self.txn.program_multi_relation = self.program_multi_relation;
-        if self.accepted { return; }
+        if self.accepted {
+            return;
+        }
         let appended = self.txn.staged.len() > self.staged_len;
         let discarded = core::mem::replace(&mut self.txn.prepared, self.prepared.take());
         self.txn.staged.truncate(self.staged_len);
@@ -40,7 +48,9 @@ impl Drop for MutationProgramWorkspace<'_> {
         // before discarding the prepared effects. Failed ordinary preparations
         // already retain their own observations in WriteTxn::write.
         if appended && let Some(prepared) = discarded {
-            prepared.dependencies.retain_observations(&mut self.txn.read_set.borrow_mut());
+            prepared
+                .dependencies
+                .retain_observations(&mut self.txn.read_set.borrow_mut());
         }
     }
 }
@@ -74,25 +84,37 @@ impl WriteTxn {
         // Lifecycle/owner/health/basis/coordinate validation wins over a zero
         // program allowance, even when every statement would match no rows.
         self.ensure_database(database).map_err(Error::Preflight)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(Error::Preflight)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(Error::Preflight)?;
         if live != self.basis {
-            return Err(Error::Preflight(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(Error::Preflight(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if let Some(first) = self.staged.first()
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && program.relation() != first.relation
         {
             return Err(Error::Preflight(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: program.relation(),
+                expected: first.relation,
+                found: program.relation(),
             }));
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
             let stats = program.execute_governed(
                 policy,
-                |statement, remaining| workspace.txn.execute_graph_mutation_governed(
-                    database, cx, statement, remaining,
-                ),
+                |statement, remaining| {
+                    workspace
+                        .txn
+                        .execute_graph_mutation_governed(database, cx, statement, remaining)
+                },
                 || cx.checkpoint(),
             )?;
             // No fallible operation or new cancellation check follows accept.
@@ -115,10 +137,18 @@ mod mutation_program_workspace_tests {
             let commit = contexts.commit();
             let txcx = contexts.txn();
             for change_observed_vertex in [false, true] {
-                let keys = crate::DatabaseKeys::new([0x81; 32], DatabaseSecurityNamespaceId([0x82; 32]), [0x83; 32]);
+                let keys = crate::DatabaseKeys::new(
+                    [0x81; 32],
+                    DatabaseSecurityNamespaceId([0x82; 32]),
+                    [0x83; 32],
+                );
                 let mut db = Database::open_memory(&commit, keys).await.unwrap();
                 let mut seed = WriteBatch::new(RelationId(1));
-                seed.create_vertex(VId(1), vec![], vec![(fgdb_delta_types::PropertyKeyId(1), CanonicalScalar::Int(10))]);
+                seed.create_vertex(
+                    VId(1),
+                    vec![],
+                    vec![(fgdb_delta_types::PropertyKeyId(1), CanonicalScalar::Int(10))],
+                );
                 db.write(&commit, seed).await.unwrap();
                 let mut txn = db.begin(&txcx).unwrap();
                 let mut prefix = WriteBatch::new(RelationId(1));
@@ -129,23 +159,39 @@ mod mutation_program_workspace_tests {
                     let mut step = WriteBatch::new(RelationId(1));
                     // Equal-to-current: canonicalization removes the effect but
                     // cannot erase the preparation's before-image observation.
-                    step.set_vertex_property(VId(1), fgdb_delta_types::PropertyKeyId(1), Some(CanonicalScalar::Int(10)));
+                    step.set_vertex_property(
+                        VId(1),
+                        fgdb_delta_types::PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(10)),
+                    );
                     workspace.txn.write(&mut db, step).unwrap();
                     panic!("injected unwind before program acceptance");
                 }));
                 assert!(failure.is_err());
                 if change_observed_vertex {
                     let mut winner = WriteBatch::new(RelationId(1));
-                    winner.set_vertex_property(VId(1), fgdb_delta_types::PropertyKeyId(1), Some(CanonicalScalar::Int(11)));
+                    winner.set_vertex_property(
+                        VId(1),
+                        fgdb_delta_types::PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(11)),
+                    );
                     db.write(&commit, winner).await.unwrap();
                     // Commit immediately: no query may repair the lost witness.
-                    assert!(matches!(txn.commit(&mut db, &commit).await,
-                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }))));
+                    assert!(matches!(
+                        txn.commit(&mut db, &commit).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
                     assert!(db.vertex(VId(777)).unwrap().is_none());
                 } else {
                     txn.commit(&mut db, &commit).await.unwrap();
                     assert!(db.vertex(VId(777)).unwrap().is_some());
-                    assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(10));
+                    assert_eq!(
+                        db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(10)
+                    );
                 }
             }
         });

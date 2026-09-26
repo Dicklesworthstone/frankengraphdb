@@ -1,10 +1,7 @@
 fn preflight_evidence_page_request<E>(
     page_size: u64,
     after: Option<&[u8]>,
-) -> Result<
-    Option<fgdb_gql::GqlEvidencePageToken>,
-    fgdb_gql::GqlEvidencePageAuditError<E>,
-> {
+) -> Result<Option<fgdb_gql::GqlEvidencePageToken>, fgdb_gql::GqlEvidencePageAuditError<E>> {
     if page_size == 0 {
         return Err(fgdb_gql::GqlEvidencePageAuditError::Page(
             fgdb_gql::GqlEvidencePageError::ZeroPageSize,
@@ -14,9 +11,9 @@ fn preflight_evidence_page_request<E>(
         .map(fgdb_gql::GqlEvidencePageToken::from_bytes)
         .transpose()
         .map_err(|source| {
-            fgdb_gql::GqlEvidencePageAuditError::Page(
-                fgdb_gql::GqlEvidencePageError::TokenDecode(source),
-            )
+            fgdb_gql::GqlEvidencePageAuditError::Page(fgdb_gql::GqlEvidencePageError::TokenDecode(
+                source,
+            ))
         })
 }
 
@@ -33,10 +30,7 @@ impl<V: Vfs + Clone> Database<V> {
         bytes: &[u8],
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<GqlError>> {
         self.audit_prepared_query_artifact_page_with_limits(
             query,
             bytes,
@@ -55,10 +49,7 @@ impl<V: Vfs + Clone> Database<V> {
         limits: fgdb_gql::GqlEvidenceLimits,
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<GqlError>> {
         let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
             .audit_prepared_query_artifact_with_limits(query, bytes, limits)
@@ -78,10 +69,7 @@ impl crate::EmbeddedReadView {
         bytes: &[u8],
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<GqlError>> {
         self.audit_prepared_query_artifact_page_with_limits(
             query,
             bytes,
@@ -100,10 +88,7 @@ impl crate::EmbeddedReadView {
         limits: fgdb_gql::GqlEvidenceLimits,
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<GqlError>> {
         let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
             .audit_prepared_query_artifact_with_limits(query, bytes, limits)
@@ -121,19 +106,14 @@ impl WriteTxn {
     /// Page size and token syntax are checked first. The entire artifact is then
     /// decoded and the current overlay re-executed before token binding. A later
     /// staged effect therefore refuses before any page is returned.
-    pub fn audit_untrusted_prepared_query_overlay_artifact_page<
-        V: Vfs + Clone,
-    >(
+    pub fn audit_untrusted_prepared_query_overlay_artifact_page<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
         bytes: &[u8],
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<WriteTxnError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<WriteTxnError>> {
         self.audit_prepared_query_overlay_artifact_page_with_limits(
             database,
             query,
@@ -146,9 +126,7 @@ impl WriteTxn {
 
     /// Resource-safe staged-overlay audit plus deterministic paging under
     /// caller-supplied artifact limits.
-    pub fn audit_prepared_query_overlay_artifact_page_with_limits<
-        V: Vfs + Clone,
-    >(
+    pub fn audit_prepared_query_overlay_artifact_page_with_limits<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
@@ -156,15 +134,10 @@ impl WriteTxn {
         limits: fgdb_gql::GqlEvidenceLimits,
         page_size: u64,
         after: Option<&[u8]>,
-    ) -> Result<
-        fgdb_gql::GqlEvidencePage,
-        fgdb_gql::GqlEvidencePageAuditError<WriteTxnError>,
-    > {
+    ) -> Result<fgdb_gql::GqlEvidencePage, fgdb_gql::GqlEvidencePageAuditError<WriteTxnError>> {
         let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
-            .audit_prepared_query_overlay_artifact_with_limits(
-                database, query, bytes, limits,
-            )
+            .audit_prepared_query_overlay_artifact_with_limits(database, query, bytes, limits)
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Audit)?;
         artifact
             .page(page_size, token.as_ref())

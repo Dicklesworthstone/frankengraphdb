@@ -22,18 +22,22 @@ impl<V: Vfs + Clone> Database<V> {
     > {
         use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError};
         let infrastructure = |error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, outcome) = match transaction.execute_graph_edge_upsert_governed(
-            self, query_cx, upsert, policy, allocate,
-        ) {
+        let (stats, outcome) = match transaction
+            .execute_graph_edge_upsert_governed(self, query_cx, upsert, policy, allocate)
+        {
             Ok(value) => value,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, outcome, completion))
     }
 }

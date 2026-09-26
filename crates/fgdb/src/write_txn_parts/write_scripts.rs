@@ -31,8 +31,10 @@ impl WriteTxn {
     > {
         use fgdb_gql::GraphWriteScriptExecutionError as Error;
         let program = script.bind_parameters(arguments).map_err(Error::Binding)?;
-        self.execute_graph_write_program_returning_governed(database, cx, &program, policy, allocate)
-            .map_err(Error::Program)
+        self.execute_graph_write_program_returning_governed(
+            database, cx, &program, policy, allocate,
+        )
+        .map_err(Error::Program)
     }
 }
 
@@ -67,7 +69,9 @@ impl<V: Vfs + Clone> Database<V> {
         let program = script.bind_parameters(arguments).map_err(Error::Binding)?;
         self.execute_graph_write_program_returning_autocommit_governed(
             txcx, query_cx, commit_cx, &program, policy, allocate,
-        ).await.map_err(Error::Program)
+        )
+        .await
+        .map_err(Error::Program)
     }
 }
 
@@ -95,8 +99,13 @@ impl WriteTxn {
         fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         self.execute_graph_write_program_returning_governed(
-            database, cx, batch.program(), policy, allocate,
-        ).map_err(|source| batch.execution_error(source))
+            database,
+            cx,
+            batch.program(),
+            policy,
+            allocate,
+        )
+        .map_err(|source| batch.execution_error(source))
     }
 
     /// Admit and bind ALL parameter sets before any storage read or allocator
@@ -118,7 +127,8 @@ impl WriteTxn {
         fgdb_gql::GraphWriteProgramReceipt,
         fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
-        let batch = script.bind_parameter_sets_with_limit(arguments, max_statements)
+        let batch = script
+            .bind_parameter_sets_with_limit(arguments, max_statements)
             .map_err(fgdb_gql::GraphWriteScriptExecutionError::BatchBinding)?;
         self.execute_bound_graph_write_script_batch_governed(database, cx, &batch, policy, allocate)
     }
@@ -143,8 +153,15 @@ impl<V: Vfs + Clone> Database<V> {
         fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         self.execute_graph_write_program_returning_autocommit_governed(
-            txcx, query_cx, commit_cx, batch.program(), policy, allocate,
-        ).await.map_err(|source| batch.execution_error(source))
+            txcx,
+            query_cx,
+            commit_cx,
+            batch.program(),
+            policy,
+            allocate,
+        )
+        .await
+        .map_err(|source| batch.execution_error(source))
     }
 
     /// Admit the expanded count and bind every record BEFORE beginning a private
@@ -167,10 +184,12 @@ impl<V: Vfs + Clone> Database<V> {
         (fgdb_gql::GraphWriteProgramReceipt, EmbeddedTxnCompletion),
         fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
-        let batch = script.bind_parameter_sets_with_limit(arguments, max_statements)
+        let batch = script
+            .bind_parameter_sets_with_limit(arguments, max_statements)
             .map_err(fgdb_gql::GraphWriteScriptExecutionError::BatchBinding)?;
         self.execute_bound_graph_write_script_batch_autocommit_governed(
             txcx, query_cx, commit_cx, &batch, policy, allocate,
-        ).await
+        )
+        .await
     }
 }

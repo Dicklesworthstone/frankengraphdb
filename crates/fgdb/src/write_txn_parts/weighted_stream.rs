@@ -19,24 +19,32 @@ impl WriteTxn {
         fgdb_gql::GraphCheapestPathStreamIterator<'cx, Box<asupersync::error::Error>>,
         TxnGqlError<fgdb_gql::GraphCheapestPathError<WriteTxnError>>,
     > {
-        use fgdb_gql::{GraphCheapestPathError, GqlQueryError};
+        use fgdb_gql::{GqlQueryError, GraphCheapestPathError};
         let stream = cx.with_restriction(|| {
-            let snapshot = self.query_snapshot(database)
+            let snapshot = self
+                .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut usage = crate::gql_exec::AdmissionUsage::default();
             let pattern = query.input_pattern();
             let source = self.query_source_over_logical(
-                snapshot, pattern.plan().clone(), pattern.required_vertex_label(),
+                snapshot,
+                pattern.plan().clone(),
+                pattern.required_vertex_label(),
                 &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe(policy, event)
                 },
             )?;
             query.stream_governed_with_admission(
-                count, source.snapshot_records as u64, source.vertex_ids(), source.identified_edges(),
+                count,
+                source.snapshot_records as u64,
+                source.vertex_ids(),
+                source.identified_edges(),
                 |eid, key| Ok::<_, WriteTxnError>(source.edge_property(eid, key)),
-                usage.path_stream_usage(), policy, || cx.checkpoint(),
+                usage.path_stream_usage(),
+                policy,
+                || cx.checkpoint(),
             )
         })?;
         Ok(stream.into_scoped_iterator(self.basis, move |stream| {
@@ -57,6 +65,12 @@ impl WriteTxn {
         fgdb_gql::GraphCheapestPathStreamIterator<'cx, Box<asupersync::error::Error>>,
         TxnGqlError<fgdb_gql::GraphCheapestPathError<WriteTxnError>>,
     > {
-        self.stream_graph_cheapest_paths_governed(database, cx, request.query(), request.ranked_count().unwrap_or(1), policy)
+        self.stream_graph_cheapest_paths_governed(
+            database,
+            cx,
+            request.query(),
+            request.ranked_count().unwrap_or(1),
+            policy,
+        )
     }
 }

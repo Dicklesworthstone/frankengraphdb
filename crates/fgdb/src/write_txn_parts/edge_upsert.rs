@@ -15,7 +15,10 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeUpsertPolicy,
         allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::GraphEdgeUpsertStats, fgdb_gql::GraphEdgeMergeOutcome),
+        (
+            fgdb_gql::GraphEdgeUpsertStats,
+            fgdb_gql::GraphEdgeMergeOutcome,
+        ),
         TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{
@@ -28,37 +31,65 @@ impl WriteTxn {
             .map_err(|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)))?;
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let (merge_stats, outcome) = workspace.txn.execute_graph_edge_merge_governed(
-                database, cx, upsert.merge(), policy.merge, allocate,
-            ).map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
+            let (merge_stats, outcome) = workspace
+                .txn
+                .execute_graph_edge_merge_governed(
+                    database,
+                    cx,
+                    upsert.merge(),
+                    policy.merge,
+                    allocate,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
             let (branch, actions, edge) = match outcome {
                 GraphEdgeMergeOutcome::NoInput => (GraphEdgeUpsertBranch::NoInput, &[][..], None),
-                GraphEdgeMergeOutcome::Matched(edge) =>
-                    (GraphEdgeUpsertBranch::Match, upsert.on_match(), Some(edge)),
-                GraphEdgeMergeOutcome::Created(edge) =>
-                    (GraphEdgeUpsertBranch::Create, upsert.on_create(), Some(edge)),
+                GraphEdgeMergeOutcome::Matched(edge) => {
+                    (GraphEdgeUpsertBranch::Match, upsert.on_match(), Some(edge))
+                }
+                GraphEdgeMergeOutcome::Created(edge) => (
+                    GraphEdgeUpsertBranch::Create,
+                    upsert.on_create(),
+                    Some(edge),
+                ),
             };
             let observed = actions.len() as u128;
             if observed > u128::from(policy.max_actions) {
                 return Err(GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
-                    limit: policy.max_actions, observed,
+                    limit: policy.max_actions,
+                    observed,
                 }));
             }
 
             let mut evaluator = merge_stats.evaluator;
             let mut event = |kind: GlaExecutionEvent| -> Result<
-                (), GqlQueryError<GraphEdgeUpsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
+                (),
+                GqlQueryError<
+                    GraphEdgeUpsertError<WriteTxnError, A>,
+                    Box<asupersync::error::Error>,
+                >,
             > {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 let work = u128::from(evaluator.work_units) + 1;
                 let scratch = u128::from(evaluator.scratch_entries)
                     + u128::from(kind == GlaExecutionEvent::ScratchEntry);
                 for (observed, limit, dimension) in [
-                    (work, policy.merge.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-                    (scratch, policy.merge.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+                    (
+                        work,
+                        policy.merge.query.evaluator.max_work_units,
+                        GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        scratch,
+                        policy.merge.query.evaluator.max_scratch_entries,
+                        GlaLimitDimension::ScratchEntries,
+                    ),
                 ] {
                     if observed > u128::from(limit) {
-                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                            dimension,
+                            limit,
+                            observed,
+                        }));
                     }
                 }
                 evaluator.work_units = work as u64;
@@ -79,11 +110,16 @@ impl WriteTxn {
             // No cancellation boundary follows staging or workspace acceptance.
             event(GlaExecutionEvent::Work)?;
             if !actions.is_empty() {
-                workspace.txn.write(database, batch)
+                workspace
+                    .txn
+                    .write(database, batch)
                     .map_err(|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)))?;
             }
             let stats = GraphEdgeUpsertStats {
-                merge: merge_stats, branch, action_effects: actions.len() as u64, evaluator,
+                merge: merge_stats,
+                branch,
+                action_effects: actions.len() as u64,
+                evaluator,
             };
             workspace.accept();
             Ok((stats, outcome))

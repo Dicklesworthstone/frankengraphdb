@@ -16,22 +16,28 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
         (fgdb_gql::GraphMutationStats, EmbeddedTxnCompletion),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphMutationError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GqlQueryError, GraphMutationError};
         let infrastructure = |error| GqlQueryError::Source(GraphMutationError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_mutation_governed(
-            self, query_cx, mutation, policy,
-        ) {
-            Ok(stats) => stats,
-            Err(error) => {
-                transaction.abort();
-                return Err(error);
-            }
-        };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let stats =
+            match transaction.execute_graph_mutation_governed(self, query_cx, mutation, policy) {
+                Ok(stats) => stats,
+                Err(error) => {
+                    transaction.abort();
+                    return Err(error);
+                }
+            };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -47,23 +53,35 @@ impl<V: Vfs + Clone> Database<V> {
         mutation: &fgdb_gql::PreparedGraphMutation,
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion),
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+        (
+            fgdb_gql::GraphMutationStats,
+            Vec<VId>,
+            Vec<EId>,
+            EmbeddedTxnCompletion,
+        ),
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::GraphMutationError<WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GqlQueryError, GraphMutationError};
         let infrastructure = |error| GqlQueryError::Source(GraphMutationError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, targets, edges) = match transaction.execute_graph_mutation_returning_governed(
-            self, query_cx, mutation, policy,
-        ) {
+        let (stats, targets, edges) = match transaction
+            .execute_graph_mutation_returning_governed(self, query_cx, mutation, policy)
+        {
             Ok(result) => result,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, targets, edges, completion))
     }
 
@@ -89,18 +107,22 @@ impl<V: Vfs + Clone> Database<V> {
         use fgdb_gql::GqlQueryError;
         use fgdb_gql::insertion::GraphInsertError;
         let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_insert_governed(
-            self, query_cx, insertion, policy, allocate,
-        ) {
+        let stats = match transaction
+            .execute_graph_insert_governed(self, query_cx, insertion, policy, allocate)
+        {
             Ok(stats) => stats,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -116,7 +138,12 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion),
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            Vec<VId>,
+            Vec<EId>,
+            EmbeddedTxnCompletion,
+        ),
         fgdb_gql::GqlQueryError<
             fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>,
             Box<asupersync::error::Error>,
@@ -125,18 +152,22 @@ impl<V: Vfs + Clone> Database<V> {
         use fgdb_gql::GqlQueryError;
         use fgdb_gql::insertion::GraphInsertError;
         let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, vertices, edges) = match transaction.execute_graph_insert_returning_governed(
-            self, query_cx, insertion, policy, allocate,
-        ) {
+        let (stats, vertices, edges) = match transaction
+            .execute_graph_insert_returning_governed(self, query_cx, insertion, policy, allocate)
+        {
             Ok(result) => result,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, vertices, edges, completion))
     }
 
@@ -157,21 +188,24 @@ impl<V: Vfs + Clone> Database<V> {
         fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
-        let infrastructure = |error| {
-            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
-        };
-        let mut transaction = self.begin(txcx)
+        let infrastructure =
+            |error| GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error));
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_write_program_governed(
-            self, query_cx, program, policy, allocate,
-        ) {
+        let stats = match transaction
+            .execute_graph_write_program_governed(self, query_cx, program, policy, allocate)
+        {
             Ok(stats) => stats,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -191,10 +225,10 @@ impl<V: Vfs + Clone> Database<V> {
         fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
-        let infrastructure = |error| {
-            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
-        };
-        let mut transaction = self.begin(txcx)
+        let infrastructure =
+            |error| GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error));
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
         let receipt = match transaction.execute_graph_write_program_returning_governed(
             self, query_cx, program, policy, allocate,
@@ -205,7 +239,10 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((receipt, completion))
     }
 }
@@ -226,16 +263,29 @@ impl<V: Vfs + Clone> Database<V> {
     fn engine_allocator<'a>(
         &mut self,
         cx: &'a fgdb_types::QueryCx,
-    ) -> Result<impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, WriteTxnError> + 'a, WriteTxnError> {
+    ) -> Result<
+        impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, WriteTxnError> + 'a,
+        WriteTxnError,
+    > {
         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
         let index = self.delta_index()?;
-        let mut state = self.identity_allocation.lock().map_err(|_| WriteTxnError::IdentityExhausted)?;
-        for batch in index.since(state.frontier).map_err(crate::read_error_from_index)? {
+        let mut state = self
+            .identity_allocation
+            .lock()
+            .map_err(|_| WriteTxnError::IdentityExhausted)?;
+        for batch in index
+            .since(state.frontier)
+            .map_err(crate::read_error_from_index)?
+        {
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
                     match row {
-                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. } => state.vertex = state.vertex.max(vid.0),
-                        fgdb_delta_types::DeltaRow::CreateEdge { eid, .. } => state.edge = state.edge.max(eid.0),
+                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. } => {
+                            state.vertex = state.vertex.max(vid.0)
+                        }
+                        fgdb_delta_types::DeltaRow::CreateEdge { eid, .. } => {
+                            state.edge = state.edge.max(eid.0)
+                        }
                         _ => {}
                     }
                 }
@@ -246,11 +296,26 @@ impl<V: Vfs + Clone> Database<V> {
         let allocation = self.identity_allocation.clone();
         Ok(move |request| {
             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            let mut state = allocation.lock().map_err(|_| WriteTxnError::IdentityExhausted)?;
-            let vertex = matches!(request, fgdb_gql::insertion::GraphInsertRequest::Vertex { .. });
-            let high = if vertex { &mut state.vertex } else { &mut state.edge };
-            *high = high.checked_add(1).ok_or(WriteTxnError::IdentityExhausted)?;
-            Ok(if vertex { ElementId::Vertex(VId(*high)) } else { ElementId::Edge(EId(*high)) })
+            let mut state = allocation
+                .lock()
+                .map_err(|_| WriteTxnError::IdentityExhausted)?;
+            let vertex = matches!(
+                request,
+                fgdb_gql::insertion::GraphInsertRequest::Vertex { .. }
+            );
+            let high = if vertex {
+                &mut state.vertex
+            } else {
+                &mut state.edge
+            };
+            *high = high
+                .checked_add(1)
+                .ok_or(WriteTxnError::IdentityExhausted)?;
+            Ok(if vertex {
+                ElementId::Vertex(VId(*high))
+            } else {
+                ElementId::Edge(EId(*high))
+            })
         })
     }
 
@@ -275,18 +340,22 @@ impl<V: Vfs + Clone> Database<V> {
     > {
         use fgdb_gql::{GqlQueryError, insertion::GraphInsertError};
         let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_insert_engine_governed(
-            self, query_cx, insertion, policy,
-        ) {
+        let stats = match transaction
+            .execute_graph_insert_engine_governed(self, query_cx, insertion, policy)
+        {
             Ok(stats) => stats,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -300,7 +369,12 @@ impl<V: Vfs + Clone> Database<V> {
         insertion: &fgdb_gql::insertion::PreparedGraphInsert,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
     ) -> Result<
-        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion),
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            Vec<VId>,
+            Vec<EId>,
+            EmbeddedTxnCompletion,
+        ),
         fgdb_gql::GqlQueryError<
             fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>,
             Box<asupersync::error::Error>,
@@ -308,19 +382,22 @@ impl<V: Vfs + Clone> Database<V> {
     > {
         use fgdb_gql::{GqlQueryError, insertion::GraphInsertError};
         let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
         let (stats, vertices, edges) = match transaction
-            .execute_graph_insert_returning_engine_governed(
-                self, query_cx, insertion, policy,
-            ) {
+            .execute_graph_insert_returning_engine_governed(self, query_cx, insertion, policy)
+        {
             Ok(result) => result,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, vertices, edges, completion))
     }
 
@@ -334,24 +411,31 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::GraphWriteProgramPolicy,
     ) -> Result<
         (fgdb_gql::GraphWriteProgramStats, EmbeddedTxnCompletion),
-        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>,
+        fgdb_gql::GraphWriteProgramError<
+            WriteTxnError,
+            WriteTxnError,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
-        let infrastructure = |error| {
-            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
-        };
-        let mut transaction = self.begin(txcx)
+        let infrastructure =
+            |error| GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error));
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let stats = match transaction.execute_graph_write_program_engine_governed(
-            self, query_cx, program, policy,
-        ) {
+        let stats = match transaction
+            .execute_graph_write_program_engine_governed(self, query_cx, program, policy)
+        {
             Ok(stats) => stats,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, completion))
     }
 
@@ -366,25 +450,31 @@ impl<V: Vfs + Clone> Database<V> {
         policy: fgdb_gql::GraphWriteProgramPolicy,
     ) -> Result<
         (fgdb_gql::GraphWriteProgramReceipt, EmbeddedTxnCompletion),
-        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>,
+        fgdb_gql::GraphWriteProgramError<
+            WriteTxnError,
+            WriteTxnError,
+            Box<asupersync::error::Error>,
+        >,
     > {
         use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
-        let infrastructure = |error| {
-            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
-        };
-        let mut transaction = self.begin(txcx)
+        let infrastructure =
+            |error| GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error));
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
         let receipt = match transaction
-            .execute_graph_write_program_returning_engine_governed(
-                self, query_cx, program, policy,
-            ) {
+            .execute_graph_write_program_returning_engine_governed(self, query_cx, program, policy)
+        {
             Ok(receipt) => receipt,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((receipt, completion))
     }
 }
@@ -400,7 +490,10 @@ impl WriteTxn {
         self.ensure_database(database)?;
         let live = database.frontier()?;
         if live != self.basis {
-            return Err(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live });
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            });
         }
         database.allocate_identity(cx, request)
     }

@@ -32,12 +32,14 @@ fn execute_budgeted_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
     let admitted = crate::gql_exec::AdmittedGqlSnapshot::admit(query.plan(), reader, as_of)
         .map_err(GqlError::Read)
         .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
-    admitted.execute_budgeted(budget).map_err(|error| match error {
-        fgdb_gql::BudgetedGqlError::Execution(error) => {
-            fgdb_gql::BudgetedGqlError::Execution(GqlError::Read(error))
-        }
-        fgdb_gql::BudgetedGqlError::Budget(error) => fgdb_gql::BudgetedGqlError::Budget(error),
-    })
+    admitted
+        .execute_budgeted(budget)
+        .map_err(|error| match error {
+            fgdb_gql::BudgetedGqlError::Execution(error) => {
+                fgdb_gql::BudgetedGqlError::Execution(GqlError::Read(error))
+            }
+            fgdb_gql::BudgetedGqlError::Budget(error) => fgdb_gql::BudgetedGqlError::Budget(error),
+        })
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -71,8 +73,11 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>> {
-        let as_of = self.frontier().map_err(GqlError::Read)
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
+        let as_of = self
+            .frontier()
+            .map_err(GqlError::Read)
             .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
         self.execute_prepared_query_budgeted_at(query, as_of, budget)
     }
@@ -83,7 +88,8 @@ impl<V: Vfs + Clone> Database<V> {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>> {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         execute_budgeted_at(self, query, as_of, budget)
     }
 
@@ -91,7 +97,15 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn execute_prepared_query_with_result_digest(
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
-    ) -> Result<(Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest), GqlError> {
+    ) -> Result<
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
+        GqlError,
+    > {
         let as_of = self.frontier().map_err(GqlError::Read)?;
         self.execute_prepared_query_with_result_digest_at(query, as_of)
     }
@@ -100,7 +114,15 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
-    ) -> Result<(Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest), GqlError> {
+    ) -> Result<
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
+        GqlError,
+    > {
         let (rows, plan_certificate, result_digest) =
             self.execute_prepared_gql_with_result_digest_at(query.plan(), as_of)?;
         let input_certificate = prepared_query_input_certificate(query, as_of);
@@ -136,7 +158,8 @@ impl crate::EmbeddedReadView {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>> {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         self.execute_prepared_query_budgeted_at(query, self.frontier(), budget)
     }
 
@@ -145,14 +168,23 @@ impl crate::EmbeddedReadView {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>> {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         execute_budgeted_at(self, query, as_of, budget)
     }
 
     pub fn execute_prepared_query_with_result_digest(
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
-    ) -> Result<(Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest), GqlError> {
+    ) -> Result<
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
+        GqlError,
+    > {
         self.execute_prepared_query_with_result_digest_at(query, self.frontier())
     }
 
@@ -160,7 +192,15 @@ impl crate::EmbeddedReadView {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
-    ) -> Result<(Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest), GqlError> {
+    ) -> Result<
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
+        GqlError,
+    > {
         let (rows, plan_certificate, result_digest) =
             self.execute_prepared_gql_with_result_digest_at(query.plan(), as_of)?;
         let input_certificate = prepared_query_input_certificate(query, as_of);
@@ -198,8 +238,10 @@ impl WriteTxn {
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<WriteTxnError>> {
-        let snapshot = self.query_snapshot(database)
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<WriteTxnError>>
+    {
+        let snapshot = self
+            .query_snapshot(database)
             .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
         let source = self.query_source_over(
             snapshot,
@@ -207,8 +249,11 @@ impl WriteTxn {
             &mut crate::gql_exec::snapshot_record_budget::<WriteTxnError>(budget),
         )?;
         source.logical.execute_budgeted(
-            count_as_u64(source.snapshot_records), source.vertex_ids(), source.edge_triples(),
-            |vid, predicates| Ok(source.matches(vid, predicates)), budget,
+            count_as_u64(source.snapshot_records),
+            source.vertex_ids(),
+            source.edge_triples(),
+            |vid, predicates| Ok(source.matches(vid, predicates)),
+            budget,
         )
     }
 
@@ -266,23 +311,35 @@ mod budgeted_overlay_admission_tests {
             staged.add_edge(EId(10), VId(5), VId(10), vec![]);
             txn.write(&mut db, staged).unwrap();
             for (statement, records, expected) in [
-                ("MATCH (a:L) RETURN a", 6,
-                    vec![VId(1), VId(2), VId(3), VId(4), VId(5), VId(10)]),
-                ("MATCH (a)-[:R]->(b) RETURN b", 5,
-                    vec![VId(2), VId(3), VId(4), VId(5), VId(10)]),
+                (
+                    "MATCH (a:L) RETURN a",
+                    6,
+                    vec![VId(1), VId(2), VId(3), VId(4), VId(5), VId(10)],
+                ),
+                (
+                    "MATCH (a)-[:R]->(b) RETURN b",
+                    5,
+                    vec![VId(2), VId(3), VId(4), VId(5), VId(10)],
+                ),
             ] {
                 let query = PreparedGqlQuery::prepare(statement, &bind).unwrap();
                 for limit in [0, 1] {
                     let result = txn.execute_prepared_query_budgeted(
-                        &db, &query, GqlExecutionBudget::new(limit, 100),
+                        &db,
+                        &query,
+                        GqlExecutionBudget::new(limit, 100),
                     );
                     assert!(matches!(result, Err(BudgetedGqlError::Budget(error))
                         if error.dimension == GqlBudgetDimension::SnapshotRecords
                             && error.limit == limit && error.observed == limit + 1));
                 }
-                let exact = txn.execute_prepared_query_budgeted(
-                    &db, &query, GqlExecutionBudget::new(records, expected.len() as u64),
-                ).unwrap();
+                let exact = txn
+                    .execute_prepared_query_budgeted(
+                        &db,
+                        &query,
+                        GqlExecutionBudget::new(records, expected.len() as u64),
+                    )
+                    .unwrap();
                 assert_eq!(exact.value, expected);
                 assert_eq!(exact.stats.snapshot_records, records);
                 assert_eq!(exact.stats.result_rows, expected.len() as u64);
@@ -302,9 +359,9 @@ mod budgeted_overlay_admission_tests {
             txn.write(&mut db, deleted).unwrap();
             for statement in ["MATCH (a:L) RETURN a", "MATCH (a)-[:R]->(b) RETURN b"] {
                 let query = PreparedGqlQuery::prepare(statement, &bind).unwrap();
-                let empty = txn.execute_prepared_query_budgeted(
-                    &db, &query, GqlExecutionBudget::new(0, 0),
-                ).unwrap();
+                let empty = txn
+                    .execute_prepared_query_budgeted(&db, &query, GqlExecutionBudget::new(0, 0))
+                    .unwrap();
                 assert!(empty.value.is_empty());
                 assert_eq!(empty.stats.snapshot_records, 0);
                 assert_eq!(empty.stats.result_rows, 0);
@@ -338,9 +395,12 @@ mod budgeted_overlay_admission_tests {
                 let query = PreparedGqlQuery::prepare(
                     "MATCH (a:L) RETURN a",
                     &RelationBind::new().with_label("L", LabelId(1)),
-                ).unwrap();
+                )
+                .unwrap();
                 let refused = txn.execute_prepared_query_budgeted(
-                    &db, &query, GqlExecutionBudget::new(0, 100),
+                    &db,
+                    &query,
+                    GqlExecutionBudget::new(0, 100),
                 );
                 assert!(matches!(refused, Err(BudgetedGqlError::Budget(error))
                     if error.dimension == GqlBudgetDimension::SnapshotRecords
@@ -352,14 +412,19 @@ mod budgeted_overlay_admission_tests {
                     winner.create_vertex(VId(2), vec![LabelId(1)], vec![]);
                 } else {
                     winner.set_vertex_property(
-                        VId(1), fgdb_delta_types::PropertyKeyId(1), Some(CanonicalScalar::Int(7)),
+                        VId(1),
+                        fgdb_delta_types::PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(7)),
                     );
                 }
                 let frontier = db.write(&commit, winner).await.unwrap();
-                assert!(matches!(txn.commit(&mut db, &commit).await,
+                assert!(matches!(
+                    txn.commit(&mut db, &commit).await,
                     Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01", ..
-                    }))));
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.vertex(VId(99)).unwrap().is_none());
             }

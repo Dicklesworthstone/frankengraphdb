@@ -25,15 +25,19 @@ impl<V: Vfs + Clone> Drop for TxnCompletionGuard<'_, '_, V> {
             self.transaction.state = if self.entered_commit {
                 match self.database.state() {
                     crate::DatabaseState::Healthy { published_frontier }
-                        if published_frontier == self.starting_frontier => EmbeddedTxnState::Aborted,
+                        if published_frontier == self.starting_frontier =>
+                    {
+                        EmbeddedTxnState::Aborted
+                    }
                     crate::DatabaseState::Healthy { published_frontier }
-                        if published_frontier.0 > self.starting_frontier.0 => {
-                            // This guard has the exclusive database borrow. An
-                            // advanced healthy frontier can only be its write.
-                            EmbeddedTxnState::Completed(EmbeddedTxnCompletion::WriteCommitted {
-                                commit_seq: published_frontier,
-                            })
-                        }
+                        if published_frontier.0 > self.starting_frontier.0 =>
+                    {
+                        // This guard has the exclusive database borrow. An
+                        // advanced healthy frontier can only be its write.
+                        EmbeddedTxnState::Completed(EmbeddedTxnCompletion::WriteCommitted {
+                            commit_seq: published_frontier,
+                        })
+                    }
                     crate::DatabaseState::Healthy { published_frontier }
                     | crate::DatabaseState::CommitOutcomeUnknown { published_frontier } => {
                         EmbeddedTxnState::CommitOutcomeUnknown { published_frontier }
@@ -67,7 +71,8 @@ fn validation_touches(
         vid,
         sorted_retired_incident_edges,
         ..
-    } = row {
+    } = row
+    {
         touched.insert(ElementId::Vertex(*vid));
         for eid in sorted_retired_incident_edges {
             checkpoint()?;
@@ -177,7 +182,8 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
-        if let Some((law, element, committed_at)) = attempt.transaction
+        if let Some((law, element, committed_at)) = attempt
+            .transaction
             .transaction_conflict(attempt.database, &mut checkpoint)?
         {
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
@@ -196,7 +202,8 @@ impl WriteTxn {
             // Set before polling the cancellable publication future. Drop
             // consults its retained database fence, never guesses rollback.
             attempt.entered_commit = true;
-            let commit_seq = attempt.database
+            let commit_seq = attempt
+                .database
                 .commit_prepared_with_crash(cx, prepared, crash_at)
                 .await?;
             EmbeddedTxnCompletion::WriteCommitted { commit_seq }
@@ -284,8 +291,7 @@ impl WriteTxn {
                     footprint.insert(ElementId::Vertex(*src));
                     footprint.insert(ElementId::Vertex(*dst));
                 }
-                PendingRow::DeleteEdge { eid, .. }
-                | PendingRow::SetEdgeProperty { eid, .. } => {
+                PendingRow::DeleteEdge { eid, .. } | PendingRow::SetEdgeProperty { eid, .. } => {
                     footprint.insert(ElementId::Edge(*eid));
                 }
                 PendingRow::CompareAndSet { elem, .. } => {
@@ -340,12 +346,20 @@ impl WriteTxn {
                     match row {
                         fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. } => {
                             if scanned_vertices {
-                                return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                                return Ok(Some((
+                                    "FG-LAW-FCW-READ-01",
+                                    ElementId::Vertex(*vid),
+                                    seq,
+                                )));
                             }
                             for label in labels {
                                 checkpoint()?;
                                 if scanned_vertex_labels.contains(label) {
-                                    return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                                    return Ok(Some((
+                                        "FG-LAW-FCW-READ-01",
+                                        ElementId::Vertex(*vid),
+                                        seq,
+                                    )));
                                 }
                             }
                         }

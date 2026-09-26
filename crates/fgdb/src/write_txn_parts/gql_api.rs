@@ -59,5 +59,4 @@ impl WriteTxn {
             })
         })
     }
-
 }

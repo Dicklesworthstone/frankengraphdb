@@ -816,6 +816,64 @@ gate_tracked_sources() {
   printf '%s\0' "${found[@]}"
 }
 
+# include_rs_sources — every .rs file pulled in by a literal include!("x.rs"),
+# resolved against the including file's directory, one per line, sorted.
+#
+# fgdb-teq1g: rustfmt reaches a file only through a `mod` declaration, so an
+# include!d file was never formatted or checked. When this was measured, 35 of
+# the 46 such files failed `rustfmt --check` while `cargo fmt --check` was green
+# over them: a verdict over an empty domain. The set is derived from the TRACKED
+# sources at run time, so a new include! is covered the moment it lands. The
+# inner grep may match nothing in most files; `|| true` keeps that from
+# becoming the pipeline's status under pipefail.
+include_rs_sources() {
+  local list src rel rc
+  list="$(mktemp "${TMPDIR:-/tmp}/gate-include-src.XXXXXX")" || return 1
+  if ! gate_tracked_sources '*.rs' > "$list"; then
+    rm -f "$list"
+    return 1
+  fi
+  while IFS= read -r -d '' src; do
+    { grep -oE 'include!\(\s*"[^"]+\.rs"\s*\)' "$src" || true; } \
+      | sed -E 's/^include!\(\s*"//; s/"\s*\)$//' \
+      | while IFS= read -r rel; do
+          realpath -m --relative-to=. -- "$(dirname -- "$src")/$rel"
+        done
+  done < "$list" | LC_ALL=C sort -u
+  rc="${PIPESTATUS[0]}"
+  rm -f "$list"
+  return "$rc"
+}
+
+# The fmt core gate: `cargo fmt --check`, then `rustfmt --check` over the
+# include!d files cargo fmt cannot reach. It fails closed. If the include!d set
+# cannot be derived, or names a file that does not exist, the gate is red rather
+# than green over fewer files.
+run_fmt_check() {
+  cargo fmt --check || return $?
+  local listing file missing=0
+  local -a included=()
+  listing="$(mktemp "${TMPDIR:-/tmp}/gate-include-set.XXXXXX")" || return 1
+  if ! include_rs_sources > "$listing"; then
+    echo "ERROR: the include!d Rust set could not be derived from the tracked sources." >&2
+    rm -f "$listing"
+    return 1
+  fi
+  readarray -t included < "$listing"
+  rm -f "$listing"
+  for file in "${included[@]}"; do
+    if [ ! -f "$file" ]; then
+      echo "ERROR: include!d file $file does not exist." >&2
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] || return 1
+  echo "    rustfmt --check over ${#included[@]} include!d files (cargo fmt never reaches them)"
+  # The workspace edition (Cargo.toml [workspace.package]); rustfmt run directly
+  # does not read it.
+  [ "${#included[@]}" -eq 0 ] || rustfmt --edition 2024 --check "${included[@]}"
+}
+
 run_ubs() {
   local log="$GATE_LOG_DIR/core-ubs.log"
   local list="$GATE_LOG_DIR/core-ubs.sources"
@@ -3658,7 +3716,7 @@ run_core_gate "$CORE_GATE_VERDICT_CONTRACT" run_verdict_contract
 gate_scope_abort_if_tree_moved "$CORE_GATE_VERDICT_CONTRACT"
 run_core_gate "$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure
 gate_scope_abort_if_tree_moved "$CORE_GATE_DOMAIN_CLOSURE"
-run_core_gate "$CORE_GATE_FMT" cargo fmt --check
+run_core_gate "$CORE_GATE_FMT" run_fmt_check
 gate_scope_abort_if_tree_moved "$CORE_GATE_FMT"
 run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets --locked
 gate_scope_abort_if_tree_moved "$CORE_GATE_CHECK"

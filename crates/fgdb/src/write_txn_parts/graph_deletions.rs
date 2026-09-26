@@ -18,10 +18,8 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         deletion: &fgdb_gql::PreparedGraphDelete,
         policy: fgdb_gql::GraphDeletePolicy,
-    ) -> Result<
-        fgdb_gql::GraphDeleteStats,
-        TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>,
-    > {
+    ) -> Result<fgdb_gql::GraphDeleteStats, TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>>
+    {
         self.execute_graph_delete_returning_governed(database, cx, deletion, policy)
             .map(|(stats, _)| stats)
     }
@@ -58,29 +56,43 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::GraphDeleteStats>,
         TxnGqlError<fgdb_gql::GraphDeleteError<WriteTxnError>>,
     > {
-        use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded,
-            GqlBudgetDimension, GraphDeleteError, GqlQueryError};
+        use fgdb_gql::{
+            GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
+            GqlQueryError, GraphDeleteError,
+        };
         let source = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
 
         self.ensure_database(database).map_err(source)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
         if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && deletion.relation() != first.relation
         {
             return Err(source(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: deletion.relation(),
+                expected: first.relation,
+                found: deletion.relation(),
             }));
         }
 
         cx.with_restriction(|| {
             let proposal = deletion.execute_governed(
                 policy,
-                |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+                |pattern, budget| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
+                },
                 || cx.checkpoint(),
             )?;
             let mut stats = proposal.stats();
@@ -92,26 +104,49 @@ impl WriteTxn {
             // Read the exact staged overlay once. Edge deletions already staged
             // by the transaction disappear here; staged edge creations appear.
             // edges() retains both point and scan dependencies for completion.
-            let edges = if targets.is_empty() { Vec::new() } else { self.edges(database).map_err(source)? };
-            let records = u64::try_from(edges.len()).ok()
+            let edges = if targets.is_empty() {
+                Vec::new()
+            } else {
+                self.edges(database).map_err(source)?
+            };
+            let records = u64::try_from(edges.len())
+                .ok()
                 .and_then(|count| stats.selection.snapshot_records.checked_add(count))
-                .ok_or(GqlQueryError::Source(GraphDeleteError::InvalidSourceStatistics))?;
-            policy.query.rows.check(GqlBudgetDimension::SnapshotRecords, records)
+                .ok_or(GqlQueryError::Source(
+                    GraphDeleteError::InvalidSourceStatistics,
+                ))?;
+            policy
+                .query
+                .rows
+                .check(GqlBudgetDimension::SnapshotRecords, records)
                 .map_err(GqlQueryError::Rows)?;
             stats.selection.snapshot_records = records;
-            let mut event = |kind: GlaExecutionEvent| -> Result<(),
-                GqlQueryError<GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>>
-            {
+            let mut event = |kind: GlaExecutionEvent| -> Result<
+                (),
+                GqlQueryError<GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+            > {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 let work = u128::from(stats.evaluator.work_units) + 1;
                 let scratch = u128::from(stats.evaluator.scratch_entries)
                     + u128::from(kind == GlaExecutionEvent::ScratchEntry);
                 for (observed, limit, dimension) in [
-                    (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-                    (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+                    (
+                        work,
+                        policy.query.evaluator.max_work_units,
+                        GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        scratch,
+                        policy.query.evaluator.max_scratch_entries,
+                        GlaLimitDimension::ScratchEntries,
+                    ),
                 ] {
                     if observed > u128::from(limit) {
-                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                            dimension,
+                            limit,
+                            observed,
+                        }));
                     }
                 }
                 stats.evaluator.work_units = work as u64;
@@ -127,7 +162,9 @@ impl WriteTxn {
                     || targets.binary_search(&edge.entry.dst).is_ok())
                     && edge_targets.binary_search(&edge.entry.eid).is_err()
                 {
-                    return Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships));
+                    return Err(GqlQueryError::Source(
+                        GraphDeleteError::IncidentRelationships,
+                    ));
                 }
             }
 

@@ -1,6 +1,6 @@
 use super::*;
-use asupersync::lab::run_async_under_lab;
 use crate::{DatabaseKeys, DerivedPublicationStage, MemVfs};
+use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 use std::future::Future;
@@ -8,14 +8,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x71; 32], DatabaseSecurityNamespaceId([0x72; 32]), [0x73; 32])
+    DatabaseKeys::new(
+        [0x71; 32],
+        DatabaseSecurityNamespaceId([0x72; 32]),
+        [0x73; 32],
+    )
 }
 
 async fn fixture(cx: &CommitCx, txcx: &TxnCx, write: bool) -> (Database<MemVfs>, WriteTxn) {
     let mut database = Database::open_memory(cx, keys()).await.unwrap();
     let mut seed = WriteBatch::new(RelationId(1));
     for id in 1..=3 {
-        seed.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]);
+        seed.create_vertex(
+            VId(id),
+            vec![],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+        );
     }
     seed.add_edge(EId(13), VId(1), VId(3), vec![]);
     seed.add_edge(EId(23), VId(2), VId(3), vec![]);
@@ -45,22 +53,37 @@ fn every_validation_checkpoint_refuses_before_acceptance_and_releases_pin() {
         for write in [false, true] {
             let (mut database, mut transaction) = fixture(&cx, &txcx, write).await;
             let mut checkpoints = 0;
-            let completed = transaction.complete_controlled(&mut database, &cx, None, false, || {
-                checkpoints += 1;
-                Ok(())
-            }).await.unwrap();
+            let completed = transaction
+                .complete_controlled(&mut database, &cx, None, false, || {
+                    checkpoints += 1;
+                    Ok(())
+                })
+                .await
+                .unwrap();
             assert_eq!(completed.commit_seq().is_some(), write);
-            assert!(checkpoints > 10, "exercise history, labels, cascades and final acceptance");
+            assert!(
+                checkpoints > 10,
+                "exercise history, labels, cascades and final acceptance"
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
             for stop in 1..=checkpoints {
                 let (mut database, mut transaction) = fixture(&cx, &txcx, write).await;
                 let frontier = database.frontier().unwrap();
                 let mut seen = 0;
-                let result = transaction.complete_controlled(&mut database, &cx, None, false, || {
-                    seen += 1;
-                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
-                }).await;
-                assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)), "stop {stop}");
+                let result = transaction
+                    .complete_controlled(&mut database, &cx, None, false, || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(WriteTxnError::NoPreparedWrite)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .await;
+                assert!(
+                    matches!(result, Err(WriteTxnError::NoPreparedWrite)),
+                    "stop {stop}"
+                );
                 assert_eq!(seen, stop);
                 assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
                 assert!(transaction.pin.is_none());
@@ -84,15 +107,19 @@ fn unwinding_completion_releases_the_pin_without_dropping_the_transaction() {
         let txcx = contexts.txn();
         let (mut database, mut transaction) = fixture(&cx, &txcx, true).await;
         let frontier = database.frontier().unwrap();
-        let mut future = Box::pin(transaction.complete_controlled(
-            &mut database, &cx, None, false, || panic!("injected validation unwind"),
-        ));
+        let mut future =
+            Box::pin(
+                transaction.complete_controlled(&mut database, &cx, None, false, || {
+                    panic!("injected validation unwind")
+                }),
+            );
         let panicked = std::future::poll_fn(|task| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 future.as_mut().poll(task)
             }));
             Poll::Ready(result.is_err())
-        }).await;
+        })
+        .await;
         drop(future);
         assert!(panicked);
         assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
@@ -131,11 +158,12 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
                     1 => Some(fgdb_chronicle::commit::CrashPoint::AfterMarkerBeforeD2),
                     _ => None,
                 };
-                let publication_failure = (phase == 2)
-                    .then_some(DerivedPublicationStage::FoldCommittedTemplate);
-                let result = guard.database.commit_template(
-                    &cx, prepared.template, crash, publication_failure, None,
-                ).await;
+                let publication_failure =
+                    (phase == 2).then_some(DerivedPublicationStage::FoldCommittedTemplate);
+                let result = guard
+                    .database
+                    .commit_template(&cx, prepared.template, crash, publication_failure, None)
+                    .await;
                 assert_eq!(result.is_ok(), phase == 3);
                 suspended.store(true, Ordering::SeqCst);
                 std::future::pending::<()>().await;
@@ -144,12 +172,17 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
                 Poll::Pending if suspended.load(Ordering::SeqCst) => Poll::Ready(()),
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(()) => panic!("the explicit suspension must not complete"),
-            }).await;
+            })
+            .await;
             drop(future);
             let expected = match phase {
                 0 => EmbeddedTxnState::Aborted,
-                1 => EmbeddedTxnState::CommitOutcomeUnknown { published_frontier: basis },
-                2 => EmbeddedTxnState::CommittedNeedsRecovery { commit_seq: CommitSeq(basis.0 + 1) },
+                1 => EmbeddedTxnState::CommitOutcomeUnknown {
+                    published_frontier: basis,
+                },
+                2 => EmbeddedTxnState::CommittedNeedsRecovery {
+                    commit_seq: CommitSeq(basis.0 + 1),
+                },
                 _ => EmbeddedTxnState::Completed(EmbeddedTxnCompletion::WriteCommitted {
                     commit_seq: CommitSeq(basis.0 + 1),
                 }),
@@ -159,14 +192,31 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
             assert!(transaction.staged.is_empty());
             assert_eq!(txcx.outstanding_obligations(), 0);
             match phase {
-                1 => assert!(matches!(database.state(), crate::DatabaseState::CommitOutcomeUnknown { .. })),
-                2 => assert!(matches!(database.state(), crate::DatabaseState::NeedsAuthoritativeRecovery(_))),
-                _ => assert!(matches!(database.state(), crate::DatabaseState::Healthy { .. })),
+                1 => assert!(matches!(
+                    database.state(),
+                    crate::DatabaseState::CommitOutcomeUnknown { .. }
+                )),
+                2 => assert!(matches!(
+                    database.state(),
+                    crate::DatabaseState::NeedsAuthoritativeRecovery(_)
+                )),
+                _ => assert!(matches!(
+                    database.state(),
+                    crate::DatabaseState::Healthy { .. }
+                )),
             }
             let recovered = database.recover_authoritatively(&cx).await.unwrap();
-            if phase == 0 { assert!(recovered.vertex(VId(1)).unwrap().is_none()); }
-            if phase >= 2 { assert!(recovered.vertex(VId(1)).unwrap().is_some()); }
-            assert_eq!(transaction.state(), expected, "recovery does not rewrite local historical outcomes");
+            if phase == 0 {
+                assert!(recovered.vertex(VId(1)).unwrap().is_none());
+            }
+            if phase >= 2 {
+                assert!(recovered.vertex(VId(1)).unwrap().is_some());
+            }
+            assert_eq!(
+                transaction.state(),
+                expected,
+                "recovery does not rewrite local historical outcomes"
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

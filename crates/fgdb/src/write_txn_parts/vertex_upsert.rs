@@ -44,13 +44,21 @@ impl WriteTxn {
             }
             Err(GqlQueryError::Rows(error)) => return Err(GqlQueryError::Rows(error)),
             Err(GqlQueryError::Evaluator(error)) => return Err(GqlQueryError::Evaluator(error)),
-            Err(GqlQueryError::Interrupted(error)) => return Err(GqlQueryError::Interrupted(error)),
-            Err(GqlQueryError::IdentifiedEdgesRequired) => return Err(GqlQueryError::IdentifiedEdgesRequired),
+            Err(GqlQueryError::Interrupted(error)) => {
+                return Err(GqlQueryError::Interrupted(error));
+            }
+            Err(GqlQueryError::IdentifiedEdgesRequired) => {
+                return Err(GqlQueryError::IdentifiedEdgesRequired);
+            }
         };
 
         let (branch, actions) = match outcome {
-            GraphVertexMergeOutcome::Matched(_) => (GraphVertexUpsertBranch::Match, upsert.on_match()),
-            GraphVertexMergeOutcome::Created(_) => (GraphVertexUpsertBranch::Create, upsert.on_create()),
+            GraphVertexMergeOutcome::Matched(_) => {
+                (GraphVertexUpsertBranch::Match, upsert.on_match())
+            }
+            GraphVertexMergeOutcome::Created(_) => {
+                (GraphVertexUpsertBranch::Create, upsert.on_create())
+            }
         };
         let observed = actions.len() as u128;
         if observed > u128::from(policy.max_actions) {
@@ -75,7 +83,9 @@ impl WriteTxn {
                 }
             }
             // No cancellation boundary after this synchronous staging call.
-            workspace.txn.write(database, batch)
+            workspace
+                .txn
+                .write(database, batch)
                 .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
         }
 

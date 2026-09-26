@@ -65,28 +65,40 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::GraphMutationStats>,
         TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
-        use fgdb_gql::{GraphMutationError, GraphMutationIntent, GqlQueryError};
+        use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationIntent};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));
         // Even an empty/zero-budget selection cannot bypass ownership, health,
         // basis or the existing relation-coordinate contract.
         self.ensure_database(database).map_err(source)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
         if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && mutation.relation() != first.relation
         {
             return Err(source(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: mutation.relation(),
+                expected: first.relation,
+                found: mutation.relation(),
             }));
         }
         cx.with_restriction(|| {
             let proposal = mutation.execute_governed(
                 policy,
-                |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+                |pattern, budget| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
+                },
                 || cx.checkpoint(),
             )?;
             let stats = proposal.stats();
@@ -97,8 +109,12 @@ impl WriteTxn {
                     match intent {
                         GraphMutationIntent::Property { vertex, .. }
                         | GraphMutationIntent::Label { vertex, .. }
-                        | GraphMutationIntent::DetachDelete { vertex } => { targets.insert(*vertex); }
-                        GraphMutationIntent::EdgeProperty { edge, .. } => { edges.insert(*edge); }
+                        | GraphMutationIntent::DetachDelete { vertex } => {
+                            targets.insert(*vertex);
+                        }
+                        GraphMutationIntent::EdgeProperty { edge, .. } => {
+                            edges.insert(*edge);
+                        }
                     }
                 }
                 (targets.into_iter().collect(), edges.into_iter().collect())
@@ -117,7 +133,11 @@ impl WriteTxn {
                     GraphMutationIntent::EdgeProperty { edge, key, value } => {
                         batch.set_edge_property(edge, key, value);
                     }
-                    GraphMutationIntent::Label { vertex, label, present } => {
+                    GraphMutationIntent::Label {
+                        vertex,
+                        label,
+                        present,
+                    } => {
                         batch.set_vertex_label(vertex, label, present);
                     }
                     GraphMutationIntent::DetachDelete { vertex } => {
@@ -128,7 +148,9 @@ impl WriteTxn {
             // Last cancellable boundary before synchronous atomic staging.
             // Never report a new interruption after the workspace has changed.
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if !batch.is_empty() { self.write(database, batch).map_err(source)?; }
+            if !batch.is_empty() {
+                self.write(database, batch).map_err(source)?;
+            }
             Ok((stats, targets, edges))
         })
     }

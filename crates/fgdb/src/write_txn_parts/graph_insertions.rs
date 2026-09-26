@@ -13,7 +13,9 @@ impl WriteTxn {
         fgdb_gql::insertion::GraphInsertStats,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>>,
     > {
-        let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
+        let source = |error| {
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error))
+        };
         self.ensure_database(database).map_err(source)?;
         let allocate = database.engine_allocator(cx).map_err(source)?;
         self.execute_graph_insert_governed(database, cx, insertion, policy, allocate)
@@ -30,7 +32,9 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>>,
     > {
-        let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
+        let source = |error| {
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error))
+        };
         self.ensure_database(database).map_err(source)?;
         let allocate = database.engine_allocator(cx).map_err(source)?;
         self.execute_graph_insert_returning_governed(database, cx, insertion, policy, allocate)
@@ -103,20 +107,28 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
-        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::GqlQueryError;
+        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         let source = |error| GqlQueryError::Source(GraphInsertError::Source(error));
         // Never allocate even one ID before ownership, health, basis and
         // relation-coordinate checks, including for empty or zero-budget input.
         self.ensure_database(database).map_err(source)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
         if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         cx.with_restriction(|| {
             let proposal = insertion.execute_governed(
                 policy,
-                |pattern, allowance| self.execute_graph_pattern_governed(database, cx, pattern, allowance),
+                |pattern, allowance| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                },
                 allocate,
                 || cx.checkpoint(),
             )?;
@@ -132,20 +144,38 @@ impl WriteTxn {
             for intent in proposal.into_intents() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 match intent {
-                    GraphInsertIntent::Vertex { vertex, labels, properties } => {
-                        if let Some(vertices) = &mut vertices { vertices.push(vertex); }
+                    GraphInsertIntent::Vertex {
+                        vertex,
+                        labels,
+                        properties,
+                    } => {
+                        if let Some(vertices) = &mut vertices {
+                            vertices.push(vertex);
+                        }
                         batch.create_vertex(vertex, labels, properties);
                     }
-                    GraphInsertIntent::Edge { edge, relation, source, destination, properties } => {
-                        if let Some(edges) = &mut edges { edges.push(edge); }
-                        groups.entry(relation).or_insert_with(|| WriteBatch::new(relation))
+                    GraphInsertIntent::Edge {
+                        edge,
+                        relation,
+                        source,
+                        destination,
+                        properties,
+                    } => {
+                        if let Some(edges) = &mut edges {
+                            edges.push(edge);
+                        }
+                        groups
+                            .entry(relation)
+                            .or_insert_with(|| WriteBatch::new(relation))
                             .add_edge(edge, source, destination, properties);
                     }
                 }
             }
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
-            if !batch.is_empty() { batches.push(batch); }
+            if !batch.is_empty() {
+                batches.push(batch);
+            }
             batches.extend(groups.into_values());
             if let Some(first) = batches.first() {
                 let relation = first.relation;
@@ -153,13 +183,19 @@ impl WriteTxn {
                     && self.staged.iter().all(|batch| batch.relation == relation)
                 {
                     let mut combined = batches.remove(0);
-                    for batch in batches { combined.rows.extend(batch.rows); }
+                    for batch in batches {
+                        combined.rows.extend(batch.rows);
+                    }
                     self.write(database, combined).map_err(source)?;
                 } else {
                     self.write_atomic(database, batches).map_err(source)?;
                 }
             }
-            Ok((stats, vertices.unwrap_or_default(), edges.unwrap_or_default()))
+            Ok((
+                stats,
+                vertices.unwrap_or_default(),
+                edges.unwrap_or_default(),
+            ))
         })
     }
 }

@@ -32,10 +32,9 @@ impl WriteTxn {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if let Err(error) = database.admit_ordered_write_rows(
-            self.staged.iter().chain(batches.iter()),
-            max_expanded_rows,
-        ) {
+        if let Err(error) = database
+            .admit_ordered_write_rows(self.staged.iter().chain(batches.iter()), max_expanded_rows)
+        {
             // Routing may have observed an existing edge's actual relation.
             // Do not let discarding the attempted suffix discard that read.
             // This intentionally retains conservative dependencies even when
@@ -100,7 +99,8 @@ mod bounded_ordered_tests {
             let mut db = seeded(&cx).await;
             let basis = db.frontier().unwrap();
             let mut txn = db.begin(&txcx).unwrap();
-            txn.write_ordered_bounded(&mut db, vec![prefix()], 2).unwrap();
+            txn.write_ordered_bounded(&mut db, vec![prefix()], 2)
+                .unwrap();
             txn.savepoint(&db, "prefix").unwrap();
             let retained = txn.prepared.as_ref().unwrap().template.clone();
             let birth = txn.vertex(&db, VId(5)).unwrap().unwrap().birth_ordinal;
@@ -120,12 +120,17 @@ mod bounded_ordered_tests {
                 assert_eq!(db.frontier().unwrap(), basis);
                 assert!(db.vertex(VId(5)).unwrap().is_none());
             }
-            txn.write_ordered_bounded(&mut db, vec![suffix()], 6).unwrap();
-            assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().birth_ordinal, birth);
+            txn.write_ordered_bounded(&mut db, vec![suffix()], 6)
+                .unwrap();
+            assert_eq!(
+                txn.vertex(&db, VId(5)).unwrap().unwrap().birth_ordinal,
+                birth
+            );
             txn.rollback_to_savepoint(&db, "prefix").unwrap();
             assert_eq!(txn.prepared.as_ref().unwrap().template, retained);
             assert_eq!(txn.staged.len(), 1);
-            txn.write_ordered_bounded(&mut db, vec![suffix()], 6).unwrap();
+            txn.write_ordered_bounded(&mut db, vec![suffix()], 6)
+                .unwrap();
             let seq = txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(seq, CommitSeq(basis.0 + 1));
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
@@ -147,7 +152,8 @@ mod bounded_ordered_tests {
             let txcx = contexts.txn();
             let mut db = seeded(&cx).await;
             let mut txn = db.begin(&txcx).unwrap();
-            txn.write_ordered_bounded(&mut db, vec![prefix()], 2).unwrap();
+            txn.write_ordered_bounded(&mut db, vec![prefix()], 2)
+                .unwrap();
             txn.savepoint(&db, "prefix").unwrap();
             let mut attempted = WriteBatch::new(RelationId(2));
             attempted.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(9)));
@@ -184,7 +190,8 @@ mod bounded_ordered_tests {
             let txcx = contexts.txn();
             let mut db = seeded(&cx).await;
             let mut txn = db.begin(&txcx).unwrap();
-            txn.write_ordered_bounded(&mut db, vec![prefix()], 2).unwrap();
+            txn.write_ordered_bounded(&mut db, vec![prefix()], 2)
+                .unwrap();
             let retained = txn.prepared.as_ref().unwrap().template.clone();
             let mut bad = WriteBatch::new(RelationId(2));
             bad.compare_and_set_vertex_property(
