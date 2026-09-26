@@ -8,8 +8,7 @@ struct EdgeMergeProposal {
     creation: Option<WriteBatch>,
 }
 
-type EdgeMergeFault<E, A, C> =
-    fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeError<E, A>, C>;
+type EdgeMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeError<E, A>, C>;
 type EdgeMergeSelection<E, C> = Result<
     fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
     fgdb_gql::GqlQueryError<E, C>,
@@ -30,9 +29,8 @@ fn collect_edge_merge<E, A, C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<EdgeMergeProposal, EdgeMergeFault<E, A, C>> {
     use fgdb_gql::{
-        GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
-        GqlQueryError, GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergeRequest,
-        GraphEdgeMergeStats,
+        GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
+        GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergeRequest, GraphEdgeMergeStats,
     };
     let selected = source(merge.selection(), policy.query)
         .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
@@ -200,9 +198,8 @@ fn collect_edge_merge<E, A, C>(
         properties.push((*key, value.value().clone()));
     }
     event(None)?;
-    let identity = allocate(GraphEdgeMergeRequest).map_err(|error| {
-        GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error))
-    })?;
+    let identity = allocate(GraphEdgeMergeRequest)
+        .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
     let ElementId::Edge(edge) = identity else {
         return Err(GqlQueryError::Source(GraphEdgeMergeError::IdentityKind));
     };

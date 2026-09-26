@@ -73,7 +73,10 @@ impl WriteTxn {
         use std::collections::BTreeSet;
 
         let frontier = database.frontier()?;
-        let previous = self.prepared.as_ref().ok_or(WriteTxnError::NoPreparedWrite)?;
+        let previous = self
+            .prepared
+            .as_ref()
+            .ok_or(WriteTxnError::NoPreparedWrite)?;
         if !std::sync::Arc::ptr_eq(&self.handle_owner, &previous.handle_owner) {
             return Err(WriteTxnError::WrongDatabase);
         }
@@ -157,8 +160,9 @@ impl WriteTxn {
                     if collision || retired_endpoint {
                         return Err(WriteError::FirstCommitterWins {
                             law: "FG-LAW-FCW-01",
-                            detail: "append rebase crossed an identity write or endpoint retirement"
-                                .to_owned(),
+                            detail:
+                                "append rebase crossed an identity write or endpoint retirement"
+                                    .to_owned(),
                         }
                         .into());
                     }
@@ -171,9 +175,8 @@ impl WriteTxn {
         }
         // This reconstructs both the canonical effects and CURRENT dependency
         // set with the ordinary evaluator, rather than blessing a stale draft.
-        let prepared = database.prepare_ordered_writes_bounded(
-            self.staged.clone(), max_expanded_rows,
-        )?;
+        let prepared =
+            database.prepare_ordered_writes_bounded(self.staged.clone(), max_expanded_rows)?;
         checkpoint()?;
         if prepared.template != previous.template {
             return Err(WriteTxnError::AppendRebaseIneligible);

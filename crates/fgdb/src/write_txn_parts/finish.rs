@@ -173,10 +173,8 @@ impl WriteTxn {
         require_write: bool,
         checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
-        self.complete_with_basis_controlled(
-            database, cx, crash_at, require_write, None, checkpoint,
-        )
-        .await
+        self.complete_with_basis_controlled(database, cx, crash_at, require_write, None, checkpoint)
+            .await
     }
 
     // Explicit re-evaluation stays INSIDE the same terminal guard and BEFORE
@@ -201,7 +199,9 @@ impl WriteTxn {
         checkpoint()?;
         if let Some(max_expanded_rows) = append_rebase {
             attempt.transaction.prepare_append_rebase(
-                attempt.database, max_expanded_rows, &mut checkpoint,
+                attempt.database,
+                max_expanded_rows,
+                &mut checkpoint,
             )?;
         }
         if let Some((law, element, committed_at)) = attempt

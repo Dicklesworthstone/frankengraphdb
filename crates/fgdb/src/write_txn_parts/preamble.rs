@@ -136,8 +136,9 @@ impl core::fmt::Display for WriteTxnError {
             Self::IdentityExhausted => formatter.write_str("element identity domain exhausted"),
             Self::UnsupportedAtomicMutation => formatter
                 .write_str("atomic write contains a mutation without a defined independence law"),
-            Self::AppendRebaseIneligible => formatter
-                .write_str("transaction is not eligible for unobserved append rebase"),
+            Self::AppendRebaseIneligible => {
+                formatter.write_str("transaction is not eligible for unobserved append rebase")
+            }
             Self::Interrupted(source) => {
                 write!(formatter, "transaction operation interrupted: {source}")
             }

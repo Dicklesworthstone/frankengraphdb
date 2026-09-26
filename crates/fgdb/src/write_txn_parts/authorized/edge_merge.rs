@@ -16,7 +16,11 @@ use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 type Fault = GqlQueryError<GraphEdgeMergeError<WriteTxnError, WriteTxnError>, WriteTxnError>;
-type Receipt = (GraphEdgeMergeStats, GraphEdgeMergeOutcome, EmbeddedTxnCompletion);
+type Receipt = (
+    GraphEdgeMergeStats,
+    GraphEdgeMergeOutcome,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphEdgeMergeError::Source(error))
@@ -83,16 +87,28 @@ impl<V: Vfs + Clone> Database<V> {
         }
         commit_cx
             .with_restriction_async(async {
-                let mut execution = Execution { cx: commit_cx, permit, clock };
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
                 execution.checkpoint().map_err(source)?;
-                let mut workspace = Workspace(Some(self.begin(txn_cx).map_err(|error| {
-                    source(WriteTxnError::Write(error))
-                })?));
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| source(WriteTxnError::Write(error)))?,
+                ));
                 let (stats, outcome) = apply(
-                    workspace.transaction(), self, query_cx, merge, policy,
-                    verified.predicates(), &mut execution, true,
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    merge,
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    true,
                 )?;
-                let completion = workspace.transaction()
+                let completion = workspace
+                    .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
                         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         execution.checkpoint()
@@ -127,17 +143,27 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             policy,
             |pattern, allowance| {
                 selection::select_overlay(
-                    transaction, &database.borrow(), cx, pattern, scope, allowance, &controls,
+                    transaction,
+                    &database.borrow(),
+                    cx,
+                    pattern,
+                    scope,
+                    allowance,
+                    &controls,
                 )
             },
             |src, dst| {
                 // The selected pair is the entire existence domain. Recheck
                 // original endpoints, never a client-selected or masked image.
                 for vertex in [src, dst] {
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted)
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
                         .map_err(GqlQueryError::Interrupted)?;
-                    if controls.borrow_mut().vertex(transaction, &database.borrow(), vertex)
-                        .map_err(GqlQueryError::Source)?.is_none()
+                    if controls
+                        .borrow_mut()
+                        .vertex(transaction, &database.borrow(), vertex)
+                        .map_err(GqlQueryError::Source)?
+                        .is_none()
                     {
                         return Err(GqlQueryError::Source(WriteTxnError::Authorization(
                             Error::ScopeDenied,
@@ -148,14 +174,21 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Raw records stay private. Only exact pair/relation candidates
                 // reach the shared collector's counts and uniqueness reducer;
                 // every such edge has the two admitted endpoints above.
-                let edges = transaction.edges(&database.borrow())
-                    .map_err(redacted).map_err(GqlQueryError::Source)?;
+                let edges = transaction
+                    .edges(&database.borrow())
+                    .map_err(redacted)
+                    .map_err(GqlQueryError::Source)?;
                 let mut admitted = Vec::new();
                 for record in edges {
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted)
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
                         .map_err(GqlQueryError::Interrupted)?;
-                    controls.borrow_mut().poll().map_err(GqlQueryError::Interrupted)?;
-                    if record.entry.src == src && record.entry.dst == dst
+                    controls
+                        .borrow_mut()
+                        .poll()
+                        .map_err(GqlQueryError::Interrupted)?;
+                    if record.entry.src == src
+                        && record.entry.dst == dst
                         && record.entry.relation == merge.relation()
                     {
                         admitted.push(record);
@@ -163,7 +196,11 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 }
                 Ok(admitted)
             },
-            |_| database.borrow_mut().allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 }),
+            |_| {
+                database
+                    .borrow_mut()
+                    .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
+            },
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 controls.borrow_mut().checkpoint()
@@ -172,13 +209,17 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     })?;
     if let Some(batch) = proposal.creation {
         for row in batch.rows {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(source)?;
             execution.checkpoint().map_err(source)?;
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
     if returning && proposal.outcome.edge().is_some() {
-        execution.permit.charge_rows_at((execution.clock)(), 1)
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), 1)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
     }
     Ok((proposal.stats, proposal.outcome))
