@@ -7,6 +7,9 @@ use super::{
 };
 use fgdb_gql::{GraphMutationProgramError, GraphMutationProgramStats, PreparedGraphMutationProgram};
 
+#[path = "write_program.rs"]
+mod mixed;
+
 type Fault = GraphMutationProgramError<WriteTxnError, WriteTxnError>;
 
 impl<V: Vfs + Clone> Database<V> {

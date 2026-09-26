@@ -2,12 +2,13 @@
 //! targets; native pinned reads prove that the vertex cascade set is empty.
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
-use super::{Workspace, WriteBatch, WriteTxnError, redacted, selection, stage};
+use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, redacted, selection, stage};
 use fgdb_gql::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
     GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
+use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 type Fault = GqlQueryError<GraphDeleteError<WriteTxnError>, WriteTxnError>;
@@ -176,143 +177,10 @@ impl<V: Vfs + Clone> Database<V> {
                     self.begin(txn_cx)
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
-                let proposal = query_cx.with_restriction(|| {
-                    let execution = RefCell::new(&mut execution);
-                    deletion.execute_governed(
-                        policy,
-                        |pattern, allowance| {
-                            selection::select(
-                                self,
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                &execution,
-                            )
-                        },
-                        || {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.borrow_mut().checkpoint()
-                        },
-                    )
-                })?;
-                let mut stats = proposal.stats();
-                let (vertices, edges) = proposal.into_target_parts();
-                let scope = execution.permit.predicates();
-                if (!vertices.is_empty()
-                    && !(scope.sees_all_incidence() && scope.sees_all_fields()))
-                    || (!edges.is_empty() && !scope.sees_all_properties())
-                {
-                    return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
-                }
-                if returning {
-                    let rows = stats
-                        .target_vertices
-                        .checked_add(stats.target_edges)
-                        .ok_or_else(|| source(WriteTxnError::Authorization(Error::TooLarge)))?;
-                    execution
-                        .permit
-                        .charge_rows_at((execution.clock)(), rows)
-                        .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                }
-                if !vertices.is_empty() {
-                    event(
-                        &mut stats,
-                        policy,
-                        query_cx,
-                        &mut execution,
-                        GlaExecutionEvent::Work,
-                    )?;
-                    // Full visibility was established above. Thus these native
-                    // records and all proof charges contain no hidden topology.
-                    // Never use the masked MATCH alone to prove isolation.
-                    let incidence = workspace
-                        .transaction()
-                        .edges(self)
-                        .map_err(redacted)
-                        .map_err(source)?;
-                    let records = u64::try_from(incidence.len())
-                        .ok()
-                        .and_then(|count| stats.selection.snapshot_records.checked_add(count))
-                        .ok_or(GqlQueryError::Source(
-                            GraphDeleteError::InvalidSourceStatistics,
-                        ))?;
-                    policy
-                        .query
-                        .rows
-                        .check(GqlBudgetDimension::SnapshotRecords, records)
-                        .map_err(GqlQueryError::Rows)?;
-                    stats.selection.snapshot_records = records;
-                    // Both proposal vectors are sorted. Price fixed-width
-                    // binary searches before testing adjacency; allocate no
-                    // alternate topology or target index.
-                    let searches = 2 * (usize::BITS - vertices.len().leading_zeros()).max(1)
-                        + (usize::BITS - edges.len().leading_zeros()).max(1);
-                    for edge in incidence {
-                        for _ in 0..searches {
-                            event(
-                                &mut stats,
-                                policy,
-                                query_cx,
-                                &mut execution,
-                                GlaExecutionEvent::Work,
-                            )?;
-                        }
-                        if (vertices.binary_search(&edge.entry.src).is_ok()
-                            || vertices.binary_search(&edge.entry.dst).is_ok())
-                            && edges.binary_search(&edge.entry.eid).is_err()
-                        {
-                            return Err(GqlQueryError::Source(
-                                GraphDeleteError::IncidentRelationships,
-                            ));
-                        }
-                    }
-                }
-                // Retire ALL explicit edges first. The complete incidence
-                // proof above guarantees every subsequent native vertex delete
-                // has an empty cascade in this exclusively owned workspace.
-                for edge in &edges {
-                    event(
-                        &mut stats,
-                        policy,
-                        query_cx,
-                        &mut execution,
-                        GlaExecutionEvent::ScratchEntry,
-                    )?;
-                    let mut batch = WriteBatch::new(deletion.relation());
-                    batch.delete_edge(*edge);
-                    for row in batch.rows {
-                        stage(
-                            workspace.transaction(),
-                            self,
-                            batch.relation,
-                            row,
-                            &mut execution,
-                        )
-                        .map_err(source)?;
-                    }
-                }
-                for vertex in &vertices {
-                    event(
-                        &mut stats,
-                        policy,
-                        query_cx,
-                        &mut execution,
-                        GlaExecutionEvent::ScratchEntry,
-                    )?;
-                    let mut batch = WriteBatch::new(deletion.relation());
-                    batch.delete_vertex(*vertex);
-                    for row in batch.rows {
-                        stage(
-                            workspace.transaction(),
-                            self,
-                            batch.relation,
-                            row,
-                            &mut execution,
-                        )
-                        .map_err(source)?;
-                    }
-                }
+                let (stats, vertices, edges) = apply(
+                    workspace.transaction(), self, query_cx, deletion, policy,
+                    verified.predicates(), &mut execution, returning,
+                )?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -321,13 +189,165 @@ impl<V: Vfs + Clone> Database<V> {
                     })
                     .await
                     .map_err(source)?;
-                if returning {
-                    Ok((stats, vertices, edges, completion))
-                } else {
-                    Ok((stats, Vec::new(), Vec::new(), completion))
-                }
+                Ok((stats, vertices, edges, completion))
             })
             .await
+    }
+}
+
+// Execute one step only. The caller owns the same private transaction, permit
+// and eventual native completion; no per-step commit or fresh allowance exists.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    deletion: &PreparedGraphDelete,
+    policy: GraphDeletePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphDeleteStats, Vec<VId>, Vec<EId>), Fault> {
+    let proposal = query_cx.with_restriction(|| {
+        let execution = RefCell::new(&mut *execution);
+        deletion.execute_governed(
+            policy,
+            |pattern, allowance| {
+                selection::select_overlay(
+                    transaction,
+                    database,
+                    query_cx,
+                    pattern,
+                    scope,
+                    allowance,
+                    &execution,
+                )
+            },
+            || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                execution.borrow_mut().checkpoint()
+            },
+        )
+    })?;
+    let mut stats = proposal.stats();
+    let (vertices, edges) = proposal.into_target_parts();
+    if (!vertices.is_empty()
+        && !(scope.sees_all_incidence() && scope.sees_all_fields()))
+        || (!edges.is_empty() && !scope.sees_all_properties())
+    {
+        return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+    }
+    if returning {
+        let rows = stats
+            .target_vertices
+            .checked_add(stats.target_edges)
+            .ok_or_else(|| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), rows)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+    }
+    if !vertices.is_empty() {
+        event(
+            &mut stats,
+            policy,
+            query_cx,
+            execution,
+            GlaExecutionEvent::Work,
+        )?;
+        // Full visibility was established above. Thus these native
+        // records and all proof charges contain no hidden topology.
+        // Never use the masked MATCH alone to prove isolation.
+        let incidence = transaction
+            .edges(database)
+            .map_err(redacted)
+            .map_err(source)?;
+        let records = u64::try_from(incidence.len())
+            .ok()
+            .and_then(|count| stats.selection.snapshot_records.checked_add(count))
+            .ok_or(GqlQueryError::Source(
+                GraphDeleteError::InvalidSourceStatistics,
+            ))?;
+        policy
+            .query
+            .rows
+            .check(GqlBudgetDimension::SnapshotRecords, records)
+            .map_err(GqlQueryError::Rows)?;
+        stats.selection.snapshot_records = records;
+        // Both proposal vectors are sorted. Price fixed-width
+        // binary searches before testing adjacency; allocate no
+        // alternate topology or target index.
+        let searches = 2 * (usize::BITS - vertices.len().leading_zeros()).max(1)
+            + (usize::BITS - edges.len().leading_zeros()).max(1);
+        for edge in incidence {
+            for _ in 0..searches {
+                event(
+                    &mut stats,
+                    policy,
+                    query_cx,
+                    execution,
+                    GlaExecutionEvent::Work,
+                )?;
+            }
+            if (vertices.binary_search(&edge.entry.src).is_ok()
+                || vertices.binary_search(&edge.entry.dst).is_ok())
+                && edges.binary_search(&edge.entry.eid).is_err()
+            {
+                return Err(GqlQueryError::Source(
+                    GraphDeleteError::IncidentRelationships,
+                ));
+            }
+        }
+    }
+    // Retire ALL explicit edges first. The complete incidence
+    // proof above guarantees every subsequent native vertex delete
+    // has an empty cascade in this exclusively owned workspace.
+    for edge in &edges {
+        event(
+            &mut stats,
+            policy,
+            query_cx,
+            execution,
+            GlaExecutionEvent::ScratchEntry,
+        )?;
+        let mut batch = WriteBatch::new(deletion.relation());
+        batch.delete_edge(*edge);
+        for row in batch.rows {
+            stage(
+                transaction,
+                database,
+                batch.relation,
+                row,
+                execution,
+            )
+            .map_err(source)?;
+        }
+    }
+    for vertex in &vertices {
+        event(
+            &mut stats,
+            policy,
+            query_cx,
+            execution,
+            GlaExecutionEvent::ScratchEntry,
+        )?;
+        let mut batch = WriteBatch::new(deletion.relation());
+        batch.delete_vertex(*vertex);
+        for row in batch.rows {
+            stage(
+                transaction,
+                database,
+                batch.relation,
+                row,
+                execution,
+            )
+            .map_err(source)?;
+        }
+    }
+    if returning {
+        Ok((stats, vertices, edges))
+    } else {
+        Ok((stats, Vec::new(), Vec::new()))
     }
 }
 

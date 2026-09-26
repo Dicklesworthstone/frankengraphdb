@@ -3,12 +3,13 @@
 //! No unchecked proposal, identity receipt or workspace escapes before completion.
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
-use super::{Workspace, WriteBatch, WriteTxnError, selection, stage};
+use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
 use fgdb_gql::GqlQueryError;
 use fgdb_gql::insertion::{
     GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
+use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 // Keep the collector's typed resource/value errors. Its interruption carrier
@@ -142,89 +143,10 @@ impl<V: Vfs + Clone> Database<V> {
                     self.begin(txn_cx)
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
-                let proposal = query_cx.with_restriction(|| {
-                    // Sequential collector callbacks share the exact write
-                    // allowance and owner. These borrows die BEFORE staging or
-                    // awaiting completion, keeping the public future Send when
-                    // its clock/host are Send. Allocation starts only after the
-                    // masked selection and all computed values are validated.
-                    let execution = RefCell::new(&mut execution);
-                    let database = RefCell::new(&mut *self);
-                    insertion.execute_governed(
-                        policy,
-                        |pattern, allowance| {
-                            selection::select(
-                                &database.borrow(),
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                &execution,
-                            )
-                        },
-                        |request| database.borrow_mut().allocate_identity(query_cx, request),
-                        || {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.borrow_mut().checkpoint()
-                        },
-                    )
-                })?;
-                let stats = proposal.stats();
-                let mut vertices = Vec::new();
-                let mut edges = Vec::new();
-                for intent in proposal.into_intents() {
-                    query_cx
-                        .checkpoint()
-                        .map_err(WriteTxnError::Interrupted)
-                        .map_err(source)?;
-                    execution.checkpoint().map_err(source)?;
-                    // Receipt admission precedes both its allocation and native
-                    // publication. The stats-only path allocates no ID vectors.
-                    if returning {
-                        execution
-                            .permit
-                            .charge_rows_at((execution.clock)(), 1)
-                            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                    }
-                    let batch = match intent {
-                        GraphInsertIntent::Vertex {
-                            vertex,
-                            labels,
-                            properties,
-                        } => {
-                            if returning {
-                                vertices.push(vertex);
-                            }
-                            let mut batch = WriteBatch::new(insertion.relation());
-                            batch.create_vertex(vertex, labels, properties);
-                            batch
-                        }
-                        GraphInsertIntent::Edge {
-                            edge,
-                            relation,
-                            source,
-                            destination,
-                            properties,
-                        } => {
-                            if returning {
-                                edges.push(edge);
-                            }
-                            let mut batch = WriteBatch::new(relation);
-                            batch.add_edge(edge, source, destination, properties);
-                            batch
-                        }
-                    };
-                    for row in batch.rows {
-                        stage(
-                            workspace.transaction(),
-                            self,
-                            batch.relation,
-                            row,
-                            &mut execution,
-                        )
-                        .map_err(source)?;
-                    }
-                }
+                let (stats, vertices, edges) = apply(
+                    workspace.transaction(), self, query_cx, insertion, policy,
+                    verified.predicates(), &mut execution, returning,
+                )?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -237,6 +159,106 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .await
     }
+}
+
+// Execute one step only. The caller owns the same private transaction, permit
+// and eventual native completion; no per-step commit or fresh allowance exists.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    insertion: &PreparedGraphInsert,
+    policy: GraphInsertPolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphInsertStats, Vec<VId>, Vec<EId>), Fault> {
+    let proposal = query_cx.with_restriction(|| {
+        // Sequential collector callbacks share the exact write
+        // allowance and owner. These borrows die BEFORE staging or
+        // awaiting completion, keeping the public future Send when
+        // its clock/host are Send. Allocation starts only after the
+        // masked selection and all computed values are validated.
+        let execution = RefCell::new(&mut *execution);
+        let database = RefCell::new(&mut *database);
+        insertion.execute_governed(
+            policy,
+            |pattern, allowance| {
+                selection::select_overlay(
+                    transaction,
+                    &database.borrow(),
+                    query_cx,
+                    pattern,
+                    scope,
+                    allowance,
+                    &execution,
+                )
+            },
+            |request| database.borrow_mut().allocate_identity(query_cx, request),
+            || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                execution.borrow_mut().checkpoint()
+            },
+        )
+    })?;
+    let stats = proposal.stats();
+    let mut vertices = Vec::new();
+    let mut edges = Vec::new();
+    for intent in proposal.into_intents() {
+        query_cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(source)?;
+        execution.checkpoint().map_err(source)?;
+        // Receipt admission precedes both its allocation and native
+        // publication. The stats-only path allocates no ID vectors.
+        if returning {
+            execution
+                .permit
+                .charge_rows_at((execution.clock)(), 1)
+                .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        }
+        let batch = match intent {
+            GraphInsertIntent::Vertex {
+                vertex,
+                labels,
+                properties,
+            } => {
+                if returning {
+                    vertices.push(vertex);
+                }
+                let mut batch = WriteBatch::new(insertion.relation());
+                batch.create_vertex(vertex, labels, properties);
+                batch
+            }
+            GraphInsertIntent::Edge {
+                edge,
+                relation,
+                source,
+                destination,
+                properties,
+            } => {
+                if returning {
+                    edges.push(edge);
+                }
+                let mut batch = WriteBatch::new(relation);
+                batch.add_edge(edge, source, destination, properties);
+                batch
+            }
+        };
+        for row in batch.rows {
+            stage(
+                transaction,
+                database,
+                batch.relation,
+                row,
+                execution,
+            )
+            .map_err(source)?;
+        }
+    }
+    Ok((stats, vertices, edges))
 }
 
 #[cfg(test)]
