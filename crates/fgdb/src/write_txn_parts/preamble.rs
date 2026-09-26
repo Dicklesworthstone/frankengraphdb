@@ -80,8 +80,9 @@ pub enum WriteTxnError {
     UnsupportedAtomicMutation,
     /// The requested 128-bit identity domain has no remaining successor.
     IdentityExhausted,
-    /// Cancellation during prepublication completion/validation. No write from
-    /// this attempt reached the commit coordinator; the transaction is terminal.
+    /// Cancellation before acceptance. Completion makes the transaction
+    /// terminal; snapshot refresh instead preserves its entire active workspace.
+    /// Neither interrupted operation publishes a write from this attempt.
     Interrupted(Box<asupersync::error::Error>),
     Read(ReadError),
     Gql(GqlError),
@@ -133,7 +134,7 @@ impl core::fmt::Display for WriteTxnError {
             Self::UnsupportedAtomicMutation => formatter
                 .write_str("atomic write contains a mutation without a defined independence law"),
             Self::Interrupted(source) => {
-                write!(formatter, "transaction completion interrupted: {source}")
+                write!(formatter, "transaction operation interrupted: {source}")
             }
             Self::Read(source) => write!(formatter, "could not read the pinned snapshot: {source}"),
             Self::Gql(source) => write!(formatter, "transaction GQL failed: {source}"),
@@ -193,6 +194,8 @@ impl From<GqlError> for WriteTxnError {
 /// pinned basis. Each successful staging refreshes one canonical template.
 /// Commit validates observations and conservative scan witnesses before
 /// delegating the whole template to the existing publication coordinator.
+/// The basis stays pinned unless `refresh_snapshot` explicitly validates and
+/// advances it; ordinary reads and writes never refresh it implicitly.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,

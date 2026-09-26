@@ -29,6 +29,15 @@ impl core::fmt::Debug for PreparedDependencies {
 }
 
 impl PreparedDependencies {
+    /// Borrow the same conservative observations used by rollback, allowing
+    /// callers to checkpoint each identity without cloning a dependency set.
+    pub(super) fn observations(&self) -> impl Iterator<Item = ElementId> + '_ {
+        self.elements
+            .iter()
+            .copied()
+            .chain(self.adjacency.iter().copied().map(ElementId::Vertex))
+    }
+
     pub(super) fn capture(writer: &BlockWriter, batch: &WriteBatch) -> Self {
         let mut result = Self::default();
         for pending in &batch.rows {
