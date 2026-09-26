@@ -314,7 +314,6 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 | `clippy::needless_range_loop` | allow | 088e510f | Toolchain bump: index walks over parallel slices by one counter; an iterator rewrite obscures the arithmetic. |
 | `clippy::result_large_err` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 263 sites / 48 files at 2026-09-25. |
 | `clippy::type_complexity` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25. |
-| `clippy::unnecessary_literal_unwrap` | allow | fgdb-gate-weakening-rollback-mthlh | Measured residual from 89b49d38: 13 sites / 3 files at 2026-09-25, all Option::<T>::None.expect(msg) stand-ins for panic!; the fix moves the UBS panic-macro ratchet, so it is decided separately. |
 
 ## Ownership vocabulary
 
@@ -392,5 +391,5 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 
 ## Pins
 
-* `id_table_hash` = `fnv1a64:4b54044276d71724` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:f30acceb8ce4597c` — every normative decision, prose excluded.
+* `id_table_hash` = `fnv1a64:fe0151bf066f740f` — every stable id, sorted.
+* `semantic_contract_hash` = `fnv1a64:05d7e17e5038c096` — every normative decision, prose excluded.

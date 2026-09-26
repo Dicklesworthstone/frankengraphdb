@@ -37,8 +37,8 @@ use std::path::{Path, PathBuf};
 // then by the 13 lint_allowance rows (fgdb-gate-weakening-rollback-mthlh), and
 // again as each residual row is retired (manual_noop_waker: 12 rows; err_expect,
 // unnecessary_mut_passed, manual_is_multiple_of: 9 rows; unusual_byte_groupings,
-// collapsible_if, too_many_arguments: 6 rows).
-const ID_TABLE_PIN: &str = "fnv1a64:4b54044276d71724";
+// collapsible_if, too_many_arguments: 6 rows; unnecessary_literal_unwrap: 5).
+const ID_TABLE_PIN: &str = "fnv1a64:fe0151bf066f740f";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -58,8 +58,9 @@ const ID_TABLE_PIN: &str = "fnv1a64:4b54044276d71724";
 // table became a registered contract: 13 lint_allowance (lint, level) lines
 // (fgdb-gate-weakening-rollback-mthlh), 12 once manual_noop_waker was fixed,
 // 9 once err_expect, unnecessary_mut_passed and manual_is_multiple_of were,
-// 6 once unusual_byte_groupings, collapsible_if and too_many_arguments were.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:f30acceb8ce4597c";
+// 6 once unusual_byte_groupings, collapsible_if and too_many_arguments were,
+// 5 once unnecessary_literal_unwrap was.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:05d7e17e5038c096";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

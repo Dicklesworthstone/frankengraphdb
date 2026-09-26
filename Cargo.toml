@@ -67,14 +67,13 @@ needless_range_loop = "allow"
 # each site fixed or allowed locally with a reason. manual_noop_waker (13 sites),
 # then err_expect (30), unnecessary_mut_passed (18), manual_is_multiple_of (14),
 # unusual_byte_groupings (44) and collapsible_if (38) followed as fixed code, and
-# too_many_arguments (9) as site-local allows with reasons. The rest remain
-# (unique sites at 2026-09-25, workspace --all-targets). Each is to become fixed
-# code or a site-local allow with a reason, never a new workspace entry.
+# too_many_arguments (9) as site-local allows with reasons.
+# unnecessary_literal_unwrap (13) followed: 11 fixed, and two documented `fail`
+# test helpers were allowed locally. The rest remain (unique sites at 2026-09-25,
+# workspace --all-targets). Each is to become fixed code or a site-local allow
+# with a reason, never a new workspace entry.
 result_large_err = "allow" # 263 sites / 48 files
 # 15 of its sites are one repeated WriteTxn error-family Result; that wants a
 # shared alias, which touches public signatures, so it is a slice of its own.
 type_complexity = "allow" # 34 / 24
-# Its 13 sites are `Option::<T>::None.expect(msg)` stand-ins for panic!: fixing
-# them moves the UBS panic-macro ratchet, so that decision rides separately.
-unnecessary_literal_unwrap = "allow" # 13 / 3
 

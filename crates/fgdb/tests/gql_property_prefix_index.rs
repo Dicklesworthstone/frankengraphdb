@@ -267,9 +267,9 @@ fn prefix_answers_and_resolved_charges_follow_history_pinning_reopen_and_as_of()
             let mut initial = WriteBatch::new(R);
             for (offset, value) in WITNESSES.iter().enumerate() {
                 let id = VId(offset as u128 + 1);
-                let value = Some(text(value));
-                remember(&mut history, id, &value);
-                initial.create_vertex(id, vec![], vec![(NAME, value.unwrap())]);
+                let value = text(value);
+                remember(&mut history, id, &Some(value.clone()));
+                initial.create_vertex(id, vec![], vec![(NAME, value)]);
             }
             initial.create_vertex(VId(90), vec![], vec![]);
             initial.create_vertex(VId(91), vec![], vec![(NAME, CanonicalScalar::Null)]);
@@ -283,9 +283,9 @@ fn prefix_answers_and_resolved_charges_follow_history_pinning_reopen_and_as_of()
                 );
             }
             for id in 150..154 {
-                let value = Some(text("ab-moving"));
-                remember(&mut history, VId(id), &value);
-                initial.create_vertex(VId(id), vec![], vec![(NAME, value.unwrap())]);
+                let value = text("ab-moving");
+                remember(&mut history, VId(id), &Some(value.clone()));
+                initial.create_vertex(VId(id), vec![], vec![(NAME, value)]);
             }
             let old = db.write(&commit, initial).await.unwrap();
             let pinned = db.read_session().unwrap();
@@ -344,9 +344,9 @@ fn prefix_answers_and_resolved_charges_follow_history_pinning_reopen_and_as_of()
                         batch.delete_vertex(VId(153));
                     }
                     let id = VId(u128::from(200 + step));
-                    let value = Some(text("ab-new"));
-                    remember(&mut history, id, &value);
-                    batch.create_vertex(id, vec![], vec![(NAME, value.unwrap())]);
+                    let value = text("ab-new");
+                    remember(&mut history, id, &Some(value.clone()));
+                    batch.create_vertex(id, vec![], vec![(NAME, value)]);
                     cuts.push(db.write(&commit, batch).await.unwrap());
                 }
                 if step == 3 {

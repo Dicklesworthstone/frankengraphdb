@@ -118,7 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
-lint_allowance_count = 6
+lint_allowance_count = 5
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -129,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:4b54044276d71724"
-semantic_contract_hash = "fnv1a64:f30acceb8ce4597c"
+id_table_hash = "fnv1a64:fe0151bf066f740f"
+semantic_contract_hash = "fnv1a64:05d7e17e5038c096"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1958,12 +1958,6 @@ lint = "clippy::type_complexity"
 level = "allow"
 reference = "fgdb-gate-weakening-rollback-mthlh"
 basis = "Measured residual from 89b49d38: 34 sites / 24 files at 2026-09-25."
-
-[[lint_allowance]]
-lint = "clippy::unnecessary_literal_unwrap"
-level = "allow"
-reference = "fgdb-gate-weakening-rollback-mthlh"
-basis = "Measured residual from 89b49d38: 13 sites / 3 files at 2026-09-25, all Option::<T>::None.expect(msg) stand-ins for panic!; the fix moves the UBS panic-macro ratchet, so it is decided separately."
 
 # --- build_here (23) ----------------------------------------------------------
 
