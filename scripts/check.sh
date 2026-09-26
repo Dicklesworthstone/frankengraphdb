@@ -1407,10 +1407,27 @@ run_ubs() {
 # - fgdb-strata tests/block_store.rs +1 (ccb28142: a let-else panic! in the
 #   batch staging law).
 # Secret/token comparisons and Command::new are unchanged at 16 and 1.
+# fgdb-zk5tw re-pin (2026-09-26, UBS v5.4.9, regex mode, 1,623 tracked files):
+# main read 771 at 45abe412 and at f3caa287 (which edits no panic-macro
+# line), so check.sh was red for every pane. Tool control: today's ubs over
+# 0b952cb2 reads 749/16/1, so the tree moved, not the tool. The 209 .rs files
+# changed since then, scanned jointly, read 153 at 0b952cb2 and 175 at
+# 45abe412: 749 - 153 + 175 = 771 exactly. Anchored per-file attribution
+# sums to +22, every site in test code:
+# - fgdb write_txn_parts/authorized: edge_merge_tests.rs +4 (948392af),
+#   analytics_tests.rs +3 (d84d2264), deletion_tests.rs +2 (07246ee9),
+#   mutation_tests.rs +2 (c9310a21), vertex_merge_tests.rs +2 (dc71d374),
+#   mutation_program_tests.rs +1 (963b337e), write_program_tests.rs +1
+#   (2398099a, 0ca28adb);
+# - fgdb cfg(test) modules: refresh.rs +2 (cee02aeb), edge_reads.rs +1
+#   (2011efdb); tests/authorized_writes/graph.rs +1 (7829437c);
+# - fgdb-gql: loom_access_tests.rs +1 (89c8daa5), tests/path_values.rs +1
+#   (034400e5), tests/with_pipelines.rs +1 (ea1be312).
+# Secret/token comparisons and Command::new are unchanged at 16 and 1.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=749"
+  "panic!/unreachable!/todo!/unimplemented!=771"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1429,7 +1446,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=749"
+  "panic!/unreachable!/todo!/unimplemented!=771"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
