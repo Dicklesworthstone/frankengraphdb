@@ -78,6 +78,9 @@ pub enum WriteTxnError {
     BirthOrdinalCollision,
     /// A new delta family needs an explicit compound-write independence law.
     UnsupportedAtomicMutation,
+    /// Explicit append rebase cannot preserve this workspace's decisions or
+    /// exact creations. Ordinary commit/refresh never select this policy.
+    AppendRebaseIneligible,
     /// The requested 128-bit identity domain has no remaining successor.
     IdentityExhausted,
     /// Cancellation before acceptance. Completion makes the transaction
@@ -133,6 +136,8 @@ impl core::fmt::Display for WriteTxnError {
             Self::IdentityExhausted => formatter.write_str("element identity domain exhausted"),
             Self::UnsupportedAtomicMutation => formatter
                 .write_str("atomic write contains a mutation without a defined independence law"),
+            Self::AppendRebaseIneligible => formatter
+                .write_str("transaction is not eligible for unobserved append rebase"),
             Self::Interrupted(source) => {
                 write!(formatter, "transaction operation interrupted: {source}")
             }
@@ -164,6 +169,7 @@ impl core::error::Error for WriteTxnError {
             | Self::OrderedWriteBudgetExceeded { .. }
             | Self::BirthOrdinalCollision
             | Self::IdentityExhausted
+            | Self::AppendRebaseIneligible
             | Self::UnsupportedAtomicMutation => None,
         }
     }
@@ -196,6 +202,8 @@ impl From<GqlError> for WriteTxnError {
 /// delegating the whole template to the existing publication coordinator.
 /// The basis stays pinned unless `refresh_snapshot` explicitly validates and
 /// advances it; ordinary reads and writes never refresh it implicitly.
+/// `commit_append_only_rebased` separately opts an unobserved append-only
+/// workspace into re-evaluation at finalization, never an active read refresh.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,

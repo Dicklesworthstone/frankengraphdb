@@ -171,6 +171,23 @@ impl WriteTxn {
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
+        checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.complete_with_basis_controlled(
+            database, cx, crash_at, require_write, None, checkpoint,
+        )
+        .await
+    }
+
+    // Explicit re-evaluation stays INSIDE the same terminal guard and BEFORE
+    // ordinary validation/publication. Every existing caller retains its basis.
+    async fn complete_with_basis_controlled<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+        require_write: bool,
+        append_rebase: Option<u64>,
         mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
@@ -182,6 +199,11 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
+        if let Some(max_expanded_rows) = append_rebase {
+            attempt.transaction.prepare_append_rebase(
+                attempt.database, max_expanded_rows, &mut checkpoint,
+            )?;
+        }
         if let Some((law, element, committed_at)) = attempt
             .transaction
             .transaction_conflict(attempt.database, &mut checkpoint)?

@@ -17,6 +17,7 @@ include!("write_txn_parts/lifecycle.rs");
 include!("write_txn_parts/bounded_ordered.rs");
 include!("write_txn_parts/savepoints.rs");
 include!("write_txn_parts/refresh.rs");
+include!("write_txn_parts/append_rebase.rs");
 include!("write_txn_parts/vertex_reads.rs");
 include!("write_txn_parts/edge_reads.rs");
 include!("write_txn_parts/gql_types.rs");
