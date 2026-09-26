@@ -798,6 +798,10 @@ pub(in crate::graph_text) fn bind_read_value(
             list: Box::new(bind_read_value(list, values)?),
             index: Box::new(bind_read_value(index, values)?),
         },
+        ReadValueTemplate::In { value, list } => GraphSetValue::In {
+            value: Box::new(bind_read_value(value, values)?),
+            list: Box::new(bind_read_value(list, values)?),
+        },
         ReadValueTemplate::Size(value) => {
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))
         }

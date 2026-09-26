@@ -77,6 +77,10 @@ pub(crate) enum ReadValueTemplate {
         index: Box<ReadValueTemplate>,
     },
     Size(Box<ReadValueTemplate>),
+    In {
+        value: Box<ReadValueTemplate>,
+        list: Box<ReadValueTemplate>,
+    },
     Literal(crate::GqlScalarParameter),
     Parameter {
         index: usize,
@@ -161,6 +165,11 @@ impl ReadValueTemplate {
                 for op in program {
                     op.append_template_transcript(bytes);
                 }
+            }
+            Self::In { value, list } => {
+                bytes.push(7);
+                value.append_template_transcript(bytes);
+                list.append_template_transcript(bytes);
             }
         }
     }

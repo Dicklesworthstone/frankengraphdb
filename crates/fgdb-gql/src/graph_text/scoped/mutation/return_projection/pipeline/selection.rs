@@ -1,8 +1,11 @@
 //! Computed WHERE operands lower to the existing Project/Filter/Project IR.
 //! All expressions read the original row. Private cells cannot become aliases,
 //! change multiplicity, escape into RETURN *, or move across an input page.
-//! IN accepts a bounded list of expressions; list parameters and subquery RHSs
-//! are not part of this profile. Text predicates use the shared scalar kernels.
+//! Literal IN lists retain bounded predicate expansion. Runtime native lists
+//! use one governed membership expression; subquery RHSs remain unsupported.
+//! Text predicates use the shared scalar kernels.
+
+mod membership;
 
 use super::*;
 use crate::algebra::IntegerComparison;
@@ -337,6 +340,12 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphSetTextError> {
         let negate = self.take_word("NOT")?;
+        if self.is_word("IN")
+            && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+        {
+            self.advance()?;
+            return self.selection_list_membership(schema, selection, left, negate, at);
+        }
         // A computed candidate is admitted/evaluated once, including for an
         // empty IN list. Neither duplicate members nor negation duplicate rows.
         let left = self.selection_cell(schema, selection, left, at)?;
