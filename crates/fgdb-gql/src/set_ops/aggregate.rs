@@ -1,6 +1,8 @@
 //! Exact GroupAggregate over an arbitrary bounded set/row relation.
 //! The source-aware type cannot accidentally execute only the first graph leaf.
 
+mod rows;
+
 use super::*;
 use crate::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateError, GraphAggregateFilter,
