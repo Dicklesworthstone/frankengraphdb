@@ -41,16 +41,26 @@ impl WriteTxn {
             }
             Err(GqlQueryError::Rows(error)) => return Err(GqlQueryError::Rows(error)),
             Err(GqlQueryError::Evaluator(error)) => return Err(GqlQueryError::Evaluator(error)),
-            Err(GqlQueryError::Interrupted(error)) => return Err(GqlQueryError::Interrupted(error)),
-            Err(GqlQueryError::IdentifiedEdgesRequired) => return Err(GqlQueryError::IdentifiedEdgesRequired),
+            Err(GqlQueryError::Interrupted(error)) => {
+                return Err(GqlQueryError::Interrupted(error));
+            }
+            Err(GqlQueryError::IdentifiedEdgesRequired) => {
+                return Err(GqlQueryError::IdentifiedEdgesRequired);
+            }
         };
 
         let (stats, batch) = vertex_upsert_actions::<WriteTxnError, A, _>(
-            upsert, policy, merge_stats, outcome, || cx.checkpoint(),
+            upsert,
+            policy,
+            merge_stats,
+            outcome,
+            || cx.checkpoint(),
         )?;
         if !batch.is_empty() {
             // No cancellation boundary after this synchronous staging call.
-            workspace.txn.write(database, batch)
+            workspace
+                .txn
+                .write(database, batch)
                 .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
         }
         workspace.accept();
@@ -73,12 +83,14 @@ fn vertex_upsert_actions<E, A, C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> VertexUpsertActionProposal<E, A, C> {
     use fgdb_gql::{
-        GqlQueryError, GraphVertexMergeOutcome, GraphVertexUpsertAction,
-        GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats,
+        GqlQueryError, GraphVertexMergeOutcome, GraphVertexUpsertAction, GraphVertexUpsertBranch,
+        GraphVertexUpsertError, GraphVertexUpsertStats,
     };
     let (branch, actions) = match outcome {
         GraphVertexMergeOutcome::Matched(_) => (GraphVertexUpsertBranch::Match, upsert.on_match()),
-        GraphVertexMergeOutcome::Created(_) => (GraphVertexUpsertBranch::Create, upsert.on_create()),
+        GraphVertexMergeOutcome::Created(_) => {
+            (GraphVertexUpsertBranch::Create, upsert.on_create())
+        }
     };
     let observed = actions.len() as u128;
     if observed > u128::from(policy.max_actions) {
