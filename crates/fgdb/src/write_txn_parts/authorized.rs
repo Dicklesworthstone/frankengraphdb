@@ -20,6 +20,8 @@ use std::collections::BTreeSet;
 // like mod.rs children (in write_txn_parts/). Name the real location.
 #[path = "authorized/deletion.rs"]
 mod deletion;
+#[path = "authorized/edge_merge.rs"]
+mod edge_merge;
 #[path = "authorized/graph.rs"]
 mod graph;
 #[path = "authorized/insert.rs"]
