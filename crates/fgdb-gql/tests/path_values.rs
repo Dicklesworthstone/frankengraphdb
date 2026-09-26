@@ -89,6 +89,47 @@ fn fixed_path_functions_preserve_traversal_order_and_filter_rows() {
     );
 }
 
+/// fgdb-j687q: openCypher `length(p)` is PATH_LENGTH, in RETURN, WHERE and
+/// ORDER BY, with the identical plan.
+#[test]
+fn opencypher_length_is_path_length() {
+    use fgdb_gql::GqlParameters;
+    let plan = |text: &str| {
+        PreparedGraphText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    for (cypher, gql) in [
+        (
+            "MATCH p = (a)-[:R]->(b)-[:S]->(c) WHERE length(p)=2 RETURN p, length(p) AS hops",
+            "MATCH p = (a)-[:R]->(b)-[:S]->(c) WHERE path_length(p)=2 RETURN p, path_length(p) AS hops",
+        ),
+        (
+            "MATCH p = ANY SHORTEST WALK (a)-[:R*0..4]->(b) RETURN p ORDER BY LENGTH(p) DESC",
+            "MATCH p = ANY SHORTEST WALK (a)-[:R*0..4]->(b) RETURN p ORDER BY path_length(p) DESC",
+        ),
+    ] {
+        assert_eq!(plan(cypher), plan(gql), "{cypher}");
+    }
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{CanonicalScalar, EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(2), VId(3)),
+    ];
+    let rows = execute(
+        "MATCH p = (a)-[:R]->(b)-[:S]->(c) WHERE length(p)=2 RETURN length(p) AS hops",
+        &edges,
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].values()[0],
+        GraphValue::Scalar(CanonicalScalar::Int(2))
+    );
+}
+
 #[test]
 fn shortest_ties_parallel_edges_and_zero_hops_retain_identity() {
     use fgdb_types::{EId, VId};

@@ -785,6 +785,7 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         Ok((word.eq_ignore_ascii_case("path_length")
+            || word.eq_ignore_ascii_case("length")
             || word.eq_ignore_ascii_case("nodes")
             || word.eq_ignore_ascii_case("edges"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))

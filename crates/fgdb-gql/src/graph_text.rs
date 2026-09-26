@@ -1098,7 +1098,9 @@ impl<'a> Parser<'a> {
     }
 
     fn path_function(name: Name<'a>) -> Result<GraphPathFunction, GraphPatternTextError> {
-        if name.text.eq_ignore_ascii_case("path_length") {
+        // `length(p)` is the openCypher spelling of PATH_LENGTH (fgdb-j687q).
+        if name.text.eq_ignore_ascii_case("path_length") || name.text.eq_ignore_ascii_case("length")
+        {
             Ok(GraphPathFunction::Length)
         } else if name.text.eq_ignore_ascii_case("nodes") {
             Ok(GraphPathFunction::Nodes)
