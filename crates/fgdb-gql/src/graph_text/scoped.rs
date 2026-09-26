@@ -702,7 +702,8 @@ impl<'a> Parser<'a> {
 
     // Look ahead through the SAME lexer, without consuming its token budget.
     // Existing identifiers named `exists` or `not` remain identifiers unless
-    // the complete EXISTS { / NOT EXISTS { introducer is present.
+    // the complete EXISTS { / NOT EXISTS { introducer, or an openCypher
+    // pattern predicate `[NOT] (n)-[...]-(...)`, is present.
     pub(super) fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
         let mut lookahead = self.lexer.clone();
         if self.is_word("EXISTS") {
@@ -713,8 +714,9 @@ impl<'a> Parser<'a> {
             if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
                 return Ok(matches!(lookahead.next()?.kind, TokenKind::Punct(b'{')));
             }
+            return pattern_predicate_follows(next.kind, &mut lookahead);
         }
-        Ok(false)
+        pattern_predicate_follows(self.current.kind, &mut lookahead)
     }
 
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
@@ -738,13 +740,19 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let anti = self.take_word("NOT")?;
-                self.word("EXISTS")?;
-                self.punct(b'{', "{")?;
-                self.match_scope(if anti {
+                let kind = if anti {
                     ScopeKind::NotExists
                 } else {
                     ScopeKind::Exists
-                })?;
+                };
+                if self.take_word("EXISTS")? {
+                    self.punct(b'{', "{")?;
+                    self.match_scope(kind)?;
+                } else {
+                    // `(n)-[:R]->()` is `EXISTS { MATCH (n)-[:R]->() }`, and
+                    // `NOT (n)-[:R]->()` its anti form (fgdb-44d8n).
+                    self.scope(kind, ScopeForm::Pattern)?;
+                }
                 has_existence = true;
             } else if path_predicates {
                 if self.starts_path_predicate()? {
@@ -900,6 +908,13 @@ impl<'a> Parser<'a> {
     }
 
     fn match_scope(&mut self, kind: ScopeKind) -> Result<(), GraphPatternTextError> {
+        self.scope(kind, ScopeForm::Clause)
+    }
+
+    /// One scoped body: a `MATCH ... [WHERE ...]` clause (closed by `}` for an
+    /// existential), or a bare pattern-predicate pattern, which has no MATCH,
+    /// WHERE or braces and is otherwise the identical body.
+    fn scope(&mut self, kind: ScopeKind, form: ScopeForm) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.capacity(
             self.syntax.scopes.len(),
@@ -912,8 +927,11 @@ impl<'a> Parser<'a> {
         let row_bindings = core::mem::take(&mut self.read_row_bindings);
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
+        let clause = form == ScopeForm::Clause;
         let parsed = (|| {
-            self.word("MATCH")?;
+            if clause {
+                self.word("MATCH")?;
+            }
             if self.starts_path_binding()? {
                 return Err(error(
                     self.current.at,
@@ -922,7 +940,7 @@ impl<'a> Parser<'a> {
             }
             self.positive_pattern()?;
             let matched_variables = self.syntax.variables.len();
-            if self.take_word("WHERE")? {
+            if clause && self.take_word("WHERE")? {
                 // The positive pattern is complete. Temporarily expose the
                 // containing symbol table to the SAME predicate parser, without
                 // inserting nodes or altering its name/parameter/token grammar.
@@ -940,7 +958,7 @@ impl<'a> Parser<'a> {
                 }
                 self.scoped_predicates(false)?;
             }
-            if !kind.exports_bindings() {
+            if clause && !kind.exports_bindings() {
                 self.punct(b'}', "}")?;
             }
             let mut body = self.take_pattern();
@@ -979,6 +997,50 @@ impl<'a> Parser<'a> {
         self.syntax.scopes.push(ScopeSyntax { kind, body });
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopeForm {
+    Clause,
+    Pattern,
+}
+
+/// Whether `first` and the tokens after it spell an openCypher pattern
+/// predicate: a parenthesised node pattern (variable, labels, property map;
+/// no `.`, operator or literal outside the map) followed by an edge
+/// introducer. `-` then `[`, `-` or `>`, or `<` `-` then `[` or `-`, never
+/// arithmetic `(x) - 2` or a comparison `(x) <-3`.
+pub(super) fn pattern_predicate_follows(
+    first: TokenKind<'_>,
+    lookahead: &mut Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    if !matches!(first, TokenKind::Punct(b'(')) {
+        return Ok(false);
+    }
+    let mut map_depth = 0_usize;
+    loop {
+        match lookahead.next()?.kind {
+            TokenKind::End => return Ok(false),
+            TokenKind::Punct(b')') if map_depth == 0 => break,
+            TokenKind::Punct(b'{') => map_depth += 1,
+            TokenKind::Punct(b'}') => {
+                let Some(outer) = map_depth.checked_sub(1) else {
+                    return Ok(false);
+                };
+                map_depth = outer;
+            }
+            _ if map_depth > 0 => {}
+            TokenKind::Word(_) | TokenKind::Punct(b':' | b'|' | b'&' | b'!') => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(match (lookahead.next()?.kind, lookahead.next()?.kind) {
+        (TokenKind::Punct(b'-'), TokenKind::Punct(b'[' | b'-' | b'>')) => true,
+        (TokenKind::Punct(b'<'), TokenKind::Punct(b'-')) => {
+            matches!(lookahead.next()?.kind, TokenKind::Punct(b'[' | b'-'))
+        }
+        _ => false,
+    })
 }
 
 #[cfg(test)]

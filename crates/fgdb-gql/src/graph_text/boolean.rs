@@ -134,7 +134,7 @@ impl<'a> Parser<'a> {
             token = lexer.next()?;
         }
         if !matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
-            return Ok(false);
+            return super::scoped::pattern_predicate_follows(token.kind, &mut lexer);
         }
         Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')))
     }

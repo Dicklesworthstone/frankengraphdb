@@ -342,6 +342,93 @@ fn existential_scopes_are_local_and_do_not_multiply_outer_occurrences() {
     );
 }
 
+/// fgdb-44d8n: an openCypher pattern predicate IS its EXISTS spelling, with
+/// identical plan bytes and so identical rows. This holds bare and under NOT,
+/// in every direction, with labels and property maps, correlated to two outer
+/// variables, and as an AND conjunct beside an ordinary predicate. Mixed
+/// under OR it is refused exactly as EXISTS is. A parenthesised expression
+/// followed by arithmetic or a comparison stays an expression.
+#[test]
+fn pattern_predicates_are_their_exists_spelling() {
+    for (pattern, exists) in [
+        (
+            "MATCH (a) WHERE (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE NOT (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->() } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE (a)<-[:S]-(src:L) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE (a:L)-[:R]-(m {n: 2}) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-(m {n: 2}) } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE a.n > 1 AND (a)-[:R]->() AND NOT (a)-[:S]->() RETURN a",
+            "MATCH (a) WHERE a.n > 1 AND EXISTS { MATCH (a)-[:R]->() } \
+             AND NOT EXISTS { MATCH (a)-[:S]->() } RETURN a",
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WHERE NOT (b)-[:S]->(a) RETURN a, b",
+            "MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(a) } RETURN a, b",
+        ),
+    ] {
+        assert_eq!(
+            query(pattern).canonical_bytes(),
+            query(exists).canonical_bytes(),
+            "{pattern}"
+        );
+    }
+    // Rows on a fixture: 0 -R-> 1, 2 -S-> 0.
+    let rows = |text: &str| {
+        let result = query(text)
+            .plan()
+            .execute_governed_with_properties(
+                5,
+                [VId(0), VId(1), VId(2)],
+                [(VId(0), R, VId(1)), (VId(2), S, VId(0))],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        ids(&result.value)
+    };
+    assert_eq!(
+        rows("MATCH (a) WHERE (a)-[:R]->() RETURN a"),
+        vec![vec![Some(VId(0))]]
+    );
+    assert_eq!(
+        rows("MATCH (a) WHERE NOT (a)-[:R]->() RETURN a"),
+        vec![vec![Some(VId(1))], vec![Some(VId(2))]]
+    );
+    assert_eq!(
+        rows("MATCH (a) WHERE (a)<-[:S]-() RETURN a"),
+        vec![vec![Some(VId(0))]]
+    );
+    // Under OR it is a scope inside a compound Boolean, refused as EXISTS is.
+    assert!(matches!(
+        PreparedGraphText::prepare("MATCH (a) WHERE a.n > 1 OR (a)-[:R]->() RETURN a", symbols)
+            .unwrap_err()
+            .kind,
+        GraphPatternTextErrorKind::UnsupportedBooleanScope
+    ));
+    // Parentheses followed by arithmetic or a comparison are not patterns.
+    for text in [
+        "MATCH (a) WHERE (a.n) - 2 > 0 RETURN a",
+        "MATCH (a) WHERE (a.n + 1) <-3 RETURN a",
+        // `- -` is edge-shaped; only the node-pattern body check rejects it.
+        "MATCH (a) WHERE (a.n) - -1 > 0 RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_ok(), "{text}");
+    }
+}
+
 #[test]
 fn required_match_after_optional_preserves_bound_correlations_without_rebinding_null() {
     let pattern = query("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:S]->(c) RETURN a,b,c");
