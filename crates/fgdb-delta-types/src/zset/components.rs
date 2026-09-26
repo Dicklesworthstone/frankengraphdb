@@ -15,6 +15,7 @@
 //! standard allocation retain the parent Z-set panic/allocation boundary.
 
 pub mod kcore;
+pub mod strong;
 
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{LimbLimit, ZWeight};
