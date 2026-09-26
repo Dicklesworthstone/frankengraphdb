@@ -33,6 +33,7 @@ pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
         StandingQuery::Rows { output, .. } => Some(output.definition().columns()),
         StandingQuery::Constant(query) => Some(query.definition.columns()),
         StandingQuery::Closure(query) => Some(query.columns()),
+        StandingQuery::Components(query) => Some(query.columns()),
         StandingQuery::Set(query) => Some(&query.columns),
         StandingQuery::Join(query) => Some(query.columns()),
         StandingQuery::Projection(query) => Some(query.columns()),
@@ -55,6 +56,7 @@ pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphS
         StandingQuery::Window(query) => query.spec().input_types().get(column).copied(),
         StandingQuery::Constant(query) => query.definition.column_types().get(column).copied(),
         StandingQuery::Closure(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
+        StandingQuery::Components(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
         _ => None,
     }
 }
@@ -63,6 +65,7 @@ pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Rows { output, .. } => Some(&output.rows),
         StandingQuery::Constant(query) => Some(&query.rows),
         StandingQuery::Closure(query) => Some(query.rows()),
+        StandingQuery::Components(query) => Some(query.value_rows()),
         StandingQuery::Set(query) => Some(&query.rows),
         StandingQuery::Join(query) => Some(query.rows()),
         StandingQuery::Projection(query) => Some(query.rows()),
@@ -76,6 +79,7 @@ pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Rows { output, .. } => output.last_delta.as_ref(),
         StandingQuery::Constant(query) => query.last_delta.as_ref(),
         StandingQuery::Closure(query) => query.delta(),
+        StandingQuery::Components(query) => query.value_delta(),
         StandingQuery::Set(query) => query.last_delta.as_ref(),
         StandingQuery::Join(query) => query.delta(),
         StandingQuery::Projection(query) => query.delta(),

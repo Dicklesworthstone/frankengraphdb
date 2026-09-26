@@ -2,6 +2,8 @@
 //! CommittedEdgeInput validates EId lifetimes, cascades and source succession;
 //! the shared component kernel owns connectivity. No second log or graph store.
 
+mod rows;
+
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeTuple};
@@ -13,6 +15,7 @@ use fgdb_delta_types::{DeltaRow, LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
+type MembershipSinks<'a> = (&'a mut ZSet<Pair>, &'a mut rows::State);
 
 /// The complete component relation definition crosses the registry's rebuild
 /// seam. A bare edge type would silently rebuild a strong view as a weak one.
@@ -80,17 +83,21 @@ impl PreparedMembership for StrongComponentUpdate<'_, VId> {
 
 fn accept_membership(
     pending: impl PreparedMembership,
-    rows: Option<&mut ZSet<Pair>>,
+    rows: Option<MembershipSinks<'_>>,
     meter: &mut Meter<'_>,
 ) -> Result<ZSet<Pair>, StandingQueryFailure> {
     meter.stats.affected_vertices =
         u64::try_from(pending.affected_vertices()).map_err(|_| StandingQueryFailure::Arithmetic)?;
     // Final membership size, not the transient retraction/insertion prefix.
     result_bound(pending.vertex_count(), meter.policy)?;
-    if let Some(rows) = rows {
+    if let Some((rows, relational)) = rows {
         let sink = rows
             .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
+        // Prepare the native derivative before publishing the kernel OR either
+        // output representation. A downstream circuit must never see a partial
+        // tick, and a projection-budget refusal must not advance connectivity.
+        let native = relational.prepare(pending.delta(), pending.vertex_count(), meter)?;
         for (pair, _) in pending.delta().iter() {
             meter.charge(ZSetEvent::Work)?;
             if sink.weight(pair).is_some_and(|w| w != &ZWeight::ONE) {
@@ -100,6 +107,7 @@ fn accept_membership(
         (meter.checkpoint)()?;
         let delta = pending.commit();
         sink.commit();
+        native.commit();
         Ok(delta)
     } else {
         (meter.checkpoint)()?;
@@ -113,7 +121,7 @@ impl Kernel {
         &mut self,
         vertices: &ZSet<VId>,
         edges: &ZSet<Pair>,
-        rows: Option<&mut ZSet<Pair>>,
+        rows: Option<MembershipSinks<'_>>,
         meter: &mut Meter<'_>,
     ) -> Result<ZSet<Pair>, StandingQueryFailure> {
         match self {
@@ -149,6 +157,7 @@ pub(crate) struct State {
     input: CommittedEdgeInput,
     components: Kernel,
     rows: ZSet<Pair>,
+    relational: rows::State,
     pub(super) relation: ComponentRelation,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
@@ -224,6 +233,18 @@ pub(super) fn vertex_delta(
 }
 
 impl State {
+    pub(super) fn columns(&self) -> &[String] {
+        self.relational.columns()
+    }
+
+    pub(super) fn value_rows(&self) -> &ZSet<GraphValueRow> {
+        self.relational.rows()
+    }
+
+    pub(super) fn value_delta(&self) -> Option<&ZSet<GraphValueRow>> {
+        self.relational.delta()
+    }
+
     pub(super) fn maintain(
         &mut self,
         cx: &CommitCx,
@@ -241,9 +262,12 @@ impl State {
             .map_err(input_error)?;
         let vertices = vertex_delta(batch, meter)?;
         let edges = project(input.delta(), self.relation.edge_type(), meter)?;
-        let _ = self
-            .components
-            .apply(&vertices, &edges, Some(&mut self.rows), meter)?;
+        let _ = self.components.apply(
+            &vertices,
+            &edges,
+            Some((&mut self.rows, &mut self.relational)),
+            meter,
+        )?;
         // All recoverable work is done. No callbacks separate these publications.
         let _ = input.commit();
         Ok(())
@@ -261,10 +285,14 @@ impl State {
         } = topology_input(snapshot, relation.edge_type(), meter)?;
         let mut components = relation.empty_kernel();
         let rows = components.apply(&vertices, &edges, None, meter)?;
+        // This kernel is still private. A failed native bootstrap drops the
+        // entire candidate without replacing a registered view or its policy.
+        let relational = rows::State::from_membership(&rows, meter)?;
         Ok(Self {
             input,
             components,
             rows,
+            relational,
             relation,
             policy: meter.policy,
             frontier: snapshot.frontier,
@@ -343,6 +371,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// selected edge. Parallel/opposite edges preserve connectivity until the
     /// last supporting edge is retired; self-loops do not merge components.
     /// Each row is (vertex, minimum vertex in its component), with weight one.
+    /// The same handle exposes native `vertex, component` columns to standing
+    /// joins, sets, projections, filters, groups, cursors and replay sinks.
+    /// Native and pair output share one publication and resource allowance;
+    /// retaining both representations costs additional linear result storage.
     ///
     /// Committed writes maintain the result or fence it unavailable. Failures
     /// never undo a durable write or stop healthy sibling views. Explicit
@@ -364,7 +396,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         let state =
             self.prepare_standing_components(cx, ComponentRelation::Weak(relation), policy)?;
-        Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
+        self.store_standing_components(cx, state)
     }
 
     /// Register exact directed strongly connected components for one edge type.
@@ -390,6 +422,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// and sink. State remains session-local and memory-resident, not a durable
     /// subscription, spill implementation, byte quota or authorization facade.
     /// Labels, properties and valid time do not filter this topology API.
+    /// The same native `vertex, component` row contract and circuit consumers
+    /// as weak components are available without another maintainer instance.
     pub fn register_standing_strong_components(
         &mut self,
         cx: &QueryCx,
@@ -398,7 +432,23 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         let state =
             self.prepare_standing_components(cx, ComponentRelation::Strong(relation), policy)?;
-        Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
+        self.store_standing_components(cx, state)
+    }
+
+    fn store_standing_components(
+        &mut self,
+        cx: &QueryCx,
+        state: State,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        // The fixed presentation copy was admitted during native bootstrap.
+        // This is another view of ONE registry entry, not a dependent evaluator.
+        let layout = Arc::new(native::Layout::Rows {
+            columns: state.columns().to_vec(),
+        });
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        let mut handle = self.store_standing_query(StandingQuery::Components(Box::new(state)));
+        handle.native = Some(layout);
+        Ok(handle)
     }
 
     pub(super) fn prepare_standing_components(
@@ -441,6 +491,47 @@ impl<V: Vfs + Clone> Database<V> {
             frontier: query.frontier,
             stats: &query.stats,
         })
+    }
+
+    /// Native `vertex, component` rows from the same accepted generation as
+    /// standing_components. Both columns retain the full Vertex identity type;
+    /// no VId is narrowed to an integer scalar. Output has no ranked page.
+    /// These rows can feed the existing standing relational operators directly.
+    pub fn standing_component_rows<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<StandingQueryView<'a, GraphValueRow>, StandingQueryError> {
+        let StandingQuery::Components(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(StandingQueryView {
+            rows: query.value_rows(),
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
+        })
+    }
+
+    /// Exact native membership changes from the latest accepted tick. A new
+    /// registration or rebuild has None, while a property-only or otherwise
+    /// unchanged tick has Some(empty). A reassignment retracts the old pair and
+    /// inserts the new pair; this is not a count of changed graph edges.
+    /// Only one tick is retained here. Use a replay sink for bounded backlog.
+    pub fn standing_component_delta<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<Option<StandingQueryView<'a, GraphValueRow>>, StandingQueryError> {
+        let StandingQuery::Components(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(query.value_delta().map(|rows| StandingQueryView {
+            rows,
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
+        }))
     }
 
     /// Current component count without scanning membership rows.
