@@ -562,6 +562,8 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 #[cfg(test)]
+mod relational_tests;
+#[cfg(test)]
 mod strong_tests;
 #[cfg(test)]
 mod tests;
