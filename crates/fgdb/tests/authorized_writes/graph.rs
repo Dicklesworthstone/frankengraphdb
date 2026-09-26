@@ -420,6 +420,98 @@ async fn delete_fixture(cx: &fgdb_types::CommitCx, hidden: u8) -> Database<fgdb:
     db
 }
 
+/// FG-INV-20 accounting on the create and update write paths (fgdb-4iiho
+/// item c). A scoped writer touching a VISIBLE element must not be able to
+/// learn, from its outcome or its MaxWork threshold, what it cannot see
+/// around that element: a hidden-relation edge, an edge to a hidden vertex, a
+/// hidden label, or a hidden property on the vertex or on its edge (the six
+/// delete_fixture variants). Each operation has ONE outcome across all six,
+/// and when admitted, ONE exact work threshold.
+#[test]
+fn create_and_update_work_thresholds_ignore_hidden_data() {
+    use fgdb_warden::Restriction;
+    const CEILING: u64 = 100_000;
+    /// A named single-write batch over the fixture's visible elements.
+    type Operation = (&'static str, fn() -> WriteBatch);
+    under_lab(0xa9a2, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let authority = issuer(NAMESPACE);
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let operations: [Operation; 3] = [
+            ("vertex property update", || {
+                let mut batch = WriteBatch::new(R);
+                batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
+                batch
+            }),
+            ("edge property update", || {
+                let mut batch = WriteBatch::new(R);
+                batch.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(5)));
+                batch
+            }),
+            ("edge create", || {
+                let mut batch = WriteBatch::new(R);
+                batch.add_edge(EId(50), VId(1), VId(2), vec![]);
+                batch
+            }),
+        ];
+        for (name, operation) in operations {
+            let mut outcomes = Vec::new();
+            for variant in 0..=5_u8 {
+                // The outcome at the full grant budget must not move either.
+                let mut db = delete_fixture(&cx, variant).await;
+                let admitted = db
+                    .write_authorized(&txn, &cx, &authority, &token, BRANCH, operation(), || NOW)
+                    .await;
+                let outcome = match admitted {
+                    Ok(_) => {
+                        let (mut low, mut high) = (0_u64, CEILING);
+                        while low < high {
+                            let middle = low + (high - low) / 2;
+                            let mut db = delete_fixture(&cx, variant).await;
+                            let limited = token.attenuate(Restriction::MaxWork(middle)).unwrap();
+                            match db
+                                .write_authorized(
+                                    &txn,
+                                    &cx,
+                                    &authority,
+                                    &limited,
+                                    BRANCH,
+                                    operation(),
+                                    || NOW,
+                                )
+                                .await
+                            {
+                                Ok(_) => high = middle,
+                                Err(WriteTxnError::Authorization(Error::LimitExceeded(
+                                    LimitDimension::Work,
+                                ))) => low = middle + 1,
+                                Err(other) => {
+                                    panic!("{name} variant {variant} at {middle}: {other:?}")
+                                }
+                            }
+                        }
+                        assert!(
+                            low < CEILING,
+                            "{name}: no threshold below the search ceiling"
+                        );
+                        format!("admitted at work {low}")
+                    }
+                    Err(error) => format!("refused: {error:?}"),
+                };
+                outcomes.push(outcome);
+            }
+            assert!(
+                outcomes.iter().all(|outcome| outcome == &outcomes[0]),
+                "{name}: outcome moved with hidden data: {outcomes:?}"
+            );
+            // Every target is visible to this grant, so a uniform refusal would
+            // satisfy the equality vacuously: require admission.
+            assert!(outcomes[0].starts_with("admitted"), "{name}: {outcomes:?}");
+        }
+    });
+}
+
 /// FG-INV-20 on the write path (fgdb-4iiho item 2, owner ruling 2026-09-25).
 /// Deleting a visible vertex must not reveal whether it has hidden incidence
 /// (a hidden-relation edge, an edge to a hidden vertex) or hidden fields (a
