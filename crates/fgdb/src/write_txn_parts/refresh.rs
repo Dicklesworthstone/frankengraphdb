@@ -430,4 +430,212 @@ mod snapshot_refresh_tests {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+
+    #[test]
+    fn missing_history_refuses_even_an_empty_workspace_before_validation_work() {
+        let ((), report) = run_async_under_lab(0xfa57_0006, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for staged in [false, true] {
+                let mut database = seeded(&cx).await;
+                let mut txn = database.begin(&txcx).unwrap();
+                let basis = txn.basis();
+                if staged {
+                    txn.write(&mut database, set_vertex(3, 30)).unwrap();
+                    txn.savepoint(&database, "kept").unwrap();
+                }
+                let template = txn.prepared.as_ref().map(|p| p.template.clone());
+                database.write(&cx, set_vertex(6, 60)).await.unwrap();
+                let frontier = database.frontier().unwrap();
+                // Exercise the real window retirement primitive as a missing-
+                // history injection. This does not authorize GC under a pin.
+                let retired = std::sync::Arc::make_mut(&mut database.snapshot)
+                    .delta_index.retire_prefix(frontier).unwrap();
+                assert!(!retired.is_empty());
+                let mut work = 0;
+                let result = txn.refresh_snapshot_controlled(&database, &mut || {
+                    work += 1;
+                    Ok(())
+                });
+                assert!(matches!(result,
+                    Err(WriteTxnError::Read(ReadError::DeltaCursorRetired {
+                        asked, retained_after, frontier: observed,
+                    })) if asked == basis && retained_after == frontier && observed == frontier));
+                assert_eq!(work, 0);
+                assert_eq!(txn.basis(), basis);
+                assert_eq!(txn.prepared.as_ref().map(|p| p.template.clone()), template);
+                assert!(txn.prepared.iter().all(|p| p.basis() == basis));
+                assert!(txn.savepoints.iter().filter_map(|s| s.prepared.as_ref())
+                    .all(|p| p.basis() == basis));
+                assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                assert_eq!(txcx.outstanding_obligations(), 1);
+                // The exact retained boundary is valid, not a blanket refusal
+                // merely because some earlier history has been retired.
+                let mut current = database.begin(&txcx).unwrap();
+                assert_eq!(current.refresh_snapshot(&database, &txcx).unwrap(), frontier);
+                current.abort();
+                txn.abort();
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn actual_commit_failure_fences_precede_refresh_even_at_the_same_frontier() {
+        use crate::{DatabaseState, DerivedPublicationStage};
+        use fgdb_chronicle::commit::CrashPoint;
+
+        let ((), report) = run_async_under_lab(0xfa57_0007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for staged in [false, true] {
+                for (crash, failure) in [
+                    (Some(CrashPoint::AfterMarkerBeforeD2), None),
+                    (None, Some(DerivedPublicationStage::FoldCommittedTemplate)),
+                ] {
+                    let mut database = seeded(&cx).await;
+                    let immutable = database.read_session().unwrap();
+                    let mut txn = database.begin(&txcx).unwrap();
+                    let basis = txn.basis();
+                    if staged {
+                        txn.write(&mut database, set_vertex(3, 30)).unwrap();
+                        txn.savepoint(&database, "kept").unwrap();
+                    }
+                    let template = txn.prepared.as_ref().map(|p| p.template.clone());
+                    let prepared = database.prepare_write(set_vertex(6, 60)).unwrap();
+                    assert!(database.commit_template(
+                        &cx, prepared.template, crash, failure, None,
+                    ).await.is_err());
+                    let state = database.state();
+                    let mut work = 0;
+                    let result = txn.refresh_snapshot_controlled(&database, &mut || {
+                        work += 1;
+                        Ok(())
+                    });
+                    match (state, result) {
+                        (DatabaseState::CommitOutcomeUnknown { published_frontier },
+                            Err(WriteTxnError::Read(ReadError::CommitOutcomeUnknown {
+                                published_frontier: observed,
+                            }))) => {
+                            assert_eq!(published_frontier, basis);
+                            assert_eq!(observed, basis);
+                            assert!(failure.is_none());
+                        }
+                        (DatabaseState::NeedsAuthoritativeRecovery(expected),
+                            Err(WriteTxnError::Read(ReadError::RecoveryRequired(observed)))) => {
+                            assert_eq!(observed, expected);
+                            assert_eq!(observed.published_frontier, basis);
+                            assert_eq!(observed.durable_frontier, CommitSeq(basis.0 + 1));
+                            assert!(failure.is_some());
+                        }
+                        other => panic!("wrong refresh fence: {other:?}"),
+                    }
+                    assert_eq!(work, 0, "health precedes same-basis success and validation");
+                    assert_eq!(txn.basis(), basis);
+                    assert_eq!(txn.prepared.as_ref().map(|p| p.template.clone()), template);
+                    assert!(txn.prepared.iter().all(|p| p.basis() == basis));
+                    assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                    assert_eq!(txcx.outstanding_obligations(), 1);
+                    assert_eq!(database.state(), state);
+                    assert_eq!(immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(10));
+                    txn.abort();
+                    let recovered = database.recover_authoritatively(&cx).await.unwrap();
+                    assert_eq!(recovered.vertex(VId(3)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(10), "refresh must not publish staged writes");
+                    if failure.is_some() {
+                        assert_eq!(recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
+                            CanonicalScalar::Int(60));
+                    }
+                    assert_eq!(txcx.outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn wrong_owner_terminal_state_and_unwinding_do_not_refresh_the_workspace() {
+        let ((), report) = run_async_under_lab(0xfa57_0008, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let (mut database, mut txn) = pending_refresh(&cx, &txcx).await;
+            let foreign = seeded(&cx).await;
+            let basis = txn.basis();
+            let template = txn.prepared.as_ref().unwrap().template.clone();
+            let mut work = 0;
+            assert!(matches!(txn.refresh_snapshot_controlled(&foreign, &mut || {
+                work += 1;
+                Ok(())
+            }), Err(WriteTxnError::WrongDatabase)));
+            assert_eq!(work, 0);
+            assert_eq!(txn.basis(), basis);
+            assert_eq!(txn.prepared.as_ref().unwrap().template, template);
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                txn.refresh_snapshot_controlled(&database, &mut || {
+                    panic!("injected refresh unwind")
+                })
+            }));
+            assert!(panicked.is_err());
+            assert_eq!(txn.basis(), basis);
+            assert_eq!(txn.prepared.as_ref().unwrap().template, template);
+            assert_eq!(txn.savepoints[0].prepared.as_ref().unwrap().basis(), basis);
+            assert_eq!(txn.state(), EmbeddedTxnState::Active);
+            assert_eq!(txcx.outstanding_obligations(), 1);
+            txn.refresh_snapshot(&database, &txcx).unwrap();
+            txn.abort();
+            let mut terminal = database.begin(&txcx).unwrap();
+            terminal.finish(&mut database, &cx).await.unwrap();
+            assert!(matches!(terminal.refresh_snapshot_controlled(&database, &mut || {
+                work += 1;
+                Ok(())
+            }), Err(WriteTxnError::Finished)));
+            assert_eq!(work, 0);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn rolled_back_and_refused_statement_observations_survive_refresh_attempts() {
+        let ((), report) = run_async_under_lab(0xfa57_0009, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for rollback in [false, true] {
+                let mut database = seeded(&cx).await;
+                let mut txn = database.begin(&txcx).unwrap();
+                let basis = txn.basis();
+                if rollback {
+                    txn.savepoint(&database, "empty").unwrap();
+                    txn.write(&mut database, set_vertex(1, 11)).unwrap();
+                    txn.rollback_to_savepoint(&database, "empty").unwrap();
+                } else {
+                    let mut refused = WriteBatch::new(RelationId(1));
+                    refused.compare_and_set_vertex_property(VId(1), P,
+                        Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(11),
+                        WriteMismatchPolicy::AbortWrite);
+                    assert!(matches!(txn.write(&mut database, refused),
+                        Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))));
+                }
+                assert!(txn.staged.is_empty());
+                assert!(txn.prepared.is_none());
+                assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))));
+                database.write(&cx, set_vertex(1, 12)).await.unwrap();
+                assert!(matches!(txn.refresh_snapshot(&database, &txcx),
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01", ..
+                    }))));
+                assert_eq!(txn.basis(), basis);
+                assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))));
+                assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
