@@ -30,6 +30,8 @@ use std::collections::BTreeMap;
 mod analytics;
 #[path = "query_authorized/beacon.rs"]
 mod beacon;
+#[path = "query_authorized/overlay.rs"]
+mod overlay;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 
@@ -226,52 +228,88 @@ impl<'a> Tables<'a> {
         scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Self, Fault> {
-        let mut tables = Self {
+        let mut tables = Self::new();
+        source::visit_vertices(&snapshot.patches, at, scan, |row, _| {
+            tables.admit_vertex(row, predicates, &mut node, control)
+        })?;
+        if plan.reads_edges() {
+            source::visit_edges_with_properties(snapshot, at, scan, |edge, properties, _| {
+                tables.admit_edge(
+                    ((edge.eid, edge.src, edge.relation, edge.dst), properties),
+                    predicates,
+                    control,
+                )
+            })?;
+        }
+        tables.metadata(plan, predicates, control)?;
+        Ok(tables)
+    }
+
+    fn new() -> Self {
+        Self {
             vertices: BTreeMap::new(),
             edges: BTreeMap::new(),
             labels: BTreeMap::new(),
             types: BTreeMap::new(),
             records: 0,
-        };
-        source::visit_vertices(&snapshot.patches, at, scan, |row, _| {
-            // Authorization examines original labels; WHERE/labels() will not.
-            if predicates.allows_vertex(&row.labels) {
-                control(SourceEvent::Work)?;
-                for &label in &row.labels {
-                    if predicates.allows_label(label) {
-                        control(SourceEvent::Work)?;
-                    }
-                }
-                node()?;
-                control(SourceEvent::SnapshotRecord)?;
-                control(SourceEvent::ScratchEntry)?;
-                tables.records += 1; // bounded by successful record admission
-                tables.vertices.insert(row.vid, row);
-            }
-            Ok(())
-        })?;
-        if plan.reads_edges() {
-            source::visit_edges_with_properties(snapshot, at, scan, |edge, properties, _| {
-                if predicates.allows_relation(edge.relation)
-                    && tables.vertices.contains_key(&edge.src)
-                    && tables.vertices.contains_key(&edge.dst)
-                {
-                    control(SourceEvent::Work)?;
-                    control(SourceEvent::SnapshotRecord)?;
-                    control(SourceEvent::ScratchEntry)?;
-                    tables.records += 1;
-                    tables.edges.insert(
-                        edge.eid,
-                        ((edge.eid, edge.src, edge.relation, edge.dst), properties),
-                    );
-                }
-                Ok(())
-            })?;
         }
+    }
+
+    // Snapshot visitors and canonical transaction rows use identical masking
+    // and logical admission charges. No input source can bypass this boundary.
+    fn admit_vertex(
+        &mut self,
+        row: &'a VertexRow,
+        predicates: &PlannerPredicates,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
+        if predicates.allows_vertex(&row.labels) {
+            control(SourceEvent::Work)?;
+            for &label in &row.labels {
+                if predicates.allows_label(label) {
+                    control(SourceEvent::Work)?;
+                }
+            }
+            node()?;
+            control(SourceEvent::SnapshotRecord)?;
+            control(SourceEvent::ScratchEntry)?;
+            self.records += 1;
+            self.vertices.insert(row.vid, row);
+        }
+        Ok(())
+    }
+
+    fn admit_edge(
+        &mut self,
+        edge: Edge<'a>,
+        predicates: &PlannerPredicates,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
+        let ((eid, src, relation, dst), _) = edge;
+        if predicates.allows_relation(relation)
+            && self.vertices.contains_key(&src)
+            && self.vertices.contains_key(&dst)
+        {
+            control(SourceEvent::Work)?;
+            control(SourceEvent::SnapshotRecord)?;
+            control(SourceEvent::ScratchEntry)?;
+            self.records += 1;
+            self.edges.insert(eid, edge);
+        }
+        Ok(())
+    }
+
+    fn metadata<Row: GlaOutput>(
+        &mut self,
+        plan: &GlaPlan<Row>,
+        predicates: &PlannerPredicates,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
         // Resolve names only after both topology and metadata scopes apply.
         // A forbidden unmapped label/type cannot cause a data-dependent error.
         if plan.projects_labels() {
-            for row in tables.vertices.values() {
+            for row in self.vertices.values() {
                 control(SourceEvent::Work)?;
                 let mut labels = Vec::new();
                 for &label in &row.labels {
@@ -293,11 +331,11 @@ impl<'a> Tables<'a> {
                     labels.push(GraphValue::Scalar(name));
                 }
                 control(SourceEvent::ScratchEntry)?;
-                tables.labels.insert(row.vid, labels);
+                self.labels.insert(row.vid, labels);
             }
         }
         if plan.projects_types() {
-            for (&eid, ((_, _, relation, _), _)) in &tables.edges {
+            for (&eid, ((_, _, relation, _), _)) in &self.edges {
                 control(SourceEvent::Work)?;
                 let name = plan
                     .reverse_catalog
@@ -309,10 +347,10 @@ impl<'a> Tables<'a> {
                     None => GqlQueryError::Source(ReadError::UnmappedRelation(*relation)),
                 })?;
                 control(SourceEvent::ScratchEntry)?;
-                tables.types.insert(eid, name);
+                self.types.insert(eid, name);
             }
         }
-        Ok(tables)
+        Ok(())
     }
 
     fn matches(&self, vid: VId, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
@@ -422,6 +460,18 @@ fn pattern_at_controlled<Row: GlaOutput>(
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )?;
+    execute_tables(tables, pattern, scope, policy, usage, checkpoint)
+}
+
+// One evaluator and all property/metadata accessors serve both source kinds.
+fn execute_tables<Row: GlaOutput>(
+    tables: Tables<'_>,
+    pattern: &PreparedGraphPattern<Row>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    usage: AdmissionUsage,
+    checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
+) -> Governed<Row> {
     let result = pattern.plan().execute_governed_with_element_accessors(
         tables.records,
         tables.vertices.keys().copied(),

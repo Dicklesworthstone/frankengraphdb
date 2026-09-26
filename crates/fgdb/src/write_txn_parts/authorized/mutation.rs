@@ -2,7 +2,8 @@
 //! ordinary simultaneous-assignment collector, and authorized native staging.
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
-use super::{Workspace, WriteBatch, WriteTxnError, selection, stage};
+use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
+use fgdb_warden::PlannerPredicates;
 use fgdb_delta_types::ElementId;
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
@@ -11,6 +12,9 @@ use fgdb_gql::{
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+
+#[path = "mutation_program.rs"]
+mod program;
 
 type Fault = GqlQueryError<GraphMutationError<WriteTxnError>, WriteTxnError>;
 type Receipt = (
@@ -139,98 +143,10 @@ impl<V: Vfs + Clone> Database<V> {
                     self.begin(txn_cx)
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
-                let proposal = query_cx.with_restriction(|| {
-                    // These sequential callback borrows end before staging and
-                    // before any await. No RefCell or query result escapes.
-                    let execution = RefCell::new(&mut execution);
-                    mutation.execute_governed(
-                        policy,
-                        |pattern, allowance| {
-                            selection::select(
-                                self,
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                &execution,
-                            )
-                        },
-                        || {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.borrow_mut().checkpoint()
-                        },
-                    )
-                })?;
-                let stats = proposal.stats();
-                let mut targets = BTreeSet::new();
-                for intent in proposal.into_intents() {
-                    query_cx
-                        .checkpoint()
-                        .map_err(WriteTxnError::Interrupted)
-                        .map_err(source)?;
-                    execution.checkpoint().map_err(source)?;
-                    let mut batch = WriteBatch::new(mutation.relation());
-                    let target = match intent {
-                        GraphMutationIntent::Property { vertex, key, value } => {
-                            batch.set_vertex_property(vertex, key, value);
-                            ElementId::Vertex(vertex)
-                        }
-                        GraphMutationIntent::EdgeProperty { edge, key, value } => {
-                            batch.set_edge_property(edge, key, value);
-                            ElementId::Edge(edge)
-                        }
-                        GraphMutationIntent::Label {
-                            vertex,
-                            label,
-                            present,
-                        } => {
-                            batch.set_vertex_label(vertex, label, present);
-                            ElementId::Vertex(vertex)
-                        }
-                        GraphMutationIntent::DetachDelete { vertex } => {
-                            batch.delete_vertex(vertex);
-                            ElementId::Vertex(vertex)
-                        }
-                    };
-                    if returning {
-                        // Price fixed-width tree lookup before touching it;
-                        // its size is bounded by the admitted effect count.
-                        let work = (usize::BITS - targets.len().leading_zeros()).max(1);
-                        execution.work(u64::from(work)).map_err(source)?;
-                        if !targets.contains(&target) {
-                            execution
-                                .permit
-                                .charge_rows_at((execution.clock)(), 1)
-                                .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-                            targets.insert(target);
-                        }
-                    }
-                    for row in batch.rows {
-                        stage(
-                            workspace.transaction(),
-                            self,
-                            batch.relation,
-                            row,
-                            &mut execution,
-                        )
-                        .map_err(source)?;
-                    }
-                }
-                // Build the complete private receipt before commit admission.
-                // The stats-only path allocated no target entries or vectors.
-                let mut vertices = Vec::new();
-                let mut edges = Vec::new();
-                for target in targets {
-                    query_cx
-                        .checkpoint()
-                        .map_err(WriteTxnError::Interrupted)
-                        .map_err(source)?;
-                    execution.checkpoint().map_err(source)?;
-                    match target {
-                        ElementId::Vertex(vertex) => vertices.push(vertex),
-                        ElementId::Edge(edge) => edges.push(edge),
-                    }
-                }
+                let (stats, vertices, edges) = apply(
+                    workspace.transaction(), self, query_cx, mutation, policy,
+                    verified.predicates(), &mut execution, returning,
+                )?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -243,6 +159,115 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .await
     }
+}
+
+// One statement executor serves autocommit and ordered programs. The caller
+// owns the private workspace and is solely responsible for native completion.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    mutation: &PreparedGraphMutation,
+    policy: GraphMutationPolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
+    let proposal = query_cx.with_restriction(|| {
+        // These sequential callback borrows end before staging and
+        // before any await. No RefCell or query result escapes.
+        let execution = RefCell::new(&mut *execution);
+        mutation.execute_governed(
+            policy,
+            |pattern, allowance| {
+                selection::select_overlay(
+                    transaction,
+                    database,
+                    query_cx,
+                    pattern,
+                    scope,
+                    allowance,
+                    &execution,
+                )
+            },
+            || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                execution.borrow_mut().checkpoint()
+            },
+        )
+    })?;
+    let stats = proposal.stats();
+    let mut targets = BTreeSet::new();
+    for intent in proposal.into_intents() {
+        query_cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(source)?;
+        execution.checkpoint().map_err(source)?;
+        let mut batch = WriteBatch::new(mutation.relation());
+        let target = match intent {
+            GraphMutationIntent::Property { vertex, key, value } => {
+                batch.set_vertex_property(vertex, key, value);
+                ElementId::Vertex(vertex)
+            }
+            GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                batch.set_edge_property(edge, key, value);
+                ElementId::Edge(edge)
+            }
+            GraphMutationIntent::Label {
+                vertex,
+                label,
+                present,
+            } => {
+                batch.set_vertex_label(vertex, label, present);
+                ElementId::Vertex(vertex)
+            }
+            GraphMutationIntent::DetachDelete { vertex } => {
+                batch.delete_vertex(vertex);
+                ElementId::Vertex(vertex)
+            }
+        };
+        if returning {
+            // Price fixed-width tree lookup before touching it;
+            // its size is bounded by the admitted effect count.
+            let work = (usize::BITS - targets.len().leading_zeros()).max(1);
+            execution.work(u64::from(work)).map_err(source)?;
+            if !targets.contains(&target) {
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), 1)
+                    .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+                targets.insert(target);
+            }
+        }
+        for row in batch.rows {
+            stage(
+                transaction,
+                database,
+                batch.relation,
+                row,
+                execution,
+            )
+            .map_err(source)?;
+        }
+    }
+    // Build the complete private receipt before commit admission.
+    // The stats-only path allocated no target entries or vectors.
+    let mut vertices = Vec::new();
+    let mut edges = Vec::new();
+    for target in targets {
+        query_cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(source)?;
+        execution.checkpoint().map_err(source)?;
+        match target {
+            ElementId::Vertex(vertex) => vertices.push(vertex),
+            ElementId::Edge(edge) => edges.push(edge),
+        }
+    }
+    Ok((stats, vertices, edges))
 }
 
 #[cfg(test)]
