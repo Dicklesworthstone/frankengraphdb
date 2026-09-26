@@ -13,7 +13,7 @@ fn build(snapshot: &crate::Snapshot) -> State {
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    State::from_snapshot(snapshot, RelationId(1), &mut meter).unwrap()
+    State::from_snapshot(snapshot, ComponentRelation::Weak(RelationId(1)), &mut meter).unwrap()
 }
 fn unchanged(actual: &State, before: &State) {
     assert_eq!(actual.input, before.input);
@@ -147,7 +147,7 @@ fn every_composed_refusal_and_exact_budget_preserves_atomic_publication() {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            let result = State::from_snapshot(&db.snapshot, RelationId(1), &mut meter);
+            let result = State::from_snapshot(&db.snapshot, ComponentRelation::Weak(RelationId(1)), &mut meter);
             if records == physical as u64 {
                 assert_eq!(result.unwrap().rows, expected.rows);
             } else {

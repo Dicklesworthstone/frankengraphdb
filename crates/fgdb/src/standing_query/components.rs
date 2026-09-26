@@ -1,21 +1,137 @@
-//! Exact database-owned weak components, including every live isolated vertex.
+//! Exact database-owned weak/strong components, including isolated vertices.
 //! CommittedEdgeInput validates EId lifetimes, cascades and source succession;
 //! the shared component kernel owns connectivity. No second log or graph store.
 
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeTuple};
-use fgdb_delta_types::zset::components::{ComponentError, IncrementalComponents};
+use fgdb_delta_types::zset::components::{ComponentError, ComponentUpdate, IncrementalComponents};
+use fgdb_delta_types::zset::components::strong::{
+    IncrementalStrongComponents, StrongComponentUpdate,
+};
 use fgdb_delta_types::{DeltaRow, LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
 
+/// The complete component relation definition crosses the registry's rebuild
+/// seam. A bare edge type would silently rebuild a strong view as a weak one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ComponentRelation {
+    Weak(RelationId),
+    Strong(RelationId),
+}
+impl ComponentRelation {
+    fn edge_type(self) -> RelationId {
+        match self {
+            Self::Weak(relation) | Self::Strong(relation) => relation,
+        }
+    }
+    fn empty_kernel(self) -> Kernel {
+        match self {
+            Self::Weak(_) => Kernel::Weak(IncrementalComponents::new()),
+            Self::Strong(_) => Kernel::Strong(IncrementalStrongComponents::new()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Kernel {
+    Weak(IncrementalComponents<VId>),
+    Strong(IncrementalStrongComponents<VId>),
+}
+
+// Statically dispatched prepared updates keep one source/sink publication law
+// without allocating boxes or duplicating the admission checks for each mode.
+trait PreparedMembership {
+    fn delta(&self) -> &ZSet<Pair>;
+    fn vertex_count(&self) -> usize;
+    fn affected_vertices(&self) -> usize;
+    fn commit(self) -> ZSet<Pair>;
+}
+impl PreparedMembership for ComponentUpdate<'_, VId> {
+    fn delta(&self) -> &ZSet<Pair> { ComponentUpdate::delta(self) }
+    fn vertex_count(&self) -> usize { ComponentUpdate::vertex_count(self) }
+    fn affected_vertices(&self) -> usize { ComponentUpdate::affected_vertices(self) }
+    fn commit(self) -> ZSet<Pair> { ComponentUpdate::commit(self) }
+}
+impl PreparedMembership for StrongComponentUpdate<'_, VId> {
+    fn delta(&self) -> &ZSet<Pair> { StrongComponentUpdate::delta(self) }
+    fn vertex_count(&self) -> usize { StrongComponentUpdate::vertex_count(self) }
+    fn affected_vertices(&self) -> usize { StrongComponentUpdate::affected_vertices(self) }
+    fn commit(self) -> ZSet<Pair> { StrongComponentUpdate::commit(self) }
+}
+
+fn accept_membership(
+    pending: impl PreparedMembership,
+    rows: Option<&mut ZSet<Pair>>,
+    meter: &mut Meter<'_>,
+) -> Result<ZSet<Pair>, StandingQueryFailure> {
+    meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
+        .map_err(|_| StandingQueryFailure::Arithmetic)?;
+    // Final membership size, not the transient retraction/insertion prefix.
+    result_bound(pending.vertex_count(), meter.policy)?;
+    if let Some(rows) = rows {
+        let sink = rows
+            .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
+            .map_err(zset_error)?;
+        for (pair, _) in pending.delta().iter() {
+            meter.charge(ZSetEvent::Work)?;
+            if sink.weight(pair).is_some_and(|w| w != &ZWeight::ONE) {
+                return Err(StandingQueryFailure::InvalidDelta);
+            }
+        }
+        (meter.checkpoint)()?;
+        let delta = pending.commit();
+        sink.commit();
+        Ok(delta)
+    } else {
+        (meter.checkpoint)()?;
+        // From empty state the exact derivative IS the initial membership set.
+        Ok(pending.commit())
+    }
+}
+
+impl Kernel {
+    fn apply(
+        &mut self,
+        vertices: &ZSet<VId>,
+        edges: &ZSet<Pair>,
+        rows: Option<&mut ZSet<Pair>>,
+        meter: &mut Meter<'_>,
+    ) -> Result<ZSet<Pair>, StandingQueryFailure> {
+        match self {
+            Self::Weak(kernel) => {
+                let pending = kernel.prepare(vertices, edges, LIMBS,
+                    &mut |event| meter.charge(event)).map_err(component_error)?;
+                accept_membership(pending, rows, meter)
+            }
+            Self::Strong(kernel) => {
+                let pending = kernel.prepare(vertices, edges, LIMBS,
+                    &mut |event| meter.charge(event)).map_err(component_error)?;
+                accept_membership(pending, rows, meter)
+            }
+        }
+    }
+    fn component_count(&self) -> usize {
+        match self {
+            Self::Weak(kernel) => kernel.component_count(),
+            Self::Strong(kernel) => kernel.component_count(),
+        }
+    }
+    fn representative(&self, vertex: &VId) -> Option<&VId> {
+        match self {
+            Self::Weak(kernel) => kernel.representative(vertex),
+            Self::Strong(kernel) => kernel.representative(vertex),
+        }
+    }
+}
+
 pub(crate) struct State {
     input: CommittedEdgeInput,
-    components: IncrementalComponents<VId>,
+    components: Kernel,
     rows: ZSet<Pair>,
-    pub(super) relation: RelationId,
+    pub(super) relation: ComponentRelation,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
@@ -106,53 +222,25 @@ impl State {
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(input_error)?;
         let vertices = vertex_delta(batch, meter)?;
-        let edges = project(input.delta(), self.relation, meter)?;
-        let pending = self
-            .components
-            .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
-            .map_err(component_error)?;
-        meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
-            .map_err(|_| StandingQueryFailure::Arithmetic)?;
-        // Final membership size, not the transient retraction/insertion prefix.
-        result_bound(pending.vertex_count(), meter.policy)?;
-        let sink = self
-            .rows
-            .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
-            .map_err(zset_error)?;
-        for (pair, _) in pending.delta().iter() {
-            meter.charge(ZSetEvent::Work)?;
-            if sink.weight(pair).is_some_and(|w| w != &ZWeight::ONE) {
-                return Err(StandingQueryFailure::InvalidDelta);
-            }
-        }
-        (meter.checkpoint)()?;
+        let edges = project(input.delta(), self.relation.edge_type(), meter)?;
+        let _ = self.components.apply(&vertices, &edges, Some(&mut self.rows), meter)?;
         // All recoverable work is done. No callbacks separate these publications.
-        let _ = pending.commit();
-        sink.commit();
         let _ = input.commit();
         Ok(())
     }
 
     fn from_snapshot(
         snapshot: &crate::Snapshot,
-        relation: RelationId,
+        relation: ComponentRelation,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
         let TopologyInput {
             input,
             vertices,
             edges,
-        } = topology_input(snapshot, relation, meter)?;
-        let mut components = IncrementalComponents::new();
-        let pending = components
-            .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
-            .map_err(component_error)?;
-        result_bound(pending.vertex_count(), meter.policy)?;
-        meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
-            .map_err(|_| StandingQueryFailure::Arithmetic)?;
-        (meter.checkpoint)()?;
-        // From empty state the exact derivative IS the initial membership set.
-        let rows = pending.commit();
+        } = topology_input(snapshot, relation.edge_type(), meter)?;
+        let mut components = relation.empty_kernel();
+        let rows = components.apply(&vertices, &edges, None, meter)?;
         Ok(Self {
             input,
             components,
@@ -254,14 +342,47 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let state = self.prepare_standing_components(cx, relation, policy)?;
+        let state = self.prepare_standing_components(cx, ComponentRelation::Weak(relation), policy)?;
+        Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
+    }
+
+    /// Register exact directed strongly connected components for one edge type.
+    /// Every live vertex has a weight-one (vertex, minimum SCC member) row,
+    /// including isolated vertices and vertices appearing only in other types.
+    /// A one-way path does not merge SCCs; directed cycles do. Parallel edges
+    /// count independently and a partial retraction retains remaining support.
+    ///
+    /// Read using standing_components, standing_component_count or
+    /// standing_component. Ordinary committed writes maintain the view; staged
+    /// transactions remain invisible. Initialization, failure fencing and
+    /// explicit rebuild use the SAME owner registry, authenticated source,
+    /// cumulative policy and atomic output sink as weak components. Rebuild
+    /// retains strong connectivity; a refused rebuild keeps the previous state.
+    ///
+    /// Directed support changes rederive affected old weakly connected regions
+    /// with iterative DFS; unrelated regions are not scanned or copied.
+    /// Properties and multiplicity-only changes do not traverse connectivity.
+    /// A large affected region can still cost its entire topology. This is not
+    /// a fully dynamic SCC complexity guarantee or a quadratic closure cache.
+    ///
+    /// Result quotas count live vertices; work/scratch include source, kernel
+    /// and sink. State remains session-local and memory-resident, not a durable
+    /// subscription, spill implementation, byte quota or authorization facade.
+    /// Labels, properties and valid time do not filter this topology API.
+    pub fn register_standing_strong_components(
+        &mut self,
+        cx: &QueryCx,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let state = self.prepare_standing_components(cx, ComponentRelation::Strong(relation), policy)?;
         Ok(self.store_standing_query(StandingQuery::Components(Box::new(state))))
     }
 
     pub(super) fn prepare_standing_components(
         &self,
         cx: &QueryCx,
-        relation: RelationId,
+        relation: ComponentRelation,
         policy: GqlQueryPolicy,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
@@ -283,6 +404,7 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Borrow current membership. Rows are in canonical (vertex, representative)
     /// order; ordered_rows() is None because no separate rank stage is needed.
+    /// The handle's registration fixes weak versus strong connectivity.
     pub fn standing_components<'a>(
         &'a self,
         cx: &QueryCx,
@@ -328,3 +450,5 @@ impl<V: Vfs + Clone> Database<V> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod strong_tests;
