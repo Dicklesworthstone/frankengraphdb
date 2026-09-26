@@ -1,3 +1,8 @@
+enum RebasePreparation {
+    Append(u64),
+    DisjointFields(u64),
+}
+
 // Completion owns cleanup across returns, Rust unwinding and dropped futures.
 // It never performs durable work in Drop or turns an unknown marker into abort.
 struct TxnCompletionGuard<'txn, 'db, V: Vfs + Clone> {
@@ -186,6 +191,28 @@ impl WriteTxn {
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
         append_rebase: Option<u64>,
+        checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.complete_rebased_controlled(
+            database,
+            cx,
+            crash_at,
+            require_write,
+            append_rebase.map(RebasePreparation::Append),
+            checkpoint,
+        )
+        .await
+    }
+
+    // Every finalization policy shares this one owner guard, acceptance point
+    // and commit future. Policy selection never creates another publication lane.
+    async fn complete_rebased_controlled<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+        require_write: bool,
+        rebase: Option<RebasePreparation>,
         mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
@@ -197,12 +224,16 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
-        if let Some(max_expanded_rows) = append_rebase {
-            attempt.transaction.prepare_append_rebase(
+        match rebase {
+            Some(RebasePreparation::Append(limit)) => attempt.transaction.prepare_append_rebase(
                 attempt.database,
-                max_expanded_rows,
+                limit,
                 &mut checkpoint,
-            )?;
+            )?,
+            Some(RebasePreparation::DisjointFields(limit)) => attempt
+                .transaction
+                .prepare_field_rebase(attempt.database, limit, &mut checkpoint)?,
+            None => {}
         }
         if let Some((law, element, committed_at)) = attempt
             .transaction

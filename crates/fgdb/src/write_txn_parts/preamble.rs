@@ -81,6 +81,9 @@ pub enum WriteTxnError {
     /// Explicit append rebase cannot preserve this workspace's decisions or
     /// exact creations. Ordinary commit/refresh never select this policy.
     AppendRebaseIneligible,
+    /// Explicit field rebase cannot preserve the observed decisions, target
+    /// lifetimes, supported intent family or exact field effects.
+    FieldRebaseIneligible,
     /// The requested 128-bit identity domain has no remaining successor.
     IdentityExhausted,
     /// Cancellation before acceptance. Completion makes the transaction
@@ -139,6 +142,9 @@ impl core::fmt::Display for WriteTxnError {
             Self::AppendRebaseIneligible => {
                 formatter.write_str("transaction is not eligible for unobserved append rebase")
             }
+            Self::FieldRebaseIneligible => {
+                formatter.write_str("transaction is not eligible for disjoint-field rebase")
+            }
             Self::Interrupted(source) => {
                 write!(formatter, "transaction operation interrupted: {source}")
             }
@@ -171,6 +177,7 @@ impl core::error::Error for WriteTxnError {
             | Self::BirthOrdinalCollision
             | Self::IdentityExhausted
             | Self::AppendRebaseIneligible
+            | Self::FieldRebaseIneligible
             | Self::UnsupportedAtomicMutation => None,
         }
     }
@@ -205,6 +212,8 @@ impl From<GqlError> for WriteTxnError {
 /// advances it; ordinary reads and writes never refresh it implicitly.
 /// `commit_append_only_rebased` separately opts an unobserved append-only
 /// workspace into re-evaluation at finalization, never an active read refresh.
+/// `commit_disjoint_fields_rebased` separately admits field-local writes whose
+/// raw property/label dependencies have not changed, without widening reads.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
