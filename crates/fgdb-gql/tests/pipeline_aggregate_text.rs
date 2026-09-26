@@ -706,8 +706,7 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
 }
 
 /// fgdb-1tgko: the WITH before an aggregate RETURN reads carried-vertex
-/// properties in its WHERE and pages exactly as the explicit column would,
-/// and the hidden columns never reach the aggregate's input schema.
+/// properties in its WHERE and pages exactly as the explicit column would.
 #[test]
 fn a_with_before_an_aggregate_reads_carried_properties_in_its_where_and_pages() {
     let input = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -746,12 +745,63 @@ fn a_with_before_an_aggregate_reads_carried_properties_in_its_where_and_pages() 
     )
     .unwrap();
     assert_eq!(template.columns(), &["owner", "c"]);
-    // The private names never resolve. A carried property inside the
-    // aggregate RETURN itself is outside the boundary scope until fgdb-djlxq
-    // lifts it deliberately: the hidden columns are projected away first.
+}
+
+/// fgdb-djlxq: the aggregate RETURN itself reads carried-vertex properties,
+/// as grouping keys, aggregate arguments and GROUP BY items. Each form equals
+/// the explicit `WITH n, n.p AS h` column. An unaliased key `n.p` is named
+/// `p`. The private names never resolve, and HAVING and the result page
+/// address only the output row: a boundary of the same width as that row
+/// must not resolve `n.p` there.
+#[test]
+fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by() {
+    let input = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
+    for (boundary, explicit) in [
+        (
+            "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c",
+            "MATCH (n) WITH n, n.p AS h RETURN h AS k, COUNT(*) AS c",
+        ),
+        (
+            "MATCH (n) WITH n WHERE n.p > 1 RETURN COUNT(n.p) AS c, SUM(n.p) AS s, MIN(n.p) AS lo",
+            "MATCH (n) WITH n, n.p AS h WHERE h > 1 RETURN COUNT(h) AS c, SUM(h) AS s, MIN(h) AS lo",
+        ),
+        (
+            "MATCH (n) WITH n AS m RETURN m.p AS k, COUNT(m) AS c GROUP BY m.p",
+            "MATCH (n) WITH n AS m, n.p AS h RETURN h AS k, COUNT(m) AS c GROUP BY h",
+        ),
+        (
+            "MATCH (n) WITH DISTINCT n RETURN n.p AS k, COUNT(*) AS c HAVING c > 1",
+            "MATCH (n) WITH DISTINCT n, n.p AS h RETURN h AS k, COUNT(*) AS c HAVING c > 1",
+        ),
+    ] {
+        let found = run(&query(boundary), &input, wide()).value;
+        assert!(!found.is_empty(), "{boundary}");
+        assert_eq!(
+            found,
+            run(&query(explicit), &input, wide()).value,
+            "{boundary}"
+        );
+    }
+    let grouped = run(
+        &query("MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING c > 1"),
+        &input,
+        wide(),
+    )
+    .value;
+    assert_eq!(grouped.len(), 1);
+    assert_eq!(grouped[0].values()[0].as_count(), Some(2));
+    let template = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n RETURN n.p, COUNT(*) AS c",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.columns(), &["p", "c"]);
     for text in [
-        "MATCH (n) WITH n WHERE n.p = 2 RETURN COUNT(__fg_boundary_0) AS c",
-        "MATCH (n) WITH n WHERE n.p = 2 RETURN COUNT(n.p) AS c",
+        "MATCH (n) WITH n RETURN n.p AS k, COUNT(__fg_boundary_0) AS c",
+        "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c GROUP BY __fg_boundary_0",
+        // Two output columns, as the boundary row has (n plus hidden n.p).
+        "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING n.p > 1",
+        "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c ORDER BY n.p",
     ] {
         assert!(
             PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),

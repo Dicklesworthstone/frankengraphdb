@@ -125,14 +125,13 @@ impl<'a> Parser<'a> {
     /// `WITH n WHERE n.p = 3 RETURN n.q`: the rest of the graph-to-row
     /// boundary's scope may read a property of a MATCH vertex the WITH
     /// projects as-is (under its own name or an alias). That scope is the
-    /// WITH's WHERE, its pages and a terminal RETURN (fgdb-1tgko), unless
-    /// `through_return` is false: an aggregate RETURN addresses row aliases
-    /// only, so the prefix projects the hidden columns away before it
-    /// (fgdb-djlxq tracks lifting that). Each such read becomes a hidden
+    /// WITH's WHERE, its pages and a terminal RETURN, plain (fgdb-1tgko) or
+    /// aggregate: keys, arguments and GROUP BY (fgdb-djlxq). Each such read
+    /// becomes a hidden
     /// column of the boundary projection itself, the same graph read
     /// `WITH n.p AS x` makes. Only `alias.property` resolves it, never its
     /// private name. The hidden columns are projected away before a later
-    /// stage, another MATCH part, an aggregate RETURN or `*` can see them. A
+    /// stage or another MATCH part can see them, and `*` never does. A
     /// property is a function of its element, so hidden columns never change
     /// DISTINCT or multiplicity. Reads in later stages or through computed or
     /// carried values stay refused as before; a page after the RETURN belongs
@@ -142,7 +141,6 @@ impl<'a> Parser<'a> {
         &mut self,
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
-        through_return: bool,
     ) -> Result<(), GraphSetTextError> {
         if !head.with {
             return Ok(());
@@ -217,7 +215,6 @@ impl<'a> Parser<'a> {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: head.outputs.len(),
-                through_return,
                 reads,
             });
         }
@@ -226,7 +223,7 @@ impl<'a> Parser<'a> {
 
     /// The output name of an unaliased hidden read in a RETURN over a row of
     /// `width`: `n.p` is named `p`, exactly as a graph RETURN names it.
-    fn boundary_key(&self, width: usize, column: usize) -> Option<Name<'a>> {
+    pub(super) fn boundary_key(&self, width: usize, column: usize) -> Option<Name<'a>> {
         let boundary = self.boundary_reads.as_ref()?;
         if boundary.width != width {
             return None;
@@ -396,15 +393,9 @@ impl<'a> Parser<'a> {
             }
             let at = self.current.at;
             if !self.is_word("WITH") {
-                // A terminal RETURN in the boundary scope resolves the hidden
-                // reads. An aggregate RETURN, the next MATCH part or the end
-                // of the statement must not see them.
-                let resolves = self.is_word("RETURN")
-                    && self
-                        .boundary_reads
-                        .as_ref()
-                        .is_some_and(|boundary| boundary.through_return);
-                if !resolves {
+                // A terminal RETURN, plain or aggregate, resolves the hidden
+                // reads; the next MATCH part or the end must not see them.
+                if !self.is_word("RETURN") {
                     self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 }
                 break;

@@ -439,7 +439,7 @@ impl<'a> Parser<'a> {
         // graph_projection_head numbers its graph inputs from zero; a
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
-        self.hoist_boundary_reads(&mut head, offset, !aggregate)?;
+        self.hoist_boundary_reads(&mut head, offset)?;
         if head.inputs.is_empty() {
             // A constant projection still emits once per graph occurrence.
             self.mutation_projection(&mut head.inputs, self.syntax.variables[0], None)?;

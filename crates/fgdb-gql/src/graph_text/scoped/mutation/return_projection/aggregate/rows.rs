@@ -49,9 +49,9 @@ pub(super) fn prefix<'a>(
             ));
         }
         let mut head = parser.graph_projection_head()?;
-        // `WITH n WHERE n.p > 1 RETURN count(*)`: the WITH's WHERE and pages
-        // read carried properties; the aggregate RETURN addresses row aliases.
-        parser.hoist_boundary_reads(&mut head, 0, false)?;
+        // `WITH n WHERE n.p > 1 RETURN n.q, count(*)`: the WITH's WHERE and
+        // pages and the aggregate RETURN read carried properties.
+        parser.hoist_boundary_reads(&mut head, 0)?;
         let (stages, schema, depth) =
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         return Ok((Head::Single(Some(head)), stages, schema, depth));

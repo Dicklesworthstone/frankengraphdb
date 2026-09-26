@@ -458,13 +458,11 @@ struct Parser<'a> {
 /// Within the scope, `alias.property` resolves to one; the hidden columns are
 /// projected away before any later stage or part. `width` is the boundary
 /// row's width, visible plus hidden; an expression over any other row (a
-/// nested scope) sees none of this. `through_return` says whether a terminal
-/// RETURN is inside the scope (never an aggregate RETURN). Each read is the
-/// carried alias, the property name (with its first offset) and the column.
+/// nested scope) sees none of this. Each read is the carried alias, the
+/// property name (with its first offset) and the column.
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
-    through_return: bool,
     reads: Vec<(&'a str, Name<'a>, usize)>,
 }
 

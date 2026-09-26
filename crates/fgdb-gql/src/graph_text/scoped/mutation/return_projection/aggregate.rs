@@ -265,7 +265,10 @@ impl PreparedGraphPipelineAggregateText {
                 } else if inputs.is_computed(column) {
                     return Err(expected(at, "AS alias for a computed grouping expression"));
                 } else {
-                    schema[column].0
+                    // A carried `n.p` key is named `p`, never its private name.
+                    parser
+                        .boundary_key(schema.len(), column)
+                        .unwrap_or(schema[column].0)
                 };
                 (name, ReturnedValue::Key(column))
             };
@@ -408,6 +411,9 @@ impl PreparedGraphPipelineAggregateText {
             having_columns.push(column);
             output_schema.push((item.name, kind));
         }
+        // HAVING and the page address the output row. A boundary still live
+        // here could resolve `n.p` to an output of the same width.
+        parser.boundary_reads = None;
         let having_at = parser.current.at;
         let mut having = Vec::new();
         if parser.take_word("HAVING")? {
