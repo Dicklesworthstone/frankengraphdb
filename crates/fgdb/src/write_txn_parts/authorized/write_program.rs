@@ -11,6 +11,7 @@ use fgdb_gql::{
     GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
+use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 #[cfg(test)]
@@ -18,6 +19,8 @@ use fgdb_gql::{GqlQueryError, GraphMutationError};
 
 #[path = "edge_upsert.rs"]
 mod edge_upsert;
+#[path = "write_script.rs"]
+mod script;
 #[path = "vertex_merge.rs"]
 mod vertex;
 
@@ -155,13 +158,32 @@ impl<V: Vfs + Clone> Database<V> {
         let now = clock();
         let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
         let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
+        let mut execution = Execution { cx: commit_cx, permit, clock };
+        self.complete_authorized_program(
+            txn_cx, query_cx, commit_cx, program, policy, verified.predicates(),
+            &mut execution, returning, receipt,
+        ).await
+    }
+
+    // A script/batch binds privately under its SAME live permit, then enters
+    // this exact preflight, dispatch and completion body. No second validation
+    // allowance, workspace, graph writer or publication path is introduced.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_authorized_program<Receipt, Clock: FnMut() -> u64>(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        program: &PreparedGraphWriteProgram,
+        policy: GraphWriteProgramPolicy,
+        scope: &PlannerPredicates,
+        execution: &mut Execution<'_, '_, Clock>,
+        returning: bool,
+        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> Receipt,
+    ) -> Result<(Receipt, EmbeddedTxnCompletion), Fault> {
+        let refusal = |error| preflight(WriteTxnError::Authorization(error));
         commit_cx
             .with_restriction_async(async {
-                let mut execution = Execution {
-                    cx: commit_cx,
-                    permit,
-                    clock,
-                };
                 // Validate the COMPLETE immutable shape before even opening a
                 // workspace. A valid prefix cannot allocate IDs ahead of a
                 // denied tail, and zero work cannot bypass required rights.
@@ -181,7 +203,7 @@ impl<V: Vfs + Clone> Database<V> {
                             | GraphWriteStatement::EdgeMerge(_)
                             | GraphWriteStatement::EdgeUpsert(_) => true,
                         };
-                        if reads && !verified.predicates().rights().can_read() {
+                        if reads && !scope.rights().can_read() {
                             return Err(refusal(Error::PermissionDenied));
                         }
                         let relation = match statement {
@@ -190,7 +212,7 @@ impl<V: Vfs + Clone> Database<V> {
                             _ => None,
                         };
                         if relation.is_some_and(|relation| {
-                            !verified.predicates().allows_relation(relation)
+                            !scope.allows_relation(relation)
                         }) {
                             return Err(refusal(Error::ScopeDenied));
                         }
@@ -206,7 +228,7 @@ impl<V: Vfs + Clone> Database<V> {
                 workspace.transaction().program_multi_relation = true;
                 let mut receipts = Vec::new();
                 let stats = query_cx.with_restriction(|| {
-                    let execution = RefCell::new(&mut execution);
+                    let execution = RefCell::new(&mut *execution);
                     program.execute_governed(
                         policy,
                         |_, statement, remaining| {
@@ -220,7 +242,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.mutations,
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -237,7 +259,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.insertion_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -254,7 +276,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.deletion_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -271,7 +293,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.vertex_merge_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -288,7 +310,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.vertex_upsert_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -305,7 +327,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.edge_merge_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
@@ -322,7 +344,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         query_cx,
                                         input,
                                         remaining.edge_upsert_policy(),
-                                        verified.predicates(),
+                                        scope,
                                         execution,
                                         returning,
                                     )
