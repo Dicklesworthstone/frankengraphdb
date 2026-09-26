@@ -1,6 +1,9 @@
 //! Parameterized ingestion shares the program's one permit and completion.
 //! Definition binding finishes before a snapshot pin or graph ID can exist.
 
+#[path = "native_write.rs"]
+mod native;
+
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, GraphWriteProgramPolicy,
     GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
