@@ -2,14 +2,13 @@
 //! authorized writers. No step publishes or gets an independent capability.
 
 use super::super::super::{
-    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace,
-    WriteTxnError, deletion, insert, mutation,
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
+    deletion, insert, mutation,
 };
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationProgramError, GraphWriteProgramError,
-    GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteProgramStats,
-    GraphWriteStatement, GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats,
-    PreparedGraphWriteProgram,
+    GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStatement,
+    GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use std::cell::RefCell;
@@ -65,9 +64,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.write_program_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, program, policy,
-            clock, false, |stats, _| stats,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            program,
+            policy,
+            clock,
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Return source-ordered per-statement receipts only after the entire
@@ -91,9 +100,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.write_program_authorized_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch, program, policy,
-            clock, true, GraphWriteProgramReceipt::new,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            program,
+            policy,
+            clock,
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -118,110 +137,156 @@ impl<V: Vfs + Clone> Database<V> {
         let now = clock();
         let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
         let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            // Validate the COMPLETE immutable shape before even opening a
-            // workspace. A valid prefix cannot allocate IDs ahead of an
-            // unsupported tail, and zero work cannot bypass required rights.
-            query_cx.with_restriction(|| {
-                for statement in program.statements() {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(preflight)?;
-                    execution.poll().map_err(preflight)?;
-                    let reads = match statement {
-                        GraphWriteStatement::Insert(input) => input.selection().is_some(),
-                        GraphWriteStatement::Mutation(_) | GraphWriteStatement::Delete(_) => true,
-                        GraphWriteStatement::VertexMerge(_)
-                        | GraphWriteStatement::VertexUpsert(_)
-                        | GraphWriteStatement::EdgeMerge(_)
-                        | GraphWriteStatement::EdgeUpsert(_) => {
-                            return Err(preflight(WriteTxnError::AuthorizedMutationRefused));
-                        }
-                    };
-                    if reads && !verified.predicates().rights().can_read() {
-                        return Err(refusal(Error::PermissionDenied));
-                    }
-                }
-                Ok(())
-            })?;
-            execution.checkpoint().map_err(preflight)?;
-            let mut workspace = Workspace(Some(
-                self.begin(txn_cx).map_err(WriteTxnError::Write).map_err(preflight)?,
-            ));
-            workspace.transaction().program_multi_relation = true;
-            let mut receipts = Vec::new();
-            let stats = query_cx.with_restriction(|| {
-                let execution = RefCell::new(&mut execution);
-                program.execute_governed(
-                    policy,
-                    |_, statement, remaining| {
-                        let mut borrowed = execution.borrow_mut();
-                        let execution = &mut **borrowed;
-                        let (stats, step) = match statement {
-                            GraphWriteStatement::Mutation(input) => {
-                                let (stats, targets, edges) = mutation::apply(
-                                    workspace.transaction(), self, query_cx, input,
-                                    remaining.mutations, verified.predicates(), execution, returning,
-                                ).map_err(GraphWriteStepError::Mutation)?;
-                                (GraphWriteStepStats::Mutation(stats),
-                                    GraphWriteStepReceipt::Mutation { targets, edges })
-                            }
-                            GraphWriteStatement::Insert(input) => {
-                                let (stats, vertices, edges) = insert::apply(
-                                    workspace.transaction(), self, query_cx, input,
-                                    remaining.insertion_policy(), verified.predicates(), execution, returning,
-                                ).map_err(GraphWriteStepError::Insert)?;
-                                (GraphWriteStepStats::Insert(stats),
-                                    GraphWriteStepReceipt::Insert { vertices, edges })
-                            }
-                            GraphWriteStatement::Delete(input) => {
-                                let (stats, targets, edges) = deletion::apply(
-                                    workspace.transaction(), self, query_cx, input,
-                                    remaining.deletion_policy(), verified.predicates(), execution, returning,
-                                ).map_err(GraphWriteStepError::Delete)?;
-                                (GraphWriteStepStats::Delete(stats),
-                                    GraphWriteStepReceipt::Delete { targets, edges })
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                // Validate the COMPLETE immutable shape before even opening a
+                // workspace. A valid prefix cannot allocate IDs ahead of an
+                // unsupported tail, and zero work cannot bypass required rights.
+                query_cx.with_restriction(|| {
+                    for statement in program.statements() {
+                        query_cx
+                            .checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(preflight)?;
+                        execution.poll().map_err(preflight)?;
+                        let reads = match statement {
+                            GraphWriteStatement::Insert(input) => input.selection().is_some(),
+                            GraphWriteStatement::Mutation(_) | GraphWriteStatement::Delete(_) => {
+                                true
                             }
                             GraphWriteStatement::VertexMerge(_)
                             | GraphWriteStatement::VertexUpsert(_)
                             | GraphWriteStatement::EdgeMerge(_)
                             | GraphWriteStatement::EdgeUpsert(_) => {
-                                // Preflight excludes these immutable arms. Keep
-                                // the dispatch fail-closed, never a privileged
-                                // fallback, even if its caller is later changed.
-                                return Err(GraphWriteStepError::Mutation(GqlQueryError::Source(
-                                    GraphMutationError::Source(WriteTxnError::AuthorizedMutationRefused),
-                                )));
+                                return Err(preflight(WriteTxnError::AuthorizedMutationRefused));
                             }
                         };
-                        if returning {
-                            // Identities were admitted by the statement helper.
-                            // This fixed-shape envelope is bounded by the native
-                            // prepared program's admitted statement count.
-                            receipts.push(step);
+                        if reads && !verified.predicates().rights().can_read() {
+                            return Err(refusal(Error::PermissionDenied));
                         }
-                        Ok(stats)
-                    },
-                    || {
+                    }
+                    Ok(())
+                })?;
+                execution.checkpoint().map_err(preflight)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(WriteTxnError::Write)
+                        .map_err(preflight)?,
+                ));
+                workspace.transaction().program_multi_relation = true;
+                let mut receipts = Vec::new();
+                let stats = query_cx.with_restriction(|| {
+                    let execution = RefCell::new(&mut execution);
+                    program.execute_governed(
+                        policy,
+                        |_, statement, remaining| {
+                            let mut borrowed = execution.borrow_mut();
+                            let execution = &mut **borrowed;
+                            let (stats, step) = match statement {
+                                GraphWriteStatement::Mutation(input) => {
+                                    let (stats, targets, edges) = mutation::apply(
+                                        workspace.transaction(),
+                                        self,
+                                        query_cx,
+                                        input,
+                                        remaining.mutations,
+                                        verified.predicates(),
+                                        execution,
+                                        returning,
+                                    )
+                                    .map_err(GraphWriteStepError::Mutation)?;
+                                    (
+                                        GraphWriteStepStats::Mutation(stats),
+                                        GraphWriteStepReceipt::Mutation { targets, edges },
+                                    )
+                                }
+                                GraphWriteStatement::Insert(input) => {
+                                    let (stats, vertices, edges) = insert::apply(
+                                        workspace.transaction(),
+                                        self,
+                                        query_cx,
+                                        input,
+                                        remaining.insertion_policy(),
+                                        verified.predicates(),
+                                        execution,
+                                        returning,
+                                    )
+                                    .map_err(GraphWriteStepError::Insert)?;
+                                    (
+                                        GraphWriteStepStats::Insert(stats),
+                                        GraphWriteStepReceipt::Insert { vertices, edges },
+                                    )
+                                }
+                                GraphWriteStatement::Delete(input) => {
+                                    let (stats, targets, edges) = deletion::apply(
+                                        workspace.transaction(),
+                                        self,
+                                        query_cx,
+                                        input,
+                                        remaining.deletion_policy(),
+                                        verified.predicates(),
+                                        execution,
+                                        returning,
+                                    )
+                                    .map_err(GraphWriteStepError::Delete)?;
+                                    (
+                                        GraphWriteStepStats::Delete(stats),
+                                        GraphWriteStepReceipt::Delete { targets, edges },
+                                    )
+                                }
+                                GraphWriteStatement::VertexMerge(_)
+                                | GraphWriteStatement::VertexUpsert(_)
+                                | GraphWriteStatement::EdgeMerge(_)
+                                | GraphWriteStatement::EdgeUpsert(_) => {
+                                    // Preflight excludes these immutable arms. Keep
+                                    // the dispatch fail-closed, never a privileged
+                                    // fallback, even if its caller is later changed.
+                                    return Err(GraphWriteStepError::Mutation(
+                                        GqlQueryError::Source(GraphMutationError::Source(
+                                            WriteTxnError::AuthorizedMutationRefused,
+                                        )),
+                                    ));
+                                }
+                            };
+                            if returning {
+                                // Identities were admitted by the statement helper.
+                                // This fixed-shape envelope is bounded by the native
+                                // prepared program's admitted statement count.
+                                receipts.push(step);
+                            }
+                            Ok(stats)
+                        },
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.borrow_mut().checkpoint()
+                        },
+                    )
+                })?;
+                let completed_statements = stats.completed_statements;
+                // Both public APIs build their final value here. There is no
+                // allocation, optional-receipt unwrap or auth check after commit.
+                let receipt = receipt(stats, receipts);
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
                         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.borrow_mut().checkpoint()
-                    },
-                )
-            })?;
-            let completed_statements = stats.completed_statements;
-            // Both public APIs build their final value here. There is no
-            // allocation, optional-receipt unwrap or auth check after commit.
-            let receipt = receipt(stats, receipts);
-            let completion = workspace.transaction()
-                .complete_controlled(self, commit_cx, None, false, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })
-                .await
-                .map_err(|source| Fault::Program(GraphMutationProgramError::Interrupted {
-                    completed_statements, source,
-                }))?;
-            Ok((receipt, completion))
-        }).await
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(|source| {
+                        Fault::Program(GraphMutationProgramError::Interrupted {
+                            completed_statements,
+                            source,
+                        })
+                    })?;
+                Ok((receipt, completion))
+            })
+            .await
     }
 }
 

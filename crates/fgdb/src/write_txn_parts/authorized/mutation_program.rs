@@ -1,11 +1,12 @@
 //! Ordered mutations keep one private native workspace and one live permit.
 
 use super::{
-    Authority, CapabilityToken, CommitCx, Database, EmbeddedTxnCompletion, Error,
-    Execution, GraphMutationPolicy, QueryCx, RefCell, TxnCx, Vfs, Workspace,
-    WriteTxnError, apply,
+    Authority, CapabilityToken, CommitCx, Database, EmbeddedTxnCompletion, Error, Execution,
+    GraphMutationPolicy, QueryCx, RefCell, TxnCx, Vfs, Workspace, WriteTxnError, apply,
 };
-use fgdb_gql::{GraphMutationProgramError, GraphMutationProgramStats, PreparedGraphMutationProgram};
+use fgdb_gql::{
+    GraphMutationProgramError, GraphMutationProgramStats, PreparedGraphMutationProgram,
+};
 
 #[path = "write_program.rs"]
 mod mixed;
@@ -60,39 +61,56 @@ impl<V: Vfs + Clone> Database<V> {
         if !verified.predicates().rights().can_read() {
             return Err(refusal(Error::PermissionDenied));
         }
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            execution.checkpoint().map_err(Fault::Preflight)?;
-            let mut workspace = Workspace(Some(
-                self.begin(txn_cx).map_err(WriteTxnError::Write).map_err(Fault::Preflight)?,
-            ));
-            let stats = query_cx.with_restriction(|| {
-                let execution = RefCell::new(&mut execution);
-                program.execute_governed(
-                    policy,
-                    |statement, remaining| {
-                        apply(
-                            workspace.transaction(), self, query_cx, statement, remaining,
-                            verified.predicates(), &mut **execution.borrow_mut(), false,
-                        ).map(|(stats, _, _)| stats)
-                    },
-                    || {
-                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.borrow_mut().checkpoint()
-                    },
-                )
-            })?;
-            let completion = workspace.transaction()
-                .complete_controlled(self, commit_cx, None, false, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })
-                .await
-                .map_err(|source| Fault::Interrupted {
-                    completed_statements: stats.completed_statements, source,
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(Fault::Preflight)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(WriteTxnError::Write)
+                        .map_err(Fault::Preflight)?,
+                ));
+                let stats = query_cx.with_restriction(|| {
+                    let execution = RefCell::new(&mut execution);
+                    program.execute_governed(
+                        policy,
+                        |statement, remaining| {
+                            apply(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                statement,
+                                remaining,
+                                verified.predicates(),
+                                &mut **execution.borrow_mut(),
+                                false,
+                            )
+                            .map(|(stats, _, _)| stats)
+                        },
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.borrow_mut().checkpoint()
+                        },
+                    )
                 })?;
-            Ok((stats, completion))
-        }).await
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(|source| Fault::Interrupted {
+                        completed_statements: stats.completed_statements,
+                        source,
+                    })?;
+                Ok((stats, completion))
+            })
+            .await
     }
 }
 

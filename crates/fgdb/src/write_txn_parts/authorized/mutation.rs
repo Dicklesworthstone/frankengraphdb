@@ -3,13 +3,13 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
-use fgdb_warden::PlannerPredicates;
 use fgdb_delta_types::ElementId;
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
     GraphMutationStats, PreparedGraphMutation,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
+use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -144,8 +144,14 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
                 let (stats, vertices, edges) = apply(
-                    workspace.transaction(), self, query_cx, mutation, policy,
-                    verified.predicates(), &mut execution, returning,
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    mutation,
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    returning,
                 )?;
                 let completion = workspace
                     .transaction()
@@ -242,14 +248,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }
         }
         for row in batch.rows {
-            stage(
-                transaction,
-                database,
-                batch.relation,
-                row,
-                execution,
-            )
-            .map_err(source)?;
+            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
     // Build the complete private receipt before commit admission.

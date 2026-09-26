@@ -3,8 +3,8 @@
 
 use super::{
     AdmissionUsage, Database, GlaOutput, Governed, GqlQueryError, GqlQueryPolicy,
-    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables,
-    VertexRow, Vfs, execute_tables,
+    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables, VertexRow,
+    Vfs, execute_tables,
 };
 use crate::EdgeRecord;
 

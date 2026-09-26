@@ -54,7 +54,10 @@ impl<V: Ord> IncrementalStrongComponents<V> {
                 outgoing: Relation::new(),
                 incoming: Relation::new(),
             },
-            membership: Membership { labels: BTreeMap::new(), count: 0 },
+            membership: Membership {
+                labels: BTreeMap::new(),
+                count: 0,
+            },
         }
     }
     pub fn vertex_count(&self) -> usize {
@@ -98,14 +101,29 @@ impl<V: Ord> Prospective<'_, V> {
         reverse: bool,
     ) -> impl Iterator<Item = (&'a V, bool)> {
         let (base, added, removed) = if reverse {
-            (&self.base.incoming, &self.changes.added_reverse, &self.changes.removed_reverse)
+            (
+                &self.base.incoming,
+                &self.changes.added_reverse,
+                &self.changes.removed_reverse,
+            )
         } else {
-            (&self.base.outgoing, &self.changes.added, &self.changes.removed)
+            (
+                &self.base.outgoing,
+                &self.changes.added,
+                &self.changes.removed,
+            )
         };
-        base.get(vertex).into_iter().flatten()
+        base.get(vertex)
+            .into_iter()
+            .flatten()
             .chain(added.get(vertex).into_iter().flatten())
             .map(move |neighbor| {
-                (neighbor, removed.get(vertex).is_some_and(|row| row.contains(neighbor)))
+                (
+                    neighbor,
+                    removed
+                        .get(vertex)
+                        .is_some_and(|row| row.contains(neighbor)),
+                )
             })
     }
 }
@@ -185,7 +203,10 @@ impl<V: Ord + Clone> Prospective<'_, V> {
                     }
                 }
             }
-            let representative = group.first().expect("unassigned root enters its SCC").clone();
+            let representative = group
+                .first()
+                .expect("unassigned root enters its SCC")
+                .clone();
             for vertex in group {
                 event(control, ZSetEvent::Work)?;
                 // Private label plus eventual retained label.
@@ -193,7 +214,9 @@ impl<V: Ord + Clone> Prospective<'_, V> {
                 event(control, ZSetEvent::ScratchEntry)?;
                 labels.insert(vertex, representative.clone());
             }
-            count = count.checked_add(1).ok_or(ComponentError::CardinalityOverflow)?;
+            count = count
+                .checked_add(1)
+                .ok_or(ComponentError::CardinalityOverflow)?;
         }
         Ok(Membership { labels, count })
     }
@@ -214,10 +237,15 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<StrongComponentUpdate<'_, V>, ComponentError<E>> {
         event(control, ZSetEvent::Work)?;
-        let edges = self.directed.edges.prepare_integration(edge_delta, limbs, control)?;
+        let edges = self
+            .directed
+            .edges
+            .prepare_integration(edge_delta, limbs, control)?;
         let mut changes = Changes {
-            added: Relation::new(), removed: Relation::new(),
-            added_reverse: Relation::new(), removed_reverse: Relation::new(),
+            added: Relation::new(),
+            removed: Relation::new(),
+            added_reverse: Relation::new(),
+            removed_reverse: Relation::new(),
         };
         let mut touched = BTreeSet::new();
         for (vertex, _) in vertex_delta.iter() {
@@ -229,7 +257,13 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
                 return Err(ComponentError::NegativeEdgeMultiplicity);
             }
             let live = !weight.is_zero();
-            if live == self.directed.edges.weight(&(a.clone(), b.clone())).is_some() {
+            if live
+                == self
+                    .directed
+                    .edges
+                    .weight(&(a.clone(), b.clone()))
+                    .is_some()
+            {
                 continue;
             }
             insert(&mut touched, a, control)?;
@@ -259,7 +293,9 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
                 insert(&mut candidates, vertex, control)?;
             }
         }
-        let weak = self.weak.prepare(vertex_delta, edge_delta, limbs, control)?;
+        let weak = self
+            .weak
+            .prepare(vertex_delta, edge_delta, limbs, control)?;
         let mut live = BTreeSet::new();
         let mut old_roots = BTreeSet::new();
         for vertex in &candidates {
@@ -271,9 +307,15 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
                 insert(&mut old_roots, root, control)?;
             }
         }
-        let next = Prospective { base: &self.directed, changes: &changes }
-            .classify(&live, control)?;
-        let count = self.membership.count.checked_sub(old_roots.len())
+        let next = Prospective {
+            base: &self.directed,
+            changes: &changes,
+        }
+        .classify(&live, control)?;
+        let count = self
+            .membership
+            .count
+            .checked_sub(old_roots.len())
             .and_then(|previous| previous.checked_add(next.count))
             .ok_or(ComponentError::CardinalityOverflow)?;
         let mut delta = ZSet::new();
@@ -284,7 +326,12 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
                 continue;
             }
             if let Some(root) = before {
-                delta.accumulate((vertex.clone(), root.clone()), ZWeight::from_i128(-1), limbs, control)?;
+                delta.accumulate(
+                    (vertex.clone(), root.clone()),
+                    ZWeight::from_i128(-1),
+                    limbs,
+                    control,
+                )?;
             }
             if let Some(root) = after {
                 delta.accumulate((vertex.clone(), root.clone()), ZWeight::ONE, limbs, control)?;
@@ -292,8 +339,15 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
         }
         event(control, ZSetEvent::Work)?;
         Ok(StrongComponentUpdate {
-            weak, directed: &mut self.directed, membership: &mut self.membership,
-            edges, changes, candidates, labels: next.labels, count, delta,
+            weak,
+            directed: &mut self.directed,
+            membership: &mut self.membership,
+            edges,
+            changes,
+            candidates,
+            labels: next.labels,
+            count,
+            delta,
         })
     }
     pub fn apply<E>(
@@ -312,8 +366,10 @@ impl<V: Ord + Clone> IncrementalStrongComponents<V> {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(V, V)>, ComponentError<E>> {
         Ok(ZSet::from_updates(
-            self.pairs().map(|(v, root)| ((v.clone(), root.clone()), ZWeight::ONE)),
-            limbs, control,
+            self.pairs()
+                .map(|(v, root)| ((v.clone(), root.clone()), ZWeight::ONE)),
+            limbs,
+            control,
         )?)
     }
 }
@@ -331,17 +387,33 @@ pub struct StrongComponentUpdate<'a, V: Ord> {
     delta: ZSet<(V, V)>,
 }
 impl<V: Ord> StrongComponentUpdate<'_, V> {
-    pub fn delta(&self) -> &ZSet<(V, V)> { &self.delta }
-    pub fn component_count(&self) -> usize { self.count }
-    pub fn vertex_count(&self) -> usize { self.weak.vertex_count() }
-    pub fn affected_vertices(&self) -> usize { self.candidates.len() }
+    pub fn delta(&self) -> &ZSet<(V, V)> {
+        &self.delta
+    }
+    pub fn component_count(&self) -> usize {
+        self.count
+    }
+    pub fn vertex_count(&self) -> usize {
+        self.weak.vertex_count()
+    }
+    pub fn affected_vertices(&self) -> usize {
+        self.candidates.len()
+    }
 }
 impl<V: Ord + Clone> StrongComponentUpdate<'_, V> {
     /// Publish the admitted weak index, directed bag and membership together.
     /// No callback or recoverable arithmetic/refusal occurs during publication.
     pub fn commit(self) -> ZSet<(V, V)> {
         let Self {
-            weak, directed, membership, edges, changes, candidates, labels, count, delta,
+            weak,
+            directed,
+            membership,
+            edges,
+            changes,
+            candidates,
+            labels,
+            count,
+            delta,
         } = self;
         let _ = weak.commit();
         directed.edges.publish(edges);
@@ -353,7 +425,11 @@ impl<V: Ord + Clone> StrongComponentUpdate<'_, V> {
         }
         for (a, row) in changes.added {
             for b in row {
-                directed.incoming.entry(b.clone()).or_default().insert(a.clone());
+                directed
+                    .incoming
+                    .entry(b.clone())
+                    .or_default()
+                    .insert(a.clone());
                 directed.outgoing.entry(a.clone()).or_default().insert(b);
             }
         }

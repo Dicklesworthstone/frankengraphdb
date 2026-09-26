@@ -178,8 +178,14 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
                 let (stats, vertices, edges) = apply(
-                    workspace.transaction(), self, query_cx, deletion, policy,
-                    verified.predicates(), &mut execution, returning,
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    deletion,
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    returning,
                 )?;
                 let completion = workspace
                     .transaction()
@@ -231,8 +237,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     })?;
     let mut stats = proposal.stats();
     let (vertices, edges) = proposal.into_target_parts();
-    if (!vertices.is_empty()
-        && !(scope.sees_all_incidence() && scope.sees_all_fields()))
+    if (!vertices.is_empty() && !(scope.sees_all_incidence() && scope.sees_all_fields()))
         || (!edges.is_empty() && !scope.sees_all_properties())
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -313,14 +318,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut batch = WriteBatch::new(deletion.relation());
         batch.delete_edge(*edge);
         for row in batch.rows {
-            stage(
-                transaction,
-                database,
-                batch.relation,
-                row,
-                execution,
-            )
-            .map_err(source)?;
+            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
     for vertex in &vertices {
@@ -334,14 +332,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut batch = WriteBatch::new(deletion.relation());
         batch.delete_vertex(*vertex);
         for row in batch.rows {
-            stage(
-                transaction,
-                database,
-                batch.relation,
-                row,
-                execution,
-            )
-            .map_err(source)?;
+            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
     if returning {

@@ -144,8 +144,14 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
                 let (stats, vertices, edges) = apply(
-                    workspace.transaction(), self, query_cx, insertion, policy,
-                    verified.predicates(), &mut execution, returning,
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    insertion,
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    returning,
                 )?;
                 let completion = workspace
                     .transaction()
@@ -248,14 +254,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }
         };
         for row in batch.rows {
-            stage(
-                transaction,
-                database,
-                batch.relation,
-                row,
-                execution,
-            )
-            .map_err(source)?;
+            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
     Ok((stats, vertices, edges))
@@ -311,65 +310,102 @@ impl<V: Vfs + Clone> Database<V> {
         mut clock: impl FnMut() -> u64,
     ) -> Result<MergeReceipt, MergeFault> {
         if authority.namespace() != self.keys.namespace {
-            return Err(merge_source(WriteTxnError::Authorization(Error::WrongAuthority)));
+            return Err(merge_source(WriteTxnError::Authorization(
+                Error::WrongAuthority,
+            )));
         }
         let now = clock();
-        let verified = authority.verify_at(token, branch, now)
+        let verified = authority
+            .verify_at(token, branch, now)
             .map_err(|error| merge_source(WriteTxnError::Authorization(error)))?;
-        let permit = verified.begin_write_at(branch, now)
+        let permit = verified
+            .begin_write_at(branch, now)
             .map_err(|error| merge_source(WriteTxnError::Authorization(error)))?;
         if !verified.predicates().rights().can_read() {
-            return Err(merge_source(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(merge_source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            execution.checkpoint().map_err(merge_source)?;
-            execution.permit.charge_rows_at((execution.clock)(), 1)
-                .map_err(|error| merge_source(WriteTxnError::Authorization(error)))?;
-            let mut workspace = Workspace(Some(
-                self.begin(txn_cx).map_err(|error| merge_source(WriteTxnError::Write(error)))?,
-            ));
-            let proposal = query_cx.with_restriction(|| {
-                // All RefCell borrows end before staging or the first await.
-                // The permit is shared, not reissued for the creation arm.
-                let execution = RefCell::new(&mut execution);
-                let database = RefCell::new(&mut *self);
-                super::super::collect_vertex_merge(
-                    merge, policy,
-                    |pattern, allowance| selection::select(
-                        &database.borrow(), query_cx, pattern, verified.predicates(),
-                        allowance, &execution,
-                    ),
-                    |request| database.borrow_mut().allocate_identity(query_cx, request),
-                    || {
-                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.borrow_mut().checkpoint()
-                    },
-                )
-            })?;
-            if let Some(creation) = proposal.creation {
-                for intent in creation.into_intents() {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(merge_source)?;
-                    let GraphInsertIntent::Vertex { vertex, labels, properties } = intent else {
-                        unreachable!("validated vertex MERGE contains no edge creation")
-                    };
-                    let mut batch = WriteBatch::new(merge.relation());
-                    batch.create_vertex(vertex, labels, properties);
-                    for row in batch.rows {
-                        stage(workspace.transaction(), self, batch.relation, row, &mut execution)
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(merge_source)?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), 1)
+                    .map_err(|error| merge_source(WriteTxnError::Authorization(error)))?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| merge_source(WriteTxnError::Write(error)))?,
+                ));
+                let proposal = query_cx.with_restriction(|| {
+                    // All RefCell borrows end before staging or the first await.
+                    // The permit is shared, not reissued for the creation arm.
+                    let execution = RefCell::new(&mut execution);
+                    let database = RefCell::new(&mut *self);
+                    super::super::collect_vertex_merge(
+                        merge,
+                        policy,
+                        |pattern, allowance| {
+                            selection::select(
+                                &database.borrow(),
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
+                                &execution,
+                            )
+                        },
+                        |request| database.borrow_mut().allocate_identity(query_cx, request),
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.borrow_mut().checkpoint()
+                        },
+                    )
+                })?;
+                if let Some(creation) = proposal.creation {
+                    for intent in creation.into_intents() {
+                        query_cx
+                            .checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
                             .map_err(merge_source)?;
+                        let GraphInsertIntent::Vertex {
+                            vertex,
+                            labels,
+                            properties,
+                        } = intent
+                        else {
+                            unreachable!("validated vertex MERGE contains no edge creation")
+                        };
+                        let mut batch = WriteBatch::new(merge.relation());
+                        batch.create_vertex(vertex, labels, properties);
+                        for row in batch.rows {
+                            stage(
+                                workspace.transaction(),
+                                self,
+                                batch.relation,
+                                row,
+                                &mut execution,
+                            )
+                            .map_err(merge_source)?;
+                        }
                     }
                 }
-            }
-            let completion = workspace.transaction()
-                .complete_controlled(self, commit_cx, None, false, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })
-                .await
-                .map_err(merge_source)?;
-            Ok((proposal.stats, proposal.outcome, completion))
-        }).await
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(merge_source)?;
+                Ok((proposal.stats, proposal.outcome, completion))
+            })
+            .await
     }
 }
 

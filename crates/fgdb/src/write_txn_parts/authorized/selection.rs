@@ -73,11 +73,17 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
     policy: GqlQueryPolicy,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
 ) -> Selected<Row> {
-    transaction.ensure_database(database).map_err(GqlQueryError::Source)?;
-    let live = database.frontier().map_err(WriteTxnError::from).map_err(GqlQueryError::Source)?;
+    transaction
+        .ensure_database(database)
+        .map_err(GqlQueryError::Source)?;
+    let live = database
+        .frontier()
+        .map_err(WriteTxnError::from)
+        .map_err(GqlQueryError::Source)?;
     if transaction.basis != live {
         return Err(GqlQueryError::Source(WriteTxnError::SnapshotAdvanced {
-            pinned: transaction.basis, live,
+            pinned: transaction.basis,
+            live,
         }));
     }
     if transaction.staged.is_empty() {
@@ -89,11 +95,16 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
             execution.borrow_mut().poll()
         };
         poll().map_err(GqlQueryError::Interrupted)?;
-        let vertices = transaction.vertices(database)
-            .map_err(super::redacted).map_err(GqlQueryError::Source)?;
+        let vertices = transaction
+            .vertices(database)
+            .map_err(super::redacted)
+            .map_err(GqlQueryError::Source)?;
         poll().map_err(GqlQueryError::Interrupted)?;
         let edges = if pattern.plan().reads_edges() {
-            transaction.edges(database).map_err(super::redacted).map_err(GqlQueryError::Source)?
+            transaction
+                .edges(database)
+                .map_err(super::redacted)
+                .map_err(GqlQueryError::Source)?
         } else {
             Vec::new()
         };
@@ -111,7 +122,11 @@ type Control<'a> = &'a mut dyn FnMut() -> Result<(), QueryError>;
 fn controlled<Row, Clock: FnMut() -> u64>(
     cx: &QueryCx,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
-    evaluate: impl FnOnce(Control<'_>, Control<'_>, Control<'_>)
+    evaluate: impl FnOnce(
+        Control<'_>,
+        Control<'_>,
+        Control<'_>,
+    )
         -> Result<GqlQueryExecution<Row>, GqlQueryError<crate::ReadError, QueryError>>,
 ) -> Selected<Row> {
     evaluate(
@@ -122,7 +137,10 @@ fn controlled<Row, Clock: FnMut() -> u64>(
             let execution = &mut **borrowed;
             execution.checkpoint().map_err(query_control)?;
             let now = (execution.clock)();
-            execution.permit.charge_nodes_at(now, 1).map_err(QueryError::Authorization)
+            execution
+                .permit
+                .charge_nodes_at(now, 1)
+                .map_err(QueryError::Authorization)
         },
         &mut || {
             cx.checkpoint()
@@ -134,5 +152,6 @@ fn controlled<Row, Clock: FnMut() -> u64>(
                 .map_err(|error| query_control(WriteTxnError::Interrupted(error)))?;
             execution.borrow_mut().checkpoint().map_err(query_control)
         },
-    ).map_err(selection_error)
+    )
+    .map_err(selection_error)
 }
