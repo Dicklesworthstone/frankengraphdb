@@ -80,7 +80,8 @@ fn prepare_root(
             | Op::Trim
             | Op::CharLength
             | Op::ToText
-            | Op::ToInteger => 1,
+            | Op::ToInteger
+            | Op::Matches(_) => 1,
             Op::Binary(_)
             | Op::Coalesce
             | Op::Compare(_)
@@ -119,7 +120,8 @@ fn prepare_root(
                 | Op::Concat
                 | Op::StartsWith
                 | Op::EndsWith
-                | Op::Contains => Some(Kind::Text),
+                | Op::Contains
+                | Op::Matches(_) => Some(Kind::Text),
                 Op::Substring => Some(if position == 0 {
                     Kind::Text
                 } else {
@@ -184,7 +186,8 @@ fn prepare_root(
             | Op::Or
             | Op::StartsWith
             | Op::EndsWith
-            | Op::Contains => Kind::Boolean,
+            | Op::Contains
+            | Op::Matches(_) => Kind::Boolean,
             Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
                 Kind::Text
             }
@@ -301,6 +304,7 @@ fn prepare_root(
                     Op::CharLength => Some(Instruction::CharLength),
                     Op::ToText => Some(Instruction::ToText),
                     Op::ToInteger => Some(Instruction::ToInteger),
+                    Op::Matches(regex) => Some(Instruction::Matches(regex.clone())),
                     _ => None,
                 };
                 if let Some(op) = unary {
@@ -370,6 +374,7 @@ fn prepare_root(
                     | Op::CharLength
                     | Op::ToText
                     | Op::ToInteger
+                    | Op::Matches(_)
                     | Op::Concat
                     | Op::StartsWith
                     | Op::EndsWith

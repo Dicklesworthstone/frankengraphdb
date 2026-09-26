@@ -53,6 +53,9 @@ pub enum GraphIntegerOp {
     /// openCypher toInteger: NULL, integer, Boolean or integer text to an
     /// integer; other text is NULL, as in openCypher.
     ToInteger,
+    /// openCypher `text =~ pattern`: a whole-string match of a pattern
+    /// compiled once, at preparation (fgdb regex profile 1).
+    Matches(Box<crate::regex::CompiledRegex>),
     Substring,
     Concat,
     StartsWith,
@@ -150,6 +153,12 @@ impl GraphIntegerOp {
             Self::CharLength => bytes.push(20),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
+            Self::Matches(regex) => {
+                bytes.push(32);
+                let source = regex.source().as_bytes();
+                bytes.extend_from_slice(&(source.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(source);
+            }
             Self::Substring => bytes.push(21),
             Self::Concat => bytes.push(22),
             Self::StartsWith => bytes.push(23),
@@ -181,6 +190,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::CharLength => f.write_str("CharLength"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
+            Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
             Self::Concat => f.write_str("Concat"),
             Self::StartsWith => f.write_str("StartsWith"),
@@ -355,6 +365,7 @@ enum Instruction {
     CharLength,
     ToText,
     ToInteger,
+    Matches(Box<crate::regex::CompiledRegex>),
     Substring,
     Concat,
     StartsWith,
@@ -607,6 +618,22 @@ impl GraphIntegerExpression {
                         Some(false)
                     };
                     *left = boolean_scalar(result).into();
+                }
+                Instruction::Matches(regex) => {
+                    let value = stack.last_mut().expect("validated text operand");
+                    let result = if let Some(text) = value.text().map_err(failure)? {
+                        // The Pike VM takes at most one step per character and
+                        // instruction; charge that bound before running it.
+                        let steps = text
+                            .len()
+                            .checked_mul(regex.program_len())
+                            .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                        charge_payload(steps, false, control)?;
+                        Some(regex.is_match(text))
+                    } else {
+                        None
+                    };
+                    *value = boolean_scalar(result).into();
                 }
                 Instruction::ToText | Instruction::ToInteger => {
                     let value = stack.last_mut().expect("validated conversion operand");
@@ -869,6 +896,12 @@ impl GraphIntegerExpression {
                 Instruction::CharLength => bytes.push(20),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
+                Instruction::Matches(regex) => {
+                    bytes.push(29);
+                    let source = regex.source().as_bytes();
+                    bytes.extend_from_slice(&(source.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(source);
+                }
                 Instruction::Substring => bytes.push(21),
                 Instruction::Concat => bytes.push(22),
                 Instruction::StartsWith => bytes.push(23),

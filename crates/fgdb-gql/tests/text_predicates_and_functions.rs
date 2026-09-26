@@ -557,3 +557,110 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
         Some(fgdb_gql::algebra::GraphValue::Scalar(text("1")))
     );
 }
+
+/// fgdb-20foe: openCypher `text =~ 'pattern'` is a whole-string match under
+/// fgdb regex profile 1. The pattern is a text literal compiled once, at
+/// preparation, so a malformed or out-of-profile pattern and a non-literal
+/// pattern refuse before execution. It filters in the graph pattern's WHERE,
+/// yields a three-valued Boolean in RETURN, fails typed on a non-text input,
+/// is part of the plan identity, and charges its bounded work.
+#[test]
+fn opencypher_regex_match_is_a_bounded_whole_string_match() {
+    let rows = |statement: &str, input: &CanonicalScalar| {
+        execute(&prepare(statement), input, policy())
+            .unwrap()
+            .value
+            .len()
+    };
+    for (pattern, text_value, expected) in [
+        ("A.*", "Ada", 1),
+        ("A.*", "bob", 0),
+        ("a", "Ada", 0),
+        ("(?i)ada", "ADA", 1),
+        ("[a-z]+@[a-z]+\\.com", "ada@lab.com", 1),
+        ("\\d{3}", "12", 0),
+    ] {
+        let statement = format!("MATCH (n) WHERE n.text =~ '{pattern}' RETURN n.text AS value");
+        assert_eq!(rows(&statement, &text(text_value)), expected, "{statement}");
+    }
+    assert_eq!(
+        scalar("n.text =~ 'a.c'", &text("abc")),
+        CanonicalScalar::Bool(true)
+    );
+    assert_eq!(
+        scalar("n.text =~ 'a.c'", &text("ab")),
+        CanonicalScalar::Bool(false)
+    );
+    assert_eq!(
+        scalar("n.text =~ 'a.c'", &CanonicalScalar::Null),
+        CanonicalScalar::Null
+    );
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN n.text =~ 'a' AS value"),
+            &CanonicalScalar::Int(1),
+            policy()
+        )
+        .is_err()
+    );
+    for statement in [
+        "MATCH (n) WHERE n.text =~ '(ab' RETURN n.text AS value",
+        "MATCH (n) WHERE n.text =~ '\\bword' RETURN n.text AS value",
+        "MATCH (n) WHERE n.text =~ n.text RETURN n.text AS value",
+        "MATCH (n) WHERE n.text =~ 1 RETURN n.text AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        prepare("MATCH (n) RETURN n.text =~ 'a+' AS value").canonical_bytes(),
+        prepare("MATCH (n) RETURN n.text =~ 'a+' AS value").canonical_bytes()
+    );
+    assert_ne!(
+        prepare("MATCH (n) RETURN n.text =~ 'a+' AS value").canonical_bytes(),
+        prepare("MATCH (n) RETURN n.text =~ 'a*' AS value").canonical_bytes()
+    );
+    // The pattern is part of the template identity too: two computed
+    // grouping keys differing only in their pattern stay two columns.
+    let keyed = fgdb_gql::PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.text AS t RETURN t =~ 'a.*' AS x, t =~ 'b.*' AS y, COUNT(*) AS c",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let input = text("ab");
+    let grouped = keyed
+        .execute_governed(
+            1,
+            [VId(1)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(Some(&input)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let keys = grouped.value[0].keys();
+    assert_eq!(keys[0].as_scalar(), Some(&CanonicalScalar::Bool(true)));
+    assert_eq!(keys[1].as_scalar(), Some(&CanonicalScalar::Bool(false)));
+    // Work is charged for text length x program size, differenced against a
+    // plain read of the same property.
+    let matcher = prepare("MATCH (n) RETURN n.text =~ 'x*' AS value");
+    let plain = prepare("MATCH (n) RETURN n.text AS value");
+    let work = |query: &PreparedGraphSet, input: &CanonicalScalar| {
+        execute(query, input, policy())
+            .unwrap()
+            .evaluator
+            .work_units
+    };
+    let (short, long) = (text("x"), text(&"x".repeat(1024)));
+    let counted_long = work(&matcher, &long) - work(&plain, &long);
+    let counted_short = work(&matcher, &short) - work(&plain, &short);
+    assert!(
+        counted_long >= counted_short + 1024 / 64,
+        "{counted_long} vs {counted_short}"
+    );
+}

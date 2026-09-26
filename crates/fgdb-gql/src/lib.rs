@@ -37,6 +37,7 @@ mod parameters;
 mod parser;
 mod pipeline_aggregate_text;
 mod prepared;
+pub mod regex;
 pub mod result_diff;
 pub mod row_aggregate;
 pub mod row_join;

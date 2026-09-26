@@ -446,6 +446,40 @@ impl<'a> Parser<'a> {
                 )?;
                 continue;
             }
+            // openCypher `text =~ 'pattern'`: the pattern is a text literal,
+            // compiled once here into fgdb regex profile 1 (fgdb-20foe).
+            if self.is_punct(b'=')
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'~'))
+            {
+                self.advance()?;
+                self.advance()?;
+                let pattern_at = self.current.at;
+                let expected = |item| {
+                    failure(
+                        pattern_at,
+                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                            item,
+                        )),
+                    )
+                };
+                let TokenKind::Quoted(raw) = self.current.kind else {
+                    return Err(expected("a regular-expression text literal after =~"));
+                };
+                let CanonicalScalar::Text(pattern) =
+                    crate::graph_text::literal::text_scalar(raw, pattern_at)?
+                else {
+                    return Err(expected("a regular-expression text literal after =~"));
+                };
+                let regex = crate::regex::CompiledRegex::compile(pattern.as_str())
+                    .map_err(|_| expected("a regular expression in fgdb regex profile 1"))?;
+                self.advance()?;
+                emit(
+                    program,
+                    ParsedOp::Bound(GraphIntegerOp::Matches(Box::new(regex))),
+                    at,
+                )?;
+                continue;
+            }
             if matches!(
                 self.current.kind,
                 TokenKind::Punct(b'=' | b'!' | b'<' | b'>')

@@ -258,7 +258,8 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'(') => depth += 1,
                 TokenKind::Punct(b')') if depth == 0 => break,
                 TokenKind::Punct(b')') => depth -= 1,
-                TokenKind::Punct(b'|') => return Ok(true),
+                // `||` concatenation and `=~` matching need the scalar compiler.
+                TokenKind::Punct(b'|' | b'~') => return Ok(true),
                 TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
                 TokenKind::Punct(b'-') => {
                     // A signed numeric RHS keeps the original typed comparison
