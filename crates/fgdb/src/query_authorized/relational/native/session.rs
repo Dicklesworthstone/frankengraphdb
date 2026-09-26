@@ -13,6 +13,8 @@ use fgdb_gql::{GraphSymbol, GraphSymbolKind, ReverseSymbolCatalog};
 use fgdb_warden::{Error as AuthorizationError, VerifiedCapability};
 use std::sync::Arc;
 
+#[path = "session/analytics.rs"]
+mod analytics;
 #[path = "session/batch.rs"]
 mod batch;
 #[path = "session/beacon.rs"]

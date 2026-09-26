@@ -30,7 +30,7 @@ fn control_error(error: QueryError) -> Error {
     }
 }
 
-fn preflight(call: &FnxCallSpec, direction: Directedness) -> Result<(), Error> {
+pub(super) fn preflight(call: &FnxCallSpec, direction: Directedness) -> Result<(), Error> {
     let required = call.signature().graph_kind;
     let compatible = match required {
         FnxGraphKind::Any => true,
@@ -128,24 +128,35 @@ impl<V: Vfs + Clone> Database<V> {
                     root: view.partition_root().0,
                     as_of: at,
                 };
-                execute(snapshot, binding, call, options, scope, execution)
+                execute(snapshot, binding, call, options, scope, execution, |_| {
+                    Ok(())
+                })
             },
         )
     }
 }
 
-fn execute<Clock: FnMut() -> u64>(
+// The optional caller meter adds fixed session policy to the SAME source,
+// builder and kernel. It never replaces the live signed execution permit.
+pub(super) fn execute<Clock: FnMut() -> u64>(
     snapshot: &Snapshot,
     binding: SnapshotBinding,
     call: &FnxCallSpec,
     options: FnxReadOptions,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: impl FnMut(SourceEvent) -> Result<(), QueryError>,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
+    let observe = RefCell::new(observe);
+    let checkpoint = || {
+        execution.borrow_mut().checkpoint()?;
+        observe.borrow_mut()(SourceEvent::Work)
+    };
     let mut work = 0u64;
     let mut scratch = 0u64;
     let mut control = |event| {
         execution.borrow_mut().checkpoint().map_err(control_error)?;
+        observe.borrow_mut()(event).map_err(control_error)?;
         let (counter, limit, resource) = match event {
             SourceEvent::Work | SourceEvent::SnapshotRecord => (
                 &mut work,
@@ -179,6 +190,8 @@ fn execute<Clock: FnMut() -> u64>(
             }
         }
         execution.borrow_mut().node().map_err(control_error)?;
+        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
+        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
         if options.selection.vertex_label.is_some_and(|label| {
             !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
         }) {
@@ -206,6 +219,8 @@ fn execute<Clock: FnMut() -> u64>(
             return Ok(());
         }
         control(SourceEvent::Work)?;
+        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
+        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
         if entry.src == entry.dst {
             match options.projection.self_loops {
                 SelfLoopPolicy::Drop => return Ok(()),
@@ -254,7 +269,7 @@ fn execute<Clock: FnMut() -> u64>(
         edges,
         options.projection,
         options.projection_limits,
-        || execution.borrow_mut().checkpoint(),
+        checkpoint,
     )
     .map_err(|error| match error {
         ProjectionBuildError::Cancelled(error) => control_error(error),
@@ -265,7 +280,7 @@ fn execute<Clock: FnMut() -> u64>(
     limits.max_result_rows = limits
         .max_result_rows
         .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
-    let result = call.execute(&graph, limits, || execution.borrow_mut().checkpoint());
+    let result = call.execute(&graph, limits, checkpoint);
     // Translate a signed-row refusal back to Warden, without allocating a
     // forbidden result first. The shared delivery gate still checks successful
     // results with fresh time; zero rows do not bypass retirement or expiry.
