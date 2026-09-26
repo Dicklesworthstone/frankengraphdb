@@ -705,6 +705,61 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
     }
 }
 
+/// fgdb-1tgko: the WITH before an aggregate RETURN reads carried-vertex
+/// properties in its WHERE and pages exactly as the explicit column would,
+/// and the hidden columns never reach the aggregate's input schema.
+#[test]
+fn a_with_before_an_aggregate_reads_carried_properties_in_its_where_and_pages() {
+    let input = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
+    for (boundary, explicit, expected) in [
+        (
+            "MATCH (n) WITH n WHERE n.p = 2 RETURN COUNT(*) AS c",
+            "MATCH (n) WITH n, n.p AS h WHERE h = 2 RETURN COUNT(*) AS c",
+            2,
+        ),
+        (
+            "MATCH (n) WITH n AS m ORDER BY m.p DESC LIMIT 3 RETURN COUNT(m) AS c",
+            "MATCH (n) WITH n AS m, n.p AS h ORDER BY h DESC LIMIT 3 RETURN COUNT(m) AS c",
+            3,
+        ),
+        (
+            "MATCH (n) WITH n LIMIT 4 WHERE n.p > 1 RETURN COUNT(*) AS c",
+            "MATCH (n) WITH n, n.p AS h LIMIT 4 WHERE h > 1 RETURN COUNT(*) AS c",
+            3,
+        ),
+    ] {
+        let found = run(&query(boundary), &input, wide()).value;
+        assert_eq!(
+            found,
+            run(&query(explicit), &input, wide()).value,
+            "{boundary}"
+        );
+        assert_eq!(
+            found[0].values()[0].as_count(),
+            Some(expected),
+            "{boundary}"
+        );
+    }
+    let template = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN n AS owner, COUNT(*) AS c",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.columns(), &["owner", "c"]);
+    // The private names never resolve. A carried property inside the
+    // aggregate RETURN itself is outside the boundary scope until fgdb-djlxq
+    // lifts it deliberately: the hidden columns are projected away first.
+    for text in [
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN COUNT(__fg_boundary_0) AS c",
+        "MATCH (n) WITH n WHERE n.p = 2 RETURN COUNT(n.p) AS c",
+    ] {
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn computed_arguments_preserve_wide_aggregate_domains_and_empty_input() {
     let bound = query("MATCH (n) WITH n.p AS x RETURN SUM(x+0) AS total,AVG(x+0) AS mean");

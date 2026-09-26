@@ -35,22 +35,20 @@ const BOUNDARY_READ_NAMES: [&str; 16] = [
     "__fg_boundary_15",
 ];
 
-/// Whether `word` ends the WHERE of a WITH at nesting depth zero. `WITH`
-/// after STARTS/ENDS is a text predicate, not a new clause.
-fn ends_boundary_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+/// Whether `word`, at nesting depth zero, ends the scope in which a graph-to-row
+/// WITH's hidden reads can resolve. The scope ends at a later WITH or UNWIND
+/// stage, another MATCH, a CALL, or a set operator. The WITH's own WHERE, its
+/// pages and a terminal RETURN are inside the scope. `WITH` after STARTS/ENDS
+/// is a text predicate, not a new clause.
+fn ends_boundary_scope(word: &str, previous: Option<TokenKind<'_>>) -> bool {
     if word.eq_ignore_ascii_case("WITH") {
         return !matches!(previous, Some(TokenKind::Word(previous))
             if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
     }
     [
-        "RETURN",
         "MATCH",
         "OPTIONAL",
         "UNWIND",
-        "ORDER",
-        "SKIP",
-        "OFFSET",
-        "LIMIT",
         "UNION",
         "EXCEPT",
         "INTERSECT",
@@ -124,22 +122,36 @@ fn emit(
 }
 
 impl<'a> Parser<'a> {
-    /// `WITH n WHERE n.p = 3`: the WHERE of the graph-to-row boundary may read
-    /// a property of a MATCH vertex the WITH projects as-is (under its
-    /// own name or an alias). Each such read becomes a hidden column of the
-    /// boundary projection itself — the same graph read `WITH n.p AS x` makes
-    /// — which only that WHERE can resolve, and the first WHERE stage drops
-    /// the hidden columns before any page, later stage or `RETURN *` sees
-    /// them. A property is a function of its element, so hidden columns never
-    /// change DISTINCT or multiplicity. Reads after a page, in later stages,
-    /// or through computed or carried values stay refused as before.
-    /// `offset` is where this head's graph inputs start in its column space.
+    /// `WITH n WHERE n.p = 3 RETURN n.q`: the rest of the graph-to-row
+    /// boundary's scope may read a property of a MATCH vertex the WITH
+    /// projects as-is (under its own name or an alias). That scope is the
+    /// WITH's WHERE, its pages and a terminal RETURN (fgdb-1tgko), unless
+    /// `through_return` is false: an aggregate RETURN addresses row aliases
+    /// only, so the prefix projects the hidden columns away before it
+    /// (fgdb-djlxq tracks lifting that). Each such read becomes a hidden
+    /// column of the boundary projection itself, the same graph read
+    /// `WITH n.p AS x` makes. Only `alias.property` resolves it, never its
+    /// private name. The hidden columns are projected away before a later
+    /// stage, another MATCH part, an aggregate RETURN or `*` can see them. A
+    /// property is a function of its element, so hidden columns never change
+    /// DISTINCT or multiplicity. Reads in later stages or through computed or
+    /// carried values stay refused as before; a page after the RETURN belongs
+    /// to the set parser, which addresses the RETURN's own columns. `offset`
+    /// is where this head's graph inputs start in its column space.
     pub(super) fn hoist_boundary_reads(
         &mut self,
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
+        through_return: bool,
     ) -> Result<(), GraphSetTextError> {
-        if !head.with || !self.is_word("WHERE") {
+        if !head.with {
+            return Ok(());
+        }
+        // The token after the projection list is not scanned. If it already
+        // ends the scope (a second WITH, UNWIND, MATCH ...), there is no scope.
+        if let TokenKind::Word(word) = self.current.kind
+            && ends_boundary_scope(word, None)
+        {
             return Ok(());
         }
         let visible = head.outputs.len();
@@ -161,7 +173,7 @@ impl<'a> Parser<'a> {
                     depth = outer;
                 }
                 TokenKind::Word(word)
-                    if depth == 0 && !after_dot && ends_boundary_where(word, window[2]) =>
+                    if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>
                 {
                     break;
                 }
@@ -169,16 +181,16 @@ impl<'a> Parser<'a> {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
                         && let Some(variable) = boundary_binding(head, offset, alias)
-                        && !reads
-                            .iter()
-                            .any(|&(read, key, _)| read == alias && key == property)
+                        && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
+                            read == alias && key.text == property
+                        })
                     {
                         let Some(&name) = BOUNDARY_READ_NAMES.iter().find(|name| {
                             head.outputs.iter().all(|(output, _)| output.text != **name)
                         }) else {
                             return Err(expected(
                                 token.at,
-                                "at most 16 property reads in the WHERE of a WITH",
+                                "at most 16 carried-vertex property reads after a WITH",
                             ));
                         };
                         let key = Name {
@@ -194,7 +206,7 @@ impl<'a> Parser<'a> {
                             },
                             ReadValueTemplate::Column(offset + input),
                         ));
-                        reads.push((alias, property, head.outputs.len() - 1));
+                        reads.push((alias, key, head.outputs.len() - 1));
                     }
                 }
                 _ => {}
@@ -205,16 +217,34 @@ impl<'a> Parser<'a> {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: head.outputs.len(),
+                through_return,
                 reads,
             });
         }
         Ok(())
     }
 
+    /// The output name of an unaliased hidden read in a RETURN over a row of
+    /// `width`: `n.p` is named `p`, exactly as a graph RETURN names it.
+    fn boundary_key(&self, width: usize, column: usize) -> Option<Name<'a>> {
+        let boundary = self.boundary_reads.as_ref()?;
+        if boundary.width != width {
+            return None;
+        }
+        boundary
+            .reads
+            .iter()
+            .find(|&&(_, _, read)| read == column)
+            .map(|&(_, key, _)| key)
+    }
+
     /// Resolve `alias.property` at the current token to its hidden boundary
-    /// column when `width` is the boundary WHERE's row, consuming all three
-    /// tokens; `None` consumes nothing.
-    fn boundary_read(&mut self, width: usize) -> Result<Option<usize>, GraphPatternTextError> {
+    /// column when `width` is the boundary row, consuming all three tokens;
+    /// `None` consumes nothing.
+    pub(in crate::graph_text) fn boundary_read(
+        &mut self,
+        width: usize,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
         let (Some(boundary), TokenKind::Word(alias)) = (&self.boundary_reads, self.current.kind)
         else {
             return Ok(None);
@@ -232,7 +262,7 @@ impl<'a> Parser<'a> {
         let Some(&(_, _, column)) = boundary
             .reads
             .iter()
-            .find(|&&(read, key, _)| read == alias && key == property)
+            .find(|&&(read, key, _)| read == alias && key.text == property)
         else {
             return Ok(None);
         };
@@ -240,6 +270,60 @@ impl<'a> Parser<'a> {
             self.advance()?;
         }
         Ok(Some(column))
+    }
+
+    /// Project hidden boundary reads away (fgdb-1tgko) before a scope they
+    /// must not reach: a later WITH or UNWIND stage, the next MATCH part, or
+    /// the end of the statement. A no-op when this row carries none.
+    fn drop_boundary_reads(
+        &mut self,
+        schema: &mut RowSchema<'a>,
+        stages: &mut Vec<ReadStageTemplate>,
+        depth: &mut usize,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        if !self
+            .boundary_reads
+            .as_ref()
+            .is_some_and(|boundary| boundary.width == schema.len())
+        {
+            return Ok(());
+        }
+        let Some(boundary) = self.boundary_reads.take() else {
+            return Ok(());
+        };
+        let projection = schema[..boundary.visible]
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(index),
+            })
+            .collect();
+        append_stage(
+            stages,
+            ReadStageTemplate::Project {
+                at,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+            },
+            depth,
+        )?;
+        schema.truncate(boundary.visible);
+        Ok(())
+    }
+
+    /// The columns a name or `*` may resolve to: all of `schema`, minus any
+    /// hidden boundary reads this row carries (their private names never
+    /// resolve by text).
+    pub(in crate::graph_text) fn visible_width(
+        &self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> usize {
+        self.boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == schema.len())
+            .map_or(schema.len(), |boundary| boundary.visible)
     }
 
     pub(super) fn row_pipeline(
@@ -259,6 +343,8 @@ impl<'a> Parser<'a> {
             GraphSetQuantifier::All
         };
         let (projection, _) = self.row_projection(&schema)?;
+        // The terminal RETURN is the last reader of any hidden boundary read.
+        self.boundary_reads = None;
         append_stage(
             &mut stages,
             ReadStageTemplate::Project {
@@ -286,39 +372,15 @@ impl<'a> Parser<'a> {
                 append_stage(&mut stages, page, &mut depth)?;
             }
             let at = self.current.at;
-            if self.take_word("UNWIND")? {
+            if self.is_word("UNWIND") {
+                self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+                self.word("UNWIND")?;
                 let stage = self.unwind_stage(&mut schema, at)?;
                 append_stage(&mut stages, stage, &mut depth)?;
                 continue;
             }
             if self.take_word("WHERE")? {
                 self.row_selection(&schema, &mut stages, &mut depth, at)?;
-                if self
-                    .boundary_reads
-                    .as_ref()
-                    .is_some_and(|boundary| boundary.width == schema.len())
-                    && let Some(boundary) = self.boundary_reads.take()
-                {
-                    // Hidden boundary reads end with this WHERE.
-                    let projection = schema[..boundary.visible]
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (name, _))| ReadProjectionTemplate {
-                            name: name.text.to_owned(),
-                            value: ReadValueTemplate::Column(index),
-                        })
-                        .collect();
-                    append_stage(
-                        &mut stages,
-                        ReadStageTemplate::Project {
-                            at,
-                            projection,
-                            quantifier: GraphSetQuantifier::All,
-                        },
-                        &mut depth,
-                    )?;
-                    schema.truncate(boundary.visible);
-                }
                 // A page written after WHERE applies to the filtered rows.
                 // Keep any earlier page on its input: moving either page across
                 // this filter changes which occurrences survive.
@@ -333,9 +395,22 @@ impl<'a> Parser<'a> {
                 }
             }
             let at = self.current.at;
-            if !self.take_word("WITH")? {
+            if !self.is_word("WITH") {
+                // A terminal RETURN in the boundary scope resolves the hidden
+                // reads. An aggregate RETURN, the next MATCH part or the end
+                // of the statement must not see them.
+                let resolves = self.is_word("RETURN")
+                    && self
+                        .boundary_reads
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.through_return);
+                if !resolves {
+                    self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+                }
                 break;
             }
+            self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+            self.word("WITH")?;
             let distinct = self.take_word("DISTINCT")?;
             if !distinct {
                 self.take_word("ALL")?;
@@ -367,7 +442,8 @@ impl<'a> Parser<'a> {
         let mut projection = Vec::new();
         let mut next_schema: RowSchema<'a> = Vec::new();
         if self.take(b'*')? {
-            for (index, &(name, kind)) in schema.iter().enumerate() {
+            let visible = self.visible_width(schema);
+            for (index, &(name, kind)) in schema[..visible].iter().enumerate() {
                 projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
                     value: ReadValueTemplate::Column(index),
@@ -386,7 +462,8 @@ impl<'a> Parser<'a> {
                 let alias = if self.take_word("AS")? {
                     self.name()?
                 } else if let ReadValueTemplate::Column(column) = &value {
-                    schema[*column].0
+                    self.boundary_key(schema.len(), *column)
+                        .unwrap_or(schema[*column].0)
                 } else {
                     return Err(expected(at, "AS alias for a computed row value"));
                 };
@@ -452,17 +529,26 @@ impl<'a> Parser<'a> {
             present = true;
             self.word("BY")?;
             loop {
-                let name = self.name()?;
-                let column = schema
-                    .iter()
-                    .position(|(alias, _)| alias.text == name.text)
-                    .ok_or_else(|| expected(name.at, "projected WITH column"))?;
+                // `alias.property` of a carried MATCH vertex orders by its
+                // hidden boundary read; every other key is a visible column.
+                let key_start = self.current.at;
+                let (column, key_at) = if let Some(column) = self.boundary_read(schema.len())? {
+                    (column, key_start)
+                } else {
+                    let visible = self.visible_width(schema);
+                    let name = self.name()?;
+                    let column = schema[..visible]
+                        .iter()
+                        .position(|(alias, _)| alias.text == name.text)
+                        .ok_or_else(|| expected(name.at, "projected WITH column"))?;
+                    (column, name.at)
+                };
                 if order
                     .iter()
                     .any(|key: &GraphValueOrder| key.column == column)
                 {
                     return Err(GraphSetTextError {
-                        offset: name.at,
+                        offset: key_at,
                         kind: GraphSetTextErrorKind::OrderBuild(
                             crate::algebra::GraphOrderError::DuplicateColumn { column },
                         ),

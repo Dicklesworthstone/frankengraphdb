@@ -432,16 +432,20 @@ struct Parser<'a> {
     boundary_reads: Option<BoundaryReads<'a>>,
 }
 
-/// Property reads the WHERE of a graph-to-row WITH makes through a projected
-/// MATCH binding (`WITH n WHERE n.p = 3`). Each is a hidden column appended to
-/// the boundary projection after its `visible` columns; only that first WHERE
-/// resolves `alias.property` to one, and the hidden columns are projected away
-/// right after it. `width` is that WHERE's row width, visible plus hidden; a
-/// selection over any other row (a nested scope) sees none of this.
+/// Property reads a graph-to-row WITH's scope makes through a projected MATCH
+/// binding (`WITH n WHERE n.p = 3 ORDER BY n.q RETURN n.r`). Each is a hidden
+/// column appended to the boundary projection after its `visible` columns.
+/// Within the scope, `alias.property` resolves to one; the hidden columns are
+/// projected away before any later stage or part. `width` is the boundary
+/// row's width, visible plus hidden; an expression over any other row (a
+/// nested scope) sees none of this. `through_return` says whether a terminal
+/// RETURN is inside the scope (never an aggregate RETURN). Each read is the
+/// carried alias, the property name (with its first offset) and the column.
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
-    reads: Vec<(&'a str, &'a str, usize)>,
+    through_return: bool,
+    reads: Vec<(&'a str, Name<'a>, usize)>,
 }
 
 impl<'a> Parser<'a> {

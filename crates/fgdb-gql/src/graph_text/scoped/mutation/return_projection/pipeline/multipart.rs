@@ -439,7 +439,7 @@ impl<'a> Parser<'a> {
         // graph_projection_head numbers its graph inputs from zero; a
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
-        self.hoist_boundary_reads(&mut head, offset)?;
+        self.hoist_boundary_reads(&mut head, offset, !aggregate)?;
         if head.inputs.is_empty() {
             // A constant projection still emits once per graph occurrence.
             self.mutation_projection(&mut head.inputs, self.syntax.variables[0], None)?;
@@ -474,6 +474,8 @@ impl<'a> Parser<'a> {
                 self.take_word("ALL")?;
             }
             let (projection, schema) = self.row_projection(&next)?;
+            // The terminal RETURN is the last reader of any hidden boundary read.
+            self.boundary_reads = None;
             pipeline.push(ReadStageTemplate::Project {
                 at,
                 projection,

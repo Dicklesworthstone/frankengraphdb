@@ -296,7 +296,7 @@ fn computed_with_predicates_filter_the_projected_rows() {
 /// graph-to-row boundary. Its rows equal the MATCH-level WHERE under the
 /// binding's own name, an alias, DISTINCT and a page after the WHERE, and the
 /// hidden column never reaches RETURN *, a later WITH *, or a lookup by its
-/// private name. Reads after a page or in a later stage stay refused.
+/// private name. Reads in a later stage stay refused.
 #[test]
 fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_columns() {
     let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -345,9 +345,104 @@ fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_c
     for text in [
         "MATCH (n) WITH n WHERE n.p = 2 AND __fg_boundary_0 = 2 RETURN n",
         "MATCH (n) WITH n WHERE n.p = 2 RETURN __fg_boundary_0",
-        "MATCH (n) WITH n LIMIT 3 WHERE n.p = 2 RETURN n",
         "MATCH (n) WITH n WITH n WHERE n.p = 2 RETURN n",
-        "MATCH (n) WITH n WHERE n.p = 2 RETURN n.p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// fgdb-1tgko: the boundary's scope also covers the WITH's pages, a WHERE
+/// after a page, and a terminal RETURN. `WITH n ... RETURN n.p` equals the
+/// same query with `n.p` projected as an explicit WITH column, or read before
+/// the WITH, and an unaliased `n.p` is named `p` as in a graph RETURN. Each
+/// UNION arm owns its own scope. A later stage, a later MATCH part, and the
+/// private names stay out of scope, including a later row that happens to
+/// have the boundary row's width.
+#[test]
+fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
+    let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .map(|template| template.bind_parameters(&GqlParameters::new()).unwrap())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        run(&query, &values, wide(), &mut || Ok(())).unwrap().value
+    };
+    for (boundary, explicit) in [
+        (
+            "MATCH (n) WITH n RETURN n.p AS v ORDER BY v",
+            "MATCH (n) RETURN n.p AS v ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n WHERE n.p >= 2 RETURN n.p AS v, n ORDER BY n",
+            "MATCH (n) WHERE n.p >= 2 RETURN n.p AS v, n ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n AS m ORDER BY m.p DESC LIMIT 2 RETURN m.p AS v",
+            "MATCH (n) WITH n.p AS v ORDER BY v DESC LIMIT 2 RETURN v",
+        ),
+        (
+            "MATCH (n) WITH n LIMIT 3 WHERE n.p = 2 RETURN n ORDER BY n",
+            "MATCH (n) WITH n, n.p AS h LIMIT 3 WHERE h = 2 RETURN n ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n RETURN DISTINCT n.p AS v ORDER BY v",
+            "MATCH (n) WITH n.p AS v RETURN DISTINCT v ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH DISTINCT n WHERE n.p > 1 RETURN n.p * 10 AS v, n ORDER BY n",
+            "MATCH (n) WHERE n.p > 1 RETURN n.p * 10 AS v, n ORDER BY n",
+        ),
+    ] {
+        let found = rows(boundary);
+        assert!(!found.is_empty(), "{boundary}");
+        assert_eq!(found, rows(explicit), "{boundary}");
+    }
+    // The WITH page keeps the two largest; only a terminal ORDER BY orders
+    // the result.
+    assert_eq!(
+        ints(
+            &rows(
+                "MATCH (n) WITH n AS m ORDER BY m.p DESC LIMIT 2 RETURN m.p AS v ORDER BY v DESC"
+            ),
+            0
+        ),
+        vec![Some(4), Some(3)]
+    );
+    let mut arms = ints(
+        &rows("MATCH (n) WITH n WHERE n.p = 2 RETURN n.p AS v UNION ALL MATCH (m) RETURN m.p AS v"),
+        0,
+    );
+    arms.sort();
+    assert_eq!(
+        arms,
+        [1, 2, 2, 2, 2, 3, 4].map(Some).to_vec(),
+        "a UNION arm after a boundary RETURN"
+    );
+    for (text, columns) in [
+        ("MATCH (n) WITH n RETURN n.p", &["p"][..]),
+        ("MATCH (n) WITH n AS m RETURN m, m.p AS q", &["m", "q"][..]),
+        ("MATCH (n) WITH n ORDER BY n.p RETURN *", &["n"][..]),
+    ] {
+        let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(template.columns(), columns, "{text}");
+        assert!(
+            rows(text).iter().all(|row| row.len() == columns.len()),
+            "{text}"
+        );
+    }
+    for text in [
+        "MATCH (n) WITH n RETURN n.p AS v, __fg_boundary_0",
+        "MATCH (n) WITH n ORDER BY __fg_boundary_0 RETURN n.p",
+        "MATCH (n) WITH n RETURN n.p, n.p",
+        "MATCH (n) WITH n WITH n RETURN n.p",
+        "MATCH (n) WITH n UNWIND [1] AS x RETURN n.p",
+        "MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v",
+        // Two columns again after the second WITH, as the boundary row had
+        // (n plus the hidden n.p): the hidden read must not resolve to `a`.
+        "MATCH (n) WITH n ORDER BY n.p WITH n, 1 AS a RETURN n.p",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),

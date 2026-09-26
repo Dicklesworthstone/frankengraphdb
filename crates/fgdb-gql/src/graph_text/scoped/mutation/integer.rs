@@ -626,8 +626,18 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: &[(Name<'a>, crate::GraphSetColumnType)],
     ) -> Result<Operand, GraphPatternTextError> {
+        // `n.p` of a carried MATCH vertex inside a graph-to-row WITH's scope
+        // reads its hidden boundary column (fgdb-1tgko); the private names of
+        // those columns never resolve as text.
+        if let Some(column) = self.boundary_read(schema.len())? {
+            return Ok(Operand::Column(column));
+        }
         if let TokenKind::Word(word) = self.current.kind {
-            if let Some(column) = schema.iter().position(|(name, _)| name.text == word) {
+            let visible = self.visible_width(schema);
+            if let Some(column) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == word)
+            {
                 self.advance()?;
                 return Ok(Operand::Column(column));
             }

@@ -411,11 +411,7 @@ impl<'a> Parser<'a> {
         // expressions. This callback resolves ONLY the current WITH aliases.
         // Hidden boundary reads resolve only as `alias.property`, never by
         // their private names.
-        let visible = self
-            .boundary_reads
-            .as_ref()
-            .filter(|boundary| boundary.width == schema.len())
-            .map_or(schema.len(), |boundary| boundary.visible);
+        let visible = self.visible_width(schema);
         self.read_resolved_value(
             &mut |parser| {
                 if let Some(column) = parser.boundary_read(schema.len())? {
