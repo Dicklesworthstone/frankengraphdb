@@ -13,6 +13,8 @@ use fgdb_gql::{
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use std::cell::RefCell;
 
+#[path = "edge_upsert.rs"]
+mod edge_upsert;
 #[path = "vertex_merge.rs"]
 mod vertex;
 
