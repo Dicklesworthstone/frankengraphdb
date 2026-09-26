@@ -2,7 +2,7 @@
 //! authorized writers. No step publishes or gets an independent capability.
 
 use super::super::super::{
-    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn, WriteTxnError,
     deletion, edge_merge, insert, mutation,
 };
 use fgdb_gql::{
@@ -19,6 +19,8 @@ use fgdb_gql::{GqlQueryError, GraphMutationError};
 
 #[path = "edge_upsert.rs"]
 mod edge_upsert;
+#[path = "write_query.rs"]
+mod query;
 #[path = "write_script.rs"]
 mod script;
 #[path = "vertex_merge.rs"]
@@ -181,7 +183,45 @@ impl<V: Vfs + Clone> Database<V> {
         returning: bool,
         receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> Receipt,
     ) -> Result<(Receipt, EmbeddedTxnCompletion), Fault> {
-        let refusal = |error| preflight(WriteTxnError::Authorization(error));
+        self.complete_authorized_program_with_output(
+            txn_cx, query_cx, commit_cx, program, policy, scope, execution, returning,
+            |_, _, _, stats, steps| Ok(receipt(stats, steps)),
+            core::convert::identity,
+        ).await
+    }
+
+    // Result construction may execute a governed query, but is always inside
+    // this private workspace and BEFORE the one native completion. The fixed
+    // return type cannot borrow transaction rows or return the workspace itself.
+    // Pure receipts and queried results share this exact dispatch/commit body.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_authorized_program_with_output<
+        'cx,
+        'permit,
+        Receipt,
+        Failure,
+        Clock: FnMut() -> u64,
+    >(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        program: &PreparedGraphWriteProgram,
+        policy: GraphWriteProgramPolicy,
+        scope: &PlannerPredicates,
+        execution: &mut Execution<'cx, 'permit, Clock>,
+        returning: bool,
+        receipt: impl FnOnce(
+            &WriteTxn,
+            &Database<V>,
+            &mut Execution<'cx, 'permit, Clock>,
+            GraphWriteProgramStats,
+            Vec<GraphWriteStepReceipt>,
+        ) -> Result<Receipt, Failure>,
+        map_error: impl Fn(Fault) -> Failure,
+    ) -> Result<(Receipt, EmbeddedTxnCompletion), Failure> {
+        let fail = |error| map_error(preflight(error));
+        let refusal = |error| fail(WriteTxnError::Authorization(error));
         commit_cx
             .with_restriction_async(async {
                 // Validate the COMPLETE immutable shape before even opening a
@@ -192,8 +232,8 @@ impl<V: Vfs + Clone> Database<V> {
                         query_cx
                             .checkpoint()
                             .map_err(WriteTxnError::Interrupted)
-                            .map_err(preflight)?;
-                        execution.poll().map_err(preflight)?;
+                            .map_err(&fail)?;
+                        execution.poll().map_err(&fail)?;
                         let reads = match statement {
                             GraphWriteStatement::Insert(input) => input.selection().is_some(),
                             GraphWriteStatement::Mutation(_)
@@ -219,11 +259,11 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     Ok(())
                 })?;
-                execution.checkpoint().map_err(preflight)?;
+                execution.checkpoint().map_err(&fail)?;
                 let mut workspace = Workspace(Some(
                     self.begin(txn_cx)
                         .map_err(WriteTxnError::Write)
-                        .map_err(preflight)?,
+                        .map_err(&fail)?,
                 ));
                 workspace.transaction().program_multi_relation = true;
                 let mut receipts = Vec::new();
@@ -368,11 +408,11 @@ impl<V: Vfs + Clone> Database<V> {
                             execution.borrow_mut().checkpoint()
                         },
                     )
-                })?;
+                }).map_err(&map_error)?;
                 let completed_statements = stats.completed_statements;
                 // Both public APIs build their final value here. There is no
                 // allocation, optional-receipt unwrap or auth check after commit.
-                let receipt = receipt(stats, receipts);
+                let receipt = receipt(workspace.transaction(), self, execution, stats, receipts)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -381,10 +421,10 @@ impl<V: Vfs + Clone> Database<V> {
                     })
                     .await
                     .map_err(|source| {
-                        Fault::Program(GraphMutationProgramError::Interrupted {
+                        map_error(Fault::Program(GraphMutationProgramError::Interrupted {
                             completed_statements,
                             source,
-                        })
+                        }))
                     })?;
                 Ok((receipt, completion))
             })

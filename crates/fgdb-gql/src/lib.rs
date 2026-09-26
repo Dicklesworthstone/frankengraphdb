@@ -56,6 +56,7 @@ mod vertex_merge;
 mod vertex_upsert;
 mod vertex_upsert_text;
 mod walk;
+mod write_query;
 mod write_receipt;
 mod write_script;
 
@@ -212,4 +213,5 @@ pub use vertex_upsert_text::{
     GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
 };
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
+pub use write_query::GraphWriteQueryError;
 pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};
