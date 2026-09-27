@@ -3,14 +3,14 @@
 
 use super::{
     AdmissionUsage, Database, GlaOutput, Governed, GqlQueryError, GqlQueryPolicy,
-    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables, VertexRow,
+    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables,
     Vfs, execute_tables,
 };
-use crate::EdgeRecord;
+use crate::write_txn::overlay_scan::OverlayRows;
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Internal only: rows must be from the same exclusively borrowed native
-    /// WriteTxn's vertices()/edges() at its pinned basis. That source retains
+    /// Internal only: the owner borrows the native transaction and its database
+    /// at the pinned basis and owns only changed rows. That source retains
     /// the native read dependencies and resolves its canonical prepared net
     /// effects, including deletes and ensure aliases, BEFORE scope admission.
     /// The trusted caller already verified ReadWrite rights and owns the one
@@ -19,8 +19,7 @@ impl<V: Vfs + Clone> Database<V> {
     pub(crate) fn select_for_authorized_overlay<Row: GlaOutput>(
         &self,
         cx: &QueryCx,
-        vertices: &[VertexRow],
-        edges: &[EdgeRecord],
+        overlay: &OverlayRows<'_, V>,
         pattern: &PreparedGraphPattern<Row>,
         scope: &PlannerPredicates,
         policy: GqlQueryPolicy,
@@ -38,27 +37,25 @@ impl<V: Vfs + Clone> Database<V> {
                     checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe::<ReadError, QueryError>(policy, event)
                 };
-                for row in vertices {
-                    // Original hidden rows incur cancellation polls, not
-                    // signed/native resource charges (FG-INV-20).
-                    poll().map_err(GqlQueryError::Interrupted)?;
+                // Historical traversal and sparse shadowing never bill hidden
+                // data. Tables admit each winner BEFORE retaining its reference.
+                let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
+                overlay.visit_vertices(&mut scan, |row, _| {
                     tables.admit_vertex(
                         row,
                         scope,
                         &mut || node().map_err(GqlQueryError::Interrupted),
                         &mut control,
-                    )?;
-                }
+                    )
+                })?;
                 if pattern.plan().reads_edges() {
-                    for record in edges {
-                        poll().map_err(GqlQueryError::Interrupted)?;
-                        let edge = &record.entry;
+                    overlay.visit_edges(&mut scan, |edge, properties, _| {
                         tables.admit_edge(
-                            ((edge.eid, edge.src, edge.relation, edge.dst), &record.props),
+                            ((edge.eid, edge.src, edge.relation, edge.dst), properties),
                             scope,
                             &mut control,
-                        )?;
-                    }
+                        )
+                    }).ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
                 }
                 tables.metadata(pattern.plan(), scope, &mut control)?;
             }

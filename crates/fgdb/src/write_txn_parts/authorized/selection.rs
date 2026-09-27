@@ -3,6 +3,7 @@
 
 use super::{Database, Error, Execution, Vfs, WriteTxn, WriteTxnError};
 use crate::query::QueryError;
+use crate::write_txn::overlay_scan::OverlayRows;
 use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
 use fgdb_gql::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 use fgdb_types::QueryCx;
@@ -59,11 +60,12 @@ pub(super) fn select<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
 }
 
 /// Resolve the native canonical overlay before masking. Raw staged intentions
-/// are never replayed here: vertices()/edges() already handle ensure aliases,
-/// removals, no-ops and the exact prepared effects that Chronicle will publish.
-/// The exclusive database borrow pins this basis across every program step.
-/// Native materialization is resident and not preemptible within one read;
-/// hidden rows only poll cancellation once they enter the shared admission loop.
+/// are never replayed here. The sparse owner uses the existing canonical-effect
+/// applicators and borrows unchanged historical winners, so admission can refuse
+/// without cloning the entire raw graph. Traversal and sparse construction poll
+/// cancellation; only admitted rows consume signed/native query allowances.
+/// The resident generation, changed-row payloads and conflict witnesses are not
+/// a bounded-byte or spillable storage abstraction.
 pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
     database: &Database<V>,
@@ -90,28 +92,22 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
         return select(database, cx, pattern, scope, policy, execution);
     }
     cx.with_restriction(|| {
-        let poll = || {
+        let mut poll = || {
             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
             execution.borrow_mut().poll()
         };
         poll().map_err(GqlQueryError::Interrupted)?;
-        let vertices = transaction
-            .vertices(database)
-            .map_err(super::redacted)
-            .map_err(GqlQueryError::Source)?;
-        poll().map_err(GqlQueryError::Interrupted)?;
-        let edges = if pattern.plan().reads_edges() {
-            transaction
-                .edges(database)
-                .map_err(super::redacted)
-                .map_err(GqlQueryError::Source)?
-        } else {
-            Vec::new()
-        };
+        let overlay = OverlayRows::new(transaction, database, pattern.plan().reads_edges(), &mut poll)
+            .map_err(|error| match error {
+                error @ (WriteTxnError::Interrupted(_) | WriteTxnError::Authorization(_)) => {
+                    GqlQueryError::Interrupted(error)
+                }
+                error => GqlQueryError::Source(super::redacted(error)),
+            })?;
         poll().map_err(GqlQueryError::Interrupted)?;
         controlled(cx, execution, |node, poll, checkpoint| {
             database.select_for_authorized_overlay(
-                cx, &vertices, &edges, pattern, scope, policy, node, poll, checkpoint,
+                cx, &overlay, pattern, scope, policy, node, poll, checkpoint,
             )
         })
     })

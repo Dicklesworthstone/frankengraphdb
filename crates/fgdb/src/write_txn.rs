@@ -11,6 +11,8 @@ mod authorized;
 mod beacon;
 #[path = "write_txn_parts/native_query.rs"]
 mod native_query;
+#[path = "write_txn_parts/overlay_scan.rs"]
+pub(crate) mod overlay_scan;
 
 include!("write_txn_parts/preamble.rs");
 include!("write_txn_parts/lifecycle.rs");
