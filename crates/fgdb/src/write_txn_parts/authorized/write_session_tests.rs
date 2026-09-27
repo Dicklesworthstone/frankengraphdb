@@ -5,8 +5,10 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, SchemaEpoch};
 use fgdb_gql::insertion::GraphInsertRequest;
-use fgdb_gql::{GqlQueryPolicy, GraphWriteProgramError, GraphMutationProgramError};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_gql::{GqlQueryPolicy, GraphMutationProgramError, GraphWriteProgramError};
+use fgdb_types::{
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Rights, Scope};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -23,7 +25,14 @@ fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa0; 32], NS, [0xa2; 32])
 }
 fn authority() -> Authority {
-    Authority::new(AuthKey::from_seed(10101), NS, "host-graph", SchemaEpoch(1), 1).unwrap()
+    Authority::new(
+        AuthKey::from_seed(10101),
+        NS,
+        "host-graph",
+        SchemaEpoch(1),
+        1,
+    )
+    .unwrap()
 }
 fn grant() -> Grant {
     Grant {
@@ -32,12 +41,21 @@ fn grant() -> Grant {
         relations: Scope::only([R]),
         properties: Scope::only([P, Q]),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
         expires_at_ms: 10_000,
     }
 }
 fn policy() -> GraphWriteProgramPolicy {
-    GraphWriteProgramPolicy::new(GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 100_000), 100, 100, 100)
+    GraphWriteProgramPolicy::new(
+        GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 100_000),
+        100,
+        100,
+        100,
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -50,7 +68,11 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn arguments(key: i64, value: i64) -> GqlParameters {
-    GqlParameters::new().with_int64("key", key).unwrap().with_int64("value", value).unwrap()
+    GqlParameters::new()
+        .with_int64("key", key)
+        .unwrap()
+        .with_int64("value", value)
+        .unwrap()
 }
 fn authorization(error: &Fault) -> Option<Error> {
     let mut source: Option<&(dyn core::error::Error + 'static)> = Some(error);
@@ -82,33 +104,76 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         let basis = db.frontier().unwrap();
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
         let calls = AtomicUsize::new(0);
-        let mut session = db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "host-branch",
-            |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
-            R, policy(), 64, || NOW,
-        ).unwrap();
-        assert_eq!(txn.outstanding_obligations(), 0, "a session is not a pinned transaction");
-        let (receipt, completion) = session.query(
-            &query, "CREATE (a:Visible {p:1}), (b:Visible {p:2}), (a)-[:R]->(b)", &GqlParameters::new(),
-        ).await.unwrap();
-        assert_eq!(receipt.steps()[0].created_vertices(), Some(&[VId(1), VId(2)][..]));
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                |kind, name| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            txn.outstanding_obligations(),
+            0,
+            "a session is not a pinned transaction"
+        );
+        let (receipt, completion) = session
+            .query(
+                &query,
+                "CREATE (a:Visible {p:1}), (b:Visible {p:2}), (a)-[:R]->(b)",
+                &GqlParameters::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt.steps()[0].created_vertices(),
+            Some(&[VId(1), VId(2)][..])
+        );
         assert_eq!(receipt.steps()[0].created_edges(), Some(&[EId(1)][..]));
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: CommitSeq(basis.0 + 1) });
-        let prepared = session.prepare(
-            &query, "MATCH (n:Visible) WHERE n.p=$key SET n.q=$value", &arguments(1, 10),
-        ).unwrap();
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(basis.0 + 1)
+            }
+        );
+        let prepared = session
+            .prepare(
+                &query,
+                "MATCH (n:Visible) WHERE n.p=$key SET n.q=$value",
+                &arguments(1, 10),
+            )
+            .unwrap();
         let frozen_calls = calls.load(Ordering::Relaxed);
         assert!(frozen_calls > 0);
         assert_eq!(prepared.parameter_schema().len(), 2);
         for (step, value) in [(2, 10), (3, 20)] {
-            let (receipt, completion) = session.execute(&query, &prepared, &arguments(1, value)).await.unwrap();
+            let (receipt, completion) = session
+                .execute(&query, &prepared, &arguments(1, value))
+                .await
+                .unwrap();
             assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[VId(1)][..]));
-            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: CommitSeq(basis.0 + step) });
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: CommitSeq(basis.0 + step)
+                }
+            );
             assert_eq!(calls.load(Ordering::Relaxed), frozen_calls);
             assert_eq!(txn.outstanding_obligations(), 0);
             assert!(!session.is_closed());
@@ -122,14 +187,29 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
         assert!(session.is_closed());
         session.close();
         drop(session);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(20))]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(20))]
+        );
         assert_eq!(db.edges().unwrap().len(), 1);
-        let expected = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let expected = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), expected);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            expected
+        );
     });
 }
 
@@ -141,19 +221,49 @@ fn constructor_checks_namespace_branch_write_rights_and_expiry_without_catalog_c
         for mode in 0..5 {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let issuer = authority();
-            let other = Authority::new(AuthKey::from_seed(10102),
-                if mode == 2 { DatabaseSecurityNamespaceId([0xa3; 32]) } else { NS },
-                "host-graph", SchemaEpoch(1), 1).unwrap();
+            let other = Authority::new(
+                AuthKey::from_seed(10102),
+                if mode == 2 {
+                    DatabaseSecurityNamespaceId([0xa3; 32])
+                } else {
+                    NS
+                },
+                "host-graph",
+                SchemaEpoch(1),
+                1,
+            )
+            .unwrap();
             let mut scope = grant();
-            if mode == 0 { scope.rights = Rights::Read; }
+            if mode == 0 {
+                scope.rights = Rights::Read;
+            }
             let token = issuer.issue_at(&scope, NOW).unwrap();
             let calls = AtomicUsize::new(0);
-            let error = db.authorized_write_session(
-                &txn, &commit, if mode == 2 || mode == 4 { &other } else { &issuer },
-                &token, if mode == 1 { "wrong-route" } else { "host-branch" },
-                |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
-                R, policy(), 64, || if mode == 3 { 10_000 } else { NOW },
-            ).unwrap_err();
+            let error = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    if mode == 2 || mode == 4 {
+                        &other
+                    } else {
+                        &issuer
+                    },
+                    &token,
+                    if mode == 1 {
+                        "wrong-route"
+                    } else {
+                        "host-branch"
+                    },
+                    |kind, name| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        symbols(kind, name)
+                    },
+                    R,
+                    policy(),
+                    64,
+                    || if mode == 3 { 10_000 } else { NOW },
+                )
+                .unwrap_err();
             assert!(authorization(&error).is_some(), "mode={mode}: {error:?}");
             assert_eq!(calls.load(Ordering::Relaxed), 0);
             assert!(db.vertices().unwrap().is_empty());
@@ -174,22 +284,44 @@ fn write_only_session_cannot_prepare_selected_writes_or_fall_back_to_raw_reads()
         let token = issuer.issue_at(&scope, NOW).unwrap();
         for text in ["MATCH (n:Visible) SET n.q=1", "MATCH (n:Visible) RETURN n"] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let mut session = db.authorized_write_session(
-                &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
-            ).unwrap();
-            session.query(&query, "CREATE (n:Visible {p:1})", &GqlParameters::new()).await.unwrap();
-            let error = session.prepare(&query, text, &GqlParameters::new()).unwrap_err();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            session
+                .query(&query, "CREATE (n:Visible {p:1})", &GqlParameters::new())
+                .await
+                .unwrap();
+            let error = session
+                .prepare(&query, text, &GqlParameters::new())
+                .unwrap_err();
             if text.contains(" SET ") {
                 assert_eq!(authorization(&error), Some(Error::PermissionDenied));
             } else {
                 assert!(matches!(error, Fault::Binding(_)));
             }
             assert!(session.is_closed());
-            let error = session.query(&query, "CREATE (n:Visible)", &GqlParameters::new()).await.unwrap_err();
+            let error = session
+                .query(&query, "CREATE (n:Visible)", &GqlParameters::new())
+                .await
+                .unwrap_err();
             assert_eq!(authorization(&error), Some(Error::ExecutionStopped));
             drop(session);
             assert_eq!(db.vertices().unwrap().len(), 1);
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(1))]);
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(1))]
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -205,28 +337,66 @@ fn prepared_handle_cannot_cross_sessions_even_with_identical_database_and_creden
         let token = issuer.issue_at(&grant(), NOW).unwrap();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.frontier().unwrap();
-        let mut first = db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
-        ).unwrap();
-        let prepared = first.prepare(&query, "CREATE (n:Visible {p:$key})", &GqlParameters::new().with_int64("key", 1).unwrap()).unwrap();
+        let mut first = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                symbols,
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        let prepared = first
+            .prepare(
+                &query,
+                "CREATE (n:Visible {p:$key})",
+                &GqlParameters::new().with_int64("key", 1).unwrap(),
+            )
+            .unwrap();
         drop(first);
         let calls = AtomicUsize::new(0);
-        let mut second = db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "host-branch",
-            |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
-            R, policy(), 64, || NOW,
-        ).unwrap();
-        let error = second.execute(&query, &prepared, &GqlParameters::new()).await.unwrap_err();
-        assert!(matches!(error, Fault::Program(GraphWriteProgramError::Program(
-            GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
-        ))));
+        let mut second = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                |kind, name| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        let error = second
+            .execute(&query, &prepared, &GqlParameters::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Fault::Program(GraphWriteProgramError::Program(
+                GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
+            ))
+        ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert!(second.is_closed());
         drop(second);
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertices().unwrap().is_empty());
-        assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap(),
-            ElementId::Vertex(VId(1)));
+        assert_eq!(
+            db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                .unwrap(),
+            ElementId::Vertex(VId(1))
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -242,32 +412,66 @@ fn clock_high_water_survives_successful_commands_and_credentials_remain_live() {
             let token = issuer.issue_at(&grant(), NOW).unwrap();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let time = AtomicU64::new(NOW);
-            let mut session = db.authorized_write_session(
-                &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64,
-                || time.load(Ordering::Relaxed),
-            ).unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || time.load(Ordering::Relaxed),
+                )
+                .unwrap();
             time.store(200, Ordering::Relaxed);
-            session.query(&query, "CREATE (n:Visible {p:1})", &GqlParameters::new()).await.unwrap();
+            session
+                .query(&query, "CREATE (n:Visible {p:1})", &GqlParameters::new())
+                .await
+                .unwrap();
             match mode {
                 0 => time.store(150, Ordering::Relaxed),
                 1 => time.store(10_000, Ordering::Relaxed),
-                _ => { assert!(issuer.retire()); }
+                _ => {
+                    assert!(issuer.retire());
+                }
             }
-            let error = session.query(&query, "CREATE (n:Visible {p:2})", &GqlParameters::new()).await.unwrap_err();
-            assert_eq!(authorization(&error), Some(match mode {
-                0 => Error::ClockWentBackwards,
-                1 => Error::Expired,
-                _ => Error::AuthorityRetired,
-            }));
+            let error = session
+                .query(&query, "CREATE (n:Visible {p:2})", &GqlParameters::new())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                authorization(&error),
+                Some(match mode {
+                    0 => Error::ClockWentBackwards,
+                    1 => Error::Expired,
+                    _ => Error::AuthorityRetired,
+                })
+            );
             assert!(session.is_closed());
             drop(session);
             assert_eq!(db.vertices().unwrap().len(), 1);
             assert_eq!(txn.outstanding_obligations(), 0);
             if mode == 0 {
-                let result = db.query_write_authorized(
-                    &txn, &query, &commit, &issuer, &token, "host-branch",
-                    "CREATE (n:Visible {p:2})", &GqlParameters::new(), symbols, R, policy(), || 150,
-                ).await.unwrap();
+                let result = db
+                    .query_write_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "host-branch",
+                        "CREATE (n:Visible {p:2})",
+                        &GqlParameters::new(),
+                        symbols,
+                        R,
+                        policy(),
+                        || 150,
+                    )
+                    .await
+                    .unwrap();
                 assert!(matches!(result, QueryResult::Write { .. }));
                 assert_eq!(db.vertices().unwrap().len(), 2);
             }
@@ -284,31 +488,73 @@ fn forbidden_tail_and_host_ceilings_close_without_publishing_a_prefix() {
         for mode in 0..3 {
             let issuer = authority();
             let mut scope = grant();
-            if mode == 1 { scope.limits.max_rows = 1; }
+            if mode == 1 {
+                scope.limits.max_rows = 1;
+            }
             let token = issuer.issue_at(&scope, NOW).unwrap();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(R);
-            seed.create_vertex(VId(99), vec![L], vec![(P, CanonicalScalar::Int(9)), (SECRET, CanonicalScalar::Int(777))]);
+            seed.create_vertex(
+                VId(99),
+                vec![L],
+                vec![
+                    (P, CanonicalScalar::Int(9)),
+                    (SECRET, CanonicalScalar::Int(777)),
+                ],
+            );
             db.write(&commit, seed).await.unwrap();
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-            let mut session = db.authorized_write_session(
-                &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(),
-                if mode == 2 { 1 } else { 64 }, || NOW,
-            ).unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    if mode == 2 { 1 } else { 64 },
+                    || NOW,
+                )
+                .unwrap();
             let text = if mode == 0 {
                 "MATCH (n:Visible) SET n.q=1; MATCH (n:Visible) SET n.secret=n.secret"
             } else {
                 "CREATE (n:Visible {p:1}); CREATE (n:Visible {p:2})"
             };
-            let error = session.query(&query, text, &GqlParameters::new()).await.unwrap_err();
+            let error = session
+                .query(&query, text, &GqlParameters::new())
+                .await
+                .unwrap_err();
             match mode {
                 0 => assert_eq!(authorization(&error), Some(Error::ScopeDenied)),
-                1 => assert_eq!(authorization(&error), Some(Error::LimitExceeded(LimitDimension::Rows))),
-                _ => assert!(matches!(error, Fault::BatchBinding(GraphWriteScriptBatchError::TooManyStatements { limit: 1, observed: 2 }))),
+                1 => assert_eq!(
+                    authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Rows))
+                ),
+                _ => assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::TooManyStatements {
+                        limit: 1,
+                        observed: 2
+                    })
+                )),
             }
             assert!(session.is_closed());
             drop(session);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -326,11 +572,23 @@ fn dropping_unpolled_commands_is_inert_but_callback_unwind_closes_the_session() 
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
             let calls = AtomicUsize::new(0);
-            let mut session = db.authorized_write_session(
-                &txn, &commit, &issuer, &token, "host-branch",
-                |_, _| { calls.fetch_add(1, Ordering::Relaxed); panic!("injected resolver unwind") },
-                R, policy(), 64, || NOW,
-            ).unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    |_, _| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        panic!("injected resolver unwind")
+                    },
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
             let params = GqlParameters::new();
             drop(session.query(&query, "CREATE (n:Visible)", &params));
             assert!(!session.is_closed());
@@ -345,13 +603,16 @@ fn dropping_unpolled_commands_is_inert_but_callback_unwind_closes_the_session() 
                 result.is_err()
             } else {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    session.prepare(&query, "CREATE (n:Visible)", &params)
-                })).is_err()
+                    drop(session.prepare(&query, "CREATE (n:Visible)", &params));
+                }))
+                .is_err()
             };
             assert!(panic, "the injected callback must execute");
             assert_eq!(calls.load(Ordering::Relaxed), 1);
             assert!(session.is_closed());
-            let error = session.prepare(&query, "CREATE (n:Visible)", &params).unwrap_err();
+            let error = session
+                .prepare(&query, "CREATE (n:Visible)", &params)
+                .unwrap_err();
             assert_eq!(authorization(&error), Some(Error::ExecutionStopped));
             assert_eq!(calls.load(Ordering::Relaxed), 1);
             drop(session);
@@ -375,21 +636,43 @@ fn each_success_gets_one_per_execution_budget_not_a_lifetime_grant_or_phase_rese
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut limits = policy();
         limits.max_created_vertices = 1;
-        let mut session = db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "host-branch", symbols, R, limits, 64, || NOW,
-        ).unwrap();
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                symbols,
+                R,
+                limits,
+                64,
+                || NOW,
+            )
+            .unwrap();
         for _ in 0..2 {
-            session.query(&query, "CREATE (n:Visible)", &GqlParameters::new()).await.unwrap();
+            session
+                .query(&query, "CREATE (n:Visible)", &GqlParameters::new())
+                .await
+                .unwrap();
         }
         assert!(!session.is_closed());
-        assert!(session.query(&query, "CREATE (a:Visible); CREATE (b:Visible)", &GqlParameters::new()).await.is_err());
+        assert!(
+            session
+                .query(
+                    &query,
+                    "CREATE (a:Visible); CREATE (b:Visible)",
+                    &GqlParameters::new()
+                )
+                .await
+                .is_err()
+        );
         assert!(session.is_closed());
         drop(session);
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
-
 
 #[test]
 fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps() {
@@ -399,21 +682,38 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         let basis = db.frontier().unwrap();
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
         let calls = AtomicUsize::new(0);
-        let mut session = db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "host-branch",
-            |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
-            R, policy(), 72, || NOW,
-        ).unwrap();
-        let template = session.prepare(&query,
-            "MERGE (n:Visible {p:0}); MERGE (n:Visible {p:$key}) ON CREATE SET n.q=$value; \
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                |kind, name| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                72,
+                || NOW,
+            )
+            .unwrap();
+        let template = session
+            .prepare(
+                &query,
+                "MERGE (n:Visible {p:0}); MERGE (n:Visible {p:$key}) ON CREATE SET n.q=$value; \
              MATCH (a:Visible),(b:Visible) WHERE a.p=0 AND b.p=$key MERGE (a)-[:R]->(b)",
-            &arguments(1, 11),
-        ).unwrap();
+                &arguments(1, 11),
+            )
+            .unwrap();
         let args: Vec<_> = (1..=24).map(|key| arguments(key, key + 10)).collect();
         let batch = session.bind_batch(&query, &template, &args).unwrap();
         assert_eq!(batch.argument_sets(), 24);
@@ -426,33 +726,75 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
         assert_eq!(txn.outstanding_obligations(), 0);
         let (receipt, completion) = session.execute_bound_batch(&query, &batch).await.unwrap();
         assert_eq!(receipt.stats().completed_statements, 72);
-        assert_eq!((receipt.stats().created_vertices, receipt.stats().created_edges), (25, 24));
+        assert_eq!(
+            (
+                receipt.stats().created_vertices,
+                receipt.stats().created_edges
+            ),
+            (25, 24)
+        );
         assert_eq!(receipt.stats().mutation_effects, 24);
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: CommitSeq(basis.0 + 1) });
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(basis.0 + 1)
+            }
+        );
         for record in 0..24 {
             let steps = batch.record_receipts(&receipt, record).unwrap();
             assert_eq!(steps.len(), 3);
             assert_eq!(steps[0].merged_vertex().unwrap().vertex(), VId(1));
-            assert_eq!(steps[2].created_edges(), Some(&[EId(record as u128 + 1)][..]));
+            assert_eq!(
+                steps[2].created_edges(),
+                Some(&[EId(record as u128 + 1)][..])
+            );
         }
         assert!(batch.record_receipts(&receipt, 24).is_none());
         let (repeat, completion) = session.execute_bound_batch(&query, &batch).await.unwrap();
-        assert_eq!((repeat.stats().created_vertices, repeat.stats().created_edges), (0, 0));
+        assert_eq!(
+            (
+                repeat.stats().created_vertices,
+                repeat.stats().created_edges
+            ),
+            (0, 0)
+        );
         assert_eq!(repeat.stats().mutation_effects, 0);
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
-        let (stats, completion) = session.execute_bound_batch_stats(&query, &batch).await.unwrap();
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        let (stats, completion) = session
+            .execute_bound_batch_stats(&query, &batch)
+            .await
+            .unwrap();
         assert_eq!(stats, repeat.stats());
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
         assert_eq!(calls.load(Ordering::Relaxed), resolved);
         drop(session);
         assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
         assert_eq!(db.vertices().unwrap().len(), 25);
         assert_eq!(db.edges().unwrap().len(), 24);
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
@@ -469,34 +811,85 @@ fn bound_batches_do_not_outlive_their_owner_or_live_credentials() {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
             let time = AtomicU64::new(NOW);
-            let mut session = db.authorized_write_session(
-                &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64,
-                || time.load(Ordering::Relaxed),
-            ).unwrap();
-            let template = session.prepare(&query, "CREATE (n:Visible {p:$key, q:$value})", &arguments(1, 10)).unwrap();
-            let batch = session.bind_batch(&query, &template, &[arguments(1, 10), arguments(2, 20)]).unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || time.load(Ordering::Relaxed),
+                )
+                .unwrap();
+            let template = session
+                .prepare(
+                    &query,
+                    "CREATE (n:Visible {p:$key, q:$value})",
+                    &arguments(1, 10),
+                )
+                .unwrap();
+            let batch = session
+                .bind_batch(&query, &template, &[arguments(1, 10), arguments(2, 20)])
+                .unwrap();
             if mode == 0 {
                 drop(session);
-                let mut other = db.authorized_write_session(
-                    &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
-                ).unwrap();
+                let mut other = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "host-branch",
+                        symbols,
+                        R,
+                        policy(),
+                        64,
+                        || NOW,
+                    )
+                    .unwrap();
                 let error = other.execute_bound_batch(&query, &batch).await.unwrap_err();
-                assert!(matches!(error, Fault::Program(GraphWriteProgramError::Program(
-                    GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
-                ))));
+                assert!(matches!(
+                    error,
+                    Fault::Program(GraphWriteProgramError::Program(
+                        GraphMutationProgramError::Preflight(
+                            WriteTxnError::AuthorizedMutationRefused
+                        )
+                    ))
+                ));
                 assert!(other.is_closed());
                 drop(other);
             } else {
-                if mode == 1 { time.store(10_000, Ordering::Relaxed); } else { issuer.retire(); }
-                let error = session.execute_bound_batch(&query, &batch).await.unwrap_err();
-                assert_eq!(authorization(&error), Some(if mode == 1 { Error::Expired } else { Error::AuthorityRetired }));
+                if mode == 1 {
+                    time.store(10_000, Ordering::Relaxed);
+                } else {
+                    issuer.retire();
+                }
+                let error = session
+                    .execute_bound_batch(&query, &batch)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(if mode == 1 {
+                        Error::Expired
+                    } else {
+                        Error::AuthorityRetired
+                    })
+                );
                 assert!(session.is_closed());
                 drop(session);
             }
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
-            assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap(),
-                ElementId::Vertex(VId(1)));
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(VId(1))
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -521,9 +914,20 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
                 let token = issuer.issue_at(&scope, NOW).unwrap();
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 let before = db.frontier().unwrap();
-                let mut session = db.authorized_write_session(
-                    &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
-                ).unwrap();
+                let mut session = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "host-branch",
+                        symbols,
+                        R,
+                        policy(),
+                        64,
+                        || NOW,
+                    )
+                    .unwrap();
                 let result = async {
                     let template = session.prepare(&query,
                         "CREATE (n:Visible {p:$key}); MATCH (n:Visible) WHERE n.p=$key SET n.q=$value",
@@ -537,15 +941,23 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
                     }
                 }.await;
                 let success = match result {
-                    Ok((stats, _)) => { assert_eq!(stats.created_vertices, 3); true }
+                    Ok((stats, _)) => {
+                        assert_eq!(stats.created_vertices, 3);
+                        true
+                    }
                     Err(error) => {
-                        assert_eq!(authorization(&error), Some(Error::LimitExceeded(LimitDimension::Work)));
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work))
+                        );
                         assert!(session.is_closed());
                         false
                     }
                 };
                 drop(session);
-                if success { high = middle; } else {
+                if success {
+                    high = middle;
+                } else {
                     low = middle + 1;
                     assert_eq!(db.frontier().unwrap(), before);
                     assert!(db.vertices().unwrap().is_empty());

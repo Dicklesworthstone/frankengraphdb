@@ -158,7 +158,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(template.parameter_schema().len(), 1);
-        assert_eq!(template.parameter_schema()[0].parameter_type, GqlParameterType::List);
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::List
+        );
         let frozen = template.canonical_template_bytes();
         let mut bound_bytes = Vec::new();
         for (members, wanted) in [
@@ -228,7 +231,10 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![GraphValueRow::from_owned_values(vec![list(vec![int(1), int(2)])])]
+            vec![GraphValueRow::from_owned_values(vec![list(vec![
+                int(1),
+                int(2)
+            ])])]
         );
         assert_eq!(
             execute(
@@ -253,11 +259,17 @@ mod tests {
             |_, _| None,
         )
         .unwrap();
-        assert_eq!(template.parameter_schema()[0].parameter_type, GqlParameterType::List);
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::List
+        );
         let arguments = GqlParameters::new()
             .with_list("groups", vec![list(vec![int(2)]), list(vec![int(1)])])
             .unwrap();
-        assert_eq!(run(&template.bind_parameters(&arguments).unwrap()), expected(&[2]));
+        assert_eq!(
+            run(&template.bind_parameters(&arguments).unwrap()),
+            expected(&[2])
+        );
         let empty = GqlParameters::new().with_list("groups", vec![]).unwrap();
         assert!(run(&template.bind_parameters(&empty).unwrap()).is_empty());
     }
@@ -286,7 +298,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(template.columns(), &["__fg_where_0".to_owned()]);
-        assert_eq!(run(&template.bind_parameters(&arguments).unwrap()), expected(&[2, 2]));
+        assert_eq!(
+            run(&template.bind_parameters(&arguments).unwrap()),
+            expected(&[2, 2])
+        );
         assert!(
             PreparedGraphSetText::prepare(
                 "UNWIND [1] AS n WITH n WHERE n IN $ids RETURN __fg_where_0",
@@ -316,7 +331,9 @@ mod tests {
                         |_, _| Err::<_, GqlQueryError<usize, usize>>(GqlQueryError::Source(1)),
                         || Ok::<_, usize>(()),
                     ),
-                    Err(GqlQueryError::Source(crate::GraphSetExecutionError::Projection { .. }))
+                    Err(GqlQueryError::Source(
+                        crate::GraphSetExecutionError::Projection { .. }
+                    ))
                 ));
             }
         }
@@ -383,7 +400,10 @@ mod tests {
         let high = VId(u128::MAX);
         let vertices = [VId(0), VId(u64::MAX.into()), high];
         let arguments = GqlParameters::new()
-            .with_list("ids", vec![GraphValue::Vertex(high), GraphValue::Vertex(high)])
+            .with_list(
+                "ids",
+                vec![GraphValue::Vertex(high), GraphValue::Vertex(high)],
+            )
             .unwrap();
         let query = prepare("MATCH (n) WITH n WHERE n IN $ids RETURN n", &arguments);
         let mut calls = 0;
@@ -408,7 +428,9 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(
             result.value,
-            vec![GraphValueRow::from_owned_values(vec![GraphValue::Vertex(high)])]
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Vertex(
+                high
+            )])]
         );
     }
 
@@ -416,7 +438,10 @@ mod tests {
     fn an_explicit_null_rhs_parameter_keeps_unknown_under_negation() {
         let template = PreparedGraphSetText::prepare_with_parameter_types(
             "UNWIND [1, NULL] AS n WITH n WHERE n NOT IN $ids RETURN n",
-            &[("ids", GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null))],
+            &[(
+                "ids",
+                GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null),
+            )],
             |_, _| None,
         )
         .unwrap();

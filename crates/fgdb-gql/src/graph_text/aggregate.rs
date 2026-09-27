@@ -942,6 +942,10 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             remap_output_columns(index, columns);
         }
         ReadValueTemplate::Size(inner) => remap_output_columns(inner, columns),
+        ReadValueTemplate::In { value, list } => {
+            remap_output_columns(value, columns);
+            remap_output_columns(list, columns);
+        }
         ReadValueTemplate::Integer { program, .. } => {
             for op in program {
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(

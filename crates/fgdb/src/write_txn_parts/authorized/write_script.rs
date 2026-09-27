@@ -71,57 +71,74 @@ impl<'a> Input<'a> {
             };
             if let Some(script) = script {
                 if script.requires_read() && !scope.rights().can_read() {
-                    return Err(admission(WriteTxnError::Authorization(Error::PermissionDenied)));
+                    return Err(admission(WriteTxnError::Authorization(
+                        Error::PermissionDenied,
+                    )));
                 }
                 for statement in script.statements() {
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(admission)?;
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(admission)?;
                     execution.poll().map_err(admission)?;
-                    if matches!(statement,
+                    if matches!(
+                        statement,
                         GraphWriteTemplateStatement::EdgeMerge(_)
-                        | GraphWriteTemplateStatement::EdgeUpsert(_)
-                    ) && !scope.allows_relation(statement.relation()) {
+                            | GraphWriteTemplateStatement::EdgeUpsert(_)
+                    ) && !scope.allows_relation(statement.relation())
+                    {
                         return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
                     }
                 }
             }
             match self {
                 Self::Script(script, arguments) => {
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(admission)?;
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(admission)?;
                     // One logical binding unit per prepared statement. Native
                     // GLA counts remain query/proposal counts; this extra work
                     // is charged to the same SIGNED ceiling as later execution.
-                    execution.work(script.statements().len() as u64).map_err(admission)?;
+                    execution
+                        .work(script.statements().len() as u64)
+                        .map_err(admission)?;
                     let program = script.bind_parameters(arguments).map_err(Fault::Binding)?;
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(admission)?;
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(admission)?;
                     execution.checkpoint().map_err(admission)?;
                     Ok(Bound::Script(program))
                 }
                 Self::Batch(script, arguments, limit) => {
                     let mut before_allocation = true;
-                    let batch = script.bind_parameter_sets_controlled(arguments, limit, |at| {
-                        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        if at.is_none() && before_allocation {
-                            before_allocation = false;
-                            // The core has already proved the expanded hard
-                            // bound. Reserve the ENTIRE statement-instance bill
-                            // before Vec::with_capacity, not one cheap record
-                            // charge ahead of a large expanded allocation.
-                            let expanded = arguments.len() as u128
-                                * script.statements().len() as u128;
-                            let work = u64::try_from(expanded).map_err(|_| {
-                                WriteTxnError::Authorization(Error::TooLarge)
-                            })?;
-                            execution.work(work)
-                        } else {
-                            execution.checkpoint()
-                        }
-                    }).map_err(|error| match error {
-                        GraphWriteScriptBatchBindError::Binding(error) => Fault::BatchBinding(error),
-                        // No statement has executed yet. Preserve the live cause
-                        // as preflight; do not invent a completed-program index
-                        // or relabel expiry/cancellation as a bad argument value.
-                        GraphWriteScriptBatchBindError::Interrupted { source, .. } => admission(source),
-                    })?;
+                    let batch = script
+                        .bind_parameter_sets_controlled(arguments, limit, |at| {
+                            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            if at.is_none() && before_allocation {
+                                before_allocation = false;
+                                // The core has already proved the expanded hard
+                                // bound. Reserve the ENTIRE statement-instance bill
+                                // before Vec::with_capacity, not one cheap record
+                                // charge ahead of a large expanded allocation.
+                                let expanded =
+                                    arguments.len() as u128 * script.statements().len() as u128;
+                                let work = u64::try_from(expanded)
+                                    .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+                                execution.work(work)
+                            } else {
+                                execution.checkpoint()
+                            }
+                        })
+                        .map_err(|error| match error {
+                            GraphWriteScriptBatchBindError::Binding(error) => {
+                                Fault::BatchBinding(error)
+                            }
+                            // No statement has executed yet. Preserve the live cause
+                            // as preflight; do not invent a completed-program index
+                            // or relabel expiry/cancellation as a bad argument value.
+                            GraphWriteScriptBatchBindError::Interrupted { source, .. } => {
+                                admission(source)
+                            }
+                        })?;
                     Ok(Bound::Batch(batch))
                 }
                 // No rebind or deep clone. The common program preflight still
@@ -168,9 +185,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Script(script, arguments), policy, clock, false, |stats, _| stats,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Script(script, arguments),
+            policy,
+            clock,
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Execute the same script and release its ordered identity receipts only
@@ -192,9 +219,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Script(script, arguments), policy, clock, true, GraphWriteProgramReceipt::new,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Script(script, arguments),
+            policy,
+            clock,
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     /// Admit and bind ALL records, then execute them record-major as ONE atomic
@@ -229,9 +266,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Batch(script, arguments, max_statements), policy, clock, false, |stats, _| stats,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Batch(script, arguments, max_statements),
+            policy,
+            clock,
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Returning form of the same atomic ingestion. Repeated identity receipts
@@ -254,10 +301,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Batch(script, arguments, max_statements), policy, clock, true,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Batch(script, arguments, max_statements),
+            policy,
+            clock,
+            true,
             GraphWriteProgramReceipt::new,
-        ).await
+        )
+        .await
     }
 
     /// Reuse a previously bound batch without granting it authority or cloning
@@ -279,9 +335,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Bound(batch), policy, clock, false, |stats, _| stats,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Bound(batch),
+            policy,
+            clock,
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Return a bound batch's ordered outcomes under this call's token. The
@@ -302,9 +368,19 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
-            txn_cx, query_cx, commit_cx, authority, token, branch,
-            Input::Bound(batch), policy, clock, true, GraphWriteProgramReceipt::new,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            Input::Bound(batch),
+            policy,
+            clock,
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -330,14 +406,29 @@ impl<V: Vfs + Clone> Database<V> {
         let now = clock();
         let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
         let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
-        let mut execution = Execution { cx: commit_cx, permit, clock };
-        commit_cx.with_restriction_async(async {
-            let bound = input.bind(query_cx, verified.predicates(), &mut execution)?;
-            self.complete_authorized_program(
-                txn_cx, query_cx, commit_cx, bound.program(), policy,
-                verified.predicates(), &mut execution, returning, receipt,
-            ).await.map_err(|error| bound.error(error))
-        }).await
+        let mut execution = Execution {
+            cx: commit_cx,
+            permit,
+            clock,
+        };
+        commit_cx
+            .with_restriction_async(async {
+                let bound = input.bind(query_cx, verified.predicates(), &mut execution)?;
+                self.complete_authorized_program(
+                    txn_cx,
+                    query_cx,
+                    commit_cx,
+                    bound.program(),
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    returning,
+                    receipt,
+                )
+                .await
+                .map_err(|error| bound.error(error))
+            })
+            .await
     }
 }
 

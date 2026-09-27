@@ -112,6 +112,9 @@
 //! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
 
 mod bulk_load;
 pub use bulk_load::{

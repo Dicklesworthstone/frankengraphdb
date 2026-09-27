@@ -73,7 +73,10 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphWriteScriptCsvStreamErro
             Self::Source(source) => write!(f, "CSV source failed: {source}"),
             Self::Interrupted(source) => write!(f, "CSV preparation interrupted: {source}"),
             Self::InvalidReadCount { capacity, returned } => {
-                write!(f, "CSV source returned {returned} bytes for a {capacity}-byte buffer")
+                write!(
+                    f,
+                    "CSV source returned {returned} bytes for a {capacity}-byte buffer"
+                )
             }
             Self::InvalidUtf8 { record, offset } => {
                 write!(f, "CSV record {record} at byte {offset}: invalid UTF-8")
@@ -208,10 +211,15 @@ impl PreparedGraphWriteScript {
             checkpoint().map_err(Error::Interrupted)?;
             // Effective limits are <= 64 MiB, so the one-byte probe cannot
             // overflow, even on 32-bit targets. Never ask for a zero-byte read.
-            let capacity = chunk.len().min(compiler.limits.max_input_bytes - input_bytes + 1);
+            let capacity = chunk
+                .len()
+                .min(compiler.limits.max_input_bytes - input_bytes + 1);
             let read = read(&mut chunk[..capacity]).map_err(Error::Source)?;
             if read > capacity {
-                return Err(Error::InvalidReadCount { capacity, returned: read });
+                return Err(Error::InvalidReadCount {
+                    capacity,
+                    returned: read,
+                });
             }
             if read == 0 {
                 break;
@@ -255,7 +263,11 @@ impl PreparedGraphWriteScript {
                 compiler.push(byte, &mut checkpoint)?;
             }
         }
-        if compiler.framer.finish().map_err(|error| compiler.framing_error(error))? {
+        if compiler
+            .framer
+            .finish()
+            .map_err(|error| compiler.framing_error(error))?
+        {
             compiler.complete_record(&mut checkpoint)?;
         }
         if compiler.records == 0 {
@@ -301,7 +313,9 @@ impl<'a> CsvStreamCompiler<'a> {
     ) -> Result<Self, GraphWriteScriptCsvStreamError<C>> {
         let hard = CsvParameterLimits::HARD;
         let max_statements = max_statements.min(PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
-        let max_records = max_statements.checked_div(script.statements().len()).unwrap_or(0);
+        let max_records = max_statements
+            .checked_div(script.statements().len())
+            .unwrap_or(0);
         let limits = CsvParameterLimits {
             max_input_bytes: limits.max_input_bytes.min(hard.max_input_bytes),
             max_records: limits.max_records.min(hard.max_records).min(max_records),
@@ -344,10 +358,18 @@ impl<'a> CsvStreamCompiler<'a> {
         offset: usize,
     ) -> GraphWriteScriptCsvStreamError<C> {
         GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-            record: if self.header_len.is_some() { self.records + 1 } else { 0 },
+            record: if self.header_len.is_some() {
+                self.records + 1
+            } else {
+                0
+            },
             column: None,
             offset,
-            kind: CsvParameterErrorKind::Limit { dimension, limit, observed },
+            kind: CsvParameterErrorKind::Limit {
+                dimension,
+                limit,
+                observed,
+            },
         })
     }
 
@@ -393,12 +415,21 @@ impl<'a> CsvStreamCompiler<'a> {
                 self.record_start,
             ));
         }
-        let completed = self.framer.push(byte).map_err(|error| self.framing_error(error))?;
+        let completed = self
+            .framer
+            .push(byte)
+            .map_err(|error| self.framing_error(error))?;
         // The allocation-free framer admits syntax/field size BEFORE raw input
         // retention. Source and record counts were admitted before this point.
-        self.buffer.try_reserve(1).map_err(|_| GraphWriteScriptCsvStreamError::Allocation {
-            record: if self.header_len.is_some() { self.records + 1 } else { 0 },
-        })?;
+        self.buffer
+            .try_reserve(1)
+            .map_err(|_| GraphWriteScriptCsvStreamError::Allocation {
+                record: if self.header_len.is_some() {
+                    self.records + 1
+                } else {
+                    0
+                },
+            })?;
         self.buffer.push(byte);
         if completed {
             self.complete_record(checkpoint)?;
@@ -413,7 +444,11 @@ impl<'a> CsvStreamCompiler<'a> {
         use GraphWriteScriptCsvStreamError as Error;
         checkpoint().map_err(Error::Interrupted)?;
         let text = core::str::from_utf8(&self.buffer).map_err(|error| Error::InvalidUtf8 {
-            record: if self.header_len.is_some() { self.records + 1 } else { 0 },
+            record: if self.header_len.is_some() {
+                self.records + 1
+            } else {
+                0
+            },
             offset: self.source_offset(error.valid_up_to()),
         })?;
         let Some(header_len) = self.header_len else {
@@ -433,7 +468,9 @@ impl<'a> CsvStreamCompiler<'a> {
         };
         let mut arguments = decode_csv_parameters(text, self.script.parameter_schema(), row_limits)
             .map_err(|error| self.csv_error(error))?;
-        let arguments = arguments.pop().expect("one framed data record after the header");
+        let arguments = arguments
+            .pop()
+            .expect("one framed data record after the header");
         self.parameter_bytes += arguments.canonical_byte_len();
         let program = self.script.bind_parameters(&arguments).map_err(|source| {
             Error::Binding(GraphWriteScriptBatchError::Arguments {
@@ -441,9 +478,11 @@ impl<'a> CsvStreamCompiler<'a> {
                 source,
             })
         })?;
-        self.statements.try_reserve(program.statements().len()).map_err(|_| Error::Allocation {
-            record: self.records + 1,
-        })?;
+        self.statements
+            .try_reserve(program.statements().len())
+            .map_err(|_| Error::Allocation {
+                record: self.records + 1,
+            })?;
         self.statements.extend(program.into_statements().into_vec());
         self.records += 1;
         self.buffer.truncate(header_len);
@@ -483,7 +522,8 @@ mod streaming_tests {
         chunk_size: usize,
         limits: CsvParameterLimits,
         statements: usize,
-    ) -> Result<(PreparedGraphWriteProgram, usize), GraphWriteScriptCsvStreamError<&'static str>> {
+    ) -> Result<(PreparedGraphWriteProgram, usize), GraphWriteScriptCsvStreamError<&'static str>>
+    {
         let mut at = 0;
         script.bind_csv_stream_controlled(
             limits,
@@ -503,11 +543,17 @@ mod streaming_tests {
         let script = script(true);
         let input = "\u{feff}value\r\n\"snow 雪🙂, \"\"quoted\"\"\r\nline\"\r\n\\N\r\n\"\\N\"\r\n\"\"\r\nlast";
         let limits = CsvParameterLimits::default();
-        let expected = script.bind_csv_with_statement_limit(input, limits, 10).unwrap();
+        let expected = script
+            .bind_csv_with_statement_limit(input, limits, 10)
+            .unwrap();
         for chunk in 1..=input.len() + 1 {
             let (actual, records) = bind(&script, input.as_bytes(), chunk, limits, 10).unwrap();
             assert_eq!(records, 5, "chunk {chunk}");
-            assert_eq!(actual.canonical_bytes(), expected.program().canonical_bytes(), "chunk {chunk}");
+            assert_eq!(
+                actual.canonical_bytes(),
+                expected.program().canonical_bytes(),
+                "chunk {chunk}"
+            );
         }
     }
 
@@ -515,18 +561,41 @@ mod streaming_tests {
     fn ending_terminator_does_not_add_a_record_and_blank_records_remain_data() {
         let script = script(true);
         for input in ["value\nx", "value\nx\n", "value\nx\r\n", "value\n\n"] {
-            let expected = script.bind_csv(input, CsvParameterLimits::default()).unwrap();
-            let (program, records) = bind(&script, input.as_bytes(), 1, CsvParameterLimits::default(), 2).unwrap();
+            let expected = script
+                .bind_csv(input, CsvParameterLimits::default())
+                .unwrap();
+            let (program, records) = bind(
+                &script,
+                input.as_bytes(),
+                1,
+                CsvParameterLimits::default(),
+                2,
+            )
+            .unwrap();
             assert_eq!(records, 1);
-            assert_eq!(program.canonical_bytes(), expected.program().canonical_bytes());
+            assert_eq!(
+                program.canonical_bytes(),
+                expected.program().canonical_bytes()
+            );
         }
     }
 
     #[test]
     fn header_only_empty_input_partial_bom_and_double_bom_refuse() {
         let script = script(true);
-        for input in [b"".as_slice(), b"value", b"value\n", b"\xef\xbb\xbf", b"\xef", b"\xef\xbb", b"\xef\xbb\xbf\xef\xbb\xbfvalue\nx"] {
-            assert!(bind(&script, input, 1, CsvParameterLimits::default(), 64).is_err(), "{input:?}");
+        for input in [
+            b"".as_slice(),
+            b"value",
+            b"value\n",
+            b"\xef\xbb\xbf",
+            b"\xef",
+            b"\xef\xbb",
+            b"\xef\xbb\xbf\xef\xbb\xbfvalue\nx",
+        ] {
+            assert!(
+                bind(&script, input, 1, CsvParameterLimits::default(), 64).is_err(),
+                "{input:?}"
+            );
         }
     }
 
@@ -538,57 +607,112 @@ mod streaming_tests {
                 &script,
                 b"value\n1\n\"unterminated",
                 1,
-                CsvParameterLimits { max_records: records, ..CsvParameterLimits::default() },
+                CsvParameterLimits {
+                    max_records: records,
+                    ..CsvParameterLimits::default()
+                },
                 statements,
-            ).unwrap_err();
-            assert!(matches!(error, GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-                record: 2, offset: 8,
-                kind: CsvParameterErrorKind::Limit { dimension: CsvParameterLimit::Records, limit: 1, observed: 2 }, ..
-            })));
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
+                    record: 2,
+                    offset: 8,
+                    kind: CsvParameterErrorKind::Limit {
+                        dimension: CsvParameterLimit::Records,
+                        limit: 1,
+                        observed: 2
+                    },
+                    ..
+                })
+            ));
         }
     }
 
     #[test]
     fn zero_statement_allowance_never_binds_a_record() {
-        let error = bind(&script(false), b"value\n1", 1, CsvParameterLimits::default(), 0).unwrap_err();
-        assert!(matches!(error, GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-            record: 1, kind: CsvParameterErrorKind::Limit { dimension: CsvParameterLimit::Records, limit: 0, .. }, ..
-        })));
+        let error = bind(
+            &script(false),
+            b"value\n1",
+            1,
+            CsvParameterLimits::default(),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
+                record: 1,
+                kind: CsvParameterErrorKind::Limit {
+                    dimension: CsvParameterLimit::Records,
+                    limit: 0,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
     fn source_byte_limit_is_inclusive_and_reads_only_one_overflow_probe() {
         let script = script(false);
         let input = b"value\n1\n";
-        let limits = CsvParameterLimits { max_input_bytes: input.len(), ..CsvParameterLimits::default() };
+        let limits = CsvParameterLimits {
+            max_input_bytes: input.len(),
+            ..CsvParameterLimits::default()
+        };
         assert!(bind(&script, input, 8192, limits, 2).is_ok());
         let mut consumed = 0;
-        let error = script.bind_csv_stream_controlled(
-            limits, 2,
-            |buffer| {
-                consumed += buffer.len();
-                buffer.fill(b'x');
-                Ok::<_, &'static str>(buffer.len())
-            },
-            || Ok(()),
-        ).unwrap_err();
+        let error = script
+            .bind_csv_stream_controlled(
+                limits,
+                2,
+                |buffer| {
+                    consumed += buffer.len();
+                    buffer.fill(b'x');
+                    Ok::<_, &'static str>(buffer.len())
+                },
+                || Ok(()),
+            )
+            .unwrap_err();
         assert_eq!(consumed, input.len() + 1);
-        assert!(matches!(error, GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-            kind: CsvParameterErrorKind::Limit { dimension: CsvParameterLimit::InputBytes, .. }, ..
-        })));
+        assert!(matches!(
+            error,
+            GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
+                kind: CsvParameterErrorKind::Limit {
+                    dimension: CsvParameterLimit::InputBytes,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
     fn parameter_budget_is_cumulative_not_refreshed_per_record() {
         let script = script(false);
-        let one = GqlParameters::new().with_int64("value", 1).unwrap().canonical_byte_len();
-        let limits = CsvParameterLimits { max_parameter_bytes: one * 2, ..CsvParameterLimits::default() };
+        let one = GqlParameters::new()
+            .with_int64("value", 1)
+            .unwrap()
+            .canonical_byte_len();
+        let limits = CsvParameterLimits {
+            max_parameter_bytes: one * 2,
+            ..CsvParameterLimits::default()
+        };
         assert!(bind(&script, b"value\n1\n2", 1, limits, 6).is_ok());
         let error = bind(&script, b"value\n1\n2\n3", 1, limits, 6).unwrap_err();
         match error {
             GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-                record: 3, offset: 10,
-                kind: CsvParameterErrorKind::Limit { dimension: CsvParameterLimit::ParameterBytes, limit, observed }, ..
+                record: 3,
+                offset: 10,
+                kind:
+                    CsvParameterErrorKind::Limit {
+                        dimension: CsvParameterLimit::ParameterBytes,
+                        limit,
+                        observed,
+                    },
+                ..
             }) => {
                 assert_eq!(limit, one * 2);
                 assert_eq!(observed, one * 3);
@@ -600,20 +724,57 @@ mod streaming_tests {
     #[test]
     fn malformed_later_record_keeps_original_source_coordinates_and_redacts_values() {
         let input = "\u{feff}value\n1\n2\nsecret";
-        let error = bind(&script(false), input.as_bytes(), 1, CsvParameterLimits::default(), 6).unwrap_err();
-        assert!(matches!(&error, GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
-            record: 3, offset: 13, kind: CsvParameterErrorKind::InvalidValue, ..
-        })));
+        let error = bind(
+            &script(false),
+            input.as_bytes(),
+            1,
+            CsvParameterLimits::default(),
+            6,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
+                record: 3,
+                offset: 13,
+                kind: CsvParameterErrorKind::InvalidValue,
+                ..
+            })
+        ));
         assert!(!format!("{error:?} {error}").contains("secret"));
-        let error = bind(&script(true), b"value\nok\n\xff", 1, CsvParameterLimits::default(), 4).unwrap_err();
-        assert!(matches!(error, GraphWriteScriptCsvStreamError::InvalidUtf8 { record: 2, offset: 9 }));
+        let error = bind(
+            &script(true),
+            b"value\nok\n\xff",
+            1,
+            CsvParameterLimits::default(),
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GraphWriteScriptCsvStreamError::InvalidUtf8 {
+                record: 2,
+                offset: 9
+            }
+        ));
     }
 
     #[test]
     fn framing_failures_after_valid_prefix_never_return_a_program() {
-        for input in ["value\n1\n\"open", "value\n1\n2\r", "value\n1\n2\"x", "value\n1\n\"2\"x"] {
+        for input in [
+            "value\n1\n\"open",
+            "value\n1\n2\r",
+            "value\n1\n2\"x",
+            "value\n1\n\"2\"x",
+        ] {
             assert!(matches!(
-                bind(&script(false), input.as_bytes(), 1, CsvParameterLimits::default(), 6),
+                bind(
+                    &script(false),
+                    input.as_bytes(),
+                    1,
+                    CsvParameterLimits::default(),
+                    6
+                ),
                 Err(GraphWriteScriptCsvStreamError::Framing(_))
             ));
         }
@@ -624,47 +785,71 @@ mod streaming_tests {
         let script = script(false);
         let input = b"value\n1\n";
         let mut reads = 0;
-        let error = script.bind_csv_stream_controlled(
-            CsvParameterLimits::default(), 2,
-            |buffer| {
-                reads += 1;
-                if reads == 1 {
-                    buffer[..input.len()].copy_from_slice(input);
-                    Ok(input.len())
-                } else { Err("source lost") }
-            },
-            || Ok(()),
-        ).unwrap_err();
-        assert!(matches!(error, GraphWriteScriptCsvStreamError::Source("source lost")));
+        let error = script
+            .bind_csv_stream_controlled(
+                CsvParameterLimits::default(),
+                2,
+                |buffer| {
+                    reads += 1;
+                    if reads == 1 {
+                        buffer[..input.len()].copy_from_slice(input);
+                        Ok(input.len())
+                    } else {
+                        Err("source lost")
+                    }
+                },
+                || Ok(()),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GraphWriteScriptCsvStreamError::Source("source lost")
+        ));
 
         // Determine all control boundaries from a successful run, then refuse
         // each independently, including after EOF and program construction.
         let mut boundaries = 0;
         let mut at = 0;
-        script.bind_csv_stream_controlled(
-            CsvParameterLimits::default(), 2,
-            |buffer| {
-                let count = input.len() - at;
-                buffer[..count].copy_from_slice(&input[at..]);
-                at = input.len();
-                Ok::<_, usize>(count)
-            },
-            || { boundaries += 1; Ok(()) },
-        ).unwrap();
+        script
+            .bind_csv_stream_controlled(
+                CsvParameterLimits::default(),
+                2,
+                |buffer| {
+                    let count = input.len() - at;
+                    buffer[..count].copy_from_slice(&input[at..]);
+                    at = input.len();
+                    Ok::<_, usize>(count)
+                },
+                || {
+                    boundaries += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
         for cutoff in 1..=boundaries {
             let mut reached = 0;
             let mut at = 0;
             let result = script.bind_csv_stream_controlled(
-                CsvParameterLimits::default(), 2,
+                CsvParameterLimits::default(),
+                2,
                 |buffer| {
                     let count = input.len() - at;
                     buffer[..count].copy_from_slice(&input[at..]);
                     at = input.len();
                     Ok(count)
                 },
-                || { reached += 1; if reached == cutoff { Err(cutoff) } else { Ok(()) } },
+                || {
+                    reached += 1;
+                    if reached == cutoff {
+                        Err(cutoff)
+                    } else {
+                        Ok(())
+                    }
+                },
             );
-            assert!(matches!(result, Err(GraphWriteScriptCsvStreamError::Interrupted(actual)) if actual == cutoff));
+            assert!(
+                matches!(result, Err(GraphWriteScriptCsvStreamError::Interrupted(actual)) if actual == cutoff)
+            );
             assert_eq!(reached, cutoff);
         }
     }
@@ -673,33 +858,48 @@ mod streaming_tests {
     fn invalid_read_contract_and_schema_refuse_without_panics() {
         let script = script(false);
         let result = script.bind_csv_stream_controlled(
-            CsvParameterLimits::default(), 2,
+            CsvParameterLimits::default(),
+            2,
             |buffer| Ok::<_, &'static str>(buffer.len() + 1),
             || Ok(()),
         );
-        assert!(matches!(result, Err(GraphWriteScriptCsvStreamError::InvalidReadCount { .. })));
-        let parameterless = PreparedGraphWriteScript::prepare("CREATE (n)", RelationId(1), |_, _| None).unwrap();
+        assert!(matches!(
+            result,
+            Err(GraphWriteScriptCsvStreamError::InvalidReadCount { .. })
+        ));
+        let parameterless =
+            PreparedGraphWriteScript::prepare("CREATE (n)", RelationId(1), |_, _| None).unwrap();
         let result = parameterless.bind_csv_stream_controlled(
-            CsvParameterLimits::default(), 2,
-            |_| -> Result<usize, &'static str> { panic!("invalid schema must refuse before reading") },
+            CsvParameterLimits::default(),
+            2,
+            |_| -> Result<usize, &'static str> {
+                panic!("invalid schema must refuse before reading")
+            },
             || Ok(()),
         );
-        assert!(matches!(result, Err(GraphWriteScriptCsvStreamError::Csv(CsvParameterError { kind: CsvParameterErrorKind::EmptySchema, .. }))));
+        assert!(matches!(
+            result,
+            Err(GraphWriteScriptCsvStreamError::Csv(CsvParameterError {
+                kind: CsvParameterErrorKind::EmptySchema,
+                ..
+            }))
+        ));
     }
 
     #[test]
     fn compiler_retains_header_and_one_record_not_the_source_or_argument_batch() {
         let script = script(false);
-        let mut compiler = CsvStreamCompiler::new::<()>(
-            &script,
-            CsvParameterLimits::default(),
-            200,
-        ).unwrap();
-        let mut checkpoint = || Ok(());
-        for &byte in b"value\n" { compiler.push(byte, &mut checkpoint).unwrap(); }
+        let mut compiler =
+            CsvStreamCompiler::new::<()>(&script, CsvParameterLimits::default(), 200).unwrap();
+        let mut checkpoint = || Ok::<(), ()>(());
+        for &byte in b"value\n" {
+            compiler.push(byte, &mut checkpoint).unwrap();
+        }
         let header_len = compiler.header_len.unwrap();
         for record in 0..100 {
-            for byte in format!("{record}\n").bytes() { compiler.push(byte, &mut checkpoint).unwrap(); }
+            for byte in format!("{record}\n").bytes() {
+                compiler.push(byte, &mut checkpoint).unwrap();
+            }
             assert_eq!(compiler.buffer.len(), header_len);
             assert_eq!(compiler.records, record + 1);
             assert_eq!(compiler.statements.len(), (record + 1) * 2);

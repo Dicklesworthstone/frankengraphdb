@@ -12,16 +12,29 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xa7; 32], DatabaseSecurityNamespaceId([0xa8; 32]), [0xa9; 32])
+    DatabaseKeys::new(
+        [0xa7; 32],
+        DatabaseSecurityNamespaceId([0xa8; 32]),
+        [0xa9; 32],
+    )
 }
 
 async fn seed(cx: &CommitCx, count: u128) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, keys()).await.unwrap();
     let mut batch = WriteBatch::new(R);
     for id in 1..=count {
-        batch.create_vertex(VId(id), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(10))]);
+        batch.create_vertex(
+            VId(id),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(10))],
+        );
         if id > 1 {
-            batch.add_edge(EId(id - 1), VId(id - 1), VId(id), vec![(P, CanonicalScalar::Int(20))]);
+            batch.add_edge(
+                EId(id - 1),
+                VId(id - 1),
+                VId(id),
+                vec![(P, CanonicalScalar::Int(20))],
+            );
         }
     }
     db.write(cx, batch).await.unwrap();
@@ -31,12 +44,17 @@ async fn seed(cx: &CommitCx, count: u128) -> Database<MemVfs> {
 fn collect(owner: &OverlayRows<'_, MemVfs>) -> (Vec<VertexRow>, Vec<EdgeRecord>) {
     let mut vertices = Vec::new();
     let mut edges = Vec::new();
-    owner.visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
-        vertices.push(row.clone());
-        Ok(())
-    }).unwrap();
+    owner
+        .visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
+            vertices.push(row.clone());
+            Ok(())
+        })
+        .unwrap();
     if let Some(result) = owner.visit_edges(&mut |_| Ok::<_, ()>(()), |entry, props, _| {
-        edges.push(EdgeRecord { entry: entry.clone(), props: props.to_vec() });
+        edges.push(EdgeRecord {
+            entry: *entry,
+            props: props.to_vec(),
+        });
         Ok(())
     }) {
         result.unwrap();
@@ -54,13 +72,22 @@ fn canonical_sparse_rows_match_bulk_effects_and_conflict_witnesses() {
         let mut txn = db.begin(&txcx).unwrap();
         let mut batch = WriteBatch::new(R);
         for id in [0, u128::MAX] {
-            batch.create_vertex(VId(id), vec![LabelId(3)], vec![(P, CanonicalScalar::Int(30))]);
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(3)],
+                vec![(P, CanonicalScalar::Int(30))],
+            );
         }
         batch.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(40)));
         batch.set_vertex_label(VId(3), LabelId(2), true);
         batch.delete_vertex(VId(5));
         batch.set_edge_property(EId(10), Q, Some(CanonicalScalar::Int(50)));
-        batch.ensure_edge_by_triple(EId(999), VId(1), VId(2), vec![(Q, CanonicalScalar::Int(999))]);
+        batch.ensure_edge_by_triple(
+            EId(999),
+            VId(1),
+            VId(2),
+            vec![(Q, CanonicalScalar::Int(999))],
+        );
         batch.add_edge(EId(0), VId(0), VId(1), vec![]);
         batch.add_edge(EId(u128::MAX), VId(u128::MAX), VId(u128::MAX), vec![]);
         batch.create_vertex(VId(1000), vec![], vec![]);
@@ -102,7 +129,10 @@ fn canonical_sparse_rows_match_bulk_effects_and_conflict_witnesses() {
         txn.commit(&mut db, &cx).await.unwrap();
         assert!(db.vertex(VId(5)).unwrap().is_none());
         assert!(db.edge(EId(4)).unwrap().is_none() && db.edge(EId(5)).unwrap().is_none());
-        assert_eq!(db.edge(EId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(20))]);
+        assert_eq!(
+            db.edge(EId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(20))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -125,21 +155,30 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             assert_eq!(owner.vertices.len(), 1);
             assert!(owner.edges.is_none());
             let mut borrowed = 0;
-            owner.visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
-                let basis = source::find_vertex(
-                    &db.snapshot.patches, row.vid, txn.basis, &mut |_| Ok::<_, ()>(()),
-                ).unwrap().unwrap();
-                if row.vid == VId(2) {
-                    assert!(!std::ptr::eq(row, basis));
-                    assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11))]);
-                } else {
-                    assert!(std::ptr::eq(row, basis), "unchanged payload was copied");
-                    borrowed += 1;
-                }
-                Ok(())
-            }).unwrap();
+            owner
+                .visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
+                    let basis =
+                        source::find_vertex(&db.snapshot.patches, row.vid, txn.basis, &mut |_| {
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap()
+                        .unwrap();
+                    if row.vid == VId(2) {
+                        assert!(!std::ptr::eq(row, basis));
+                        assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11))]);
+                    } else {
+                        assert!(std::ptr::eq(row, basis), "unchanged payload was copied");
+                        borrowed += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(borrowed, 127);
-            assert!(owner.visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(())).is_none());
+            assert!(
+                owner
+                    .visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                    .is_none()
+            );
             assert!(!txn.scanned_edges.get());
         }
         // An edge-enabled owner likewise keeps only the one changed edge.
@@ -147,20 +186,27 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
             assert_eq!(owner.edges.as_ref().unwrap().len(), 1);
             let mut original = BTreeMap::new();
-            source::visit_edges_with_properties(&db.snapshot, txn.basis,
-                &mut |_| Ok::<_, ()>(()), |entry, props, _| {
+            source::visit_edges_with_properties(
+                &db.snapshot,
+                txn.basis,
+                &mut |_| Ok::<_, ()>(()),
+                |entry, props, _| {
                     original.insert(entry.eid, (entry, props));
                     Ok(())
                 },
-            ).unwrap();
-            owner.visit_edges(&mut |_| Ok::<_, ()>(()), |entry, props, _| {
-                if entry.eid != EId(2) {
-                    let (old, old_props) = original[&entry.eid];
-                    assert!(std::ptr::eq(entry, old));
-                    assert!(std::ptr::eq(props, old_props));
-                }
-                Ok(())
-            }).unwrap().unwrap();
+            )
+            .unwrap();
+            owner
+                .visit_edges(&mut |_| Ok::<_, ()>(()), |entry, props, _| {
+                    if entry.eid != EId(2) {
+                        let (old, old_props) = original[&entry.eid];
+                        assert!(std::ptr::eq(entry, old));
+                        assert!(std::ptr::eq(props, old_props));
+                    }
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
         }
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -189,7 +235,12 @@ fn historical_basis_and_staged_tombstones_never_fall_back_to_newer_rows() {
         {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
             assert_eq!(collect(&owner), expected);
-            assert!(!expected.0.iter().any(|row| row.vid == VId(2) || row.vid == VId(9)));
+            assert!(
+                !expected
+                    .0
+                    .iter()
+                    .any(|row| row.vid == VId(2) || row.vid == VId(9))
+            );
         }
         let frontier = db.frontier().unwrap();
         assert!(txn.commit(&mut db, &cx).await.is_err());
@@ -223,12 +274,15 @@ fn every_sparse_preparation_and_scan_poll_can_stop_without_changing_staged_state
             };
             let owner = OverlayRows::new(&txn, &db, true, &mut || {
                 poll().map_err(|_| WriteTxnError::AuthorizedMutationRefused)
-            }).map_err(|error| {
+            })
+            .map_err(|error| {
                 assert!(matches!(error, WriteTxnError::AuthorizedMutationRefused));
                 calls.get()
             })?;
             owner.visit_vertices(&mut |_| poll(), |_, _| Ok(()))?;
-            owner.visit_edges(&mut |_| poll(), |_, _, _| Ok(())).unwrap()?;
+            owner
+                .visit_edges(&mut |_| poll(), |_, _, _| Ok(()))
+                .unwrap()?;
             Ok(calls.get())
         };
         let total = run(usize::MAX).unwrap();
@@ -237,7 +291,10 @@ fn every_sparse_preparation_and_scan_poll_can_stop_without_changing_staged_state
             assert_eq!(run(stop), Err(stop));
             assert_eq!(db.frontier().unwrap(), frontier);
         }
-        assert_eq!((txn.vertices(&db).unwrap(), txn.edges(&db).unwrap()), expected);
+        assert_eq!(
+            (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap()),
+            expected
+        );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -268,16 +325,24 @@ fn refusal_and_unwind_stop_before_the_next_output_and_leave_the_owner_reusable()
             assert_eq!(visits, 1);
             let mut visits = 0;
             let mut edge_polls = 0;
-            let result = owner.visit_edges(&mut |_| {
-                edge_polls += 1;
-                Ok(())
-            }, |_, _, _| {
-                visits += 1;
-                Err(23)
-            }).unwrap();
+            let result = owner
+                .visit_edges(
+                    &mut |_| {
+                        edge_polls += 1;
+                        Ok(())
+                    },
+                    |_, _, _| {
+                        visits += 1;
+                        Err(23)
+                    },
+                )
+                .unwrap();
             assert_eq!(result, Err(23));
             assert_eq!(visits, 1);
-            assert!(edge_polls < 16, "a refused first row scanned the raw suffix: {edge_polls}");
+            assert!(
+                edge_polls < 16,
+                "a refused first row scanned the raw suffix: {edge_polls}"
+            );
             let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = owner.visit_vertices(&mut |_| Ok::<_, ()>(()), |_, _| {
                     panic!("injected consumer unwind")
@@ -305,7 +370,9 @@ fn foreign_and_finished_transactions_refuse_before_copying_or_calling_controls()
         let error = OverlayRows::new(&txn, &foreign, true, &mut || {
             controls += 1;
             Ok(())
-        }).err().unwrap();
+        })
+        .err()
+        .unwrap();
         assert!(matches!(error, WriteTxnError::WrongDatabase));
         assert_eq!(controls, 0);
         let mut batch = WriteBatch::new(R);
@@ -315,7 +382,9 @@ fn foreign_and_finished_transactions_refuse_before_copying_or_calling_controls()
         let error = OverlayRows::new(&txn, &db, true, &mut || {
             controls += 1;
             Ok(())
-        }).err().unwrap();
+        })
+        .err()
+        .unwrap();
         assert!(matches!(error, WriteTxnError::Finished));
         assert_eq!(controls, 0);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -346,13 +415,19 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
         assert!(expansions.contains(&(VId(777), S)));
         for refuse in [true, false] {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
-            let result = owner.visit_vertices(&mut |_| Ok(()), |_, _| {
-                if refuse { Err(17) } else { Ok(()) }
-            });
+            let result =
+                owner.visit_vertices(
+                    &mut |_| Ok(()),
+                    |_, _| {
+                        if refuse { Err(17) } else { Ok(()) }
+                    },
+                );
             assert_eq!(result, if refuse { Err(17) } else { Ok(()) });
             if !refuse {
-                owner.visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
-                    .unwrap().unwrap();
+                owner
+                    .visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                    .unwrap()
+                    .unwrap();
             }
             assert!(reads.is_subset(&txn.read_set.borrow()));
             assert!(expansions.is_subset(&txn.match_expansions.borrow()));
@@ -364,8 +439,10 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
         let frontier = db.write(&cx, concurrent).await.unwrap();
         assert!(txn.commit(&mut db, &cx).await.is_err());
         assert_eq!(db.frontier().unwrap(), frontier);
-        assert_eq!(db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10))]);
+        assert_eq!(
+            db.vertex(VId(2)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(10))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

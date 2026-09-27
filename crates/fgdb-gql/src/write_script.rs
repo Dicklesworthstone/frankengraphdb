@@ -213,7 +213,10 @@ impl PreparedGraphWriteScript {
     pub fn requires_read(&self) -> bool {
         self.statements().iter().any(|statement| match statement {
             GraphWriteTemplateStatement::Insert(input) => {
-                matches!(&input.input, crate::insertion_text::InsertTextInput::Match(_))
+                matches!(
+                    &input.input,
+                    crate::insertion_text::InsertTextInput::Match(_)
+                )
             }
             GraphWriteTemplateStatement::Mutation(_)
             | GraphWriteTemplateStatement::Delete(_)
@@ -299,15 +302,19 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphWriteScriptBatchBindErro
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Binding(source) => source.fmt(f),
-            Self::Interrupted { argument_set, source } => {
-                write!(f, "graph write batch binding interrupted at {argument_set:?}: {source}")
+            Self::Interrupted {
+                argument_set,
+                source,
+            } => {
+                write!(
+                    f,
+                    "graph write batch binding interrupted at {argument_set:?}: {source}"
+                )
             }
         }
     }
 }
-impl<C: core::error::Error + 'static> core::error::Error
-    for GraphWriteScriptBatchBindError<C>
-{
+impl<C: core::error::Error + 'static> core::error::Error for GraphWriteScriptBatchBindError<C> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Binding(source) => Some(source),
@@ -509,12 +516,14 @@ impl PreparedGraphWriteScript {
         let observed = arguments.len() as u128 * self.spans.len() as u128;
         let limit = max_statements.min(Self::MAX_BATCH_STATEMENTS);
         if observed > limit as u128 {
-            return Err(Error::Binding(GraphWriteScriptBatchError::TooManyStatements {
-                limit,
-                observed,
-            }));
+            return Err(Error::Binding(
+                GraphWriteScriptBatchError::TooManyStatements { limit, observed },
+            ));
         }
-        checkpoint(None).map_err(|source| Error::Interrupted { argument_set: None, source })?;
+        checkpoint(None).map_err(|source| Error::Interrupted {
+            argument_set: None,
+            source,
+        })?;
         let mut statements = Vec::with_capacity(observed as usize);
         for (argument_set, values) in arguments.iter().enumerate() {
             checkpoint(Some(argument_set)).map_err(|source| Error::Interrupted {
@@ -536,7 +545,10 @@ impl PreparedGraphWriteScript {
             argument_sets: arguments.len(),
             spans: self.spans.clone(),
         };
-        checkpoint(None).map_err(|source| Error::Interrupted { argument_set: None, source })?;
+        checkpoint(None).map_err(|source| Error::Interrupted {
+            argument_set: None,
+            source,
+        })?;
         Ok(batch)
     }
 }
@@ -552,9 +564,7 @@ mod controlled_binding_tests {
             "CREATE (n {p:$key}); MATCH (n) WHERE n.p=$key SET n.p=$key",
             RelationId(1),
             |kind, name| match (kind, name) {
-                (GraphSymbolKind::Property, "p") => {
-                    Some(GraphSymbol::Property(PropertyKeyId(1)))
-                }
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
                 _ => None,
             },
         )
@@ -574,8 +584,8 @@ mod controlled_binding_tests {
             ("MATCH (n) DELETE n", true),
             ("MERGE (n)", true),
         ] {
-            let prepared = PreparedGraphWriteScript::prepare(text, RelationId(1), |_, _| None)
-                .unwrap();
+            let prepared =
+                PreparedGraphWriteScript::prepare(text, RelationId(1), |_, _| None).unwrap();
             assert_eq!(prepared.requires_read(), reads, "{text}");
         }
         assert!(script().requires_read()); // unbound $key cannot erase the MATCH
@@ -586,22 +596,38 @@ mod controlled_binding_tests {
         let script = script();
         let arguments = [values(30), values(10), values(30)];
         let mut events = Vec::new();
-        let batch = script.bind_parameter_sets_controlled(&arguments, 6, |at| {
-            events.push(at);
-            Ok::<_, ()>(())
-        }).unwrap();
+        let batch = script
+            .bind_parameter_sets_controlled(&arguments, 6, |at| {
+                events.push(at);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         assert_eq!(events, vec![None, Some(0), Some(1), Some(2), None]);
         // Independent assembly from separately bound records, not the legacy
         // batch wrapper (which intentionally delegates to the controlled loop).
         let expected = PreparedGraphWriteProgram::prepare(
-            arguments.iter().flat_map(|input| {
-                script.bind_parameters(input).unwrap().into_statements().into_vec()
-            }).collect(),
-        ).unwrap();
-        assert_eq!(batch.program().canonical_bytes(), expected.canonical_bytes());
+            arguments
+                .iter()
+                .flat_map(|input| {
+                    script
+                        .bind_parameters(input)
+                        .unwrap()
+                        .into_statements()
+                        .into_vec()
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            batch.program().canonical_bytes(),
+            expected.canonical_bytes()
+        );
         for flat in 0..6 {
             let location = batch.location(flat).unwrap();
-            assert_eq!((location.argument_set, location.statement), (flat / 2, flat % 2));
+            assert_eq!(
+                (location.argument_set, location.statement),
+                (flat / 2, flat % 2)
+            );
             assert_eq!(location.span, script.statement_span(flat % 2).unwrap());
         }
         assert_eq!(batch.location(6), None);
@@ -616,13 +642,25 @@ mod controlled_binding_tests {
             let mut visited = Vec::new();
             let result = script.bind_parameter_sets_controlled(&arguments, 6, |at| {
                 visited.push(at);
-                if visited.len() == cutoff + 1 { Err(cutoff) } else { Ok(()) }
+                if visited.len() == cutoff + 1 {
+                    Err(cutoff)
+                } else {
+                    Ok(())
+                }
             });
-            assert!(matches!(result, Err(GraphWriteScriptBatchBindError::Interrupted {
+            assert!(
+                matches!(result, Err(GraphWriteScriptBatchBindError::Interrupted {
                 argument_set, source,
-            }) if argument_set == expected[cutoff] && source == cutoff));
+            }) if argument_set == expected[cutoff] && source == cutoff)
+            );
             assert_eq!(visited, expected[..=cutoff]);
-            assert_eq!(script.bind_parameter_sets(&arguments).unwrap().argument_sets(), 3);
+            assert_eq!(
+                script
+                    .bind_parameter_sets(&arguments)
+                    .unwrap()
+                    .argument_sets(),
+                3
+            );
         }
     }
 
@@ -635,23 +673,38 @@ mod controlled_binding_tests {
             events.push(at);
             Ok::<_, ()>(())
         });
-        assert!(matches!(too_small, Err(GraphWriteScriptBatchBindError::Binding(
-            GraphWriteScriptBatchError::TooManyStatements { limit: 5, observed: 6 }
-        ))));
+        assert!(matches!(
+            too_small,
+            Err(GraphWriteScriptBatchBindError::Binding(
+                GraphWriteScriptBatchError::TooManyStatements {
+                    limit: 5,
+                    observed: 6
+                }
+            ))
+        ));
         assert!(events.is_empty());
         let empty = script.bind_parameter_sets_controlled(&[], usize::MAX, |_| {
             panic!("empty input must refuse before controls")
         });
-        assert!(matches!(empty, Err(GraphWriteScriptBatchBindError::<()>::Binding(
-            GraphWriteScriptBatchError::Empty
-        ))));
+        assert!(matches!(
+            empty,
+            Err(GraphWriteScriptBatchBindError::<()>::Binding(
+                GraphWriteScriptBatchError::Empty
+            ))
+        ));
         let result = script.bind_parameter_sets_controlled(&inputs, 6, |at| {
             events.push(at);
             Ok::<_, ()>(())
         });
-        assert!(matches!(result, Err(GraphWriteScriptBatchBindError::Binding(
-            GraphWriteScriptBatchError::Arguments { argument_set: 1, .. }
-        ))));
+        assert!(matches!(
+            result,
+            Err(GraphWriteScriptBatchBindError::Binding(
+                GraphWriteScriptBatchError::Arguments {
+                    argument_set: 1,
+                    ..
+                }
+            ))
+        ));
         assert_eq!(events, vec![None, Some(0), Some(1)]);
     }
 
@@ -659,31 +712,54 @@ mod controlled_binding_tests {
     fn admitted_expansion_can_exceed_64_but_not_the_hard_ceiling() {
         let script = script();
         let inputs = (0..40).map(values).collect::<Vec<_>>();
-        let batch = script.bind_parameter_sets_controlled(&inputs, 80, |_| Ok::<_, ()>(()))
+        let batch = script
+            .bind_parameter_sets_controlled(&inputs, 80, |_| Ok::<_, ()>(()))
             .unwrap();
         assert_eq!(batch.program().statements().len(), 80);
         assert_eq!(batch.statement_range(39), Some(78..80));
-        let too_many = vec![GqlParameters::new(); PreparedGraphWriteScript::MAX_BATCH_STATEMENTS / 2 + 1];
+        let too_many =
+            vec![GqlParameters::new(); PreparedGraphWriteScript::MAX_BATCH_STATEMENTS / 2 + 1];
         let result = script.bind_parameter_sets_controlled(&too_many, usize::MAX, |_| {
             panic!("hard count admission must precede values and controls")
         });
-        assert!(matches!(result, Err(GraphWriteScriptBatchBindError::<()>::Binding(
-            GraphWriteScriptBatchError::TooManyStatements { limit: 65_536, observed: 65_538 }
-        ))));
+        assert!(matches!(
+            result,
+            Err(GraphWriteScriptBatchBindError::<()>::Binding(
+                GraphWriteScriptBatchError::TooManyStatements {
+                    limit: 65_536,
+                    observed: 65_538
+                }
+            ))
+        ));
     }
 
     #[test]
     fn unwind_drops_the_private_expansion_and_leaves_the_definition_reusable() {
         let script = script();
         let inputs = [values(1), values(2)];
-        let baseline = script.bind_parameter_sets(&inputs).unwrap().program().canonical_bytes();
+        let baseline = script
+            .bind_parameter_sets(&inputs)
+            .unwrap()
+            .program()
+            .canonical_bytes();
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             script.bind_parameter_sets_controlled(&inputs, 4, |at| {
-                assert_ne!(at, Some(1), "injected bind unwind after one complete record");
+                assert_ne!(
+                    at,
+                    Some(1),
+                    "injected bind unwind after one complete record"
+                );
                 Ok::<_, ()>(())
             })
         }));
         assert!(failure.is_err());
-        assert_eq!(script.bind_parameter_sets(&inputs).unwrap().program().canonical_bytes(), baseline);
+        assert_eq!(
+            script
+                .bind_parameter_sets(&inputs)
+                .unwrap()
+                .program()
+                .canonical_bytes(),
+            baseline
+        );
     }
 }

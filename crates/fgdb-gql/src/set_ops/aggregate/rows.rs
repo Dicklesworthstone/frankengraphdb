@@ -26,9 +26,7 @@ fn conversion_error<E, C>(
 /// No partial output escapes on a late incompatible value or control failure.
 pub(super) fn convert_rows<E, C>(
     rows: Vec<GraphAggregateRow>,
-    control: &mut impl FnMut(
-        GlaExecutionEvent,
-    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
 ) -> ResultRows<E, C> {
     let mut output = Vec::new();
     for row in rows {
@@ -105,8 +103,7 @@ impl PreparedGraphSetAggregate {
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>>
-    {
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         let execution = self.execute_governed(policy, source, &mut checkpoint)?;
         let mut evaluator = execution.evaluator;
         let value = convert_rows(execution.value, &mut |event| {
@@ -152,10 +149,12 @@ mod tests {
                     values
                         .iter()
                         .map(|value| {
-                            GraphSetValue::Value(value.map_or_else(
-                                || GraphValue::Scalar(CanonicalScalar::Null),
-                                scalar,
-                            ))
+                            GraphSetValue::Value(
+                                value.map_or_else(
+                                    || GraphValue::Scalar(CanonicalScalar::Null),
+                                    scalar,
+                                ),
+                            )
                         })
                         .collect(),
                 ),
@@ -222,11 +221,13 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(grouped
-            .execute_values_governed(policy(), source, || Ok(()))
-            .unwrap()
-            .value
-            .is_empty());
+        assert!(
+            grouped
+                .execute_values_governed(policy(), source, || Ok(()))
+                .unwrap()
+                .value
+                .is_empty()
+        );
     }
 
     #[test]
@@ -268,26 +269,46 @@ mod tests {
             assert_eq!(exact.value[0].values()[2].as_integer(), Some(expected));
             assert!(matches!(
                 query.execute_values_governed(policy(), source, || Ok(())),
-                Err(GqlQueryError::Source(GraphAggregateError::OutputExpression {
-                    column: 2,
-                    error: GraphIntegerError { kind: GraphIntegerErrorKind::Overflow, .. },
-                }))
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        column: 2,
+                        error: GraphIntegerError {
+                            kind: GraphIntegerErrorKind::Overflow,
+                            ..
+                        },
+                    }
+                ))
             ));
         }
         for values in [[Some(1), Some(2)], [Some(2), Some(2)]] {
             let average = PreparedGraphSetAggregate::prepare(
-                input(&values), &[], &[GraphAggregate::average_int("mean", 0)], 0, None,
+                input(&values),
+                &[],
+                &[GraphAggregate::average_int("mean", 0)],
+                0,
+                None,
             )
             .unwrap();
-            assert!(average.execute_governed(policy(), source, || Ok(())).unwrap()
-                .value[0].values()[0].as_average().is_some());
+            assert!(
+                average
+                    .execute_governed(policy(), source, || Ok(()))
+                    .unwrap()
+                    .value[0]
+                    .values()[0]
+                    .as_average()
+                    .is_some()
+            );
             assert!(matches!(
                 average.execute_values_governed(policy(), source, || Ok(())),
-                Err(GqlQueryError::Source(GraphAggregateError::OutputExpression {
-                    error: GraphIntegerError {
-                        kind: GraphIntegerErrorKind::IncompatibleOperands, ..
-                    }, ..
-                }))
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        error: GraphIntegerError {
+                            kind: GraphIntegerErrorKind::IncompatibleOperands,
+                            ..
+                        },
+                        ..
+                    }
+                ))
             ));
         }
     }
@@ -296,9 +317,13 @@ mod tests {
     fn conversion_shares_work_scratch_and_does_not_charge_result_rows_twice() {
         let query = summary(&[Some(1), Some(2)]);
         let exact = query.execute_governed(policy(), source, || Ok(())).unwrap();
-        let converted = query.execute_values_governed(
-            GqlQueryPolicy::new(0, 1, 1_000_000, 1_000_000), source, || Ok(()),
-        ).unwrap();
+        let converted = query
+            .execute_values_governed(
+                GqlQueryPolicy::new(0, 1, 1_000_000, 1_000_000),
+                source,
+                || Ok(()),
+            )
+            .unwrap();
         assert_eq!(converted.rows.result_rows, 1);
         assert!(converted.evaluator.work_units > exact.evaluator.work_units);
         assert!(converted.evaluator.scratch_entries > exact.evaluator.scratch_entries);
@@ -317,22 +342,34 @@ mod tests {
     fn conversion_keeps_the_same_checkpoint_after_aggregation() {
         let query = summary(&[Some(1), Some(2)]);
         let mut before = 0;
-        query.execute_governed(policy(), source, || {
-            before += 1;
-            Ok(())
-        }).unwrap();
+        query
+            .execute_governed(policy(), source, || {
+                before += 1;
+                Ok(())
+            })
+            .unwrap();
         let mut calls = 0;
         let result = query.execute_values_governed(
             policy(),
-            |_, _| -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<Infallible, &'static str>> {
-                panic!("unexpected source")
-            },
+            |_,
+             _|
+             -> Result<
+                GqlQueryExecution<GraphValueRow>,
+                GqlQueryError<Infallible, &'static str>,
+            > { panic!("unexpected source") },
             || {
                 calls += 1;
-                if calls > before { Err("cancel conversion") } else { Ok(()) }
+                if calls > before {
+                    Err("cancel conversion")
+                } else {
+                    Ok(())
+                }
             },
         );
-        assert!(matches!(result, Err(GqlQueryError::Interrupted("cancel conversion"))));
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Interrupted("cancel conversion"))
+        ));
     }
 
     #[test]
@@ -345,30 +382,56 @@ mod tests {
             )
             .unwrap();
         let query = PreparedGraphSetAggregate::prepare(
-            relation, &[], &[GraphAggregate::count_rows("n"), GraphAggregate::sum_int("s", 0)], 0, None,
-        ).unwrap();
-        assert_eq!(query.execute_values_governed(policy(), source, || Ok(())).unwrap()
-            .value[0].values(), &[scalar(4), scalar(7)]);
+            relation,
+            &[],
+            &[
+                GraphAggregate::count_rows("n"),
+                GraphAggregate::sum_int("s", 0),
+            ],
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            query
+                .execute_values_governed(policy(), source, || Ok(()))
+                .unwrap()
+                .value[0]
+                .values(),
+            &[scalar(4), scalar(7)]
+        );
     }
 
     #[test]
     fn late_source_failure_is_not_hidden_by_an_empty_left_relation() {
-        let pattern = crate::PreparedGraphText::prepare(
-            "MATCH (n) RETURN n AS id", |_, _: &str| None,
-        ).unwrap().bind_parameters(&crate::GqlParameters::new()).unwrap();
-        let relation = PreparedGraphSet::from(pattern.clone()).combine(
-            GraphSetOperation::Union,
-            GraphSetQuantifier::All,
-            PreparedGraphSet::from(pattern),
-        ).unwrap();
+        let pattern =
+            crate::PreparedGraphText::prepare("MATCH (n) RETURN n AS id", |_, _: &str| None)
+                .unwrap()
+                .bind_parameters(&crate::GqlParameters::new())
+                .unwrap();
+        let relation = PreparedGraphSet::from(pattern.clone())
+            .combine(
+                GraphSetOperation::Union,
+                GraphSetQuantifier::All,
+                PreparedGraphSet::from(pattern),
+            )
+            .unwrap();
         let query = PreparedGraphSetAggregate::prepare(
-            relation, &[], &[GraphAggregate::count_rows("n")], 0, None,
-        ).unwrap();
+            relation,
+            &[],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap();
         let mut calls = 0;
         let result = query.execute_values_governed(
             GqlQueryPolicy::new(2, 1, 1_000_000, 1_000_000),
-            |_, remaining| -> Result<
-                GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, Infallible>,
+            |_,
+             remaining|
+             -> Result<
+                GqlQueryExecution<GraphValueRow>,
+                GqlQueryError<&'static str, Infallible>,
             > {
                 calls += 1;
                 assert_eq!(remaining.rows.max_snapshot_records(), Some(3 - calls));
@@ -377,7 +440,10 @@ mod tests {
                 }
                 Ok(GqlQueryExecution {
                     value: Vec::new(),
-                    rows: crate::GqlExecutionStats { snapshot_records: 1, result_rows: 0 },
+                    rows: crate::GqlExecutionStats {
+                        snapshot_records: 1,
+                        result_rows: 0,
+                    },
                     evaluator: crate::GlaExecutionStats::default(),
                 })
             },
@@ -387,5 +453,4 @@ mod tests {
         assert!(matches!(&result, Err(GqlQueryError::Source(_))));
         assert!(result.unwrap_err().to_string().contains("late-source"));
     }
-
 }

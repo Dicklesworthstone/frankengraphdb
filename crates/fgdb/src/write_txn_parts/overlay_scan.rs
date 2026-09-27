@@ -52,8 +52,10 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                     PendingRow::Edge { eid, .. }
                     | PendingRow::DeleteEdge { eid, .. }
                     | PendingRow::SetEdgeProperty { eid, .. }
-                    | PendingRow::CompareAndSet { elem: ElementId::Edge(eid), .. }
-                        if read_edges => Some(ElementId::Edge(*eid)),
+                    | PendingRow::CompareAndSet {
+                        elem: ElementId::Edge(eid),
+                        ..
+                    } if read_edges => Some(ElementId::Edge(*eid)),
                     _ => None,
                 };
                 if let Some(observed) = observed {
@@ -70,16 +72,24 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                         DeltaRow::CreateVertex { vid, .. }
                         | DeltaRow::DeleteVertex { vid, .. }
                         | DeltaRow::LabelMembership { vid, .. }
-                        | DeltaRow::Property { elem: ElementId::Vertex(vid), .. } => {
-                            transaction.read_set.borrow_mut().insert(ElementId::Vertex(*vid));
+                        | DeltaRow::Property {
+                            elem: ElementId::Vertex(vid),
+                            ..
+                        } => {
+                            transaction
+                                .read_set
+                                .borrow_mut()
+                                .insert(ElementId::Vertex(*vid));
                             let row = match owner.vertices.entry(*vid) {
                                 Entry::Occupied(entry) => entry.into_mut(),
                                 Entry::Vacant(entry) => {
                                     poll()?;
                                     // Birth and retirement replace the whole image;
                                     // do not copy a payload that will be discarded.
-                                    let basis = if matches!(effect,
-                                        DeltaRow::CreateVertex { .. } | DeltaRow::DeleteVertex { .. }
+                                    let basis = if matches!(
+                                        effect,
+                                        DeltaRow::CreateVertex { .. }
+                                            | DeltaRow::DeleteVertex { .. }
                                     ) {
                                         None
                                     } else {
@@ -92,17 +102,26 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                         }
                         _ => {}
                     }
-                    let Some(edges) = owner.edges.as_mut() else { continue; };
+                    let Some(edges) = owner.edges.as_mut() else {
+                        continue;
+                    };
                     match effect {
                         DeltaRow::CreateEdge { eid, .. }
                         | DeltaRow::DeleteEdge { eid, .. }
-                        | DeltaRow::Property { elem: ElementId::Edge(eid), .. } => {
-                            transaction.read_set.borrow_mut().insert(ElementId::Edge(*eid));
+                        | DeltaRow::Property {
+                            elem: ElementId::Edge(eid),
+                            ..
+                        } => {
+                            transaction
+                                .read_set
+                                .borrow_mut()
+                                .insert(ElementId::Edge(*eid));
                             let row = match edges.entry(*eid) {
                                 Entry::Occupied(entry) => entry.into_mut(),
                                 Entry::Vacant(entry) => {
                                     poll()?;
-                                    let basis = if matches!(effect,
+                                    let basis = if matches!(
+                                        effect,
                                         DeltaRow::CreateEdge { .. } | DeltaRow::DeleteEdge { .. }
                                     ) {
                                         None
@@ -110,17 +129,26 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                                         database.edge_at(*eid, transaction.basis)?
                                     };
                                     if let Some(record) = &basis {
-                                        transaction.read_set.borrow_mut()
+                                        transaction
+                                            .read_set
+                                            .borrow_mut()
                                             .insert(ElementId::Vertex(record.entry.src));
                                     }
                                     entry.insert(basis)
                                 }
                             };
                             if let Some(source) = transaction.apply_edge_effect(*eid, row, effect) {
-                                transaction.read_set.borrow_mut().insert(ElementId::Vertex(source));
+                                transaction
+                                    .read_set
+                                    .borrow_mut()
+                                    .insert(ElementId::Vertex(source));
                             }
                         }
-                        DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+                        DeltaRow::DeleteVertex {
+                            vid,
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
                             for eid in sorted_retired_incident_edges {
                                 poll()?;
                                 // The canonical cascade image is already exact.
@@ -163,26 +191,43 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             control,
             |basis, control| {
                 control(SourceEvent::Work)?;
-                self.transaction.read_set.borrow_mut().insert(ElementId::Vertex(basis.vid));
-                while replacements.peek().is_some_and(|(vid, _)| **vid < basis.vid) {
+                self.transaction
+                    .read_set
+                    .borrow_mut()
+                    .insert(ElementId::Vertex(basis.vid));
+                while replacements
+                    .peek()
+                    .is_some_and(|(vid, _)| **vid < basis.vid)
+                {
                     let (_, row) = replacements.next().expect("peeked sparse vertex");
                     if let Some(row) = row {
                         control(SourceEvent::Work)?;
                         visit(row, control)?;
                     }
                 }
-                let row = if replacements.peek().is_some_and(|(vid, _)| **vid == basis.vid) {
-                    replacements.next().expect("matching sparse vertex").1.as_ref()
+                let row = if replacements
+                    .peek()
+                    .is_some_and(|(vid, _)| **vid == basis.vid)
+                {
+                    replacements
+                        .next()
+                        .expect("matching sparse vertex")
+                        .1
+                        .as_ref()
                 } else {
                     Some(basis)
                 };
-                if let Some(row) = row { visit(row, control)?; }
+                if let Some(row) = row {
+                    visit(row, control)?;
+                }
                 Ok(())
             },
         )?;
         for (_, row) in replacements {
             control(SourceEvent::Work)?;
-            if let Some(row) = row { visit(row, control)?; }
+            if let Some(row) = row {
+                visit(row, control)?;
+            }
         }
         Ok(())
     }
@@ -214,7 +259,10 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                     reads.insert(ElementId::Edge(entry.eid));
                     reads.insert(ElementId::Vertex(entry.src));
                 }
-                self.transaction.match_expansions.borrow_mut().insert((entry.src, entry.relation));
+                self.transaction
+                    .match_expansions
+                    .borrow_mut()
+                    .insert((entry.src, entry.relation));
                 visit(entry, properties, control)
             };
             self.database.snapshot.visit_indexed_edges(
@@ -229,14 +277,20 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                         reads.insert(ElementId::Edge(basis.eid));
                         reads.insert(ElementId::Vertex(basis.src));
                     }
-                    while replacements.peek().is_some_and(|(eid, _)| **eid < basis.eid) {
+                    while replacements
+                        .peek()
+                        .is_some_and(|(eid, _)| **eid < basis.eid)
+                    {
                         let (_, row) = replacements.next().expect("peeked sparse edge");
                         if let Some(row) = row {
                             control(SourceEvent::Work)?;
                             emit(&row.entry, &row.props, control)?;
                         }
                     }
-                    if replacements.peek().is_some_and(|(eid, _)| **eid == basis.eid) {
+                    if replacements
+                        .peek()
+                        .is_some_and(|(eid, _)| **eid == basis.eid)
+                    {
                         if let Some(row) = replacements.next().expect("matching sparse edge").1 {
                             emit(&row.entry, &row.props, control)?;
                         }
@@ -248,7 +302,9 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             )?;
             for (_, row) in replacements {
                 control(SourceEvent::Work)?;
-                if let Some(row) = row { emit(&row.entry, &row.props, control)?; }
+                if let Some(row) = row {
+                    emit(&row.entry, &row.props, control)?;
+                }
             }
             Ok(())
         })())

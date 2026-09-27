@@ -2,13 +2,13 @@
 //! authorized writers. No step publishes or gets an independent capability.
 
 use super::super::super::{
-    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn, WriteTxnError,
-    deletion, edge_merge, insert, mutation,
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
+    WriteTxnError, deletion, edge_merge, insert, mutation,
 };
 use fgdb_gql::{
-    GraphMutationProgramError, GraphWriteProgramError,
-    GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStatement,
-    GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats, PreparedGraphWriteProgram,
+    GraphMutationProgramError, GraphWriteProgramError, GraphWriteProgramPolicy,
+    GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStatement, GraphWriteStepError,
+    GraphWriteStepReceipt, GraphWriteStepStats, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
@@ -160,11 +160,23 @@ impl<V: Vfs + Clone> Database<V> {
         let now = clock();
         let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
         let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
-        let mut execution = Execution { cx: commit_cx, permit, clock };
+        let mut execution = Execution {
+            cx: commit_cx,
+            permit,
+            clock,
+        };
         self.complete_authorized_program(
-            txn_cx, query_cx, commit_cx, program, policy, verified.predicates(),
-            &mut execution, returning, receipt,
-        ).await
+            txn_cx,
+            query_cx,
+            commit_cx,
+            program,
+            policy,
+            verified.predicates(),
+            &mut execution,
+            returning,
+            receipt,
+        )
+        .await
     }
 
     // A script/batch binds privately under its SAME live permit, then enters
@@ -184,10 +196,18 @@ impl<V: Vfs + Clone> Database<V> {
         receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> Receipt,
     ) -> Result<(Receipt, EmbeddedTxnCompletion), Fault> {
         self.complete_authorized_program_with_output(
-            txn_cx, query_cx, commit_cx, program, policy, scope, execution, returning,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            program,
+            policy,
+            scope,
+            execution,
+            returning,
             |_, _, _, stats, steps| Ok(receipt(stats, steps)),
             core::convert::identity,
-        ).await
+        )
+        .await
     }
 
     // Result construction may execute a governed query, but is always inside
@@ -248,12 +268,12 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                         let relation = match statement {
                             GraphWriteStatement::EdgeMerge(input) => Some(input.relation()),
-                            GraphWriteStatement::EdgeUpsert(input) => Some(input.merge().relation()),
+                            GraphWriteStatement::EdgeUpsert(input) => {
+                                Some(input.merge().relation())
+                            }
                             _ => None,
                         };
-                        if relation.is_some_and(|relation| {
-                            !scope.allows_relation(relation)
-                        }) {
+                        if relation.is_some_and(|relation| !scope.allows_relation(relation)) {
                             return Err(refusal(Error::ScopeDenied));
                         }
                     }
@@ -267,148 +287,150 @@ impl<V: Vfs + Clone> Database<V> {
                 ));
                 workspace.transaction().program_multi_relation = true;
                 let mut receipts = Vec::new();
-                let stats = query_cx.with_restriction(|| {
-                    let execution = RefCell::new(&mut *execution);
-                    program.execute_governed(
-                        policy,
-                        |_, statement, remaining| {
-                            let mut borrowed = execution.borrow_mut();
-                            let execution = &mut **borrowed;
-                            let (stats, step) = match statement {
-                                GraphWriteStatement::Mutation(input) => {
-                                    let (stats, targets, edges) = mutation::apply(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.mutations,
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::Mutation)?;
-                                    (
-                                        GraphWriteStepStats::Mutation(stats),
-                                        GraphWriteStepReceipt::Mutation { targets, edges },
-                                    )
+                let stats = query_cx
+                    .with_restriction(|| {
+                        let execution = RefCell::new(&mut *execution);
+                        program.execute_governed(
+                            policy,
+                            |_, statement, remaining| {
+                                let mut borrowed = execution.borrow_mut();
+                                let execution = &mut **borrowed;
+                                let (stats, step) = match statement {
+                                    GraphWriteStatement::Mutation(input) => {
+                                        let (stats, targets, edges) = mutation::apply(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.mutations,
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::Mutation)?;
+                                        (
+                                            GraphWriteStepStats::Mutation(stats),
+                                            GraphWriteStepReceipt::Mutation { targets, edges },
+                                        )
+                                    }
+                                    GraphWriteStatement::Insert(input) => {
+                                        let (stats, vertices, edges) = insert::apply(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.insertion_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::Insert)?;
+                                        (
+                                            GraphWriteStepStats::Insert(stats),
+                                            GraphWriteStepReceipt::Insert { vertices, edges },
+                                        )
+                                    }
+                                    GraphWriteStatement::Delete(input) => {
+                                        let (stats, targets, edges) = deletion::apply(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.deletion_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::Delete)?;
+                                        (
+                                            GraphWriteStepStats::Delete(stats),
+                                            GraphWriteStepReceipt::Delete { targets, edges },
+                                        )
+                                    }
+                                    GraphWriteStatement::VertexMerge(input) => {
+                                        let (stats, outcome) = vertex::merge(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.vertex_merge_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::VertexMerge)?;
+                                        (
+                                            GraphWriteStepStats::VertexMerge(stats),
+                                            GraphWriteStepReceipt::VertexMerge { outcome },
+                                        )
+                                    }
+                                    GraphWriteStatement::VertexUpsert(input) => {
+                                        let (stats, outcome) = vertex::upsert(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.vertex_upsert_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::VertexUpsert)?;
+                                        (
+                                            GraphWriteStepStats::VertexUpsert(stats),
+                                            GraphWriteStepReceipt::VertexUpsert { outcome },
+                                        )
+                                    }
+                                    GraphWriteStatement::EdgeMerge(input) => {
+                                        let (stats, outcome) = edge_merge::apply(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.edge_merge_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::EdgeMerge)?;
+                                        (
+                                            GraphWriteStepStats::EdgeMerge(stats),
+                                            GraphWriteStepReceipt::EdgeMerge { outcome },
+                                        )
+                                    }
+                                    GraphWriteStatement::EdgeUpsert(input) => {
+                                        let (stats, outcome) = edge_upsert::apply(
+                                            workspace.transaction(),
+                                            self,
+                                            query_cx,
+                                            input,
+                                            remaining.edge_upsert_policy(),
+                                            scope,
+                                            execution,
+                                            returning,
+                                        )
+                                        .map_err(GraphWriteStepError::EdgeUpsert)?;
+                                        (
+                                            GraphWriteStepStats::EdgeUpsert(stats),
+                                            GraphWriteStepReceipt::EdgeUpsert { outcome },
+                                        )
+                                    }
+                                };
+                                if returning {
+                                    // Identities were admitted by the statement helper.
+                                    // This fixed-shape envelope is bounded by the native
+                                    // prepared program's admitted statement count.
+                                    receipts.push(step);
                                 }
-                                GraphWriteStatement::Insert(input) => {
-                                    let (stats, vertices, edges) = insert::apply(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.insertion_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::Insert)?;
-                                    (
-                                        GraphWriteStepStats::Insert(stats),
-                                        GraphWriteStepReceipt::Insert { vertices, edges },
-                                    )
-                                }
-                                GraphWriteStatement::Delete(input) => {
-                                    let (stats, targets, edges) = deletion::apply(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.deletion_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::Delete)?;
-                                    (
-                                        GraphWriteStepStats::Delete(stats),
-                                        GraphWriteStepReceipt::Delete { targets, edges },
-                                    )
-                                }
-                                GraphWriteStatement::VertexMerge(input) => {
-                                    let (stats, outcome) = vertex::merge(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.vertex_merge_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::VertexMerge)?;
-                                    (
-                                        GraphWriteStepStats::VertexMerge(stats),
-                                        GraphWriteStepReceipt::VertexMerge { outcome },
-                                    )
-                                }
-                                GraphWriteStatement::VertexUpsert(input) => {
-                                    let (stats, outcome) = vertex::upsert(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.vertex_upsert_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::VertexUpsert)?;
-                                    (
-                                        GraphWriteStepStats::VertexUpsert(stats),
-                                        GraphWriteStepReceipt::VertexUpsert { outcome },
-                                    )
-                                }
-                                GraphWriteStatement::EdgeMerge(input) => {
-                                    let (stats, outcome) = edge_merge::apply(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.edge_merge_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::EdgeMerge)?;
-                                    (
-                                        GraphWriteStepStats::EdgeMerge(stats),
-                                        GraphWriteStepReceipt::EdgeMerge { outcome },
-                                    )
-                                }
-                                GraphWriteStatement::EdgeUpsert(input) => {
-                                    let (stats, outcome) = edge_upsert::apply(
-                                        workspace.transaction(),
-                                        self,
-                                        query_cx,
-                                        input,
-                                        remaining.edge_upsert_policy(),
-                                        scope,
-                                        execution,
-                                        returning,
-                                    )
-                                    .map_err(GraphWriteStepError::EdgeUpsert)?;
-                                    (
-                                        GraphWriteStepStats::EdgeUpsert(stats),
-                                        GraphWriteStepReceipt::EdgeUpsert { outcome },
-                                    )
-                                }
-                            };
-                            if returning {
-                                // Identities were admitted by the statement helper.
-                                // This fixed-shape envelope is bounded by the native
-                                // prepared program's admitted statement count.
-                                receipts.push(step);
-                            }
-                            Ok(stats)
-                        },
-                        || {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.borrow_mut().checkpoint()
-                        },
-                    )
-                }).map_err(&map_error)?;
+                                Ok(stats)
+                            },
+                            || {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                execution.borrow_mut().checkpoint()
+                            },
+                        )
+                    })
+                    .map_err(&map_error)?;
                 let completed_statements = stats.completed_statements;
                 // Both public APIs build their final value here. There is no
                 // allocation, optional-receipt unwrap or auth check after commit.

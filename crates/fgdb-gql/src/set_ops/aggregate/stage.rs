@@ -42,7 +42,9 @@ impl PreparedGraphSet {
                 | Function::AverageIntDistinct => GraphSetColumnType::Scalar,
                 Function::Collect | Function::CollectDistinct => GraphSetColumnType::List,
                 Function::Min | Function::Max => {
-                    input.types[aggregate.argument_column().expect("native extremum argument")]
+                    input.types[aggregate
+                        .argument_column()
+                        .expect("native extremum argument")]
                 }
             });
         }

@@ -292,9 +292,9 @@ where
                     } else {
                         event
                     };
-                    meter
-                        .event(event)
-                        .map_err(|error| error.map_source(crate::GraphAggregateError::InputRelation))
+                    meter.event(event).map_err(|error| {
+                        error.map_source(crate::GraphAggregateError::InputRelation)
+                    })
                 })
                 .map_err(|error| {
                     error.map_source(|error| GraphSetExecutionError::Aggregate(Box::new(error)))

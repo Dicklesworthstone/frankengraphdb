@@ -2,6 +2,10 @@
 //! durability path. These laws distinguish committed writes, zero-effect read
 //! closes, execution refusal and allocator refusal while checking pin cleanup.
 
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};

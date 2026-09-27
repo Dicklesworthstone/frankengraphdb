@@ -77,7 +77,10 @@ where
         work: &mut dyn WorkControl,
         visit: &mut dyn FnMut(VId, &mut dyn WorkControl) -> Result<(), BeaconError>,
     ) -> Result<(), BeaconError> {
-        if self.relation.is_some_and(|relation| !(self.relation_allowed)(relation)) {
+        if self
+            .relation
+            .is_some_and(|relation| !(self.relation_allowed)(relation))
+        {
             return Ok(());
         }
         let snapshot = self.snapshot;
@@ -85,20 +88,32 @@ where
         let mut after = None;
         loop {
             let next = snapshot.adjacency_index.next_incident_edge(
-                vertex, direction, after, &mut |event| {
-                    self.source_event(match event {
-                        GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
-                        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => SourceEvent::Work,
-                    }, work)
+                vertex,
+                direction,
+                after,
+                &mut |event| {
+                    self.source_event(
+                        match event {
+                            GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                            GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                                SourceEvent::Work
+                            }
+                        },
+                        work,
+                    )
                 },
             )?;
             let Some(eid) = next else { break };
             // Ordered successors handle zero and u128::MAX without arithmetic.
             after = Some(eid);
             self.source_event(SourceEvent::Work, work)?;
-            let Some((block, row)) = snapshot.adjacency_index
-                .statement_at(&snapshot.blocks, eid, self.at)
-            else { continue };
+            let Some((block, row)) =
+                snapshot
+                    .adjacency_index
+                    .statement_at(&snapshot.blocks, eid, self.at)
+            else {
+                continue;
+            };
             let edge = &snapshot.blocks[block][row];
             let neighbour = match direction {
                 GlaDirection::Forward if edge.src == vertex => edge.dst,
@@ -109,7 +124,9 @@ where
             };
             // Winner selection MUST precede every filter. The index is a
             // historical superset, not permission to resurrect an older edge.
-            if self.relation.is_some_and(|relation| relation != edge.relation)
+            if self
+                .relation
+                .is_some_and(|relation| relation != edge.relation)
                 || !(self.relation_allowed)(edge.relation)
                 || !self.selected.contains(edge.src)
                 || !self.selected.contains(edge.dst)
@@ -174,8 +191,15 @@ pub(crate) fn evaluate(
         Scan::Unmetered(poll) => Scan::Unmetered(&mut **poll),
     };
     let index = build_selected(
-        snapshot, at, options, config, work, vertex_scan,
-        admit, label_allowed, property_allowed,
+        snapshot,
+        at,
+        options,
+        config,
+        work,
+        vertex_scan,
+        admit,
+        label_allowed,
+        property_allowed,
         |row| {
             if let Some(graph) = &mut selected {
                 graph.insert_vertex(row.vid, &mut SharedWork(work))?;
@@ -185,23 +209,36 @@ pub(crate) fn evaluate(
     )?;
     let graph_hits = if let Some(graph) = selected {
         let mut source = IndexedNeighbors {
-            snapshot, at, selected: &graph, relation: expansion.relation,
+            snapshot,
+            at,
+            selected: &graph,
+            relation: expansion.relation,
             direction: match expansion.direction {
                 ExpansionDirection::Outgoing => GlaDirection::Forward,
                 ExpansionDirection::Incoming => GlaDirection::Reverse,
                 ExpansionDirection::Undirected => GlaDirection::Undirected,
             },
-            limits: expansion.limits, scan, relation_allowed, admit_edge,
-            admitted: 0, scratch: 0,
+            limits: expansion.limits,
+            scan,
+            relation_allowed,
+            admit_edge,
+            admitted: 0,
+            scratch: 0,
         };
         graph.expand_from_source(
-            expansion.seeds, expansion.max_hops, expansion.include_seeds,
-            query.graph_candidates, &mut source, &mut SharedWork(work),
+            expansion.seeds,
+            expansion.max_hops,
+            expansion.include_seeds,
+            query.graph_candidates,
+            &mut source,
+            &mut SharedWork(work),
         )?
     } else {
         Vec::new()
     };
-    let rows = index.snapshot().hybrid_search_graph(query, &graph_hits, &mut SharedWork(work))?;
+    let rows = index
+        .snapshot()
+        .hybrid_search_graph(query, &graph_hits, &mut SharedWork(work))?;
     work.borrow_mut().charge(1)?;
     Ok(rows)
 }
@@ -237,7 +274,8 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            self.read_session().map_err(Error::Read)?
+            self.read_session()
+                .map_err(Error::Read)?
                 .beacon_search_graph_indexed(cx, options, query, expansion)
         })
     }
@@ -258,10 +296,22 @@ impl EmbeddedReadView {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let at = options.as_of.unwrap_or(self.frontier());
             self.snapshot.check_frontier(at).map_err(Error::Read)?;
-            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| cx.checkpoint()));
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
             let result = evaluate(
-                &self.snapshot, at, options, query, expansion, &work, Scan::Metered,
-                |_| Ok(true), |_| true, |_| true, |_| true, || Ok(()),
+                &self.snapshot,
+                at,
+                options,
+                query,
+                expansion,
+                &work,
+                Scan::Metered,
+                |_| Ok(true),
+                |_| true,
+                |_| true,
+                |_| true,
+                || Ok(()),
             );
             work.into_inner().finish(result)
         })
@@ -274,17 +324,23 @@ mod tests {
     use crate::{DatabaseKeys, MemVfs, WriteBatch};
     use asupersync::lab::run_async_under_lab;
     use fgdb_beacon::{
-        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch,
-        VectorSearch, WorkBudget,
+        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
+        WorkBudget,
     };
-    use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+    use fgdb_types::{
+        CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+    };
     use std::cell::Cell;
 
     const R: RelationId = RelationId(1);
     const HIGH: VId = VId(u128::MAX);
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0xb1; 32], DatabaseSecurityNamespaceId([0xb2; 32]), [0xb3; 32])
+        DatabaseKeys::new(
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            [0xb3; 32],
+        )
     }
     fn options() -> Options {
         let mut value = Options::text(PropertyKeyId(1));
@@ -296,28 +352,55 @@ mod tests {
     fn query() -> GraphHybridQuery<'static> {
         GraphHybridQuery {
             retrieval: ExactHybridQuery {
-                vector: &[0.0], text: "graph", k: 3,
-                vector_candidates: 4, text_candidates: 4,
-                vector_mode: VectorSearch::Exact, text_mode: TextMatch::Any,
+                vector: &[0.0],
+                text: "graph",
+                k: 3,
+                vector_candidates: 4,
+                text_candidates: 4,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
                 profile: ExactRrfProfile::new(60, 1, 1).unwrap(),
             },
-            graph_candidates: 4, graph_weight: 100,
+            graph_candidates: 4,
+            graph_weight: 100,
         }
     }
-    fn spec(seeds: &[VId], direction: ExpansionDirection, hops: u32) -> ExpansionSpec<'_, RelationId> {
-        ExpansionSpec { seeds, relation: Some(R), direction, max_hops: hops,
-            include_seeds: false, limits: ExpansionLimits::default() }
+    fn spec(
+        seeds: &[VId],
+        direction: ExpansionDirection,
+        hops: u32,
+    ) -> ExpansionSpec<'_, RelationId> {
+        ExpansionSpec {
+            seeds,
+            relation: Some(R),
+            direction,
+            max_hops: hops,
+            include_seeds: false,
+            limits: ExpansionLimits::default(),
+        }
     }
     async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, disconnected: usize) {
         let mut batch = WriteBatch::new(R);
         for (id, x) in [(VId(0), 0), (VId(1), 1), (HIGH, 2), (VId(9), 3)] {
-            batch.create_vertex(id, vec![LabelId(1)], vec![
-                (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph").unwrap()),
-                (PropertyKeyId(2), CanonicalScalar::Int(x)),
-            ]);
+            batch.create_vertex(
+                id,
+                vec![LabelId(1)],
+                vec![
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                    ),
+                    (PropertyKeyId(2), CanonicalScalar::Int(x)),
+                ],
+            );
         }
-        for (eid, from, to) in [(0, VId(0), VId(1)), (1, VId(0), VId(1)),
-            (2, VId(1), HIGH), (3, HIGH, VId(0)), (4, VId(1), VId(1))] {
+        for (eid, from, to) in [
+            (0, VId(0), VId(1)),
+            (1, VId(0), VId(1)),
+            (2, VId(1), HIGH),
+            (3, HIGH, VId(0)),
+            (4, VId(1), VId(1)),
+        ] {
             batch.add_edge(EId(eid), from, to, vec![]);
         }
         for eid in 0..disconnected {
@@ -332,26 +415,52 @@ mod tests {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             seed(&mut db, &c.commit(), 8).await;
             let seeds = [VId(0), VId(0), VId(999)];
-            for direction in [ExpansionDirection::Outgoing, ExpansionDirection::Incoming, ExpansionDirection::Undirected] {
+            for direction in [
+                ExpansionDirection::Outgoing,
+                ExpansionDirection::Incoming,
+                ExpansionDirection::Undirected,
+            ] {
                 for hops in 0..=4 {
                     for include in [false, true] {
                         let mut expansion = spec(&seeds, direction, hops);
                         expansion.include_seeds = include;
-                        let expected = db.beacon_search_graph(&c.query(), &options(), query(), expansion).unwrap();
-                        let actual = db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap();
+                        let expected = db
+                            .beacon_search_graph(&c.query(), &options(), query(), expansion)
+                            .unwrap();
+                        let actual = db
+                            .beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                            .unwrap();
                         assert_eq!(actual, expected);
                     }
                 }
             }
-            let expected = db.beacon_search_graph_indexed(&c.query(), &options(), query(),
-                spec(&seeds, ExpansionDirection::Outgoing, 2)).unwrap();
+            let expected = db
+                .beacon_search_graph_indexed(
+                    &c.query(),
+                    &options(),
+                    query(),
+                    spec(&seeds, ExpansionDirection::Outgoing, 2),
+                )
+                .unwrap();
             drop(db);
-            let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys()).await.unwrap();
-            assert_eq!(db.beacon_search_graph_indexed(&c.query(), &options(), query(),
-                spec(&seeds, ExpansionDirection::Outgoing, 2)).unwrap(), expected);
+            let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(
+                db.beacon_search_graph_indexed(
+                    &c.query(),
+                    &options(),
+                    query(),
+                    spec(&seeds, ExpansionDirection::Outgoing, 2)
+                )
+                .unwrap(),
+                expected
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -366,21 +475,40 @@ mod tests {
             let mut expansion = spec(&seeds, ExpansionDirection::Outgoing, 1);
             expansion.limits.max_input_edges = 2;
             expansion.limits.max_source_scratch = 2;
-            let expected = db.beacon_search_graph(&c.query(), &options(), query(),
-                spec(&seeds, ExpansionDirection::Outgoing, 1)).unwrap();
-            assert_eq!(db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap(), expected);
-            assert!(db.beacon_search_graph(&c.query(), &options(), query(), expansion).is_err());
+            let expected = db
+                .beacon_search_graph(
+                    &c.query(),
+                    &options(),
+                    query(),
+                    spec(&seeds, ExpansionDirection::Outgoing, 1),
+                )
+                .unwrap();
+            assert_eq!(
+                db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                    .unwrap(),
+                expected
+            );
+            assert!(
+                db.beacon_search_graph(&c.query(), &options(), query(), expansion)
+                    .is_err()
+            );
             expansion.limits.max_input_edges = 1;
-            assert!(matches!(db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
+            assert!(matches!(
+                db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "indexed expansion incidence visits", limit: 1,
-                }))));
+                    resource: "indexed expansion incidence visits",
+                    limit: 1,
+                }))
+            ));
             expansion.limits.max_input_edges = 2;
             expansion.limits.max_source_scratch = 1;
-            assert!(matches!(db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
+            assert!(matches!(
+                db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "indexed expansion source admissions", limit: 1,
-                }))));
+                    resource: "indexed expansion source admissions",
+                    limit: 1,
+                }))
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -395,22 +523,42 @@ mod tests {
             let pinned = db.read_session().unwrap();
             let seeds = [VId(0)];
             let expansion = spec(&seeds, ExpansionDirection::Outgoing, 2);
-            let old = pinned.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap();
+            let old = pinned
+                .beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                .unwrap();
             let mut edit = WriteBatch::new(R);
             edit.delete_edge(EId(2));
             edit.set_edge_property(EId(0), PropertyKeyId(99), Some(CanonicalScalar::Int(42)));
             edit.add_edge(EId(u128::MAX), VId(0), VId(9), vec![]);
             db.write(&c.commit(), edit).await.unwrap();
-            let current = db.beacon_search_graph(&c.query(), &options(), query(), expansion).unwrap();
-            assert_eq!(db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap(), current);
+            let current = db
+                .beacon_search_graph(&c.query(), &options(), query(), expansion)
+                .unwrap();
+            assert_eq!(
+                db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                    .unwrap(),
+                current
+            );
             assert_ne!(current, old);
-            let mut historic = options(); historic.as_of = Some(at);
-            assert_eq!(db.beacon_search_graph_indexed(&c.query(), &historic, query(), expansion).unwrap(), old);
+            let mut historic = options();
+            historic.as_of = Some(at);
+            assert_eq!(
+                db.beacon_search_graph_indexed(&c.query(), &historic, query(), expansion)
+                    .unwrap(),
+                old
+            );
             historic.as_of = Some(CommitSeq(db.frontier().unwrap().0 + 1));
-            assert!(matches!(pinned.beacon_search_graph_indexed(&c.query(), &historic, query(), expansion),
-                Err(Error::Read(ReadError::BeyondFrontier { .. }))));
+            assert!(matches!(
+                pinned.beacon_search_graph_indexed(&c.query(), &historic, query(), expansion),
+                Err(Error::Read(ReadError::BeyondFrontier { .. }))
+            ));
             drop(db);
-            assert_eq!(pinned.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap(), old);
+            assert_eq!(
+                pinned
+                    .beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                    .unwrap(),
+                old
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -429,8 +577,12 @@ mod tests {
             for relation in [Some(R), Some(RelationId(2)), None] {
                 let mut expansion = spec(&seeds, ExpansionDirection::Outgoing, 2);
                 expansion.relation = relation;
-                assert_eq!(db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion).unwrap(),
-                    db.beacon_search_graph(&c.query(), &options(), query(), expansion).unwrap());
+                assert_eq!(
+                    db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion)
+                        .unwrap(),
+                    db.beacon_search_graph(&c.query(), &options(), query(), expansion)
+                        .unwrap()
+                );
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -453,9 +605,24 @@ mod tests {
             ] {
                 let count = Cell::new(0);
                 let work = RefCell::new(WorkBudget::new(1_000_000));
-                evaluate(&db.snapshot, at, &options(), query(), spec(&seeds, direction, hops),
-                    &work, Scan::Metered, |_| Ok(true), |_| true, |_| true, |_| true,
-                    || { count.set(count.get()+1); Ok(()) }).unwrap();
+                evaluate(
+                    &db.snapshot,
+                    at,
+                    &options(),
+                    query(),
+                    spec(&seeds, direction, hops),
+                    &work,
+                    Scan::Metered,
+                    |_| Ok(true),
+                    |_| true,
+                    |_| true,
+                    |_| true,
+                    || {
+                        count.set(count.get() + 1);
+                        Ok(())
+                    },
+                )
+                .unwrap();
                 assert_eq!(count.get(), expected, "{direction:?}, hops {hops}");
             }
         });

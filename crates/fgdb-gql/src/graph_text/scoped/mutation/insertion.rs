@@ -308,7 +308,8 @@ fn bind_fields(
             }
             ReadValueTemplate::List(_)
             | ReadValueTemplate::Index { .. }
-            | ReadValueTemplate::Size(_) => {
+            | ReadValueTemplate::Size(_)
+            | ReadValueTemplate::In { .. } => {
                 // Scalar properties only: list construction is a read-surface
                 // capability, not a stored property encoding.
                 return Err(GraphInsertTextError {

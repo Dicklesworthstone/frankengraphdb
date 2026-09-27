@@ -65,20 +65,36 @@ fn project_rows(
         }
         let [left, right] = definition.endpoints;
         meter.units(ZSetEvent::Work, 2)?;
-        let left = endpoint(row.values().get(left).ok_or(StandingQueryFailure::InvalidDelta)?)?;
-        let right = endpoint(row.values().get(right).ok_or(StandingQueryFailure::InvalidDelta)?)?;
+        let left = endpoint(
+            row.values()
+                .get(left)
+                .ok_or(StandingQueryFailure::InvalidDelta)?,
+        )?;
+        let right = endpoint(
+            row.values()
+                .get(right)
+                .ok_or(StandingQueryFailure::InvalidDelta)?,
+        )?;
         // Both cells were checked before processing NULL. A self-loop supplies
         // one endpoint witness per occurrence, not two accidental lifetimes.
         for vertex in left.into_iter().chain(right.filter(|_| right != left)) {
             meter.charge(ZSetEvent::Work)?;
-            let count = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
-            vertices.accumulate(vertex, count, LIMBS, &mut |event| meter.charge(event))
+            let count = weight
+                .checked_clone(LIMBS)
+                .map_err(|_| StandingQueryFailure::Arithmetic)?;
+            vertices
+                .accumulate(vertex, count, LIMBS, &mut |event| meter.charge(event))
                 .map_err(zset_error)?;
         }
         if let (Some(left), Some(right)) = (left, right) {
             meter.charge(ZSetEvent::Work)?;
-            let count = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
-            edges.accumulate((left, right), count, LIMBS, &mut |event| meter.charge(event))
+            let count = weight
+                .checked_clone(LIMBS)
+                .map_err(|_| StandingQueryFailure::Arithmetic)?;
+            edges
+                .accumulate((left, right), count, LIMBS, &mut |event| {
+                    meter.charge(event)
+                })
                 .map_err(zset_error)?;
         }
     }
@@ -95,8 +111,11 @@ impl State {
     ) -> Result<Self, StandingQueryFailure> {
         let projection = project_rows(source, definition, meter)?;
         let mut support = VertexSupport::new(SetOperation::UnionDistinct);
-        let vertices = support.prepare(&projection.vertices, &ZSet::new(), LIMBS,
-            &mut |event| meter.charge(event)).map_err(support_error)?;
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(support_error)?;
         let mut components = relation.empty_kernel();
         let rows = components.apply(vertices.delta(), &projection.edges, None, meter)?;
         let relational = rows::State::from_membership(&rows, meter)?;
@@ -120,17 +139,27 @@ impl State {
         delta: &ZSet<GraphValueRow>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        let definition = self.relation.selected().ok_or(StandingQueryFailure::InvalidDelta)?;
+        let definition = self
+            .relation
+            .selected()
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
         let Input::Selected(support) = &mut self.input else {
             return Err(StandingQueryFailure::InvalidDelta);
         };
         let projection = project_rows(delta, definition, meter)?;
-        let vertices = support.prepare(&projection.vertices, &ZSet::new(), LIMBS,
-            &mut |event| meter.charge(event)).map_err(support_error)?;
+        let vertices = support
+            .prepare(&projection.vertices, &ZSet::new(), LIMBS, &mut |event| {
+                meter.charge(event)
+            })
+            .map_err(support_error)?;
         // DISTINCT is applied to integrated counts, not to signed input deltas.
         // Keep its guard uncommitted until connectivity AND both sinks accept.
-        let _ = self.components.apply(vertices.delta(), &projection.edges,
-            Some((&mut self.rows, &mut self.relational)), meter)?;
+        let _ = self.components.apply(
+            vertices.delta(),
+            &projection.edges,
+            Some((&mut self.rows, &mut self.relational)),
+            meter,
+        )?;
         let _ = vertices.commit();
         Ok(())
     }
@@ -158,7 +187,8 @@ impl State {
             return Err(StandingQueryFailure::DependencyUnavailable);
         }
         let delta = sets::delta(source).ok_or(StandingQueryFailure::DependencyUnavailable)?;
-        meter.stats.delta_rows = u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        meter.stats.delta_rows =
+            u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
         self.apply_selected(delta, meter)
     }
 }
@@ -227,7 +257,9 @@ impl<V: Vfs + Clone> Database<V> {
         let definition = Definition {
             input: source.index,
             endpoints,
-            width: sets::columns(parent).ok_or(StandingQueryError::Unsupported)?.len(),
+            width: sets::columns(parent)
+                .ok_or(StandingQueryError::Unsupported)?
+                .len(),
         };
         if !definition.matches_schema(parent) {
             return Err(StandingQueryError::Unsupported);
@@ -248,12 +280,19 @@ impl<V: Vfs + Clone> Database<V> {
         meter: &mut Meter<'_>,
     ) -> Result<State, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        let parent = sets::input_at(&self.standing_queries, definition.input, self.snapshot.frontier)?;
+        let parent = sets::input_at(
+            &self.standing_queries,
+            definition.input,
+            self.snapshot.frontier,
+        )?;
         if !definition.matches_schema(parent) {
             return Err(StandingQueryFailure::DependencyUnavailable);
         }
         let rows = sets::rows(parent).ok_or(StandingQueryFailure::DependencyUnavailable)?;
-        if meter.policy.rows.max_snapshot_records()
+        if meter
+            .policy
+            .rows
+            .max_snapshot_records()
             .is_some_and(|limit| rows.len() as u128 > u128::from(limit))
         {
             return Err(StandingQueryFailure::SnapshotBudget);

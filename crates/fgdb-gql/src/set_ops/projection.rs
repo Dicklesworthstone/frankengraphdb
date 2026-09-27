@@ -3,6 +3,8 @@
 
 mod membership;
 
+pub(crate) use membership::evaluate as evaluate_membership;
+
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
     check_depth,

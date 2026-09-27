@@ -147,24 +147,7 @@ fn expression<'g, E, C>(
             let mut list = Vec::new();
             for value in values {
                 let value = expression(value, input, column, control)?.into_owned(control)?;
-                // GraphValue lists have the ordinary scalar domain. Preserve
-                // exactness or fail, never truncate an aggregate into an i64.
-                let value = match value {
-                    GraphAggregateValue::Value(value) => value,
-                    GraphAggregateValue::Count(value) => GraphValue::Scalar(CanonicalScalar::Int(
-                        i64::try_from(value)
-                            .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))?,
-                    )),
-                    GraphAggregateValue::Integer(value) => {
-                        GraphValue::Scalar(CanonicalScalar::Int(
-                            i64::try_from(value)
-                                .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))?,
-                        ))
-                    }
-                    GraphAggregateValue::Average(_) => {
-                        return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
-                    }
-                };
+                let value = graph_value(value, column)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
                 list.push(value);
             }
@@ -202,6 +185,25 @@ fn expression<'g, E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))
         }
+        // Three-valued membership with the row evaluator's law (fgdb-gql
+        // set_ops): both operands execute once, a NULL list is UNKNOWN, and
+        // any other non-list is an expression error.
+        GraphSetValue::In { value, list } => {
+            let value = expression(value, input, column, control)?.into_owned(control)?;
+            let value = graph_value(value, column)?;
+            let list = expression(list, input, column, control)?;
+            let truth = match list.cell() {
+                cell if cell.is_null() => None,
+                Cell::Value(ValueRef::List(members)) => {
+                    crate::set_ops::evaluate_membership(&value, members, control)?
+                }
+                _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
+            )))
+        }
         GraphSetValue::Index { list, index } => {
             let list = expression(list, input, column, control)?;
             let index = expression(index, input, column, control)?;
@@ -233,6 +235,27 @@ fn expression<'g, E, C>(
             }
         }
     })
+}
+
+/// An aggregate output as an ordinary graph value. Preserve exactness or
+/// fail; never truncate an aggregate into an i64.
+fn graph_value<E, C>(
+    value: GraphAggregateValue,
+    column: usize,
+) -> Result<GraphValue, QueryError<E, C>> {
+    let int = |value: i128| {
+        i64::try_from(value)
+            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+            .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))
+    };
+    match value {
+        GraphAggregateValue::Value(value) => Ok(value),
+        GraphAggregateValue::Count(value) => int(i128::from(value)),
+        GraphAggregateValue::Integer(value) => int(value),
+        GraphAggregateValue::Average(_) => {
+            Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands))
+        }
+    }
 }
 
 struct ProjectedGroup<'g, 'a> {

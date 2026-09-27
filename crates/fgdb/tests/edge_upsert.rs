@@ -1,5 +1,9 @@
 //! Branch-specific directed relationship MERGE property actions.
 
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};

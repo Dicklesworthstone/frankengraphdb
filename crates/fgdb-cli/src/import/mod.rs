@@ -316,29 +316,35 @@ mod streaming_tests {
     use std::io::{self, Cursor};
 
     fn script() -> PreparedGraphWriteScript {
-        PreparedGraphWriteScript::prepare(
-            "CREATE (n {p:$value})",
-            RelationId(1),
-            |kind, name| match (kind, name) {
+        PreparedGraphWriteScript::prepare("CREATE (n {p:$value})", RelationId(1), |kind, name| {
+            match (kind, name) {
                 (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
                 _ => None,
-            },
-        ).unwrap()
+            }
+        })
+        .unwrap()
     }
 
     #[test]
     fn source_adapter_preserves_native_program_and_record_count() {
         let script = script();
         let input = "value\n1\n2\n3";
-        let expected = script.bind_csv(input, CsvParameterLimits::default()).unwrap();
+        let expected = script
+            .bind_csv(input, CsvParameterLimits::default())
+            .unwrap();
         let (program, records) = bind_source(
             &script,
             &mut Cursor::new(input.as_bytes()),
             DEFAULT_INPUT_BYTES,
             || Ok(()),
-        ).map_err(|error| error.message).unwrap();
+        )
+        .map_err(|error| error.message)
+        .unwrap();
         assert_eq!(records, 3);
-        assert_eq!(program.canonical_bytes(), expected.program().canonical_bytes());
+        assert_eq!(
+            program.canonical_bytes(),
+            expected.program().canonical_bytes()
+        );
     }
 
     struct BrokenSource {
@@ -357,8 +363,12 @@ mod streaming_tests {
 
     #[test]
     fn source_failure_after_valid_records_is_io_not_success_or_query_error() {
-        let mut source = BrokenSource { prefix: Cursor::new(b"value\n1\n") };
-        let error = bind_source(&script(), &mut source, DEFAULT_INPUT_BYTES, || Ok(())).err().unwrap();
+        let mut source = BrokenSource {
+            prefix: Cursor::new(b"value\n1\n"),
+        };
+        let error = bind_source(&script(), &mut source, DEFAULT_INPUT_BYTES, || Ok(()))
+            .err()
+            .unwrap();
         assert_eq!(error.code, 5);
         assert_eq!(error.message, "cannot read --input");
         assert!(!error.message.contains("private"));
@@ -368,8 +378,13 @@ mod streaming_tests {
     fn malformed_late_record_and_invalid_utf8_keep_query_exit_class() {
         for input in [b"value\n1\nsecret".as_slice(), b"value\n1\n\xff"] {
             let error = bind_source(
-                &script(), &mut Cursor::new(input), DEFAULT_INPUT_BYTES, || Ok(()),
-            ).err().unwrap();
+                &script(),
+                &mut Cursor::new(input),
+                DEFAULT_INPUT_BYTES,
+                || Ok(()),
+            )
+            .err()
+            .unwrap();
             assert_eq!(error.code, 3);
             assert!(!error.message.contains("secret"));
         }
@@ -378,10 +393,23 @@ mod streaming_tests {
     #[test]
     fn source_size_is_checked_without_trusting_file_metadata() {
         let input = b"value\n1\n";
-        assert!(bind_source(&script(), &mut Cursor::new(input), input.len() as u64, || Ok(())).is_ok());
+        assert!(
+            bind_source(
+                &script(),
+                &mut Cursor::new(input),
+                input.len() as u64,
+                || Ok(())
+            )
+            .is_ok()
+        );
         let error = bind_source(
-            &script(), &mut Cursor::new(input), input.len() as u64 - 1, || Ok(()),
-        ).err().unwrap();
+            &script(),
+            &mut Cursor::new(input),
+            input.len() as u64 - 1,
+            || Ok(()),
+        )
+        .err()
+        .unwrap();
         assert_eq!(error.code, 3);
     }
 
@@ -394,7 +422,11 @@ mod streaming_tests {
             DEFAULT_INPUT_BYTES,
             || {
                 boundaries += 1;
-                if boundaries == 4 { Err(Failure::io("cancelled")) } else { Ok(()) }
+                if boundaries == 4 {
+                    Err(Failure::io("cancelled"))
+                } else {
+                    Ok(())
+                }
             },
         );
         let error = result.err().unwrap();
@@ -406,7 +438,9 @@ mod streaming_tests {
     #[test]
     fn initial_cancellation_does_not_consume_the_input_source() {
         let mut input = Cursor::new(b"value\n1\n");
-        let result = bind_source(&script(), &mut input, DEFAULT_INPUT_BYTES, || Err(Failure::io("cancelled")));
+        let result = bind_source(&script(), &mut input, DEFAULT_INPUT_BYTES, || {
+            Err(Failure::io("cancelled"))
+        });
         assert!(result.is_err());
         assert_eq!(input.position(), 0);
     }

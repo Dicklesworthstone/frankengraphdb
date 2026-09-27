@@ -3,8 +3,8 @@
 
 use super::{
     AdmissionUsage, Database, GlaOutput, Governed, GqlQueryError, GqlQueryPolicy,
-    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables,
-    Vfs, execute_tables,
+    PlannerPredicates, PreparedGraphPattern, QueryCx, QueryError, ReadError, Tables, Vfs,
+    execute_tables,
 };
 use crate::write_txn::overlay_scan::OverlayRows;
 
@@ -49,13 +49,15 @@ impl<V: Vfs + Clone> Database<V> {
                     )
                 })?;
                 if pattern.plan().reads_edges() {
-                    overlay.visit_edges(&mut scan, |edge, properties, _| {
-                        tables.admit_edge(
-                            ((edge.eid, edge.src, edge.relation, edge.dst), properties),
-                            scope,
-                            &mut control,
-                        )
-                    }).ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
+                    overlay
+                        .visit_edges(&mut scan, |edge, properties, _| {
+                            tables.admit_edge(
+                                ((edge.eid, edge.src, edge.relation, edge.dst), properties),
+                                scope,
+                                &mut control,
+                            )
+                        })
+                        .ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
                 }
                 tables.metadata(pattern.plan(), scope, &mut control)?;
             }

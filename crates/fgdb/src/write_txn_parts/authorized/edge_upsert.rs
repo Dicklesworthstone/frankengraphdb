@@ -1,7 +1,9 @@
 //! Conditional relationship writes over the existing authorized MERGE. The
 //! native branch lowerer and original image checks remain the only writers.
 
-use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError};
+use super::{
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
+};
 use crate::write_txn::authorized::{edge_merge, stage};
 use crate::write_txn::{WriteTxn, edge_upsert_actions};
 use fgdb_gql::{
@@ -12,7 +14,11 @@ use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
 
 type Fault = GqlQueryError<GraphEdgeUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
-type Receipt = (GraphEdgeUpsertStats, GraphEdgeMergeOutcome, EmbeddedTxnCompletion);
+type Receipt = (
+    GraphEdgeUpsertStats,
+    GraphEdgeMergeOutcome,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
@@ -33,25 +39,41 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     // and directed existence probe. Do not issue another permit or deliver a
     // receipt for this internal MERGE; the complete upsert returns one identity.
     let (merge_stats, outcome) = edge_merge::apply(
-        transaction, database, cx, input.merge(), policy.merge, scope, execution, false,
-    ).map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
+        transaction,
+        database,
+        cx,
+        input.merge(),
+        policy.merge,
+        scope,
+        execution,
+        false,
+    )
+    .map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
     let (stats, batch) = cx.with_restriction(|| {
         edge_upsert_actions::<WriteTxnError, WriteTxnError, _>(
-            input, policy, merge_stats, outcome, || {
+            input,
+            policy,
+            merge_stats,
+            outcome,
+            || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 execution.checkpoint()
             },
         )
     })?;
     for row in batch.rows {
-        cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+        cx.checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(source)?;
         execution.checkpoint().map_err(source)?;
         // The full original edge and both endpoints decide authorization, not
         // a masked replacement. Forbidden equal-to-current fields still refuse.
         stage(transaction, database, batch.relation, row, execution).map_err(source)?;
     }
     if returning && outcome.edge().is_some() {
-        execution.permit.charge_rows_at((execution.clock)(), 1)
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), 1)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
     }
     Ok((stats, outcome))
@@ -100,28 +122,46 @@ impl<V: Vfs + Clone> Database<V> {
         if !verified.predicates().rights().can_read() {
             return Err(refusal(Error::PermissionDenied));
         }
-        if !verified.predicates().allows_relation(input.merge().relation()) {
+        if !verified
+            .predicates()
+            .allows_relation(input.merge().relation())
+        {
             return Err(refusal(Error::ScopeDenied));
         }
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            execution.checkpoint().map_err(source)?;
-            let mut workspace = Workspace(Some(
-                self.begin(txn_cx).map_err(WriteTxnError::Write).map_err(source)?,
-            ));
-            let (stats, outcome) = apply(
-                workspace.transaction(), self, query_cx, input, policy,
-                verified.predicates(), &mut execution, true,
-            )?;
-            let completion = workspace.transaction()
-                .complete_controlled(self, commit_cx, None, false, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })
-                .await
-                .map_err(source)?;
-            Ok((stats, outcome, completion))
-        }).await
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(WriteTxnError::Write)
+                        .map_err(source)?,
+                ));
+                let (stats, outcome) = apply(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    input,
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    true,
+                )?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(source)?;
+                Ok((stats, outcome, completion))
+            })
+            .await
     }
 }
 

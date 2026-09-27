@@ -2,8 +2,8 @@
 //! No neighbor vector, new index, or per-query graph representation is built.
 
 use super::*;
-use crate::gql_exec::source::{AdjacencyIndex, IndexMap};
 use crate::Snapshot;
+use crate::gql_exec::source::{AdjacencyIndex, IndexMap};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
@@ -135,8 +135,15 @@ impl Snapshot {
         C: FnMut(SourceEvent) -> Result<(), E>,
     {
         self.adjacency_index.visit_all_coordinates(
-            &self.blocks, as_of, control, |entry, block, row, control| {
-                visit(entry, edge_properties_at(&self.block_props, block, row), control)
+            &self.blocks,
+            as_of,
+            control,
+            |entry, block, row, control| {
+                visit(
+                    entry,
+                    edge_properties_at(&self.block_props, block, row),
+                    control,
+                )
             },
         )
     }
@@ -365,18 +372,29 @@ mod indexed_scan_tests {
             let index = AdjacencyIndex::build(&blocks);
             for seq in 0..=5 {
                 let mut expected = Vec::new();
-                source::visit_edges(&blocks, CommitSeq(seq), &mut |_| Ok::<_, ()>(()), |row, _| {
-                    expected.push(row);
-                    Ok(())
-                }).unwrap();
-                let mut actual = Vec::new();
-                index.visit_all_coordinates(&blocks, CommitSeq(seq), &mut |_| Ok::<_, ()>(()),
-                    |row, block, at, _| {
-                        assert!(std::ptr::eq(row, &blocks[block][at]));
-                        actual.push(row);
+                source::visit_edges(
+                    &blocks,
+                    CommitSeq(seq),
+                    &mut |_| Ok::<_, ()>(()),
+                    |row, _| {
+                        expected.push(row);
                         Ok(())
                     },
-                ).unwrap();
+                )
+                .unwrap();
+                let mut actual = Vec::new();
+                index
+                    .visit_all_coordinates(
+                        &blocks,
+                        CommitSeq(seq),
+                        &mut |_| Ok::<_, ()>(()),
+                        |row, block, at, _| {
+                            assert!(std::ptr::eq(row, &blocks[block][at]));
+                            actual.push(row);
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
                 assert_eq!(actual, expected, "count={count} cut={seq}");
                 assert!(actual.windows(2).all(|pair| pair[0].eid < pair[1].eid));
             }
@@ -389,27 +407,40 @@ mod indexed_scan_tests {
         let index = AdjacencyIndex::build(&blocks);
         let mut new_calls = 0;
         let mut new_rows = 0;
-        let result = index.visit_all_coordinates(&blocks, CommitSeq(1), &mut |_| {
-            new_calls += 1;
-            Ok(())
-        }, |row, _, _, _| {
-            assert_eq!(row.eid, EId(0));
-            new_rows += 1;
-            Err(17)
-        });
+        let result = index.visit_all_coordinates(
+            &blocks,
+            CommitSeq(1),
+            &mut |_| {
+                new_calls += 1;
+                Ok(())
+            },
+            |row, _, _, _| {
+                assert_eq!(row.eid, EId(0));
+                new_rows += 1;
+                Err(17)
+            },
+        );
         assert_eq!(result, Err(17));
         assert_eq!(new_rows, 1);
-        assert!(new_calls < 64, "indexed prefix traversed {new_calls} events");
+        assert!(
+            new_calls < 64,
+            "indexed prefix traversed {new_calls} events"
+        );
         let mut old_calls = 0;
         let mut old_rows = 0;
-        let result = source::visit_edges(&blocks, CommitSeq(1), &mut |_| {
-            old_calls += 1;
-            Ok(())
-        }, |row, _| {
-            assert_eq!(row.eid, EId(0));
-            old_rows += 1;
-            Err(17)
-        });
+        let result = source::visit_edges(
+            &blocks,
+            CommitSeq(1),
+            &mut |_| {
+                old_calls += 1;
+                Ok(())
+            },
+            |row, _| {
+                assert_eq!(row.eid, EId(0));
+                old_rows += 1;
+                Err(17)
+            },
+        );
         assert_eq!(result, Err(17));
         assert_eq!(old_rows, 1);
         assert!(old_calls > 4096, "the live incumbent was not exercised");
@@ -422,13 +453,18 @@ mod indexed_scan_tests {
         let run = |stop| {
             let mut calls = 0;
             let mut rows = Vec::new();
-            let result = index.visit_all_coordinates(&blocks, CommitSeq(2), &mut |_| {
-                calls += 1;
-                if calls == stop { Err(stop) } else { Ok(()) }
-            }, |row, _, _, _| {
-                rows.push(row.eid);
-                Ok(())
-            });
+            let result = index.visit_all_coordinates(
+                &blocks,
+                CommitSeq(2),
+                &mut |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                },
+                |row, _, _, _| {
+                    rows.push(row.eid);
+                    Ok(())
+                },
+            );
             (result, calls, rows)
         };
         let (result, total, rows) = run(usize::MAX);
@@ -445,8 +481,10 @@ mod indexed_scan_tests {
         }
         assert_eq!(run(usize::MAX), (Ok(()), total, rows));
         let empty = AdjacencyIndex::build(&[]);
-        assert_eq!(empty.visit_all_coordinates(&[], CommitSeq(0), &mut |_| Err(19),
-            |_, _, _, _| Ok(())), Err(19));
+        assert_eq!(
+            empty.visit_all_coordinates(&[], CommitSeq(0), &mut |_| Err(19), |_, _, _, _| Ok(())),
+            Err(19)
+        );
     }
 
     #[test]
@@ -455,13 +493,23 @@ mod indexed_scan_tests {
         use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
         fn check(snapshot: &Snapshot, at: CommitSeq) {
             let mut expected = Vec::new();
-            source::visit_edges_with_properties(snapshot, at, &mut |_| Ok::<_, ()>(()),
-                |entry, props, _| { expected.push((entry, props)); Ok(()) },
-            ).unwrap();
+            source::visit_edges_with_properties(
+                snapshot,
+                at,
+                &mut |_| Ok::<_, ()>(()),
+                |entry, props, _| {
+                    expected.push((entry, props));
+                    Ok(())
+                },
+            )
+            .unwrap();
             let mut actual = Vec::new();
-            snapshot.visit_indexed_edges(at, &mut |_| Ok::<_, ()>(()),
-                |entry, props, _| { actual.push((entry, props)); Ok(()) },
-            ).unwrap();
+            snapshot
+                .visit_indexed_edges(at, &mut |_| Ok::<_, ()>(()), |entry, props, _| {
+                    actual.push((entry, props));
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(actual, expected);
             for ((a, ap), (b, bp)) in actual.iter().zip(&expected) {
                 assert!(std::ptr::eq(*a, *b));
@@ -473,10 +521,16 @@ mod indexed_scan_tests {
             let cx = contexts.commit();
             let vfs = crate::MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let keys = || crate::DatabaseKeys::new(
-                [0xb7; 32], DatabaseSecurityNamespaceId([0xb8; 32]), [0xb9; 32],
-            );
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            let keys = || {
+                crate::DatabaseKeys::new(
+                    [0xb7; 32],
+                    DatabaseSecurityNamespaceId([0xb8; 32]),
+                    [0xb9; 32],
+                )
+            };
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             let p = PropertyKeyId(1);
             let mut batch = crate::WriteBatch::new(RelationId(1));
             batch.create_vertex(VId(1), vec![], vec![]);
@@ -489,9 +543,15 @@ mod indexed_scan_tests {
             for step in 0..3 {
                 let mut batch = crate::WriteBatch::new(RelationId(1));
                 match step {
-                    0 => { batch.set_edge_property(EId(0), p, Some(CanonicalScalar::Int(10))); }
-                    1 => { batch.delete_edge(EId(1)); }
-                    _ => { batch.delete_vertex(VId(2)); }
+                    0 => {
+                        batch.set_edge_property(EId(0), p, Some(CanonicalScalar::Int(10)));
+                    }
+                    1 => {
+                        batch.delete_edge(EId(1));
+                    }
+                    _ => {
+                        batch.delete_vertex(VId(2));
+                    }
                 }
                 db.write(&cx, batch).await.unwrap();
                 check(&db.snapshot, basis);
@@ -503,7 +563,9 @@ mod indexed_scan_tests {
             check(&db.snapshot, frontier);
             check(&pinned.snapshot, basis);
             drop(db);
-            let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            let db = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
             check(&db.snapshot, frontier);
             assert_eq!(db.edges().unwrap().len(), 1);
             assert_eq!(db.edges().unwrap()[0].entry.eid, EId(u128::MAX));

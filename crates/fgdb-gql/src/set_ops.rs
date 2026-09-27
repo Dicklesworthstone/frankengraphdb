@@ -16,6 +16,7 @@ mod projection;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
+pub(crate) use projection::evaluate_membership;
 pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 
 use crate::algebra::{

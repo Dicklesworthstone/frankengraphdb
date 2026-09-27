@@ -152,11 +152,19 @@ impl UnresolvedGraphText<'_> {
         (names, types)
     }
     pub(crate) fn depth(&self) -> usize {
-        1 + self.leading.iter().map(ReadStageTemplate::depth).sum::<usize>()
+        1 + self
+            .leading
+            .iter()
+            .map(ReadStageTemplate::depth)
+            .sum::<usize>()
             + usize::from(!self.leading.is_empty() && !self.singleton)
             + usize::from(self.projection.is_some())
             + usize::from(!self.correlations.is_empty())
-            + self.pipeline.iter().map(ReadStageTemplate::depth).sum::<usize>()
+            + self
+                .pipeline
+                .iter()
+                .map(ReadStageTemplate::depth)
+                .sum::<usize>()
     }
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.syntax.parameters

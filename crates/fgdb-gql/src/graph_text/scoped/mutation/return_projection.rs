@@ -136,7 +136,9 @@ impl<'a> Parser<'a> {
                     match input.path {
                         None => GraphSetColumnType::Vertex,
                         Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
-                        Some(GraphPathFunction::Length | GraphPathFunction::Type) => GraphSetColumnType::Scalar,
+                        Some(GraphPathFunction::Length | GraphPathFunction::Type) => {
+                            GraphSetColumnType::Scalar
+                        }
                         Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
                         Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
                         Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,

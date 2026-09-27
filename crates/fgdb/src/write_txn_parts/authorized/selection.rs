@@ -97,13 +97,18 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
             execution.borrow_mut().poll()
         };
         poll().map_err(GqlQueryError::Interrupted)?;
-        let overlay = OverlayRows::new(transaction, database, pattern.plan().reads_edges(), &mut poll)
-            .map_err(|error| match error {
-                error @ (WriteTxnError::Interrupted(_) | WriteTxnError::Authorization(_)) => {
-                    GqlQueryError::Interrupted(error)
-                }
-                error => GqlQueryError::Source(super::redacted(error)),
-            })?;
+        let overlay = OverlayRows::new(
+            transaction,
+            database,
+            pattern.plan().reads_edges(),
+            &mut poll,
+        )
+        .map_err(|error| match error {
+            error @ (WriteTxnError::Interrupted(_) | WriteTxnError::Authorization(_)) => {
+                GqlQueryError::Interrupted(error)
+            }
+            error => GqlQueryError::Source(super::redacted(error)),
+        })?;
         poll().map_err(GqlQueryError::Interrupted)?;
         controlled(cx, execution, |node, poll, checkpoint| {
             database.select_for_authorized_overlay(

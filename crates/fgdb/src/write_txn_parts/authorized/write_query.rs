@@ -4,13 +4,13 @@
 use super::super::super::super::selection;
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, GraphWriteProgramPolicy,
-    GraphWriteProgramStats, PlannerPredicates, PreparedGraphWriteProgram, Vfs,
-    WriteTxn, WriteTxnError, preflight,
+    GraphWriteProgramStats, PlannerPredicates, PreparedGraphWriteProgram, Vfs, WriteTxn,
+    WriteTxnError, preflight,
 };
 use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
 use fgdb_gql::{
-    GlaExecutionLimits, GlaLimitDimension, GqlBudgetDimension, GqlExecutionBudget,
-    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphWriteQueryError,
+    GlaExecutionLimits, GlaLimitDimension, GqlBudgetDimension, GqlExecutionBudget, GqlQueryError,
+    GqlQueryExecution, GqlQueryPolicy, GraphWriteQueryError,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use std::cell::RefCell;
@@ -18,7 +18,11 @@ use std::cell::RefCell;
 type Fault = GraphWriteQueryError<WriteTxnError, WriteTxnError, WriteTxnError>;
 type QueryFault = GqlQueryError<WriteTxnError, WriteTxnError>;
 type ResultValue<Row> = (GraphWriteProgramStats, GqlQueryExecution<Row>);
-type Receipt<Row> = (GraphWriteProgramStats, GqlQueryExecution<Row>, EmbeddedTxnCompletion);
+type Receipt<Row> = (
+    GraphWriteProgramStats,
+    GqlQueryExecution<Row>,
+    EmbeddedTxnCompletion,
+);
 
 fn query_source(error: WriteTxnError) -> Fault {
     Fault::Query(GqlQueryError::Source(error))
@@ -27,12 +31,20 @@ fn query_source(error: WriteTxnError) -> Fault {
 // Subtract the exact successful program's cumulative native totals. These are
 // query/proposal units; signed binding/staging/completion charges live in the
 // separate, shared permit and must NOT be substituted for these counters.
-fn remaining(policy: GqlQueryPolicy, used: GraphWriteProgramStats) -> Result<GqlQueryPolicy, Fault> {
+fn remaining(
+    policy: GqlQueryPolicy,
+    used: GraphWriteProgramStats,
+) -> Result<GqlQueryPolicy, Fault> {
     let invalid = || query_source(WriteTxnError::AuthorizedMutationRefused);
     let subtract = |limit: Option<u64>, used: u64| -> Result<Option<u64>, Fault> {
-        limit.map(|limit| limit.checked_sub(used).ok_or_else(&invalid)).transpose()
+        limit
+            .map(|limit| limit.checked_sub(used).ok_or_else(&invalid))
+            .transpose()
     };
-    let records = subtract(policy.rows.max_snapshot_records(), used.selection.snapshot_records)?;
+    let records = subtract(
+        policy.rows.max_snapshot_records(),
+        used.selection.snapshot_records,
+    )?;
     let rows = subtract(policy.rows.max_result_rows(), used.selection.result_rows)?;
     let rows = match (records, rows) {
         (None, None) => GqlExecutionBudget::UNLIMITED,
@@ -43,9 +55,15 @@ fn remaining(policy: GqlQueryPolicy, used: GraphWriteProgramStats) -> Result<Gql
     Ok(GqlQueryPolicy {
         rows,
         evaluator: GlaExecutionLimits::new(
-            policy.evaluator.max_work_units.checked_sub(used.evaluator.work_units)
+            policy
+                .evaluator
+                .max_work_units
+                .checked_sub(used.evaluator.work_units)
                 .ok_or_else(&invalid)?,
-            policy.evaluator.max_scratch_entries.checked_sub(used.evaluator.scratch_entries)
+            policy
+                .evaluator
+                .max_scratch_entries
+                .checked_sub(used.evaluator.scratch_entries)
                 .ok_or_else(invalid)?,
         ),
     })
@@ -53,14 +71,21 @@ fn remaining(policy: GqlQueryPolicy, used: GraphWriteProgramStats) -> Result<Gql
 
 // A failure from the residual allowance names the original WHOLE-operation
 // ceiling and total observation, not the smaller final-query residual.
-fn cumulative_error(mut error: QueryFault, policy: GqlQueryPolicy, used: GraphWriteProgramStats) -> Fault {
+fn cumulative_error(
+    mut error: QueryFault,
+    policy: GqlQueryPolicy,
+    used: GraphWriteProgramStats,
+) -> Fault {
     match &mut error {
         GqlQueryError::Rows(exceeded) => {
             let (limit, before) = match exceeded.dimension {
-                GqlBudgetDimension::SnapshotRecords =>
-                    (policy.rows.max_snapshot_records(), used.selection.snapshot_records),
-                GqlBudgetDimension::ResultRows =>
-                    (policy.rows.max_result_rows(), used.selection.result_rows),
+                GqlBudgetDimension::SnapshotRecords => (
+                    policy.rows.max_snapshot_records(),
+                    used.selection.snapshot_records,
+                ),
+                GqlBudgetDimension::ResultRows => {
+                    (policy.rows.max_result_rows(), used.selection.result_rows)
+                }
             };
             exceeded.limit = limit.unwrap_or(u64::MAX);
             let Some(observed) = exceeded.observed.checked_add(before) else {
@@ -95,7 +120,9 @@ fn result_query<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
     stats: GraphWriteProgramStats,
 ) -> Result<ResultValue<Row>, Fault> {
     cx.with_restriction(|| {
-        cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(query_source)?;
+        cx.checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(query_source)?;
         execution.checkpoint().map_err(query_source)?;
         let budget = remaining(policy, stats)?;
         let result = {
@@ -109,7 +136,9 @@ fn result_query<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u64>(
             .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
         // Reserve only the actual final rows, not intermediate selected rows or
         // internal identity receipts. Even an empty result rechecks live authority.
-        execution.permit.charge_rows_at((execution.clock)(), rows)
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), rows)
             .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
         Ok((stats, result))
     })
@@ -169,16 +198,36 @@ impl<V: Vfs + Clone> Database<V> {
         if !verified.predicates().rights().can_read() {
             return Err(refusal(Error::PermissionDenied));
         }
-        let mut execution = Execution { cx: commit_cx, permit, clock };
+        let mut execution = Execution {
+            cx: commit_cx,
+            permit,
+            clock,
+        };
         self.complete_authorized_program_with_output(
-            txn_cx, query_cx, commit_cx, program, policy, verified.predicates(),
-            &mut execution, false,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            program,
+            policy,
+            verified.predicates(),
+            &mut execution,
+            false,
             |transaction, database, execution, stats, _| {
-                result_query(transaction, database, query_cx, query, policy.mutations.query,
-                    verified.predicates(), execution, stats)
+                result_query(
+                    transaction,
+                    database,
+                    query_cx,
+                    query,
+                    policy.mutations.query,
+                    verified.predicates(),
+                    execution,
+                    stats,
+                )
             },
             Fault::Program,
-        ).await.map(|((stats, result), completion)| (stats, result, completion))
+        )
+        .await
+        .map(|((stats, result), completion)| (stats, result, completion))
     }
 }
 

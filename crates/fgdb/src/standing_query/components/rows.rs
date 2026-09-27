@@ -140,7 +140,9 @@ mod tests {
 
     fn pairs(values: &[(u128, u128, i128)]) -> ZSet<Pair> {
         ZSet::from_updates(
-            values.iter().map(|&(v, r, weight)| ((VId(v), VId(r)), ZWeight::from_i128(weight))),
+            values
+                .iter()
+                .map(|&(v, r, weight)| ((VId(v), VId(r)), ZWeight::from_i128(weight))),
             LIMBS,
             &mut |_| Ok::<_, StandingQueryFailure>(()),
         )
@@ -201,7 +203,10 @@ mod tests {
                     }
                 }
                 let delta = pairs(
-                    &expected_delta.iter().map(|(&(v, r), &w)| (v, r, w)).collect::<Vec<_>>(),
+                    &expected_delta
+                        .iter()
+                        .map(|(&(v, r), &w)| (v, r, w))
+                        .collect::<Vec<_>>(),
                 );
                 let mut checkpoint = || Ok(());
                 let mut meter = Meter {
@@ -209,7 +214,10 @@ mod tests {
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                state.prepare(&delta, after.len(), &mut meter).unwrap().commit();
+                state
+                    .prepare(&delta, after.len(), &mut meter)
+                    .unwrap()
+                    .commit();
                 assert_eq!(decoded(state.rows()), after);
                 assert_eq!(decoded(state.delta().unwrap()), expected_delta);
             }
@@ -223,8 +231,10 @@ mod tests {
         assert_eq!(state.columns(), ["vertex", "component"]);
         assert!(state.delta().is_none());
         let delta = pairs(&[
-            (wide, wide, -1), (u128::MAX, wide, -1),
-            (wide, 0, 1), (u128::MAX, 0, 1),
+            (wide, wide, -1),
+            (u128::MAX, wide, -1),
+            (wide, 0, 1),
+            (u128::MAX, 0, 1),
         ]);
         let mut checkpoint = || Ok(());
         let mut meter = Meter {
@@ -233,7 +243,10 @@ mod tests {
             checkpoint: &mut checkpoint,
         };
         state.prepare(&delta, 2, &mut meter).unwrap().commit();
-        assert_eq!(decoded(state.rows()), [((wide, 0), 1), ((u128::MAX, 0), 1)].into());
+        assert_eq!(
+            decoded(state.rows()),
+            [((wide, 0), 1), ((u128::MAX, 0), 1)].into()
+        );
         assert_eq!(state.delta().unwrap().len(), 4);
         state.prepare(&ZSet::new(), 2, &mut meter).unwrap().commit();
         assert!(state.delta().unwrap().is_empty());
@@ -275,7 +288,10 @@ mod tests {
         let mut success = build(&baseline);
         let mut calls = 0;
         let stats = {
-            let mut checkpoint = || { calls += 1; Ok(()) };
+            let mut checkpoint = || {
+                calls += 1;
+                Ok(())
+            };
             let mut meter = Meter {
                 policy: policy(),
                 stats: StandingQueryStats::default(),
@@ -292,24 +308,45 @@ mod tests {
             {
                 let mut checkpoint = || {
                     seen += 1;
-                    if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
                 };
                 let mut meter = Meter {
                     policy: policy(),
                     stats: StandingQueryStats::default(),
                     checkpoint: &mut checkpoint,
                 };
-                assert!(matches!(state.prepare(&change, 3, &mut meter),
-                    Err(StandingQueryFailure::Interrupted)));
+                assert!(matches!(
+                    state.prepare(&change, 3, &mut meter),
+                    Err(StandingQueryFailure::Interrupted)
+                ));
             }
             assert_eq!(seen, stop);
             assert_eq!(state, before);
         }
         for (work, scratch, count, error) in [
             (stats.work_units, stats.scratch_entries, 3, None),
-            (stats.work_units - 1, stats.scratch_entries, 3, Some(StandingQueryFailure::WorkBudget)),
-            (stats.work_units, stats.scratch_entries - 1, 3, Some(StandingQueryFailure::ScratchBudget)),
-            (stats.work_units, stats.scratch_entries, 2, Some(StandingQueryFailure::ResultBudget)),
+            (
+                stats.work_units - 1,
+                stats.scratch_entries,
+                3,
+                Some(StandingQueryFailure::WorkBudget),
+            ),
+            (
+                stats.work_units,
+                stats.scratch_entries - 1,
+                3,
+                Some(StandingQueryFailure::ScratchBudget),
+            ),
+            (
+                stats.work_units,
+                stats.scratch_entries,
+                2,
+                Some(StandingQueryFailure::ResultBudget),
+            ),
         ] {
             let mut state = build(&baseline);
             let before = build(&baseline);

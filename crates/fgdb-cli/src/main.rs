@@ -1,6 +1,9 @@
 //! Embedded CLI. Every graph operation uses the public native engine;
 //! symbol IDs remain explicit until the library supplies a durable catalog.
 #![forbid(unsafe_code)]
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
 
 mod diff;
 mod fnx;

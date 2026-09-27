@@ -8,7 +8,9 @@ use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Error, Grant, LimitDimension, QueryLimits, Rights, Scope};
 use std::cell::RefCell;
 
@@ -36,7 +38,11 @@ fn grant() -> Grant {
         relations: Scope::only([R]),
         properties: Scope::only([P]),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100_000 },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100_000,
+        },
         expires_at_ms: 10_000,
     }
 }
@@ -50,8 +56,11 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
-    PreparedGraphText::prepare(text, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap().with_duplicates()
+    PreparedGraphText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
 }
 
 async fn seed(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
@@ -68,7 +77,9 @@ async fn seed(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
     }
     for id in [10, 11] {
         let mut props = vec![(P, CanonicalScalar::Int(30))];
-        if hidden { props.push((SECRET, CanonicalScalar::Int(901))); }
+        if hidden {
+            props.push((SECRET, CanonicalScalar::Int(901)));
+        }
         batch.add_edge(EId(id), VId(10), VId(20), props);
     }
     if hidden {
@@ -94,7 +105,9 @@ impl Trace {
         let mut events = self.events.borrow_mut();
         events.push(event);
         if self.stop == Some(events.len()) {
-            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Work)))
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Work,
+            )))
         } else {
             Ok(())
         }
@@ -130,17 +143,26 @@ fn incumbent(
                 usage.observe::<ReadError, QueryError>(policy, event)
             };
             for row in &vertices {
-                tables.admit_vertex(row, scope,
-                    &mut || trace.charge(2).map_err(GqlQueryError::Interrupted), &mut control)?;
+                tables.admit_vertex(
+                    row,
+                    scope,
+                    &mut || trace.charge(2).map_err(GqlQueryError::Interrupted),
+                    &mut control,
+                )?;
             }
             for row in &edges {
                 let edge = &row.entry;
-                tables.admit_edge(((edge.eid, edge.src, edge.relation, edge.dst), &row.props),
-                    scope, &mut control)?;
+                tables.admit_edge(
+                    ((edge.eid, edge.src, edge.relation, edge.dst), &row.props),
+                    scope,
+                    &mut control,
+                )?;
             }
             tables.metadata(pattern.plan(), scope, &mut control)?;
         }
-        execute_tables(tables, pattern, scope, policy, usage, &mut || trace.charge(1))
+        execute_tables(tables, pattern, scope, policy, usage, &mut || {
+            trace.charge(1)
+        })
     })
 }
 
@@ -153,9 +175,23 @@ fn sparse(
     policy: GqlQueryPolicy,
     trace: &Trace,
 ) -> Governed<GraphValueRow> {
-    let owner = OverlayRows::new(transaction, database, pattern.plan().reads_edges(), &mut || Ok(())).unwrap();
-    database.select_for_authorized_overlay(cx, &owner, pattern, scope, policy,
-        || trace.charge(2), || Ok(()), || trace.charge(1))
+    let owner = OverlayRows::new(
+        transaction,
+        database,
+        pattern.plan().reads_edges(),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    database.select_for_authorized_overlay(
+        cx,
+        &owner,
+        pattern,
+        scope,
+        policy,
+        || trace.charge(2),
+        || Ok(()),
+        || trace.charge(1),
+    )
 }
 
 fn equal_results(left: Governed<GraphValueRow>, right: Governed<GraphValueRow>) {
@@ -195,51 +231,90 @@ fn sparse_authorized_admission_preserves_all_charged_callbacks_and_native_thresh
                     batch.create_vertex(VId(0), vec![L], vec![(P, CanonicalScalar::Int(0))]);
                     batch.add_edge(EId(0), VId(0), VId(10), vec![(P, CanonicalScalar::Int(1))]);
                     batch.set_vertex_property(VId(20), P, Some(CanonicalScalar::Int(21)));
-                    if hide_successor { batch.set_vertex_label(VId(20), L, false); }
+                    if hide_successor {
+                        batch.set_vertex_label(VId(20), L, false);
+                    }
                     transaction.write(&mut db, batch).unwrap();
                     // A native fixture may stage a scope escape; source masking
                     // must hide its successor rather than revive its old row.
                     let trace = Trace::default();
-                    let result = sparse(&db, &transaction, &cx, &pattern, scope, policy(), &trace).unwrap();
+                    let result =
+                        sparse(&db, &transaction, &cx, &pattern, scope, policy(), &trace).unwrap();
                     let charged = trace.events.into_inner();
                     let old_trace = Trace::default();
-                    let old = incumbent(&db, &transaction, &cx, &pattern, scope, policy(), &old_trace);
-                    let signature = (result.value.clone(), result.rows, result.evaluator, charged.clone());
+                    let old = incumbent(
+                        &db,
+                        &transaction,
+                        &cx,
+                        &pattern,
+                        scope,
+                        policy(),
+                        &old_trace,
+                    );
+                    let signature = (
+                        result.value.clone(),
+                        result.rows,
+                        result.evaluator,
+                        charged.clone(),
+                    );
                     equal_results(Ok(result), old);
                     assert_eq!(old_trace.events.into_inner(), charged);
                     if hidden {
-                        assert_eq!(Some(signature.clone()), visible,
-                            "hidden graph changed visible rows, native stats or a charged callback");
+                        assert_eq!(
+                            Some(signature.clone()),
+                            visible,
+                            "hidden graph changed visible rows, native stats or a charged callback"
+                        );
                     } else {
                         visible = Some(signature.clone());
                     }
                     for stop in 1..=charged.len() {
-                        let left = Trace { stop: Some(stop), ..Trace::default() };
-                        let right = Trace { stop: Some(stop), ..Trace::default() };
+                        let left = Trace {
+                            stop: Some(stop),
+                            ..Trace::default()
+                        };
+                        let right = Trace {
+                            stop: Some(stop),
+                            ..Trace::default()
+                        };
                         let new = sparse(&db, &transaction, &cx, &pattern, scope, policy(), &left);
-                        let old = incumbent(&db, &transaction, &cx, &pattern, scope, policy(), &right);
+                        let old =
+                            incumbent(&db, &transaction, &cx, &pattern, scope, policy(), &right);
                         assert!(matches!(new, Err(GqlQueryError::Interrupted(_))));
                         equal_results(new, old);
                         assert_eq!(*left.events.borrow(), charged[..stop]);
                         assert_eq!(*left.events.borrow(), *right.events.borrow());
                     }
                     let (_, rows, evaluator, _) = signature;
-                    let exact = GqlQueryPolicy::new(rows.snapshot_records, rows.result_rows,
-                        evaluator.work_units, evaluator.scratch_entries);
+                    let exact = GqlQueryPolicy::new(
+                        rows.snapshot_records,
+                        rows.result_rows,
+                        evaluator.work_units,
+                        evaluator.scratch_entries,
+                    );
                     for below in [None, Some(0), Some(1), Some(2), Some(3)] {
-                        let mut limits = [rows.snapshot_records, rows.result_rows,
-                            evaluator.work_units, evaluator.scratch_entries];
+                        let mut limits = [
+                            rows.snapshot_records,
+                            rows.result_rows,
+                            evaluator.work_units,
+                            evaluator.scratch_entries,
+                        ];
                         if let Some(dimension) = below {
-                            if limits[dimension] == 0 { continue; }
+                            if limits[dimension] == 0 {
+                                continue;
+                            }
                             limits[dimension] -= 1;
                         }
-                        let budget = if below.is_none() { exact } else {
+                        let budget = if below.is_none() {
+                            exact
+                        } else {
                             GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3])
                         };
                         let left = Trace::default();
                         let right = Trace::default();
                         let new = sparse(&db, &transaction, &cx, &pattern, scope, budget, &left);
-                        let old = incumbent(&db, &transaction, &cx, &pattern, scope, budget, &right);
+                        let old =
+                            incumbent(&db, &transaction, &cx, &pattern, scope, budget, &right);
                         assert_eq!(new.is_ok(), below.is_none());
                         equal_results(new, old);
                         assert_eq!(*left.events.borrow(), *right.events.borrow());
@@ -271,10 +346,19 @@ fn missing_edge_domain_refuses_instead_of_falling_back_to_unstaged_basis() {
         {
             let owner = OverlayRows::new(&transaction, &db, false, &mut || Ok(())).unwrap();
             let result = db.select_for_authorized_overlay(
-                &cx, &owner, &pattern("MATCH (a:L)-[e:R]->(b:L) RETURN e.p"),
-                verified.predicates(), policy(), || Ok(()), || Ok(()), || Ok(()),
+                &cx,
+                &owner,
+                &pattern("MATCH (a:L)-[e:R]->(b:L) RETURN e.p"),
+                verified.predicates(),
+                policy(),
+                || Ok(()),
+                || Ok(()),
+                || Ok(()),
             );
-            assert!(matches!(result, Err(GqlQueryError::IdentifiedEdgesRequired)));
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::IdentifiedEdgesRequired)
+            ));
         }
         transaction.abort();
         assert!(db.edge(EId(10)).unwrap().is_some());

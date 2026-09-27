@@ -340,8 +340,7 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphSetTextError> {
         let negate = self.take_word("NOT")?;
-        if self.is_word("IN")
-            && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+        if self.is_word("IN") && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
         {
             self.advance()?;
             return self.selection_list_membership(schema, selection, left, negate, at);

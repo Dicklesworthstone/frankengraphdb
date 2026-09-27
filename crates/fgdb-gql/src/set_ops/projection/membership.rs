@@ -6,7 +6,7 @@
 use crate::GlaExecutionEvent;
 use crate::algebra::{GraphValue, IntegerComparison};
 
-pub(super) fn evaluate<E>(
+pub(crate) fn evaluate<E>(
     value: &GraphValue,
     members: &[GraphValue],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -131,11 +131,11 @@ fn equal_sequence<T: PartialEq, E>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{
         GraphSetColumnType, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
         GraphValueRow, ProjectionFailure, evaluate_value,
     };
+    use super::*;
     use crate::GraphIntegerErrorKind;
     use crate::algebra::GraphPath;
     use fgdb_types::{CanonicalScalar, EId, VId};
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn nested_equality_is_not_set_key_equality() {
         let candidate = list(vec![null(), int(1)]);
-        assert_eq!(member(&candidate, &[candidate.clone()]), None);
+        assert_eq!(member(&candidate, std::slice::from_ref(&candidate)), None);
         assert_eq!(
             member(&candidate, &[list(vec![null(), int(2)])]),
             Some(false)
@@ -190,7 +190,10 @@ mod tests {
         assert_eq!(member(&candidate, &[list(vec![null()])]), Some(false));
         assert_eq!(member(&list(vec![]), &[list(vec![])]), Some(true));
         assert_eq!(
-            member(&list(vec![list(vec![int(3)])]), &[list(vec![list(vec![int(3)])])]),
+            member(
+                &list(vec![list(vec![int(3)])]),
+                &[list(vec![list(vec![int(3)])])]
+            ),
             Some(true)
         );
     }
@@ -199,15 +202,18 @@ mod tests {
     fn graph_identities_and_paths_retain_full_width_and_domain() {
         let vertex = GraphValue::Vertex(VId(u128::MAX));
         let edge = GraphValue::Edge(EId(u128::MAX));
-        assert_eq!(member(&vertex, &[vertex.clone()]), Some(true));
-        assert_eq!(member(&vertex, &[GraphValue::Vertex(VId(u64::MAX.into()))]), Some(false));
-        assert_eq!(member(&vertex, &[edge.clone()]), None);
-        assert_eq!(member(&edge, &[edge.clone()]), Some(true));
+        assert_eq!(member(&vertex, std::slice::from_ref(&vertex)), Some(true));
+        assert_eq!(
+            member(&vertex, &[GraphValue::Vertex(VId(u64::MAX.into()))]),
+            Some(false)
+        );
+        assert_eq!(member(&vertex, std::slice::from_ref(&edge)), None);
+        assert_eq!(member(&edge, std::slice::from_ref(&edge)), Some(true));
         let path = GraphValue::Path(GraphPath::new(
             VId(u128::MAX),
             vec![(EId(u128::MAX), VId(0))].into_boxed_slice(),
         ));
-        assert_eq!(member(&path, &[path.clone()]), Some(true));
+        assert_eq!(member(&path, std::slice::from_ref(&path)), Some(true));
         let reverse = GraphValue::Path(GraphPath::new(
             VId(0),
             vec![(EId(u128::MAX), VId(u128::MAX))].into_boxed_slice(),
@@ -234,7 +240,10 @@ mod tests {
             }
             Ok::<_, ()>(())
         });
-        assert!(matches!(result, Ok(GraphValue::Scalar(CanonicalScalar::Bool(true)))));
+        assert!(matches!(
+            result,
+            Ok(GraphValue::Scalar(CanonicalScalar::Bool(true)))
+        ));
         assert_eq!(scratch, 1, "only the Boolean result requires a copied cell");
     }
 
@@ -261,7 +270,10 @@ mod tests {
         let invalid = expression(GraphSetValue::Column(3), GraphSetValue::List(vec![]));
         assert_eq!(
             GraphSetProjection::admit_output(&invalid, &[GraphSetColumnType::Scalar], 2),
-            Err(GraphSetProjectionError::UnknownInput { column: 2, input: 3 })
+            Err(GraphSetProjectionError::UnknownInput {
+                column: 2,
+                input: 3
+            })
         );
         let invalid = expression(GraphSetValue::Value(null()), GraphSetValue::Value(int(1)));
         assert_eq!(
@@ -280,19 +292,16 @@ mod tests {
 
     #[test]
     fn every_control_refusal_is_preserved_even_after_a_match() {
-        let expression = expression(
-            GraphSetValue::Column(0),
-            GraphSetValue::Column(1),
-        );
-        let row = GraphValueRow::from_owned_values(vec![
-            int(0),
-            list((0..128).map(int).collect()),
-        ]);
+        let expression = expression(GraphSetValue::Column(0), GraphSetValue::Column(1));
+        let row = GraphValueRow::from_owned_values(vec![int(0), list((0..128).map(int).collect())]);
         let mut events = 0;
-        assert!(evaluate_value(&expression, &row, 0, &mut |_| {
-            events += 1;
-            Ok::<_, usize>(())
-        }).is_ok());
+        assert!(
+            evaluate_value(&expression, &row, 0, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            })
+            .is_ok()
+        );
         assert!(events >= 128);
         for refused in 0..events {
             let mut at = 0;
@@ -320,7 +329,10 @@ mod tests {
         assert_ne!(left_bytes, right_bytes);
         let mut column_bytes = Vec::new();
         GraphSetValue::Column(0).append_canonical_bytes(&mut column_bytes);
-        assert_eq!(column_bytes, [vec![0], 0_u64.to_be_bytes().to_vec()].concat());
+        assert_eq!(
+            column_bytes,
+            [vec![0], 0_u64.to_be_bytes().to_vec()].concat()
+        );
     }
 
     #[test]

@@ -81,9 +81,8 @@ pub use pipeline_aggregate_text::{
 };
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
-    GraphWriteScriptBatchLocation,
-    GraphWriteScriptError, GraphWriteScriptErrorKind, GraphWriteScriptExecutionError,
-    MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphWriteScript,
+    GraphWriteScriptBatchLocation, GraphWriteScriptError, GraphWriteScriptErrorKind,
+    GraphWriteScriptExecutionError, MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphWriteScript,
 };
 
 pub use aggregation::{

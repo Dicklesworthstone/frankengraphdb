@@ -6,12 +6,12 @@ use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GqlScalarParameter, GraphEdgeMergePolicy,
-    GraphEdgeMergeError, GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphSymbol, GraphSymbolKind,
-    PreparedGraphEdgeMerge,
-    PreparedGraphEdgeMergeText, GraphMutationProgramDimension, GraphMutationProgramError,
-    GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteStatement, PreparedGraphWriteProgram,
-    PreparedGraphDeleteText, PreparedGraphInsertText, PreparedGraphMutationText,
+    GqlParameters, GqlQueryPolicy, GqlScalarParameter, GraphEdgeMergeError, GraphEdgeMergePolicy,
+    GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphMutationProgramDimension,
+    GraphMutationProgramError, GraphSymbol, GraphSymbolKind, GraphWriteProgramError,
+    GraphWriteProgramPolicy, GraphWriteStatement, PreparedGraphDeleteText, PreparedGraphEdgeMerge,
+    PreparedGraphEdgeMergeText, PreparedGraphInsertText, PreparedGraphMutationText,
+    PreparedGraphWriteProgram,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
@@ -40,7 +40,11 @@ fn grant() -> Grant {
         relations: Scope::only([R, S]),
         properties: Scope::only([P]),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
         expires_at_ms: 10_000,
     }
 }
@@ -59,8 +63,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn prepared(text: &str) -> PreparedGraphEdgeMerge {
-    PreparedGraphEdgeMergeText::prepare(text, S, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphEdgeMergeText::prepare(text, S, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn duplicate_input() -> PreparedGraphEdgeMerge {
     prepared("MATCH (a:Visible)-[:S]->(b:Visible) MERGE (a)-[:R]->(b)")
@@ -94,7 +100,9 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool, matched: b
     if matched {
         let mut batch = WriteBatch::new(R);
         let mut properties = vec![(P, CanonicalScalar::Int(7))];
-        if hidden { properties.push((SECRET, CanonicalScalar::Int(99))); }
+        if hidden {
+            properties.push((SECRET, CanonicalScalar::Int(99)));
+        }
         batch.add_edge(EId(13), VId(1), VId(2), properties);
         db.write(cx, batch).await.unwrap();
     }
@@ -111,7 +119,6 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool, matched: b
     }
 }
 
-
 fn action(key: PropertyKeyId, value: i64) -> GraphEdgeUpsertAction {
     GraphEdgeUpsertAction {
         key,
@@ -119,9 +126,8 @@ fn action(key: PropertyKeyId, value: i64) -> GraphEdgeUpsertAction {
     }
 }
 fn conditional() -> PreparedGraphEdgeUpsert {
-    PreparedGraphEdgeUpsert::prepare(
-        duplicate_input(), vec![action(P, 11)], vec![action(P, 7)],
-    ).unwrap()
+    PreparedGraphEdgeUpsert::prepare(duplicate_input(), vec![action(P, 11)], vec![action(P, 7)])
+        .unwrap()
 }
 fn upsert_policy() -> GraphEdgeUpsertPolicy {
     GraphEdgeUpsertPolicy::new(policy(), 100)
@@ -129,7 +135,9 @@ fn upsert_policy() -> GraphEdgeUpsertPolicy {
 fn upsert_authorization(error: Fault) -> Error {
     match error {
         GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
-        | GqlQueryError::Source(GraphEdgeUpsertError::Staging(WriteTxnError::Authorization(error)))
+        | GqlQueryError::Source(GraphEdgeUpsertError::Staging(WriteTxnError::Authorization(
+            error,
+        )))
         | GqlQueryError::Source(GraphEdgeUpsertError::Merge(GraphEdgeMergeError::Source(
             WriteTxnError::Authorization(error),
         ))) => error,
@@ -144,8 +152,11 @@ fn selected_upsert_branch_alone_executes_and_preserves_hidden_properties() {
         let query = contexts.query();
         let txn = contexts.txn();
         let authority = authority();
-        let token = authority.issue_at(&grant(), NOW).unwrap()
-            .attenuate(Restriction::MaxRows(1)).unwrap();
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(1))
+            .unwrap();
         for matched in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true, matched).await;
@@ -158,25 +169,59 @@ fn selected_upsert_branch_alone_executes_and_preserves_hidden_properties() {
             } else {
                 (vec![action(SECRET, 999)], vec![action(P, 7)])
             };
-            let input = PreparedGraphEdgeUpsert::prepare(duplicate_input(), on_match, on_create).unwrap();
-            let (stats, outcome, completion) = db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &input, upsert_policy(), || NOW,
-            ).await.unwrap();
-            assert_eq!(stats.branch, if matched { GraphEdgeUpsertBranch::Match } else { GraphEdgeUpsertBranch::Create });
+            let input =
+                PreparedGraphEdgeUpsert::prepare(duplicate_input(), on_match, on_create).unwrap();
+            let (stats, outcome, completion) = db
+                .execute_graph_edge_upsert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &input,
+                    upsert_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                stats.branch,
+                if matched {
+                    GraphEdgeUpsertBranch::Match
+                } else {
+                    GraphEdgeUpsertBranch::Create
+                }
+            );
             assert_eq!(stats.action_effects, 1);
-            assert_eq!(stats.evaluator.work_units, stats.merge.evaluator.work_units + 2);
-            assert_eq!(stats.evaluator.scratch_entries, stats.merge.evaluator.scratch_entries + 1);
+            assert_eq!(
+                stats.evaluator.work_units,
+                stats.merge.evaluator.work_units + 2
+            );
+            assert_eq!(
+                stats.evaluator.scratch_entries,
+                stats.merge.evaluator.scratch_entries + 1
+            );
             assert_eq!(outcome.created(), !matched);
             let props = db.edge(outcome.edge().unwrap()).unwrap().unwrap().props;
             if matched {
-                assert_eq!(props, vec![(P, CanonicalScalar::Int(11)), (SECRET, CanonicalScalar::Int(99))]);
+                assert_eq!(
+                    props,
+                    vec![
+                        (P, CanonicalScalar::Int(11)),
+                        (SECRET, CanonicalScalar::Int(99))
+                    ]
+                );
             } else {
                 assert_eq!(props, vec![(P, CanonicalScalar::Int(7))]);
             }
             assert_eq!(db.vertices().unwrap(), vertices);
             let seq = db.frontier().unwrap();
             assert_eq!(seq.0, frontier.0 + 1);
-            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -193,22 +238,68 @@ fn refused_upsert_tail_rolls_back_creation_and_forbidden_equal_value_actions() {
         for matched in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true, matched).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let forbidden = vec![action(P, 11), action(SECRET, 99)];
-            let input = PreparedGraphEdgeUpsert::prepare(
-                duplicate_input(), forbidden.clone(), forbidden,
-            ).unwrap();
-            let error = db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &input, upsert_policy(), || NOW,
-            ).await.unwrap_err();
+            let input =
+                PreparedGraphEdgeUpsert::prepare(duplicate_input(), forbidden.clone(), forbidden)
+                    .unwrap();
+            let error = db
+                .execute_graph_edge_upsert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &input,
+                    upsert_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(upsert_authorization(error), Error::ScopeDenied);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             let limited = GraphEdgeUpsertPolicy::new(policy(), 0);
-            let error = db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &conditional(), limited, || NOW,
-            ).await.unwrap_err();
-            assert!(matches!(error, GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit { limit: 0, observed: 1 })));
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            let error = db
+                .execute_graph_edge_upsert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &conditional(),
+                    limited,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
+                    limit: 0,
+                    observed: 1
+                })
+            ));
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -223,33 +314,69 @@ fn upsert_no_input_runs_neither_branch_but_still_requires_readwrite() {
         let authority = authority();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, true, true).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let input = PreparedGraphEdgeUpsert::prepare(
             prepared("MATCH (a:Visible) WHERE a.p = 999 MERGE (a)-[:R]->(a)"),
-            vec![action(SECRET, 9)], vec![action(SECRET, 10)],
-        ).unwrap();
+            vec![action(SECRET, 9)],
+            vec![action(SECRET, 10)],
+        )
+        .unwrap();
         for rights in [Rights::Read, Rights::Write, Rights::ReadWrite] {
             let mut scope = grant();
             scope.rights = rights;
             scope.limits.max_rows = 0;
-            if rights != Rights::ReadWrite { scope.limits.max_work = 0; }
+            if rights != Rights::ReadWrite {
+                scope.limits.max_work = 0;
+            }
             let token = authority.issue_at(&scope, NOW).unwrap();
-            let result = db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &input,
-                GraphEdgeUpsertPolicy::new(policy().with_creation_limit(0), 0), || NOW,
-            ).await;
+            let result = db
+                .execute_graph_edge_upsert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &input,
+                    GraphEdgeUpsertPolicy::new(policy().with_creation_limit(0), 0),
+                    || NOW,
+                )
+                .await;
             if rights == Rights::ReadWrite {
                 let (stats, outcome, completion) = result.unwrap();
                 assert_eq!(outcome, GraphEdgeMergeOutcome::NoInput);
                 assert_eq!(stats.branch, GraphEdgeUpsertBranch::NoInput);
                 assert_eq!(stats.action_effects, 0);
-                assert_eq!(stats.evaluator.work_units, stats.merge.evaluator.work_units + 1);
-                assert_eq!(stats.evaluator.scratch_entries, stats.merge.evaluator.scratch_entries);
-                assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+                assert_eq!(
+                    stats.evaluator.work_units,
+                    stats.merge.evaluator.work_units + 1
+                );
+                assert_eq!(
+                    stats.evaluator.scratch_entries,
+                    stats.merge.evaluator.scratch_entries
+                );
+                assert!(matches!(
+                    completion,
+                    EmbeddedTxnCompletion::ReadClosed { .. }
+                ));
             } else {
-                assert_eq!(upsert_authorization(result.unwrap_err()), Error::PermissionDenied);
+                assert_eq!(
+                    upsert_authorization(result.unwrap_err()),
+                    Error::PermissionDenied
+                );
             }
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -266,30 +393,67 @@ fn upsert_native_resource_caps_cover_selection_merge_and_actions_cumulatively() 
         for matched in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, false, matched).await;
-            let (stats, _, _) = db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &conditional(), upsert_policy(), || NOW,
-            ).await.unwrap();
+            let (stats, _, _) = db
+                .execute_graph_edge_upsert_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &conditional(),
+                    upsert_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
             let records = stats.merge.match_selection.snapshot_records + stats.merge.overlay_edges;
             for dimension in 0..3 {
                 for below in [false, true] {
                     let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                     seed(&mut db, &commit, false, matched).await;
-                    let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
                     let reduce = u64::from(below);
-                    let policy = GraphEdgeUpsertPolicy::new(GraphEdgeMergePolicy::new(
-                        GqlQueryPolicy::new(
+                    let policy = GraphEdgeUpsertPolicy::new(
+                        GraphEdgeMergePolicy::new(GqlQueryPolicy::new(
                             records - if dimension == 0 { reduce } else { 0 },
                             stats.merge.match_selection.result_rows,
                             stats.evaluator.work_units - if dimension == 1 { reduce } else { 0 },
-                            stats.evaluator.scratch_entries - if dimension == 2 { reduce } else { 0 },
-                        ),
-                    ), 1);
-                    let result = db.execute_graph_edge_upsert_authorized(
-                        &txn, &query, &commit, &authority, &token, "main", &conditional(), policy, || NOW,
-                    ).await;
+                            stats.evaluator.scratch_entries
+                                - if dimension == 2 { reduce } else { 0 },
+                        )),
+                        1,
+                    );
+                    let result = db
+                        .execute_graph_edge_upsert_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &authority,
+                            &token,
+                            "main",
+                            &conditional(),
+                            policy,
+                            || NOW,
+                        )
+                        .await;
                     if below {
-                        assert!(matches!(result, Err(GqlQueryError::Rows(_)) | Err(GqlQueryError::Evaluator(_))));
-                        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                        assert!(matches!(
+                            result,
+                            Err(GqlQueryError::Rows(_)) | Err(GqlQueryError::Evaluator(_))
+                        ));
+                        assert_eq!(
+                            (
+                                db.frontier().unwrap(),
+                                db.vertices().unwrap(),
+                                db.edges().unwrap()
+                            ),
+                            before
+                        );
                     } else {
                         assert_eq!(result.unwrap().0, stats);
                     }
@@ -313,24 +477,60 @@ fn every_upsert_expiry_boundary_discards_created_and_matched_action_prefixes() {
             seed(&mut db, &commit, true, matched).await;
             let calls = AtomicU64::new(0);
             db.execute_graph_edge_upsert_authorized(
-                &txn, &query, &commit, &authority, &token, "main", &conditional(), upsert_policy(), || {
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &conditional(),
+                upsert_policy(),
+                || {
                     calls.fetch_add(1, Ordering::Relaxed);
                     NOW
                 },
-            ).await.unwrap();
+            )
+            .await
+            .unwrap();
             let total = calls.load(Ordering::Relaxed);
             for cutoff in 0..total {
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 seed(&mut db, &commit, true, matched).await;
-                let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
                 let calls = AtomicU64::new(0);
-                let error = db.execute_graph_edge_upsert_authorized(
-                    &txn, &query, &commit, &authority, &token, "main", &conditional(), upsert_policy(), || {
-                        if calls.fetch_add(1, Ordering::Relaxed) < cutoff { NOW } else { 10_000 }
-                    },
-                ).await.unwrap_err();
+                let error = db
+                    .execute_graph_edge_upsert_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &conditional(),
+                        upsert_policy(),
+                        || {
+                            if calls.fetch_add(1, Ordering::Relaxed) < cutoff {
+                                NOW
+                            } else {
+                                10_000
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
                 assert_eq!(upsert_authorization(error), Error::Expired);
-                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
         }
@@ -338,16 +538,29 @@ fn every_upsert_expiry_boundary_discards_created_and_matched_action_prefixes() {
 }
 
 fn insert_step(text: &str) -> GraphWriteStatement {
-    PreparedGraphInsertText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap().into()
+    PreparedGraphInsertText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .into()
 }
 fn dependent_program() -> PreparedGraphWriteProgram {
     let update = PreparedGraphMutationText::prepare(
-        "MATCH (a:Visible)-[e:R]->(b:Visible) WHERE e.p = 11 SET a.p = 99", R, symbols,
-    ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        "MATCH (a:Visible)-[e:R]->(b:Visible) WHERE e.p = 11 SET a.p = 99",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     let deletion = PreparedGraphDeleteText::prepare(
-        "MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e", R, symbols,
-    ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        "MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     PreparedGraphWriteProgram::prepare(vec![
         insert_step("INSERT (a:Visible {p:10}), (b:Visible {p:20}), (a)-[:S]->(b)"),
         conditional().into(),
@@ -355,12 +568,12 @@ fn dependent_program() -> PreparedGraphWriteProgram {
         conditional().into(),
         update.into(),
         deletion.into(),
-    ]).unwrap()
+    ])
+    .unwrap()
 }
 fn program_policy() -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(policy().query, 100, 100, 100)
 }
-
 
 #[test]
 fn mixed_program_observes_created_and_updated_relationships_and_commits_once() {
@@ -370,33 +583,74 @@ fn mixed_program_observes_created_and_updated_relationships_and_commits_once() {
         let txn = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         let frontier = db.frontier().unwrap();
         let authority = authority();
         let mut scope = grant();
         scope.properties = Scope::All; // Whole-edge deletion requires all fields.
-        let token = authority.issue_at(&scope, NOW).unwrap()
-            .attenuate(Restriction::MaxRows(8)).unwrap();
-        let (receipt, completion) = db.execute_graph_write_program_returning_authorized(
-            &txn, &query, &commit, &authority, &token, "main", &dependent_program(), program_policy(), || NOW,
-        ).await.unwrap();
+        let token = authority
+            .issue_at(&scope, NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(8))
+            .unwrap();
+        let (receipt, completion) = db
+            .execute_graph_write_program_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &dependent_program(),
+                program_policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         let stats = receipt.stats();
-        assert_eq!((stats.completed_statements, stats.created_vertices, stats.created_edges, stats.mutation_effects), (6, 2, 2, 4));
-        assert_eq!(receipt.steps()[1].merged_edge(), Some(GraphEdgeMergeOutcome::Created(EId(2))));
-        assert_eq!(receipt.steps()[2].merged_edge(), Some(GraphEdgeMergeOutcome::Matched(EId(2))));
-        assert_eq!(receipt.steps()[3].merged_edge(), Some(GraphEdgeMergeOutcome::Matched(EId(2))));
+        assert_eq!(
+            (
+                stats.completed_statements,
+                stats.created_vertices,
+                stats.created_edges,
+                stats.mutation_effects
+            ),
+            (6, 2, 2, 4)
+        );
+        assert_eq!(
+            receipt.steps()[1].merged_edge(),
+            Some(GraphEdgeMergeOutcome::Created(EId(2)))
+        );
+        assert_eq!(
+            receipt.steps()[2].merged_edge(),
+            Some(GraphEdgeMergeOutcome::Matched(EId(2)))
+        );
+        assert_eq!(
+            receipt.steps()[3].merged_edge(),
+            Some(GraphEdgeMergeOutcome::Matched(EId(2)))
+        );
         assert_eq!(receipt.steps()[5].deleted_edges(), Some(&[EId(2)][..]));
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(99))]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99))]
+        );
         assert!(db.edge(EId(2)).unwrap().is_none());
         assert!(db.edge(EId(1)).unwrap().is_some());
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
-        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+        );
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), seq);
         assert_eq!(db.vertices().unwrap(), vertices);
         assert_eq!(db.edges().unwrap(), edges);
@@ -418,24 +672,59 @@ fn cumulative_program_creation_action_and_receipt_limits_discard_every_prefix() 
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let frontier = db.frontier().unwrap();
             let mut policy = program_policy();
-            let limited = token.attenuate(Restriction::MaxRows(if mode == 2 { 7 } else { 100 })).unwrap();
-            if mode == 0 { policy.max_created_edges = 1; }
-            if mode == 1 { policy.mutations.max_effects = 1; }
-            let error = db.execute_graph_write_program_returning_authorized(
-                &txn, &query, &commit, &authority, &limited, "main", &dependent_program(), policy, || NOW,
-            ).await.unwrap_err();
+            let limited = token
+                .attenuate(Restriction::MaxRows(if mode == 2 { 7 } else { 100 }))
+                .unwrap();
+            if mode == 0 {
+                policy.max_created_edges = 1;
+            }
+            if mode == 1 {
+                policy.mutations.max_effects = 1;
+            }
+            let error = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &dependent_program(),
+                    policy,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             match mode {
-                0 => assert!(matches!(error, GraphWriteProgramError::CreationBudget {
-                    statement: 1, dimension: GraphInsertLimitDimension::Edges, limit: 1, observed: 2,
-                })),
-                1 => assert!(matches!(error, GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
-                    statement: 3, dimension: GraphMutationProgramDimension::Effects, limit: 1, observed: 2,
-                }))),
-                _ => assert!(matches!(error, GraphWriteProgramError::Delete {
-                    source: GqlQueryError::Source(fgdb_gql::GraphDeleteError::Source(
-                        WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Rows)),
-                    )), ..
-                })),
+                0 => assert!(matches!(
+                    error,
+                    GraphWriteProgramError::CreationBudget {
+                        statement: 1,
+                        dimension: GraphInsertLimitDimension::Edges,
+                        limit: 1,
+                        observed: 2,
+                    }
+                )),
+                1 => assert!(matches!(
+                    error,
+                    GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
+                        statement: 3,
+                        dimension: GraphMutationProgramDimension::Effects,
+                        limit: 1,
+                        observed: 2,
+                    })
+                )),
+                _ => assert!(matches!(
+                    error,
+                    GraphWriteProgramError::Delete {
+                        source: GqlQueryError::Source(fgdb_gql::GraphDeleteError::Source(
+                            WriteTxnError::Authorization(Error::LimitExceeded(
+                                LimitDimension::Rows
+                            )),
+                        )),
+                        ..
+                    }
+                )),
             }
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
@@ -443,9 +732,20 @@ fn cumulative_program_creation_action_and_receipt_limits_discard_every_prefix() 
         }
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
-        let (stats, _) = db.execute_graph_write_program_authorized(
-            &txn, &query, &commit, &authority, &zero, "main", &dependent_program(), program_policy(), || NOW,
-        ).await.unwrap();
+        let (stats, _) = db
+            .execute_graph_write_program_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &zero,
+                "main",
+                &dependent_program(),
+                program_policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.completed_statements, 6);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -460,36 +760,75 @@ fn repeated_read_only_merges_share_nodes_and_receipt_rows_without_a_new_commit()
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let program = PreparedGraphWriteProgram::prepare(vec![
-            duplicate_input().into(), duplicate_input().into(),
-        ]).unwrap();
+            duplicate_input().into(),
+            duplicate_input().into(),
+        ])
+        .unwrap();
         for (nodes, rows) in [(2, 2), (3, 2), (4, 1), (4, 2)] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-            let limited = token.attenuate(Restriction::MaxNodes(nodes)).unwrap()
-                .attenuate(Restriction::MaxRows(rows)).unwrap();
-            let result = db.execute_graph_write_program_returning_authorized(
-                &txn, &query, &commit, &authority, &limited, "main", &program, program_policy(), || NOW,
-            ).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let limited = token
+                .attenuate(Restriction::MaxNodes(nodes))
+                .unwrap()
+                .attenuate(Restriction::MaxRows(rows))
+                .unwrap();
+            let result = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &program,
+                    program_policy(),
+                    || NOW,
+                )
+                .await;
             if nodes < 4 {
-                assert!(matches!(result, Err(GraphWriteProgramError::EdgeMerge {
-                    statement: 1,
-                    source: GqlQueryError::Interrupted(WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Nodes))),
-                })));
+                assert!(matches!(
+                    result,
+                    Err(GraphWriteProgramError::EdgeMerge {
+                        statement: 1,
+                        source: GqlQueryError::Interrupted(WriteTxnError::Authorization(
+                            Error::LimitExceeded(LimitDimension::Nodes)
+                        )),
+                    })
+                ));
             } else if rows < 2 {
-                assert!(matches!(result, Err(GraphWriteProgramError::EdgeMerge {
-                    statement: 1,
-                    source: GqlQueryError::Source(GraphEdgeMergeError::Source(
-                        WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Rows)),
-                    )),
-                })));
+                assert!(matches!(
+                    result,
+                    Err(GraphWriteProgramError::EdgeMerge {
+                        statement: 1,
+                        source: GqlQueryError::Source(GraphEdgeMergeError::Source(
+                            WriteTxnError::Authorization(Error::LimitExceeded(
+                                LimitDimension::Rows
+                            )),
+                        )),
+                    })
+                ));
             } else {
                 let (receipt, completion) = result.unwrap();
                 assert_eq!(receipt.steps().len(), 2);
                 assert_eq!(receipt.stats().created_edges, 0);
-                assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+                assert!(matches!(
+                    completion,
+                    EmbeddedTxnCompletion::ReadClosed { .. }
+                ));
             }
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
@@ -520,28 +859,44 @@ fn whole_program_edge_scope_and_rights_precede_all_identity_reservations() {
                 // rights or capability-determined target-relation refusal.
                 let merge = prepared("MATCH (a:Visible) WHERE a.p = 999 MERGE (a)-[:R]->(a)");
                 let tail = if conditional {
-                    PreparedGraphEdgeUpsert::prepare(merge, vec![], vec![]).unwrap().into()
+                    PreparedGraphEdgeUpsert::prepare(merge, vec![], vec![])
+                        .unwrap()
+                        .into()
                 } else {
                     merge.into()
                 };
                 let program = PreparedGraphWriteProgram::prepare(vec![
                     insert_step("INSERT (a:Visible {p:10}), (b:Visible {p:20}), (a)-[:S]->(b)"),
                     tail,
-                ]).unwrap();
-                let error = db.execute_graph_write_program_authorized(
-                    &txn, &query, &commit, &authority, &token, "main", &program, program_policy(), || NOW,
-                ).await.unwrap_err();
+                ])
+                .unwrap();
+                let error = db
+                    .execute_graph_write_program_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &program,
+                        program_policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
                 assert!(matches!(error, GraphWriteProgramError::Program(
                     GraphMutationProgramError::Preflight(WriteTxnError::Authorization(error)),
                 ) if error == expected));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
                 assert_eq!(
-                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap(),
+                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
                     ElementId::Vertex(VId(1)),
                 );
                 assert_eq!(
-                    db.allocate_identity(&query, GraphInsertRequest::Edge { row: 0, edge: 0 }).unwrap(),
+                    db.allocate_identity(&query, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                        .unwrap(),
                     ElementId::Edge(EId(1)),
                 );
                 assert_eq!(txn.outstanding_obligations(), 0);

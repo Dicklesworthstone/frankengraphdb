@@ -6,10 +6,22 @@
 use super::*;
 
 const HIDDEN_NAMES: [&str; 16] = [
-    "__fg_group_0", "__fg_group_1", "__fg_group_2", "__fg_group_3",
-    "__fg_group_4", "__fg_group_5", "__fg_group_6", "__fg_group_7",
-    "__fg_group_8", "__fg_group_9", "__fg_group_10", "__fg_group_11",
-    "__fg_group_12", "__fg_group_13", "__fg_group_14", "__fg_group_15",
+    "__fg_group_0",
+    "__fg_group_1",
+    "__fg_group_2",
+    "__fg_group_3",
+    "__fg_group_4",
+    "__fg_group_5",
+    "__fg_group_6",
+    "__fg_group_7",
+    "__fg_group_8",
+    "__fg_group_9",
+    "__fg_group_10",
+    "__fg_group_11",
+    "__fg_group_12",
+    "__fg_group_13",
+    "__fg_group_14",
+    "__fg_group_15",
 ];
 
 fn scope_end(word: &str, previous: Option<TokenKind<'_>>) -> bool {
@@ -19,9 +31,23 @@ fn scope_end(word: &str, previous: Option<TokenKind<'_>>) -> bool {
     {
         return false;
     }
-    ["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "MATCH",
-        "OPTIONAL", "UNWIND", "UNION", "EXCEPT", "INTERSECT", "CALL"]
-        .iter().any(|keyword| word.eq_ignore_ascii_case(keyword))
+    [
+        "WHERE",
+        "ORDER",
+        "SKIP",
+        "LIMIT",
+        "RETURN",
+        "WITH",
+        "MATCH",
+        "OPTIONAL",
+        "UNWIND",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+        "CALL",
+    ]
+    .iter()
+    .any(|keyword| word.eq_ignore_ascii_case(keyword))
 }
 
 impl<'a> Parser<'a> {
@@ -40,7 +66,9 @@ impl<'a> Parser<'a> {
         let width = incoming.len();
         self.syntax.distinct = false;
         self.boundary_reads = None;
-        let mut outputs: Vec<_> = incoming.iter().enumerate()
+        let mut outputs: Vec<_> = incoming
+            .iter()
+            .enumerate()
             .map(|(column, &(name, _))| (name, ReadValueTemplate::Column(column)))
             .collect();
         let bindings: Vec<_> = self.visible_graph_bindings().collect();
@@ -48,8 +76,11 @@ impl<'a> Parser<'a> {
             if incoming.iter().any(|(name, _)| name.text == variable.text) {
                 continue;
             }
-            self.capacity(outputs.len(), MAX_PATTERN_VERTICES,
-                crate::algebra::PatternLimitDimension::Columns)?;
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
             let column = self.mutation_projection(&mut inputs, variable, None)?;
             outputs.push((variable, ReadValueTemplate::Column(width + column)));
         }
@@ -73,22 +104,48 @@ impl<'a> Parser<'a> {
                         let property = lookahead.next()?;
                         if let TokenKind::Word(key) = property.kind {
                             if optional && incoming.iter().any(|(name, _)| name.text == word) {
-                                return Err(expected(token.at,
-                                    "project carried vertex properties before OPTIONAL MATCH"));
+                                return Err(expected(
+                                    token.at,
+                                    "project carried vertex properties before OPTIONAL MATCH",
+                                ));
                             }
-                            if let Some(&variable) = bindings.iter().find(|name| name.text == word) {
+                            if let Some(&variable) = bindings.iter().find(|name| name.text == word)
+                            {
                                 self.require_property_variable(variable)?;
-                                if !reads.iter().any(|&(owner, property, _)| owner == word && property.text == key) {
-                                    self.capacity(outputs.len(), MAX_PATTERN_VERTICES,
-                                        crate::algebra::PatternLimitDimension::Columns)?;
-                                    let name = HIDDEN_NAMES.iter().copied()
-                                        .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
-                                        .ok_or_else(|| expected(token.at, "bounded grouping property reads"))?;
-                                    let property = Name { text: key, at: property.at };
-                                    let column = self.mutation_projection(&mut inputs, variable, Some(property))?;
+                                if !reads.iter().any(|&(owner, property, _)| {
+                                    owner == word && property.text == key
+                                }) {
+                                    self.capacity(
+                                        outputs.len(),
+                                        MAX_PATTERN_VERTICES,
+                                        crate::algebra::PatternLimitDimension::Columns,
+                                    )?;
+                                    let name = HIDDEN_NAMES
+                                        .iter()
+                                        .copied()
+                                        .find(|name| {
+                                            outputs.iter().all(|(output, _)| output.text != *name)
+                                        })
+                                        .ok_or_else(|| {
+                                            expected(token.at, "bounded grouping property reads")
+                                        })?;
+                                    let property = Name {
+                                        text: key,
+                                        at: property.at,
+                                    };
+                                    let column = self.mutation_projection(
+                                        &mut inputs,
+                                        variable,
+                                        Some(property),
+                                    )?;
                                     reads.push((word, property, outputs.len()));
-                                    outputs.push((Name { text: name, at: token.at },
-                                        ReadValueTemplate::Column(width + column)));
+                                    outputs.push((
+                                        Name {
+                                            text: name,
+                                            at: token.at,
+                                        },
+                                        ReadValueTemplate::Column(width + column),
+                                    ));
                                 }
                             }
                         }
@@ -96,7 +153,9 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => {
-                    let Some(outer) = depth.checked_sub(1) else { break; };
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
                     depth = outer;
                 }
                 _ => {}
@@ -108,13 +167,26 @@ impl<'a> Parser<'a> {
             // anonymous binding solely to carry those rows; it remains private.
             let variable = self.syntax.variables[0];
             let column = self.mutation_projection(&mut inputs, variable, None)?;
-            outputs.push((Name { text: HIDDEN_NAMES[0], at },
-                ReadValueTemplate::Column(width + column)));
+            outputs.push((
+                Name {
+                    text: HIDDEN_NAMES[0],
+                    at,
+                },
+                ReadValueTemplate::Column(width + column),
+            ));
         }
         if outputs.len() != visible {
-            self.boundary_reads = Some(BoundaryReads { visible, width: outputs.len(), reads });
+            self.boundary_reads = Some(BoundaryReads {
+                visible,
+                width: outputs.len(),
+                reads,
+            });
         }
-        Ok(GraphProjectionHead { with: true, inputs, outputs })
+        Ok(GraphProjectionHead {
+            with: true,
+            inputs,
+            outputs,
+        })
     }
 }
 

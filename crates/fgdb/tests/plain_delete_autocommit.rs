@@ -1,6 +1,10 @@
 //! Autocommit plain DELETE must preserve the same non-detach law and release
 //! transaction obligations on success, empty selection and refusal.
 
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};

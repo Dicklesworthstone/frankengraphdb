@@ -196,6 +196,10 @@ impl PreparedGraphAggregateText {
             ReadValueTemplate::Size(inner) => Ok(GraphSetValue::Size(Box::new(
                 Self::bind_input_value(inner, values)?,
             ))),
+            ReadValueTemplate::In { value, list } => Ok(GraphSetValue::In {
+                value: Box::new(Self::bind_input_value(value, values)?),
+                list: Box::new(Self::bind_input_value(list, values)?),
+            }),
         }
     }
 }

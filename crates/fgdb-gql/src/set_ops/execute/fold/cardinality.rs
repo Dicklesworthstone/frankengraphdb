@@ -22,6 +22,7 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::List(values) => values.iter().all(constant),
         GraphSetValue::Index { list, index } => constant(list) && constant(index),
         GraphSetValue::Size(list) => constant(list),
+        GraphSetValue::In { value, list } => constant(value) && constant(list),
     }
 }
 

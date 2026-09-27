@@ -497,6 +497,70 @@ fn rejected_members_and_zero_or_refused_output_keep_transaction_read_dependencie
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// IN over an aggregate's output keeps the row law (fgdb-r6n09): the output
+/// projection that runs after HAVING compares a count as an exact integer, a
+/// NULL member makes a miss UNKNOWN, and an empty list is FALSE. The text
+/// frontend does not spell `COUNT(*) IN [...]` in RETURN yet, so this builds
+/// the checked output projection directly.
+#[test]
+fn membership_over_aggregate_outputs_keeps_three_valued_logic() {
+    use fgdb_gql::{GqlScalarParameter, GraphSetProjection, GraphSetValue};
+    let ((), report) = run_async_under_lab(0x1ab1_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(1), vec![], vec![(SCORE, CanonicalScalar::Int(1))]);
+        batch.create_vertex(VId(2), vec![], vec![(SCORE, CanonicalScalar::Int(2))]);
+        db.write(&commit, batch).await.unwrap();
+        let literal = |value: CanonicalScalar| {
+            GraphSetValue::Literal(GqlScalarParameter::new(value).unwrap())
+        };
+        for (members, expected) in [
+            (
+                vec![CanonicalScalar::Int(1), CanonicalScalar::Int(2)],
+                Some(true),
+            ),
+            (vec![CanonicalScalar::Int(3)], Some(false)),
+            (vec![CanonicalScalar::Int(3), CanonicalScalar::Null], None),
+            (vec![], Some(false)),
+        ] {
+            let list = GraphSetValue::List(members.iter().cloned().map(literal).collect());
+            let query =
+                PreparedGraphAggregateText::prepare("MATCH (n) RETURN COUNT(*) AS c", symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .with_output_projection(vec![GraphSetProjection::new(
+                        "hit",
+                        GraphSetValue::In {
+                            value: Box::new(GraphSetValue::Column(0)),
+                            list: Box::new(list),
+                        },
+                    )])
+                    .unwrap();
+            let rows = db
+                .execute_graph_aggregate_governed(&cx, &query, policy())
+                .unwrap()
+                .value;
+            assert_eq!(rows.len(), 1, "{members:?}");
+            let cell = &rows[0].values()[0];
+            let actual = match cell {
+                fgdb_gql::GraphAggregateValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                    CanonicalScalar::Bool(truth),
+                )) => Some(Some(*truth)),
+                fgdb_gql::GraphAggregateValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                    CanonicalScalar::Null,
+                )) => Some(None),
+                _ => None,
+            };
+            assert_eq!(actual, Some(expected), "{members:?}: {cell:?}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn having_ranges_keep_exact_averages_empty_groups_and_hidden_source_errors() {
     let ((), report) = run_async_under_lab(0x1ab1_0005, |root| async move {

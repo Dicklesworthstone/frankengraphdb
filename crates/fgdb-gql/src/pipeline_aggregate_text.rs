@@ -240,6 +240,7 @@ impl PreparedGraphPipelineAggregateText {
         fn stages(operators: &mut Vec<&'static str>, stages: &[ReadStageTemplate]) {
             for stage in stages {
                 operators.push(match stage {
+                    ReadStageTemplate::Aggregate { .. } => "Aggregate",
                     ReadStageTemplate::Unwind { .. } => "Unwind",
                     ReadStageTemplate::Project { .. } => "ProjectValues",
                     ReadStageTemplate::Filter { .. } => "Select",

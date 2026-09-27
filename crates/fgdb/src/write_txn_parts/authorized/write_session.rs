@@ -1,13 +1,13 @@
 //! Host-configured mutable sessions over the existing authorized write path.
 //! No raw database, issuer, transaction, allocator or host callback escapes.
 
+use super::super::Bound;
 use super::{
     Authority, CapabilityToken, CommitCx, Database, Error, Execution, Fault, GqlParameters,
     GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteProgramReceipt, Input,
     PreparedGraphWriteScript, QueryCx, RelationId, TxnCx, Vfs, WriteTxnError, admission,
     checkpoint,
 };
-use super::super::Bound;
 use fgdb_gql::{
     BoundGraphWriteScriptBatch, GraphWriteProgramStats, GraphWriteScriptBatchError,
     GraphWriteScriptBatchLocation, GraphWriteStepReceipt,
@@ -162,7 +162,9 @@ fn begin<'a, C: FnMut() -> u64>(
 ) -> Result<ExecutionPermit<'a, WriteAccess>, Fault> {
     let now = clock();
     if now < *last_now_ms {
-        return Err(admission(WriteTxnError::Authorization(Error::ClockWentBackwards)));
+        return Err(admission(WriteTxnError::Authorization(
+            Error::ClockWentBackwards,
+        )));
     }
     *last_now_ms = now;
     capability
@@ -187,10 +189,9 @@ fn tracked_clock<'a, C: FnMut() -> u64>(
 fn statement_limit(script: &PreparedGraphWriteScript, limit: usize) -> Result<(), Fault> {
     let observed = script.statements().len() as u128;
     if observed > limit as u128 {
-        return Err(Fault::BatchBinding(GraphWriteScriptBatchError::TooManyStatements {
-            limit,
-            observed,
-        }));
+        return Err(Fault::BatchBinding(
+            GraphWriteScriptBatchError::TooManyStatements { limit, observed },
+        ));
     }
     Ok(())
 }
@@ -241,7 +242,10 @@ impl<V: Vfs + Clone> Database<V> {
         R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         C: FnMut() -> u64,
     {
-        commit_cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(admission)?;
+        commit_cx
+            .checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(admission)?;
         let refusal = |error| admission(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
             return Err(refusal(Error::WrongAuthority));
@@ -296,17 +300,36 @@ where
     ) -> Result<AuthorizedPreparedWrite, Fault> {
         let mut state = self.state.take().ok_or_else(stopped)?;
         let result = (|| {
-            let permit = begin(&state.capability, &state.branch, &mut state.clock, &mut state.last_now_ms)?;
+            let permit = begin(
+                &state.capability,
+                &state.branch,
+                &mut state.clock,
+                &mut state.last_now_ms,
+            )?;
             let mut execution = Execution {
                 cx: state.commit_cx,
                 permit,
                 clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
             };
-            let script = super::prepare(cx, &mut execution, text, params, state.relation, &mut state.resolver)?;
+            let script = super::prepare(
+                cx,
+                &mut execution,
+                text,
+                params,
+                state.relation,
+                &mut state.resolver,
+            )?;
             statement_limit(&script, state.max_statements)?;
-            Input::Script(&script, params).bind(cx, state.capability.predicates(), &mut execution)?;
+            Input::Script(&script, params).bind(
+                cx,
+                state.capability.predicates(),
+                &mut execution,
+            )?;
             checkpoint(cx, &mut execution).map_err(admission)?;
-            Ok(AuthorizedPreparedWrite { owner: Arc::clone(&self.owner), script })
+            Ok(AuthorizedPreparedWrite {
+                owner: Arc::clone(&self.owner),
+                script,
+            })
         })();
         if result.is_ok() {
             self.state = Some(state);
@@ -324,7 +347,13 @@ where
         text: &str,
         params: &GqlParameters,
     ) -> Result<Receipt, Fault> {
-        self.run(cx, Request::Text(text, params), true, GraphWriteProgramReceipt::new).await
+        self.run(
+            cx,
+            Request::Text(text, params),
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     /// Rebind a template from this exact session, then execute one atomic
@@ -337,7 +366,13 @@ where
         prepared: &AuthorizedPreparedWrite,
         params: &GqlParameters,
     ) -> Result<Receipt, Fault> {
-        self.run(cx, Request::Prepared(prepared, params), true, GraphWriteProgramReceipt::new).await
+        self.run(
+            cx,
+            Request::Prepared(prepared, params),
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     /// Bind ALL input records and execute one atomic ingestion program. The
@@ -352,7 +387,13 @@ where
         prepared: &AuthorizedPreparedWrite,
         arguments: &[GqlParameters],
     ) -> Result<Receipt, Fault> {
-        self.run(cx, Request::Batch(prepared, arguments), true, GraphWriteProgramReceipt::new).await
+        self.run(
+            cx,
+            Request::Batch(prepared, arguments),
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     /// The same atomic ingestion without retaining/delivering identity rows.
@@ -364,7 +405,13 @@ where
         prepared: &AuthorizedPreparedWrite,
         arguments: &[GqlParameters],
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
-        self.run(cx, Request::Batch(prepared, arguments), false, |stats, _| stats).await
+        self.run(
+            cx,
+            Request::Batch(prepared, arguments),
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Bind a reusable finite batch without graph access or identity allocation.
@@ -381,7 +428,12 @@ where
     ) -> Result<AuthorizedBoundWriteBatch, Fault> {
         let mut state = self.state.take().ok_or_else(stopped)?;
         let result = (|| {
-            let permit = begin(&state.capability, &state.branch, &mut state.clock, &mut state.last_now_ms)?;
+            let permit = begin(
+                &state.capability,
+                &state.branch,
+                &mut state.clock,
+                &mut state.last_now_ms,
+            )?;
             let mut execution = Execution {
                 cx: state.commit_cx,
                 permit,
@@ -391,15 +443,21 @@ where
             if !Arc::ptr_eq(&self.owner, &prepared.owner) {
                 return Err(admission(WriteTxnError::AuthorizedMutationRefused));
             }
-            let bound = Input::Batch(&prepared.script, arguments, state.max_statements)
-                .bind(cx, state.capability.predicates(), &mut execution)?;
+            let bound = Input::Batch(&prepared.script, arguments, state.max_statements).bind(
+                cx,
+                state.capability.predicates(),
+                &mut execution,
+            )?;
             checkpoint(cx, &mut execution).map_err(admission)?;
             // Input::Batch is the only producer above. Keep this fail-closed
             // rather than exposing a raw program if its binding contract changes.
             let Bound::Batch(batch) = bound else {
                 return Err(admission(WriteTxnError::AuthorizedMutationRefused));
             };
-            Ok(AuthorizedBoundWriteBatch { owner: Arc::clone(&self.owner), batch })
+            Ok(AuthorizedBoundWriteBatch {
+                owner: Arc::clone(&self.owner),
+                batch,
+            })
         })();
         if result.is_ok() {
             self.state = Some(state);
@@ -415,7 +473,13 @@ where
         cx: &QueryCx,
         batch: &AuthorizedBoundWriteBatch,
     ) -> Result<Receipt, Fault> {
-        self.run(cx, Request::Bound(batch), true, GraphWriteProgramReceipt::new).await
+        self.run(
+            cx,
+            Request::Bound(batch),
+            true,
+            GraphWriteProgramReceipt::new,
+        )
+        .await
     }
 
     #[allow(clippy::result_large_err)]
@@ -424,7 +488,8 @@ where
         cx: &QueryCx,
         batch: &AuthorizedBoundWriteBatch,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
-        self.run(cx, Request::Bound(batch), false, |stats, _| stats).await
+        self.run(cx, Request::Bound(batch), false, |stats, _| stats)
+            .await
     }
 
     #[allow(clippy::result_large_err)]
@@ -439,7 +504,9 @@ where
         // open state while the operation is pending. Success restores it in a
         // non-fallible tail; dropping this future drops its private state.
         let mut state = self.state.take().ok_or_else(stopped)?;
-        let result = state.run(cx, request, &self.owner, returning, receipt).await;
+        let result = state
+            .run(cx, request, &self.owner, returning, receipt)
+            .await;
         if result.is_ok() {
             self.state = Some(state);
         }
@@ -485,43 +552,56 @@ where
             permit,
             clock: tracked_clock(clock, last_now_ms),
         };
-        commit_cx.with_restriction_async(async {
-            checkpoint(cx, &mut execution).map_err(admission)?;
-            let parsed;
-            let input = match request {
-                Request::Text(text, params) => {
-                    parsed = super::prepare(cx, &mut execution, text, params, *relation, resolver)?;
-                    statement_limit(&parsed, *max_statements)?;
-                    Input::Script(&parsed, params)
-                }
-                Request::Prepared(prepared, params) => {
-                    if !Arc::ptr_eq(owner, &prepared.owner) {
-                        return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+        commit_cx
+            .with_restriction_async(async {
+                checkpoint(cx, &mut execution).map_err(admission)?;
+                let parsed;
+                let input = match request {
+                    Request::Text(text, params) => {
+                        parsed =
+                            super::prepare(cx, &mut execution, text, params, *relation, resolver)?;
+                        statement_limit(&parsed, *max_statements)?;
+                        Input::Script(&parsed, params)
                     }
-                    statement_limit(&prepared.script, *max_statements)?;
-                    Input::Script(&prepared.script, params)
-                }
-                Request::Batch(prepared, arguments) => {
-                    if !Arc::ptr_eq(owner, &prepared.owner) {
-                        return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                    Request::Prepared(prepared, params) => {
+                        if !Arc::ptr_eq(owner, &prepared.owner) {
+                            return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                        }
+                        statement_limit(&prepared.script, *max_statements)?;
+                        Input::Script(&prepared.script, params)
                     }
-                    Input::Batch(&prepared.script, arguments, *max_statements)
-                }
-                Request::Bound(bound) => {
-                    if !Arc::ptr_eq(owner, &bound.owner) {
-                        return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                    Request::Batch(prepared, arguments) => {
+                        if !Arc::ptr_eq(owner, &prepared.owner) {
+                            return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                        }
+                        Input::Batch(&prepared.script, arguments, *max_statements)
                     }
-                    Input::Bound(&bound.batch)
-                }
-            };
-            let bound = input.bind(cx, capability.predicates(), &mut execution)?;
-            database.complete_authorized_program(
-                txn_cx, cx, commit_cx, bound.program(), *policy,
-                capability.predicates(), &mut execution, returning, receipt,
-            ).await.map_err(|error| bound.error(error))
-            // Nothing fallible, no authorization sampling, no callback and no
-            // receipt allocation after the existing completion boundary.
-        }).await
+                    Request::Bound(bound) => {
+                        if !Arc::ptr_eq(owner, &bound.owner) {
+                            return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                        }
+                        Input::Bound(&bound.batch)
+                    }
+                };
+                let bound = input.bind(cx, capability.predicates(), &mut execution)?;
+                database
+                    .complete_authorized_program(
+                        txn_cx,
+                        cx,
+                        commit_cx,
+                        bound.program(),
+                        *policy,
+                        capability.predicates(),
+                        &mut execution,
+                        returning,
+                        receipt,
+                    )
+                    .await
+                    .map_err(|error| bound.error(error))
+                // Nothing fallible, no authorization sampling, no callback and no
+                // receipt allocation after the existing completion boundary.
+            })
+            .await
     }
 }
 

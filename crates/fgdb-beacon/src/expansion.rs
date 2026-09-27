@@ -211,8 +211,12 @@ impl ExpansionGraph {
         work: &mut dyn WorkControl,
     ) -> Result<Vec<GraphHit>, BeaconError> {
         self.expand_from_source(
-            seeds, max_hops, include_seeds, candidates,
-            &mut ResidentNeighbors(&self.arcs), work,
+            seeds,
+            max_hops,
+            include_seeds,
+            candidates,
+            &mut ResidentNeighbors(&self.arcs),
+            work,
         )
     }
 
@@ -373,19 +377,28 @@ mod source_tests {
                 if from == vertex {
                     work.charge(1)?;
                     let result = visit(to, work);
-                    if !self.swallow { result?; }
+                    if !self.swallow {
+                        result?;
+                    }
                 }
             }
             Ok(())
         }
     }
     fn source(arcs: Vec<(VId, VId)>) -> Source {
-        Source { arcs, calls: Vec::new(), fail_at: None, swallow: false }
+        Source {
+            arcs,
+            calls: Vec::new(),
+            fail_at: None,
+            swallow: false,
+        }
     }
     fn corpus(ids: &[VId], limits: ExpansionLimits) -> ExpansionGraph {
         let mut graph = ExpansionGraph::new(limits);
         let mut work = WorkBudget::new(usize::MAX);
-        for &id in ids { graph.insert_vertex(id, &mut work).unwrap(); }
+        for &id in ids {
+            graph.insert_vertex(id, &mut work).unwrap();
+        }
         graph
     }
 
@@ -393,11 +406,30 @@ mod source_tests {
     fn demand_stops_at_hop_boundary_and_never_visits_disconnected_vertices() {
         let high = VId(u128::MAX);
         let graph = corpus(&[VId(0), VId(1), VId(2), high], ExpansionLimits::default());
-        let mut input = source(vec![(VId(0), VId(2)), (VId(0), VId(1)),
-            (VId(0), VId(1)), (VId(1), high), (high, high)]);
-        let rows = graph.expand_from_source(&[VId(0), VId(0), VId(99)], 1, false, 1,
-            &mut input, &mut WorkBudget::new(10_000)).unwrap();
-        assert_eq!(rows, vec![GraphHit { id: VId(1), hops: 1 }]);
+        let mut input = source(vec![
+            (VId(0), VId(2)),
+            (VId(0), VId(1)),
+            (VId(0), VId(1)),
+            (VId(1), high),
+            (high, high),
+        ]);
+        let rows = graph
+            .expand_from_source(
+                &[VId(0), VId(0), VId(99)],
+                1,
+                false,
+                1,
+                &mut input,
+                &mut WorkBudget::new(10_000),
+            )
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![GraphHit {
+                id: VId(1),
+                hops: 1
+            }]
+        );
         assert_eq!(input.calls, vec![VId(0)]);
         assert!(graph.arcs.is_empty());
     }
@@ -406,14 +438,33 @@ mod source_tests {
     fn zero_hops_zero_candidates_and_missing_seeds_do_not_touch_adjacency() {
         let graph = corpus(&[VId(1)], ExpansionLimits::default());
         for (seeds, hops, k, expected) in [
-            (vec![VId(1)], 0, 1, vec![GraphHit { id: VId(1), hops: 0 }]),
+            (
+                vec![VId(1)],
+                0,
+                1,
+                vec![GraphHit {
+                    id: VId(1),
+                    hops: 0,
+                }],
+            ),
             (vec![VId(1)], u32::MAX, 0, vec![]),
             (vec![VId(99)], u32::MAX, 1, vec![]),
         ] {
             let mut input = source(vec![]);
             input.fail_at = Some(VId(1));
-            assert_eq!(graph.expand_from_source(&seeds, hops, true, k,
-                &mut input, &mut WorkBudget::new(1000)).unwrap(), expected);
+            assert_eq!(
+                graph
+                    .expand_from_source(
+                        &seeds,
+                        hops,
+                        true,
+                        k,
+                        &mut input,
+                        &mut WorkBudget::new(1000)
+                    )
+                    .unwrap(),
+                expected
+            );
             assert!(input.calls.is_empty());
         }
     }
@@ -423,16 +474,39 @@ mod source_tests {
         let graph = corpus(&[VId(1), VId(2), VId(3)], ExpansionLimits::default());
         let mut input = source(vec![(VId(1), VId(2)), (VId(2), VId(3))]);
         input.fail_at = Some(VId(2));
-        assert!(matches!(graph.expand_from_source(&[VId(1)], 3, false, 1,
-            &mut input, &mut WorkBudget::new(1000)),
-            Err(BeaconError::Invariant("injected source refusal"))));
-        let graph = corpus(&[VId(1), VId(2), VId(3)], ExpansionLimits {
-            max_visited_vertices: 2, ..ExpansionLimits::default()
-        });
+        assert!(matches!(
+            graph.expand_from_source(
+                &[VId(1)],
+                3,
+                false,
+                1,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            ),
+            Err(BeaconError::Invariant("injected source refusal"))
+        ));
+        let graph = corpus(
+            &[VId(1), VId(2), VId(3)],
+            ExpansionLimits {
+                max_visited_vertices: 2,
+                ..ExpansionLimits::default()
+            },
+        );
         input.fail_at = None;
-        assert!(matches!(graph.expand_from_source(&[VId(1)], 3, false, 1,
-            &mut input, &mut WorkBudget::new(1000)),
-            Err(BeaconError::ResourceLimit { resource: "expansion visited vertices", limit: 2 })));
+        assert!(matches!(
+            graph.expand_from_source(
+                &[VId(1)],
+                3,
+                false,
+                1,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            ),
+            Err(BeaconError::ResourceLimit {
+                resource: "expansion visited vertices",
+                limit: 2
+            })
+        ));
     }
 
     #[test]
@@ -440,15 +514,37 @@ mod source_tests {
         let graph = corpus(&[VId(1)], ExpansionLimits::default());
         let mut input = source(vec![(VId(1), VId(99))]);
         input.swallow = true;
-        assert!(matches!(graph.expand_from_source(&[VId(1)], 1, true, 1,
-            &mut input, &mut WorkBudget::new(1000)), Err(BeaconError::InvalidQuery(_))));
-        let graph = corpus(&[VId(1), VId(2)], ExpansionLimits {
-            max_visited_vertices: 1, ..ExpansionLimits::default()
-        });
+        assert!(matches!(
+            graph.expand_from_source(
+                &[VId(1)],
+                1,
+                true,
+                1,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            ),
+            Err(BeaconError::InvalidQuery(_))
+        ));
+        let graph = corpus(
+            &[VId(1), VId(2)],
+            ExpansionLimits {
+                max_visited_vertices: 1,
+                ..ExpansionLimits::default()
+            },
+        );
         let mut input = source(vec![(VId(1), VId(2))]);
         input.swallow = true;
-        assert!(matches!(graph.expand_from_source(&[VId(1)], 1, true, 1,
-            &mut input, &mut WorkBudget::new(1000)), Err(BeaconError::ResourceLimit { .. })));
+        assert!(matches!(
+            graph.expand_from_source(
+                &[VId(1)],
+                1,
+                true,
+                1,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            ),
+            Err(BeaconError::ResourceLimit { .. })
+        ));
     }
 
     #[test]
@@ -470,35 +566,55 @@ mod source_tests {
             for via in 0..3 {
                 for from in 0..3 {
                     for to in 0..3 {
-                        distance[from][to] = distance[from][to]
-                            .min(distance[from][via] + distance[via][to]);
+                        distance[from][to] =
+                            distance[from][to].min(distance[from][via] + distance[via][to]);
                     }
                 }
             }
             let mut graph = corpus(&ids, ExpansionLimits::default());
             let mut work = WorkBudget::new(usize::MAX);
             for &(from, to) in &arcs {
-                graph.insert_edge(from, to, ExpansionDirection::Outgoing, &mut work).unwrap();
+                graph
+                    .insert_edge(from, to, ExpansionDirection::Outgoing, &mut work)
+                    .unwrap();
             }
             for mask in 0_u8..8 {
-                let seeds: Vec<_> = (0..3).filter(|i| mask & (1 << i) != 0)
-                    .map(|i| ids[i]).collect();
+                let seeds: Vec<_> = (0..3)
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| ids[i])
+                    .collect();
                 for hops in 0..=3 {
                     for include in [false, true] {
                         for k in 0..=3 {
-                            let mut expected: Vec<_> = (0..3).filter_map(|to| {
-                                let d = (0..3).filter(|i| mask & (1 << i) != 0)
-                                    .map(|from| distance[from][to]).min().unwrap_or(99);
-                                (d <= hops && (include || d != 0)).then_some((d, ids[to]))
-                            }).collect();
+                            let mut expected: Vec<_> = (0..3)
+                                .filter_map(|to| {
+                                    let d = (0..3)
+                                        .filter(|i| mask & (1 << i) != 0)
+                                        .map(|from| distance[from][to])
+                                        .min()
+                                        .unwrap_or(99);
+                                    (d <= hops && (include || d != 0)).then_some((d, ids[to]))
+                                })
+                                .collect();
                             expected.sort();
                             expected.truncate(k as usize);
-                            let expected: Vec<_> = expected.into_iter()
-                                .map(|(hops, id)| GraphHit { id, hops }).collect();
+                            let expected: Vec<_> = expected
+                                .into_iter()
+                                .map(|(hops, id)| GraphHit { id, hops })
+                                .collect();
                             let mut input = source(arcs.iter().rev().copied().collect());
-                            assert_eq!(graph.expand_from_source(&seeds, hops, include, k,
-                                &mut input, &mut work).unwrap(), expected);
-                            assert_eq!(graph.expand(&seeds, hops, include, k, &mut work).unwrap(), expected);
+                            assert_eq!(
+                                graph
+                                    .expand_from_source(
+                                        &seeds, hops, include, k, &mut input, &mut work
+                                    )
+                                    .unwrap(),
+                                expected
+                            );
+                            assert_eq!(
+                                graph.expand(&seeds, hops, include, k, &mut work).unwrap(),
+                                expected
+                            );
                         }
                     }
                 }

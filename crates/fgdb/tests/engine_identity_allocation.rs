@@ -1,5 +1,9 @@
 //! Allocation follows committed creation history, not just the live graph.
 //! Never-committed reservations are not claimed to be durable leases.
+// Lab tests prove Send across the nested authorized write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{CrashPoint, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};

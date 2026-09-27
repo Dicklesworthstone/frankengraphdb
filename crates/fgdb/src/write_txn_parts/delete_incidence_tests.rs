@@ -21,7 +21,10 @@ fn policy() -> GraphDeletePolicy {
 }
 fn stats() -> GraphDeleteStats {
     GraphDeleteStats {
-        selection: fgdb_gql::GqlExecutionStats::default(),
+        selection: fgdb_gql::GqlExecutionStats {
+            snapshot_records: 0,
+            result_rows: 0,
+        },
         evaluator: fgdb_gql::GlaExecutionStats::default(),
         target_vertices: 0,
         target_edges: 0,
