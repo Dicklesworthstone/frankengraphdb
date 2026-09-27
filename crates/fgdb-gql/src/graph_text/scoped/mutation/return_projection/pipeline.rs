@@ -1,5 +1,5 @@
 //! WITH is preparation-only relational staging over the SAME native lexer.
-//! Runtime receives only Project/Filter/page nodes in PreparedGraphSet. There
+//! Runtime receives only native row operators in PreparedGraphSet. There
 //! are no graph-slot aliases, synthetic MATCH text, or source calls here.
 
 mod multipart;
@@ -85,6 +85,7 @@ fn append_stage(
     depth: &mut usize,
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
+        ReadStageTemplate::Aggregate { at, .. } => (*at, 3),
         ReadStageTemplate::Project { at, .. }
         | ReadStageTemplate::Filter { at, .. }
         | ReadStageTemplate::Unwind { at, .. } => (*at, 1),
@@ -399,6 +400,12 @@ impl<'a> Parser<'a> {
                     self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 }
                 break;
+            }
+            if self.with_has_aggregate()? {
+                let (stage, next_schema) = self.with_aggregate_stage(&schema)?;
+                append_stage(&mut stages, stage, &mut depth)?;
+                schema = next_schema;
+                continue;
             }
             self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
             self.word("WITH")?;

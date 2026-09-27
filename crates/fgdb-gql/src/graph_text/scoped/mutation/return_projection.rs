@@ -4,6 +4,7 @@
 
 mod aggregate;
 mod pipeline;
+mod with_aggregate;
 
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;
@@ -710,6 +711,7 @@ fn bind_stages(
 ) -> Result<PreparedGraphSet, GraphSetTextError> {
     for stage in stages {
         input = match stage {
+            ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
             ReadStageTemplate::Unwind { at, name, value } => input
                 .unwind(name.clone(), bind_read_value(value, values)?)
                 .map_err(|kind| GraphSetTextError {

@@ -130,6 +130,9 @@ impl UnresolvedGraphText<'_> {
                     .unzip()
             };
         for stage in &self.pipeline {
+            if let ReadStageTemplate::Aggregate { stage, .. } = stage {
+                (names, types) = stage.column_schema();
+            }
             if let ReadStageTemplate::Project { projection, .. } = stage {
                 let next = projection
                     .iter()
@@ -149,15 +152,11 @@ impl UnresolvedGraphText<'_> {
         (names, types)
     }
     pub(crate) fn depth(&self) -> usize {
-        1 + self.leading.len()
+        1 + self.leading.iter().map(ReadStageTemplate::depth).sum::<usize>()
             + usize::from(!self.leading.is_empty() && !self.singleton)
             + usize::from(self.projection.is_some())
             + usize::from(!self.correlations.is_empty())
-            + self
-                .pipeline
-                .iter()
-                .filter(|stage| !matches!(stage, ReadStageTemplate::Page { .. }))
-                .count()
+            + self.pipeline.iter().map(ReadStageTemplate::depth).sum::<usize>()
     }
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.syntax.parameters

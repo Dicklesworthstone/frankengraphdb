@@ -1,6 +1,7 @@
 //! Compound query preparation over the shared graph-text lexer and compiler.
 //! Syntax is parsed before catalog access; execution sees only PreparedGraphSet.
 
+pub(crate) mod aggregate;
 pub(crate) mod multipart;
 
 use crate::algebra::{GraphOrderError, GraphValueOrder, IntegerComparison};
@@ -27,6 +28,7 @@ pub enum GraphSetTextErrorKind {
     OrderBuild(GraphOrderError),
     ProjectionBuild(crate::GraphSetProjectionError),
     FilterBuild(crate::GraphSetFilterError),
+    AggregateBuild(crate::GraphAggregateBuildError),
     IntegerExpression(crate::GraphIntegerBuildError),
     IntegerOperand,
     IntegerNesting { limit: usize },
@@ -248,8 +250,21 @@ impl ReadFilterOp {
     }
 }
 impl ReadStageTemplate {
+    /// Count the physical relational nodes produced by native binding.
+    pub(crate) fn depth(&self) -> usize {
+        match self {
+            Self::Page { .. } => 0,
+            Self::Aggregate { .. } => 3,
+            _ => 1,
+        }
+    }
+
     pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
         match self {
+            Self::Aggregate { stage, .. } => {
+                bytes.push(4);
+                stage.append_template_transcript(bytes);
+            }
             Self::Unwind { name, value, .. } => {
                 bytes.push(0);
                 bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
@@ -417,6 +432,10 @@ pub(crate) enum ReadFilterOp {
 }
 #[derive(Clone)]
 pub(crate) enum ReadStageTemplate {
+    Aggregate {
+        at: usize,
+        stage: aggregate::ReadAggregateStage,
+    },
     Unwind {
         at: usize,
         name: String,
@@ -1005,9 +1024,11 @@ impl PreparedGraphSetText {
     /// boundaries remain before that join. The next WITH or RETURN may combine
     /// imported columns with the new pattern's properties. Every graph source
     /// executes once under the existing set engine and cumulative budget.
-    /// Row-only stages do not dereference graph values; aggregate WITH,
-    /// writes and imported bindings used only inside a later scoped clause
-    /// remain unsupported and refuse before catalog access.
+    /// Row-only WITH stages can group keys and native aggregate arguments,
+    /// then feed their checked row values to WHERE, UNWIND or later MATCH.
+    /// Wide numeric results and nonnull exact averages refuse row conversion.
+    /// Row-only stages do not dereference graph values. Writes and imported
+    /// bindings used only inside a later scoped clause remain unsupported.
     /// Aggregate RETURN operands remain unsupported. Byte/token admission is
     /// definition-wide; no branch resets those caps.
     pub fn prepare(

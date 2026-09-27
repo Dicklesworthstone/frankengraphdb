@@ -41,8 +41,8 @@ impl UnresolvedReadInput<'_> {
                             .input
                             .pipeline
                             .iter()
-                            .filter(|stage| !matches!(stage, ReadStageTemplate::Page { .. }))
-                            .count()
+                            .map(ReadStageTemplate::depth)
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
     }
