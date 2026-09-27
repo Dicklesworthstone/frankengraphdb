@@ -19,6 +19,9 @@ enum PointReadField {
 #[derive(Default)]
 struct PointReads(
     std::collections::BTreeMap<ElementId, std::collections::BTreeSet<PointReadField>>,
+    // A refused governed projection may expose a data-dependent failure before
+    // its precise domain fits. This allocation-free superset survives rollback.
+    Option<ElementId>,
 );
 
 impl PointReads {
@@ -26,6 +29,7 @@ impl PointReads {
         self.0.entry(element).or_default().insert(field);
     }
 
+    #[cfg(test)]
     fn record_adjacency(
         &mut self,
         vertex: VId,
@@ -33,25 +37,55 @@ impl PointReads {
         incoming: bool,
         edges: impl IntoIterator<Item = EId>,
     ) {
+        let result = self.record_adjacency_controlled(
+            vertex,
+            relation,
+            incoming,
+            edges,
+            &mut || Ok::<(), core::convert::Infallible>(()),
+        );
+        match result {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    fn record_adjacency_controlled<E>(
+        &mut self,
+        vertex: VId,
+        relation: RelationId,
+        incoming: bool,
+        edges: impl IntoIterator<Item = EId>,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
         // The anchor covers the insertion gap and its own lifetime; the EIds
         // cover retirement, including vertex-delete cascades. Keep all matching
         // basis and staged edges, not just one edge per distinct neighbour.
         // Union with earlier observations; never remove a broad read or slot.
+        control()?;
         self.record(
             ElementId::Vertex(vertex),
             PointReadField::Adjacency { relation, incoming },
         );
         for eid in edges {
+            control()?;
             self.record(ElementId::Edge(eid), PointReadField::EdgeTopology);
         }
+        Ok(())
+    }
+
+    fn retain_refused_projection(&mut self, anchor: VId) {
+        let element = ElementId::Vertex(anchor);
+        self.1 = Some(self.1.map_or(element, |previous| previous.min(element)));
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_empty() && self.1.is_none()
     }
 
     fn clear(&mut self) {
         self.0.clear();
+        self.1 = None;
     }
 
     fn contains(&self, element: ElementId, field: PointReadField) -> bool {
@@ -74,6 +108,9 @@ impl PointReads {
             return Ok(None);
         }
         checkpoint()?;
+        if let Some(element) = self.1 {
+            return Ok(Some(element));
+        }
         let target = match row {
             DeltaRow::Property { elem, property, .. } => {
                 return Ok(self

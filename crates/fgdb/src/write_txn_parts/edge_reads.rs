@@ -1,3 +1,5 @@
+include!("governed_adjacency.rs");
+
 impl WriteTxn {
     /// Read the pinned durable edge plus the exact prepared net effects.
     pub fn edge<V: Vfs + Clone>(
@@ -231,6 +233,7 @@ impl WriteTxn {
     /// the admitted generation rather than cloning every edge and property.
     /// Keep EIds until after overlay application: neighbour deduplication here
     /// would lose the last-surviving-parallel-edge rule and read witnesses.
+    #[cfg(test)]
     fn adjacency_basis<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -239,43 +242,21 @@ impl WriteTxn {
         incoming: bool,
         control: &mut impl FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), WriteTxnError>,
     ) -> Result<std::collections::BTreeMap<EId, VId>, WriteTxnError> {
-        use fgdb_gql::algebra::GlaDirection;
-
-        self.ensure_database(database)?;
-        // Direct snapshot access must retain the health fence previously
-        // enforced by edges_at(), even for empty or entirely staged adjacency.
-        database.ensure_readable()?;
-        let snapshot = &database.snapshot;
-        snapshot.check_frontier(self.basis)?;
-        let direction = if incoming {
-            GlaDirection::Reverse
-        } else {
-            GlaDirection::Forward
-        };
-        let index = &snapshot.adjacency_index;
-        let mut matching = std::collections::BTreeMap::new();
-        let mut after = None;
-        while let Some(eid) = index.next_incident_edge(vertex, direction, after, control)? {
-            // Advance even for invisible or other-relation candidates. Strict
-            // successors also handle zero and u128::MAX without arithmetic.
-            after = Some(eid);
-            let Some((block, row)) = index.statement_at(&snapshot.blocks, eid, self.basis) else {
-                continue;
-            };
-            let entry = &snapshot.blocks[block][row];
-            let (anchor, neighbour) = if incoming {
-                (entry.dst, entry.src)
-            } else {
-                (entry.src, entry.dst)
-            };
-            // The index is a historical superset, never an authority beside
-            // the exact-cut winner. In particular, do not resurrect retired
-            // edges or admit creations newer than the pinned transaction.
-            if anchor == vertex && entry.relation == relation {
-                matching.insert(eid, neighbour);
-            }
-        }
-        Ok(matching)
+        self.adjacency_basis_controlled(
+            database,
+            vertex,
+            relation,
+            incoming,
+            &mut |event| {
+                use crate::gql_exec::source::SourceEvent;
+                use fgdb_gql::GlaExecutionEvent;
+                control(match event {
+                    SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                })
+            },
+            &core::convert::identity,
+        )
     }
 
     fn adjacency_neighbours<V: Vfs + Clone>(
@@ -285,59 +266,15 @@ impl WriteTxn {
         relation: RelationId,
         incoming: bool,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        // Do not call edges(): that would turn a local expansion into a global
-        // edge-scan conflict witness. Retain the logical relation/direction
-        // gap below, without accidentally observing endpoint/edge properties.
-        let mut matching =
-            self.adjacency_basis(database, vertex, relation, incoming, &mut |_| Ok(()))?;
-        let mut observed_edges: std::collections::BTreeSet<EId> =
-            matching.keys().copied().collect();
-        if let Some(prepared) = &self.prepared {
-            for coordinate in prepared.template.coordinate_entries() {
-                for effect in &coordinate.rows {
-                    match effect {
-                        fgdb_delta_types::DeltaRow::CreateEdge {
-                            eid,
-                            src,
-                            relation: edge_relation,
-                            dst,
-                            ..
-                        } => {
-                            let (anchor, neighbour) =
-                                if incoming { (*dst, *src) } else { (*src, *dst) };
-                            if anchor == vertex && *edge_relation == relation {
-                                matching.insert(*eid, neighbour);
-                                observed_edges.insert(*eid);
-                            }
-                        }
-                        fgdb_delta_types::DeltaRow::DeleteEdge { eid, .. } => {
-                            matching.remove(eid);
-                        }
-                        fgdb_delta_types::DeltaRow::DeleteVertex {
-                            sorted_retired_incident_edges,
-                            ..
-                        } => {
-                            // Apply only the authoritative cascade image. Do
-                            // not rescan every surviving edge for each delete.
-                            for eid in sorted_retired_incident_edges {
-                                matching.remove(eid);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        self.point_reads
-            .borrow_mut()
-            .record_adjacency(vertex, relation, incoming, observed_edges);
-        // Deduplicate once, after applying all edge identities. In particular,
-        // deletion of one parallel edge never removes a surviving neighbour.
-        Ok(matching
-            .into_values()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect())
+        self.adjacency_with_control(
+            database,
+            vertex,
+            relation,
+            incoming,
+            &mut |_| Ok(()),
+            &core::convert::identity,
+        )
+        .map(|(value, _)| value)
     }
 }
 
