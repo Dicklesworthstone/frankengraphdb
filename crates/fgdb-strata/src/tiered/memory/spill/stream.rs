@@ -50,7 +50,10 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
             return Err(SpillError::ForeignRun);
         }
         let run_len = u64::try_from(run.len).map_err(|_| SpillError::SizeOverflow)?;
-        let extent_end = run.offset.checked_add(run_len).ok_or(SpillError::InvalidRun)?;
+        let extent_end = run
+            .offset
+            .checked_add(run_len)
+            .ok_or(SpillError::InvalidRun)?;
         let window_end = start.checked_add(len).ok_or(SpillError::InvalidRun)?;
         if run.id == 0
             || run.id > self.stats.reserved_runs
@@ -114,7 +117,9 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
             }
             .into());
         }
-        self.pool.allocate_inner(bytes, 0).map_err(SpillError::Memory)
+        self.pool
+            .allocate_inner(bytes, 0)
+            .map_err(SpillError::Memory)
     }
 }
 

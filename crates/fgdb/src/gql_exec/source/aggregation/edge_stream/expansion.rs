@@ -65,9 +65,9 @@ impl AdjacencyIndex {
                     let coordinate = history_coordinate(&current.value, as_of, control)?;
                     // The newest statement can be a retirement. Never search
                     // backwards again to substitute an older live statement.
-                    return Ok(coordinate.filter(|&(block, row)| {
-                        blocks[block][row].visible_at(as_of)
-                    }));
+                    return Ok(
+                        coordinate.filter(|&(block, row)| blocks[block][row].visible_at(as_of))
+                    );
                 }
             }
         }
@@ -468,16 +468,12 @@ mod indexed_scan_tests {
             for cut in [0, 1, 67, 68, 69, u64::MAX] {
                 let run = |stop| {
                     let mut calls = 0;
-                    let result = index.statement_at_controlled(
-                        &blocks,
-                        eid,
-                        CommitSeq(cut),
-                        &mut |event| {
+                    let result =
+                        index.statement_at_controlled(&blocks, eid, CommitSeq(cut), &mut |event| {
                             assert_eq!(event, SourceEvent::Work);
                             calls += 1;
                             if calls == stop { Err(stop) } else { Ok(()) }
-                        },
-                    );
+                        });
                     (result, calls)
                 };
                 let (expected, total) = run(usize::MAX);
@@ -653,7 +649,10 @@ mod indexed_scan_tests {
                     .unwrap()
                     .unwrap();
                 assert!(std::ptr::eq(*a, &snapshot.blocks[block][row]));
-                assert!(std::ptr::eq(*ap, edge_properties_at(&snapshot.block_props, block, row)));
+                assert!(std::ptr::eq(
+                    *ap,
+                    edge_properties_at(&snapshot.block_props, block, row)
+                ));
             }
         }
         let ((), report) = run_async_under_lab(0xa710, |root| async move {
