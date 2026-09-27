@@ -16,6 +16,8 @@
 //! are retained while writing. Opaque run handles contain all read coordinates
 //! and integrity evidence, never a path or a self-asserted on-disk length.
 
+mod stream;
+
 use core::fmt;
 use std::io::{self, SeekFrom};
 use std::sync::Arc;
@@ -34,7 +36,8 @@ pub struct SpillLimits {
     pub max_file_bytes: u64,
     /// Cumulative append attempts, including incomplete writes and empty runs.
     pub max_runs: u64,
-    /// Maximum bytes restored in one admitted resident allocation.
+    /// Maximum logical bytes in one run. Whole-buffer append/restore retain
+    /// separate resident admission; restore_window retains only its window.
     pub max_run_bytes: usize,
 }
 
@@ -354,6 +357,8 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
 
 #[cfg(test)]
 mod tests {
+    include!("spill/stream_tests.rs");
+
     use super::super::SpillableBytes;
     use super::*;
     use asupersync::io::ReadBuf;
