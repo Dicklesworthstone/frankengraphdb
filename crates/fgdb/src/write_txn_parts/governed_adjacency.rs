@@ -8,23 +8,6 @@ enum AdjacencyReadEvent {
     ResultRow,
 }
 
-struct AdjacencyReadAttempt<'a> {
-    reads: &'a std::cell::RefCell<PointReads>,
-    anchor: VId,
-    accepted: bool,
-}
-
-impl Drop for AdjacencyReadAttempt<'_> {
-    fn drop(&mut self) {
-        if !self.accepted {
-            // Inner RefCell borrows have ended before this guard is dropped.
-            // No allocation, source read, callback or I/O is needed to retain
-            // a superset of observations conveyed by a data-dependent refusal.
-            self.reads.borrow_mut().retain_refused_projection(self.anchor);
-        }
-    }
-}
-
 impl WriteTxn {
     /// Read outgoing neighbours with one source/work/scratch/result allowance.
     ///
@@ -184,8 +167,8 @@ impl WriteTxn {
         database.snapshot.check_frontier(self.basis)
             .map_err(WriteTxnError::from).map_err(source_error)?;
         control(Source(Work))?;
-        let mut attempt = AdjacencyReadAttempt {
-            reads: &self.point_reads, anchor: vertex, accepted: false,
+        let mut attempt = ProjectionReadAttempt {
+            reads: &self.point_reads, element: ElementId::Vertex(vertex), accepted: false,
         };
         let mut matching = self.adjacency_basis_controlled(
             database, vertex, relation, incoming,

@@ -74,8 +74,7 @@ impl PointReads {
         Ok(())
     }
 
-    fn retain_refused_projection(&mut self, anchor: VId) {
-        let element = ElementId::Vertex(anchor);
+    fn retain_refused_projection(&mut self, element: ElementId) {
         self.1 = Some(self.1.map_or(element, |previous| previous.min(element)));
     }
 
@@ -176,6 +175,7 @@ impl PointReads {
 }
 
 include!("point_projection.rs");
+include!("governed_point_reads.rs");
 
 impl WriteTxn {
     /// Read only one vertex property at the pinned basis plus canonical effects.
@@ -247,7 +247,11 @@ impl WriteTxn {
         vid: VId,
         label: LabelId,
     ) -> Result<Option<bool>, WriteTxnError> {
-        let row = self.point_projection(database, ElementId::Vertex(vid), PointReadField::Label(label))?;
+        let row = self.point_projection(
+            database,
+            ElementId::Vertex(vid),
+            PointReadField::Label(label),
+        )?;
         self.point_reads
             .borrow_mut()
             .record(ElementId::Vertex(vid), PointReadField::Label(label));
