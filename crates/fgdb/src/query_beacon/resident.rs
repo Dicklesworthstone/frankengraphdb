@@ -11,7 +11,7 @@
 //! and they do not provide disk spill or an independently writable graph.
 
 use super::{Meter, Scan, SharedWork, build};
-use crate::{Database, ReadError};
+use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{
@@ -26,6 +26,9 @@ use std::sync::Arc;
 
 type Cancel = Box<asupersync::error::Error>;
 pub type Options = ReadOptions<PropertyKeyId, LabelId>;
+
+#[path = "resident_graph.rs"]
+mod graph;
 
 #[cfg(test)]
 #[path = "resident_tests.rs"]
@@ -98,6 +101,9 @@ pub struct ResidentIndex {
     definition: Arc<Options>,
     source_sequence: CommitSeq,
     index: BeaconIndex,
+    // Opt-in: ordinary two-lane preparation retains no native graph snapshot.
+    // The selected cut is source_sequence, not this view's possibly newer head.
+    graph_source: Option<EmbeddedReadView>,
 }
 
 /// A cheap, immutable pin of both lanes, BM25 statistics, and ANN topology at
@@ -108,6 +114,7 @@ pub struct PinnedIndex {
     definition: Arc<Options>,
     source_sequence: CommitSeq,
     index: IndexSnapshot,
+    graph_source: Option<EmbeddedReadView>,
 }
 
 /// One atomic refresh, including no-effect commits. `touched_vertices` counts
@@ -237,6 +244,7 @@ impl ResidentIndex {
             definition: Arc::clone(&self.definition),
             source_sequence: self.source_sequence,
             index: self.index.snapshot(),
+            graph_source: self.graph_source.clone(),
         }
     }
 
@@ -263,7 +271,8 @@ impl ResidentIndex {
     /// writer's newer frontier. No intermediate search generation is claimed.
     ///
     /// Changed documents enter Beacon's existing segmented atomic apply path.
-    /// Both lanes, corpus statistics and source_sequence advance together, only
+    /// Both lanes, corpus statistics, an optional graph source, and the sequence
+    /// advance together, only
     /// after final live admission. Errors, cancellation and unwinding leave the
     /// previous index and every pin unchanged. Retired history, a foreign owner,
     /// a future/backwards target, and unsupported deltas fail closed; no hidden
@@ -436,10 +445,20 @@ impl ResidentIndex {
                 });
             next.try_apply_batch(mutations, &mut SharedWork(work))?;
         }
-        // The native source sequence is distinct from Beacon's internal Arc
-        // generation. Edge-only/no-op commits advance only the source sequence.
+        // A graph-enabled index must advance topology even for edge-only
+        // commits. Pin the successor off-side, before the SAME final acceptance
+        // as both search lanes. Failure/unwind leaves the old coherent triple.
+        let graph_source = if self.graph_source.is_some() {
+            work.borrow_mut().charge(1)?;
+            Some(database.read_session().map_err(Error::Source)?)
+        } else {
+            None
+        };
+        // Beacon's internal generation need not change for an edge-only tick.
+        // All source reads still use through, never the pinned view's live head.
         work.borrow_mut().charge(1)?;
         self.index = next;
+        self.graph_source = graph_source;
         self.source_sequence = through;
         Ok(report)
     }
@@ -493,6 +512,15 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         options: &Options,
     ) -> Result<ResidentIndex, Error> {
+        self.prepare_beacon_index_internal(cx, options, false)
+    }
+
+    fn prepare_beacon_index_internal(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+        graph_enabled: bool,
+    ) -> Result<ResidentIndex, Error> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
@@ -514,11 +542,18 @@ impl<V: Vfs + Clone> Database<V> {
                     |_| true,
                     |_| true,
                 )?;
+                let graph_source = if graph_enabled {
+                    work.borrow_mut().charge(1)?;
+                    Some(self.read_session().map_err(Error::Source)?)
+                } else {
+                    None
+                };
                 let prepared = ResidentIndex {
                     owner: Arc::clone(&self.handle_owner),
                     definition: Arc::new(definition),
                     source_sequence: at,
                     index,
+                    graph_source,
                 };
                 work.borrow_mut().charge(1)?;
                 Ok(prepared)
