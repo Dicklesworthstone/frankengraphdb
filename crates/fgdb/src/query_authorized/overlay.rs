@@ -63,3 +63,7 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "overlay_tests.rs"]
+mod tests;

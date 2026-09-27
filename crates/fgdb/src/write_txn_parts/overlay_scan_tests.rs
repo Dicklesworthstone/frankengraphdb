@@ -260,12 +260,17 @@ fn refusal_and_unwind_stop_before_the_next_output_and_leave_the_owner_reusable()
             assert_eq!(result, Err(17));
             assert_eq!(visits, 1);
             let mut visits = 0;
-            let result = owner.visit_edges(&mut |_| Ok(()), |_, _, _| {
+            let mut edge_polls = 0;
+            let result = owner.visit_edges(&mut |_| {
+                edge_polls += 1;
+                Ok(())
+            }, |_, _, _| {
                 visits += 1;
                 Err(23)
             }).unwrap();
             assert_eq!(result, Err(23));
             assert_eq!(visits, 1);
+            assert!(edge_polls < 16, "a refused first row scanned the raw suffix: {edge_polls}");
             let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = owner.visit_vertices(&mut |_| Ok::<_, ()>(()), |_, _| {
                     panic!("injected consumer unwind")

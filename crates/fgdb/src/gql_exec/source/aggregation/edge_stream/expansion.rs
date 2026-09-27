@@ -3,8 +3,12 @@
 
 use super::*;
 use crate::gql_exec::source::{AdjacencyIndex, IndexMap};
+use crate::Snapshot;
+use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
+use fgdb_strata::AdjacencyEntry;
+use fgdb_types::CanonicalScalar;
 
 pub(super) fn next<C>(
     source: &SnapshotEdgeSource<'_>,
@@ -35,6 +39,52 @@ pub(crate) fn next_from_view<C>(
 }
 
 impl AdjacencyIndex {
+    /// Visit exact-cut winners directly from the admitted historical index.
+    /// The ordered cursor retains at most the AVL height in borrowed pointers;
+    /// no all-edge winner map or candidate vector is allocated before output.
+    /// Caller controls cover cursor admission and every history predecessor.
+    /// This is an internal source primitive, not snapshot/visibility authority.
+    fn visit_all_coordinates<'a, E, C>(
+        &'a self,
+        blocks: &'a [Vec<AdjacencyEntry>],
+        as_of: CommitSeq,
+        control: &mut C,
+        mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        control(SourceEvent::Work)?;
+        // Reserve the maximum live cursor depth BEFORE iter() allocates its
+        // initial stack. Subsequent descent reuses those logical slots.
+        for _ in 0..self.histories.height() {
+            control(SourceEvent::ScratchEntry)?;
+        }
+        for (_, history) in self.histories.iter() {
+            control(SourceEvent::Work)?;
+            let mut node = history.0.as_deref();
+            let mut winner = None;
+            while let Some(current) = node {
+                control(SourceEvent::Work)?;
+                // Rightmost (created_at, block, row) <= this sequence. A
+                // retirement restatement wins too: never revive an older row.
+                if current.key.0 <= as_of {
+                    winner = Some(current.key);
+                    node = current.right.0.as_deref();
+                } else {
+                    node = current.left.0.as_deref();
+                }
+            }
+            if let Some((_, block, row)) = winner {
+                let entry = &blocks[block][row];
+                if entry.visible_at(as_of) {
+                    visit(entry, block, row, control)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Seek the next incident identity without materializing the graph or an
     /// incidence list. Shared by query streams and transaction overlay reads.
     ///
@@ -63,6 +113,32 @@ impl AdjacencyIndex {
                 })
             }
         }
+    }
+}
+
+impl Snapshot {
+    /// Borrow topology and properties from the SAME winning coordinate of an
+    /// already admitted immutable generation. The caller validates its cut and
+    /// supplies physical-scan controls separately from logical row admission.
+    /// Authorized callers poll here and charge only after scope filtering.
+    pub(crate) fn visit_indexed_edges<'a, E, C>(
+        &'a self,
+        as_of: CommitSeq,
+        control: &mut C,
+        mut visit: impl FnMut(
+            &'a AdjacencyEntry,
+            &'a [(PropertyKeyId, CanonicalScalar)],
+            &mut C,
+        ) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        self.adjacency_index.visit_all_coordinates(
+            &self.blocks, as_of, control, |entry, block, row, control| {
+                visit(entry, edge_properties_at(&self.block_props, block, row), control)
+            },
+        )
     }
 }
 
@@ -241,5 +317,197 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod indexed_scan_tests {
+    use super::*;
+    use crate::gql_exec::source;
+    use fgdb_delta_types::RelationId;
+
+    fn histories(count: u128) -> Vec<Vec<AdjacencyEntry>> {
+        let mut blocks = Vec::new();
+        for seq in 1..=4 {
+            let mut rows = Vec::new();
+            for id in (0..count).chain([u128::MAX]) {
+                rows.push(AdjacencyEntry {
+                    eid: EId(id),
+                    src: VId(id % 7),
+                    dst: VId(id % 11),
+                    relation: match id % 3 {
+                        0 => RelationId(1),
+                        1 => RelationId(2),
+                        _ => RelationId(3),
+                    },
+                    created_at: CommitSeq(seq),
+                    retired_at: (id % 4 == 0 && seq >= 3).then_some(CommitSeq(3)),
+                });
+            }
+            // Equal creation sequences in later blocks are intentional: the
+            // locator and retirement winner must agree with the full scan.
+            blocks.push(rows);
+        }
+        let mut restated = blocks[1].clone();
+        for entry in &mut restated {
+            if entry.eid.0 % 5 == 0 {
+                entry.retired_at = Some(CommitSeq(2));
+            }
+        }
+        blocks.push(restated);
+        blocks
+    }
+
+    #[test]
+    fn indexed_all_edge_scan_matches_independent_history_fold_at_every_cut() {
+        for count in [0, 1, 7, 31] {
+            let blocks = histories(count);
+            let index = AdjacencyIndex::build(&blocks);
+            for seq in 0..=5 {
+                let mut expected = Vec::new();
+                source::visit_edges(&blocks, CommitSeq(seq), &mut |_| Ok::<_, ()>(()), |row, _| {
+                    expected.push(row);
+                    Ok(())
+                }).unwrap();
+                let mut actual = Vec::new();
+                index.visit_all_coordinates(&blocks, CommitSeq(seq), &mut |_| Ok::<_, ()>(()),
+                    |row, block, at, _| {
+                        assert!(std::ptr::eq(row, &blocks[block][at]));
+                        actual.push(row);
+                        Ok(())
+                    },
+                ).unwrap();
+                assert_eq!(actual, expected, "count={count} cut={seq}");
+                assert!(actual.windows(2).all(|pair| pair[0].eid < pair[1].eid));
+            }
+        }
+    }
+
+    #[test]
+    fn first_row_refusal_visits_a_cursor_prefix_not_the_whole_history() {
+        let blocks = histories(4096);
+        let index = AdjacencyIndex::build(&blocks);
+        let mut new_calls = 0;
+        let mut new_rows = 0;
+        let result = index.visit_all_coordinates(&blocks, CommitSeq(1), &mut |_| {
+            new_calls += 1;
+            Ok(())
+        }, |row, _, _, _| {
+            assert_eq!(row.eid, EId(0));
+            new_rows += 1;
+            Err(17)
+        });
+        assert_eq!(result, Err(17));
+        assert_eq!(new_rows, 1);
+        assert!(new_calls < 64, "indexed prefix traversed {new_calls} events");
+        let mut old_calls = 0;
+        let mut old_rows = 0;
+        let result = source::visit_edges(&blocks, CommitSeq(1), &mut |_| {
+            old_calls += 1;
+            Ok(())
+        }, |row, _| {
+            assert_eq!(row.eid, EId(0));
+            old_rows += 1;
+            Err(17)
+        });
+        assert_eq!(result, Err(17));
+        assert_eq!(old_rows, 1);
+        assert!(old_calls > 4096, "the live incumbent was not exercised");
+    }
+
+    #[test]
+    fn indexed_cursor_admission_and_every_predecessor_step_are_fallible() {
+        let blocks = histories(16);
+        let index = AdjacencyIndex::build(&blocks);
+        let run = |stop| {
+            let mut calls = 0;
+            let mut rows = Vec::new();
+            let result = index.visit_all_coordinates(&blocks, CommitSeq(2), &mut |_| {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            }, |row, _, _, _| {
+                rows.push(row.eid);
+                Ok(())
+            });
+            (result, calls, rows)
+        };
+        let (result, total, rows) = run(usize::MAX);
+        assert_eq!(result, Ok(()));
+        assert!(!rows.is_empty());
+        for stop in 1..=total {
+            let (result, calls, prefix) = run(stop);
+            assert_eq!(result, Err(stop));
+            assert_eq!(calls, stop);
+            assert!(rows.starts_with(&prefix));
+            if stop <= 1 + usize::from(index.histories.height()) {
+                assert!(prefix.is_empty(), "output preceded cursor admission");
+            }
+        }
+        assert_eq!(run(usize::MAX), (Ok(()), total, rows));
+        let empty = AdjacencyIndex::build(&[]);
+        assert_eq!(empty.visit_all_coordinates(&[], CommitSeq(0), &mut |_| Err(19),
+            |_, _, _, _| Ok(())), Err(19));
+    }
+
+    #[test]
+    fn indexed_topology_and_properties_share_the_winner_across_compaction_and_reopen() {
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+        fn check(snapshot: &Snapshot, at: CommitSeq) {
+            let mut expected = Vec::new();
+            source::visit_edges_with_properties(snapshot, at, &mut |_| Ok::<_, ()>(()),
+                |entry, props, _| { expected.push((entry, props)); Ok(()) },
+            ).unwrap();
+            let mut actual = Vec::new();
+            snapshot.visit_indexed_edges(at, &mut |_| Ok::<_, ()>(()),
+                |entry, props, _| { actual.push((entry, props)); Ok(()) },
+            ).unwrap();
+            assert_eq!(actual, expected);
+            for ((a, ap), (b, bp)) in actual.iter().zip(&expected) {
+                assert!(std::ptr::eq(*a, *b));
+                assert!(std::ptr::eq(*ap, *bp));
+            }
+        }
+        let ((), report) = run_async_under_lab(0xa710, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = crate::MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let keys = || crate::DatabaseKeys::new(
+                [0xb7; 32], DatabaseSecurityNamespaceId([0xb8; 32]), [0xb9; 32],
+            );
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            let p = PropertyKeyId(1);
+            let mut batch = crate::WriteBatch::new(RelationId(1));
+            batch.create_vertex(VId(1), vec![], vec![]);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.add_edge(EId(0), VId(1), VId(2), vec![(p, CanonicalScalar::Int(1))]);
+            batch.add_edge(EId(1), VId(1), VId(2), vec![(p, CanonicalScalar::Int(2))]);
+            batch.add_edge(EId(u128::MAX), VId(1), VId(1), vec![]);
+            let basis = db.write(&cx, batch).await.unwrap();
+            let pinned = db.read_session().unwrap();
+            for step in 0..3 {
+                let mut batch = crate::WriteBatch::new(RelationId(1));
+                match step {
+                    0 => { batch.set_edge_property(EId(0), p, Some(CanonicalScalar::Int(10))); }
+                    1 => { batch.delete_edge(EId(1)); }
+                    _ => { batch.delete_vertex(VId(2)); }
+                }
+                db.write(&cx, batch).await.unwrap();
+                check(&db.snapshot, basis);
+                check(&db.snapshot, db.frontier().unwrap());
+                check(&pinned.snapshot, basis);
+            }
+            let frontier = db.frontier().unwrap();
+            db.compact(&cx).await.unwrap();
+            check(&db.snapshot, frontier);
+            check(&pinned.snapshot, basis);
+            drop(db);
+            let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            check(&db.snapshot, frontier);
+            assert_eq!(db.edges().unwrap().len(), 1);
+            assert_eq!(db.edges().unwrap()[0].entry.eid, EId(u128::MAX));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

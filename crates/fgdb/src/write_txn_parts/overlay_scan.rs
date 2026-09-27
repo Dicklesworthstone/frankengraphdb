@@ -217,8 +217,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                 self.transaction.match_expansions.borrow_mut().insert((entry.src, entry.relation));
                 visit(entry, properties, control)
             };
-            source::visit_edges_with_properties(
-                &self.database.snapshot,
+            self.database.snapshot.visit_indexed_edges(
                 self.transaction.basis,
                 control,
                 |basis, properties, control| {
