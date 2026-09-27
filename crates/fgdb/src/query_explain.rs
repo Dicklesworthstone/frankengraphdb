@@ -67,6 +67,15 @@ impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for &mut CachingResolv
     }
 }
 
+/// One optional trailing `;` terminates a read, as it separates write-script
+/// statements, so a statement copied from a script or the README runs as
+/// written. Only that final terminator is removed: `;;` or an interior `;`
+/// still reaches the grammar and refuses there. No other offset moves.
+/// The shared lexer of fgdb-one-lexer-one-dispatch-285i2 is its final home.
+fn without_terminator(text: &str) -> &str {
+    text.trim_end().strip_suffix(';').unwrap_or(text)
+}
+
 impl PreparedNativeRead {
     /// Classify using native parsers, from more specific grammars to general ones.
     /// Resolution, including misses, is frozen across all grammar probes.
@@ -80,6 +89,7 @@ impl PreparedNativeRead {
         params: &GqlParameters,
         mut resolver: impl GraphSymbolResolver,
     ) -> Result<Self, QueryError> {
+        let text = without_terminator(text);
         let mut resolve = CachingResolver {
             resolver: &mut resolver,
             symbols: BTreeMap::new(),

@@ -201,6 +201,79 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 #[test]
+fn one_trailing_terminator_is_accepted_by_every_read_class_and_replays() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    let cx = contexts.query();
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        for (class, text) in READS {
+            let params = if matches!(
+                class,
+                NativeReadClass::TemporalPattern
+                    | NativeReadClass::TemporalSet
+                    | NativeReadClass::TemporalAggregate
+            ) {
+                GqlParameters::new().with_uint64("at", 1).unwrap()
+            } else {
+                GqlParameters::new()
+            };
+            let bare = db.query(&cx, text, &params, symbols, policy()).unwrap();
+            for spelled in [format!("{text};"), format!("{text} ;\n")] {
+                assert_rows_equal(
+                    &bare,
+                    &db.query(&cx, &spelled, &params, symbols, policy()).unwrap(),
+                );
+                let (_, certificate) = db
+                    .execute_certified(&cx, &spelled, &params, symbols, policy())
+                    .unwrap();
+                assert_rows_equal(
+                    &bare,
+                    &db.replay(&cx, &certificate, &params, symbols, policy())
+                        .unwrap(),
+                );
+            }
+            // Exactly one terminator: a second one still reaches the grammar.
+            assert!(
+                db.query(&cx, &format!("{text};;"), &params, symbols, policy())
+                    .is_err(),
+                "{class:?}"
+            );
+        }
+        let explained = db
+            .query(
+                &cx,
+                "EXPLAIN (CERTIFICATE) MATCH (n:Person) RETURN n.p AS p;",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = explained else {
+            unreachable!("explain")
+        };
+        assert!(!rows.is_empty());
+        // A `;` inside the final literal is data, not a terminator.
+        let literal = db
+            .query(
+                &cx,
+                "MATCH (n:Person) WHERE n.p = 10 RETURN 'a;' AS x",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = literal else {
+            unreachable!("read")
+        };
+        assert_eq!(rows.len(), 1);
+    });
+}
+
+#[test]
 fn replay_refuses_values_plan_class_snapshot_and_result_mismatches() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
