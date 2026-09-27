@@ -1,6 +1,68 @@
 // Re-evaluate a deliberately narrow, decision-free append program. The native
 // mutation evaluator remains the only producer of effects and dependencies.
 
+#[derive(Default)]
+struct AppendRebaseFootprint {
+    creations: std::collections::BTreeSet<ElementId>,
+    endpoints: std::collections::BTreeSet<VId>,
+}
+
+impl AppendRebaseFootprint {
+    fn record(&mut self, row: &PendingRow) -> Result<(), WriteTxnError> {
+        match row {
+            PendingRow::Vertex {
+                vid, ensure: false, ..
+            } => {
+                self.creations.insert(ElementId::Vertex(*vid));
+            }
+            PendingRow::Edge {
+                eid,
+                src,
+                dst,
+                ensure: false,
+                ..
+            } => {
+                self.creations.insert(ElementId::Edge(*eid));
+                self.endpoints.insert(*src);
+                self.endpoints.insert(*dst);
+            }
+            _ => return Err(WriteTxnError::AppendRebaseIneligible),
+        }
+        Ok(())
+    }
+
+    fn conflicts(
+        &self,
+        row: &fgdb_delta_types::DeltaRow,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<bool, WriteTxnError> {
+        use fgdb_delta_types::DeltaRow;
+        checkpoint()?;
+        match row {
+            DeltaRow::CreateVertex { .. }
+            | DeltaRow::CreateEdge { .. }
+            | DeltaRow::DeleteVertex { .. }
+            | DeltaRow::DeleteEdge { .. }
+            | DeltaRow::LabelMembership { .. }
+            | DeltaRow::Property { .. } => {}
+            // Includes schema/constraints. New families need an explicit
+            // independence law before any append policy may cross them.
+            _ => return Err(WriteTxnError::AppendRebaseIneligible),
+        }
+        let mut touched = std::collections::BTreeSet::new();
+        validation_touches(row, &mut touched, checkpoint)?;
+        let mut collision = false;
+        for element in &touched {
+            checkpoint()?;
+            collision |= self.creations.contains(element);
+        }
+        let retired_endpoint = matches!(
+            row, DeltaRow::DeleteVertex { vid, .. } if self.endpoints.contains(vid)
+        );
+        Ok(collision || retired_endpoint)
+    }
+}
+
 impl WriteTxn {
     /// Commit vertex/edge creations after read-validated append rebase.
     ///
@@ -79,9 +141,6 @@ impl WriteTxn {
         max_expanded_rows: u64,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<(), WriteTxnError> {
-        use fgdb_delta_types::DeltaRow;
-        use std::collections::BTreeSet;
-
         let frontier = database.frontier()?;
         let previous = self
             .prepared
@@ -117,24 +176,13 @@ impl WriteTxn {
             }
         }
         database.admit_ordered_write_rows(self.staged.iter(), max_expanded_rows)?;
-        let mut creations = BTreeSet::new();
-        let mut endpoints = BTreeSet::new();
+        let mut footprint = AppendRebaseFootprint::default();
         for row in self.staged.iter().flat_map(|batch| &batch.rows) {
             checkpoint()?;
-            match row {
-                PendingRow::Vertex { vid, .. } => {
-                    creations.insert(ElementId::Vertex(*vid));
-                }
-                PendingRow::Edge { eid, src, dst, .. } => {
-                    creations.insert(ElementId::Edge(*eid));
-                    endpoints.insert(*src);
-                    endpoints.insert(*dst);
-                }
-                _ => unreachable!("raw append eligibility was checked"),
-            }
+            footprint.record(row)?;
         }
         if frontier != self.basis {
-            self.validate_unobserved_creations(&creations, checkpoint)?;
+            self.validate_unobserved_creations(&footprint.creations, checkpoint)?;
         }
         // A current-state lookup alone misses create/delete identity races and
         // retired endpoints. Admission needs the COMPLETE original-basis tail.
@@ -143,29 +191,7 @@ impl WriteTxn {
             for coordinate in batch.coordinate_entries() {
                 checkpoint()?;
                 for row in &coordinate.rows {
-                    checkpoint()?;
-                    match row {
-                        DeltaRow::CreateVertex { .. }
-                        | DeltaRow::CreateEdge { .. }
-                        | DeltaRow::DeleteVertex { .. }
-                        | DeltaRow::DeleteEdge { .. }
-                        | DeltaRow::LabelMembership { .. }
-                        | DeltaRow::Property { .. } => {}
-                        // Includes schema/constraints. New families need an
-                        // explicit independence law before rebase may cross them.
-                        _ => return Err(WriteTxnError::AppendRebaseIneligible),
-                    }
-                    let mut touched = BTreeSet::new();
-                    validation_touches(row, &mut touched, checkpoint)?;
-                    let mut collision = false;
-                    for element in &touched {
-                        checkpoint()?;
-                        collision |= creations.contains(element);
-                    }
-                    let retired_endpoint = matches!(
-                        row, DeltaRow::DeleteVertex { vid, .. } if endpoints.contains(vid)
-                    );
-                    if collision || retired_endpoint {
+                    if footprint.conflicts(row, checkpoint)? {
                         return Err(WriteError::FirstCommitterWins {
                             law: "FG-LAW-FCW-01",
                             detail:

@@ -1,6 +1,9 @@
+include!("mixed_rebase.rs");
+
 enum RebasePreparation {
     Append(u64),
     DisjointFields(u64),
+    Mixed(u64),
 }
 
 enum ConflictScope {
@@ -258,6 +261,9 @@ impl WriteTxn {
             Some(RebasePreparation::DisjointFields(limit)) => attempt
                 .transaction
                 .prepare_field_rebase(attempt.database, limit, &mut checkpoint)?,
+            Some(RebasePreparation::Mixed(limit)) => attempt
+                .transaction
+                .prepare_mixed_rebase(attempt.database, limit, &mut checkpoint)?,
             None => {}
         }
         if let Some((law, element, committed_at)) = attempt
