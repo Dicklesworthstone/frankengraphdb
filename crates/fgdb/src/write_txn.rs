@@ -56,4 +56,5 @@ include!("write_txn_parts/evidence_limits.rs");
 include!("write_txn_parts/evidence_page.rs");
 include!("write_txn_parts/evidence_cursor.rs");
 include!("write_txn_parts/finish.rs");
+include!("write_txn_parts/idempotent_rebase.rs");
 include!("write_txn_parts/traits_and_tests.rs");
