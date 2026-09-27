@@ -8,6 +8,17 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 
+/// The whole-row oracle for single-property reads: the requested property's
+/// value in a full row, with a stored Null kept as Some(Null).
+fn take_point_property(
+    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    requested: PropertyKeyId,
+) -> Option<CanonicalScalar> {
+    properties
+        .into_iter()
+        .find_map(|(key, value)| (key == requested).then_some(value))
+}
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0x31; 32], DatabaseSecurityNamespaceId([0x32; 32]), [0x33; 32])
 }

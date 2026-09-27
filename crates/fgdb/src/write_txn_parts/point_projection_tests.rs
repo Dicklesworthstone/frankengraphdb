@@ -160,7 +160,7 @@ fn old_cut_and_reopened_cut_use_their_own_winning_payloads() {
         old.abort();
         db.compact(&cx).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+        let mut db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
         assert_eq!(db.frontier().unwrap(), frontier);
         let txn = db.begin(&txcx).unwrap();
         compare_with_full_rows(&txn, &db);

@@ -39,7 +39,7 @@ fn exact_quotas_repeated_reads_and_all_below_boundary_refusals() {
         let cx = contexts.commit();
         let txcx = contexts.txn();
         let query = contexts.query();
-        let db = seeded(&cx, 1024, 4096).await;
+        let mut db = seeded(&cx, 1024, 4096).await;
         for edge in [false, true] {
             let txn = db.begin(&txcx).unwrap();
             let read = |policy| if edge {
@@ -87,7 +87,7 @@ fn selected_payload_units_are_charged_before_copy_but_unrelated_fields_are_not()
         let query = contexts.query();
         let mut executions = Vec::new();
         for (selected, unrelated) in [(64, 64), (1024, 64), (64, 32768)] {
-            let db = seeded(&cx, selected, unrelated).await;
+            let mut db = seeded(&cx, selected, unrelated).await;
             let txn = db.begin(&txcx).unwrap();
             let vertex = txn.vertex_property_governed(&db, &query, VId(1), P, policy()).unwrap();
             let edge = txn.edge_property_governed(&db, &query, EId(10), P, policy()).unwrap();

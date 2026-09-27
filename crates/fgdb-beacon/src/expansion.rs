@@ -248,13 +248,18 @@ impl ExpansionGraph {
             return Err(error.clone());
         }
         expand_controlled(
-            seeds, max_hops, include_seeds, candidates, self.limits,
+            seeds,
+            max_hops,
+            include_seeds,
+            candidates,
+            self.limits,
             &mut |id, entries, work| {
                 // Preserve the resident profile's existing combined charge.
                 work.charge(tree_work(self.vertices.len()) + tree_work(entries))?;
                 Ok(self.contains(id))
             },
-            source, work,
+            source,
+            work,
         )
     }
 }
@@ -266,11 +271,8 @@ impl ExpansionGraph {
 /// an expansion, and membership and adjacency must name the SAME logical cut.
 /// Neither this trait nor the expansion kernel authenticates that contract.
 pub trait ExpansionMembership {
-    fn contains_vertex(
-        &self,
-        vertex: VId,
-        work: &mut dyn WorkControl,
-    ) -> Result<bool, BeaconError>;
+    fn contains_vertex(&self, vertex: VId, work: &mut dyn WorkControl)
+    -> Result<bool, BeaconError>;
 }
 
 impl ExpansionMembership for ExpansionGraph {
@@ -311,12 +313,17 @@ pub fn expand_from_membership(
     work: &mut dyn WorkControl,
 ) -> Result<Vec<GraphHit>, BeaconError> {
     expand_controlled(
-        seeds, max_hops, include_seeds, candidates, limits,
+        seeds,
+        max_hops,
+        include_seeds,
+        candidates,
+        limits,
         &mut |id, entries, work| {
             work.charge(tree_work(entries))?;
             membership.contains_vertex(id, work)
         },
-        source, work,
+        source,
+        work,
     )
 }
 
@@ -700,9 +707,16 @@ mod source_tests {
                             let mut input = source(arcs.clone());
                             assert_eq!(
                                 expand_from_membership(
-                                    &seeds, hops, include, k, ExpansionLimits::default(),
-                                    &graph, &mut input, &mut work,
-                                ).unwrap(),
+                                    &seeds,
+                                    hops,
+                                    include,
+                                    k,
+                                    ExpansionLimits::default(),
+                                    &graph,
+                                    &mut input,
+                                    &mut work,
+                                )
+                                .unwrap(),
                                 expected
                             );
                         }
@@ -718,7 +732,11 @@ mod source_tests {
         refused: Option<VId>,
     }
     impl ExpansionMembership for Membership {
-        fn contains_vertex(&self, id: VId, work: &mut dyn WorkControl) -> Result<bool, BeaconError> {
+        fn contains_vertex(
+            &self,
+            id: VId,
+            work: &mut dyn WorkControl,
+        ) -> Result<bool, BeaconError> {
             work.charge(1)?;
             self.calls.set(self.calls.get() + 1);
             if self.refused == Some(id) {
@@ -728,7 +746,11 @@ mod source_tests {
         }
     }
     fn membership() -> Membership {
-        Membership { calls: std::cell::Cell::new(0), absent: None, refused: None }
+        Membership {
+            calls: std::cell::Cell::new(0),
+            absent: None,
+            refused: None,
+        }
     }
 
     #[test]
@@ -737,12 +759,32 @@ mod source_tests {
         let domain = membership();
         let high = VId(u128::MAX);
         let mut input = source(vec![(VId(0), high), (VId(7), VId(8)), (high, VId(9))]);
-        let mut limits = ExpansionLimits::default();
-        limits.max_vertices = 2;
-        limits.max_visited_vertices = 2;
-        let rows = expand_from_membership(&[VId(0), VId(0)], 1, true, 2, limits,
-            &domain, &mut input, &mut WorkBudget::new(1000)).unwrap();
-        assert_eq!(rows, vec![GraphHit { id: VId(0), hops: 0 }, GraphHit { id: high, hops: 1 }]);
+        let limits = ExpansionLimits {
+            max_vertices: 2,
+            max_visited_vertices: 2,
+            ..ExpansionLimits::default()
+        };
+        let rows = expand_from_membership(
+            &[VId(0), VId(0)],
+            1,
+            true,
+            2,
+            limits,
+            &domain,
+            &mut input,
+            &mut WorkBudget::new(1000),
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                GraphHit {
+                    id: VId(0),
+                    hops: 0
+                },
+                GraphHit { id: high, hops: 1 }
+            ]
+        );
         assert_eq!(domain.calls.get(), 3);
         assert_eq!(input.calls, vec![VId(0)]);
     }
@@ -753,10 +795,25 @@ mod source_tests {
         domain.refused = Some(VId(2));
         let mut input = source(vec![(VId(1), VId(2)), (VId(1), VId(3))]);
         input.swallow = true;
-        let result = expand_from_membership(&[VId(1)], 1, true, 1,
-            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000));
-        assert!(matches!(result, Err(BeaconError::Invariant("injected membership refusal"))));
-        assert_eq!(domain.calls.get(), 2, "no membership demand after retained refusal");
+        let result = expand_from_membership(
+            &[VId(1)],
+            1,
+            true,
+            1,
+            ExpansionLimits::default(),
+            &domain,
+            &mut input,
+            &mut WorkBudget::new(1000),
+        );
+        assert!(matches!(
+            result,
+            Err(BeaconError::Invariant("injected membership refusal"))
+        ));
+        assert_eq!(
+            domain.calls.get(),
+            2,
+            "no membership demand after retained refusal"
+        );
     }
 
     #[test]
@@ -765,49 +822,123 @@ mod source_tests {
         domain.absent = Some(VId(99));
         domain.refused = Some(VId(2));
         let mut input = source(vec![]);
-        assert!(expand_from_membership(&[VId(2)], u32::MAX, true, 0,
-            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000))
-            .unwrap().is_empty());
+        assert!(
+            expand_from_membership(
+                &[VId(2)],
+                u32::MAX,
+                true,
+                0,
+                ExpansionLimits::default(),
+                &domain,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            )
+            .unwrap()
+            .is_empty()
+        );
         assert_eq!(domain.calls.get(), 0);
-        assert!(expand_from_membership(&[VId(99)], u32::MAX, true, 1,
-            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000))
-            .unwrap().is_empty());
+        assert!(
+            expand_from_membership(
+                &[VId(99)],
+                u32::MAX,
+                true,
+                1,
+                ExpansionLimits::default(),
+                &domain,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            )
+            .unwrap()
+            .is_empty()
+        );
         assert!(input.calls.is_empty());
         for vertices in [false, true] {
             let mut limits = ExpansionLimits::default();
-            if vertices { limits.max_vertices = 0; }
-            else { limits.max_visited_vertices = 0; }
-            assert!(matches!(expand_from_membership(&[VId(1)], 0, true, 1,
-                limits, &domain, &mut input, &mut WorkBudget::new(1000)),
-                Err(BeaconError::ResourceLimit { resource: "expansion visited vertices", limit: 0 })));
+            if vertices {
+                limits.max_vertices = 0;
+            } else {
+                limits.max_visited_vertices = 0;
+            }
+            assert!(matches!(
+                expand_from_membership(
+                    &[VId(1)],
+                    0,
+                    true,
+                    1,
+                    limits,
+                    &domain,
+                    &mut input,
+                    &mut WorkBudget::new(1000)
+                ),
+                Err(BeaconError::ResourceLimit {
+                    resource: "expansion visited vertices",
+                    limit: 0
+                })
+            ));
         }
         let before = domain.calls.get();
-        assert!(matches!(expand_from_membership(&[VId(1)], 1, true, 1,
-            ExpansionLimits { max_seed_ids: 0, ..ExpansionLimits::default() },
-            &domain, &mut input, &mut WorkBudget::new(1000)),
-            Err(BeaconError::ResourceLimit { resource: "expansion seed IDs", limit: 0 })));
+        assert!(matches!(
+            expand_from_membership(
+                &[VId(1)],
+                1,
+                true,
+                1,
+                ExpansionLimits {
+                    max_seed_ids: 0,
+                    ..ExpansionLimits::default()
+                },
+                &domain,
+                &mut input,
+                &mut WorkBudget::new(1000)
+            ),
+            Err(BeaconError::ResourceLimit {
+                resource: "expansion seed IDs",
+                limit: 0
+            })
+        ));
         assert_eq!(domain.calls.get(), before);
     }
 
     #[test]
     fn every_membership_and_neighbor_work_cut_discards_the_private_result() {
-        struct Cut { calls: usize, stop: usize }
+        struct Cut {
+            calls: usize,
+            stop: usize,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
-                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.calls == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let run = |stop| {
             let mut work = Cut { calls: 0, stop };
             let domain = membership();
             let mut input = source(vec![(VId(0), VId(1)), (VId(1), VId(2)), (VId(2), VId(0))]);
-            let result = expand_from_membership(&[VId(0)], 3, true, 1,
-                ExpansionLimits::default(), &domain, &mut input, &mut work);
+            let result = expand_from_membership(
+                &[VId(0)],
+                3,
+                true,
+                1,
+                ExpansionLimits::default(),
+                &domain,
+                &mut input,
+                &mut work,
+            );
             (result, work.calls)
         };
         let (rows, count) = run(usize::MAX);
-        assert_eq!(rows.unwrap(), vec![GraphHit { id: VId(0), hops: 0 }]);
+        assert_eq!(
+            rows.unwrap(),
+            vec![GraphHit {
+                id: VId(0),
+                hops: 0
+            }]
+        );
         assert!(count > 10);
         for stop in 1..=count {
             let (result, seen) = run(stop);

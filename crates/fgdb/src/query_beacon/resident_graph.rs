@@ -120,7 +120,8 @@ impl PinnedIndex {
             return Err(BeaconError::ResourceLimit {
                 resource: "result rows",
                 limit: policy.max_result_rows,
-            }.into());
+            }
+            .into());
         }
         let request = Search::Hybrid(query.source_query());
         let (vector, text) = request.lanes();
@@ -132,14 +133,20 @@ impl PinnedIndex {
         }
         request.validate(&self.definition.index, &mut SharedWork(work))?;
         let graph = if query.graph_enabled() {
-            let view = self.graph_source.as_ref()
+            let view = self
+                .graph_source
+                .as_ref()
                 .ok_or(BeaconError::Disabled("resident graph source"))?;
             // The view can contain a newer head when preparation/refresh chose
             // history. EVERY lookup uses source_sequence, never that newer head.
-            let source = view.vertex_scan_source(cx, self.source_sequence).map_err(Error::Source)?;
+            let source = view
+                .vertex_scan_source(cx, self.source_sequence)
+                .map_err(Error::Source)?;
             let budget = SourceBudget {
                 used: Cell::new(0),
-                limit: policy.max_source_scratch.min(expansion.limits.max_source_scratch),
+                limit: policy
+                    .max_source_scratch
+                    .min(expansion.limits.max_source_scratch),
             };
             let membership = Membership {
                 source,
@@ -162,9 +169,14 @@ impl PinnedIndex {
                 limit: expansion.limits.max_input_edges,
             };
             let result = expand_from_membership(
-                expansion.seeds, expansion.max_hops, expansion.include_seeds,
-                query.graph_candidates, expansion.limits, &membership,
-                &mut neighbors, &mut SharedWork(work),
+                expansion.seeds,
+                expansion.max_hops,
+                expansion.include_seeds,
+                query.graph_candidates,
+                expansion.limits,
+                &membership,
+                &mut neighbors,
+                &mut SharedWork(work),
             );
             // The narrow Beacon source interface never flattens a native read
             // failure into a successful omission or a permanent generic error.
@@ -175,7 +187,9 @@ impl PinnedIndex {
         } else {
             Vec::new()
         };
-        let rows = self.index.hybrid_search_graph(query, &graph, &mut SharedWork(work))?;
+        let rows = self
+            .index
+            .hybrid_search_graph(query, &graph, &mut SharedWork(work))?;
         work.borrow_mut().charge(1)?;
         Ok(rows)
     }
@@ -229,7 +243,9 @@ impl<S: VertexScanSource<Error = ReadError>> ExpansionMembership for Membership<
         };
         let Some(row) = row else { return Ok(false) };
         work.charge(row.labels.len())?;
-        Ok(self.label.is_none_or(|label| row.labels.binary_search(&label).is_ok()))
+        Ok(self
+            .label
+            .is_none_or(|label| row.labels.binary_search(&label).is_ok()))
     }
 }
 
@@ -256,7 +272,10 @@ impl<M: ExpansionMembership> ExpansionNeighbors for Neighbors<'_, M> {
         let mut after = None;
         loop {
             let next = snapshot.adjacency_index.next_incident_edge(
-                vertex, self.direction, after, &mut |event| {
+                vertex,
+                self.direction,
+                after,
+                &mut |event| {
                     work.charge(1)?;
                     if matches!(event, GlaExecutionEvent::ScratchEntry) {
                         self.budget.reserve()?;
@@ -267,9 +286,13 @@ impl<M: ExpansionMembership> ExpansionNeighbors for Neighbors<'_, M> {
             let Some(eid) = next else { break };
             after = Some(eid);
             work.charge(1)?;
-            let Some((block, row)) = snapshot.adjacency_index
-                .statement_at(&snapshot.blocks, eid, self.at)
-            else { continue };
+            let Some((block, row)) =
+                snapshot
+                    .adjacency_index
+                    .statement_at(&snapshot.blocks, eid, self.at)
+            else {
+                continue;
+            };
             let edge = &snapshot.blocks[block][row];
             let neighbor = match self.direction {
                 GlaDirection::Forward if edge.src == vertex => edge.dst,
@@ -278,7 +301,9 @@ impl<M: ExpansionMembership> ExpansionNeighbors for Neighbors<'_, M> {
                 GlaDirection::Undirected if edge.dst == vertex => edge.src,
                 _ => continue,
             };
-            if self.relation.is_some_and(|relation| relation != edge.relation)
+            if self
+                .relation
+                .is_some_and(|relation| relation != edge.relation)
                 || !self.membership.contains_vertex(edge.src, work)?
                 || !self.membership.contains_vertex(edge.dst, work)?
             {

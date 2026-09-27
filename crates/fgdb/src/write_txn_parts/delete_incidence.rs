@@ -115,9 +115,9 @@ impl WriteTxn {
         // Health/ownership and cancellation before traversal reveal no graph
         // content. Once traversal starts, even a refused budget can reveal it.
         event(DeleteSourceEvent::Work)?;
-        let mut attempt = AdjacencyReadAttempt {
+        let mut attempt = ProjectionReadAttempt {
             reads: &self.point_reads,
-            anchor,
+            element: ElementId::Vertex(anchor),
             accepted: false,
         };
         // Reuse the allocation-free refusal witness. A quota failure/unwind
