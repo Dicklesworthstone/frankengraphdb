@@ -2519,7 +2519,8 @@ fn search_lanes_equal_the_library_and_pin_history() {
     );
 
     // The graph lane (GraphRAG): expansion from seed vertices, fused as a
-    // third reciprocal-rank lane, equals Database::beacon_search_graph.
+    // third reciprocal-rank lane. The CLI runs the indexed expansion; the
+    // independent whole-graph Database::beacon_search_graph is the oracle.
     let ids = vertex_ids(&db);
     let seed = |name: &str| fgdb_types::VId(ids[name].parse::<u128>().unwrap());
     let graph_oracle = |read: ReadOptions<PropertyKeyId, LabelId>,

@@ -19,8 +19,10 @@
 //!   (`--expand-relation <relation>`, default every relation;
 //!   `--expand-direction out|in|both`, default out; `--include-seeds
 //!   true|false`, default false), fused as a third reciprocal-rank lane
-//!   (`--graph-candidates`, default `--candidates`; `--graph-weight`, default
-//!   1) with the text and/or vector lanes it needs;
+//!   (`--graph-candidates`, default `--candidates`; `--graph-weight`,
+//!   default 1) with the text and/or vector lanes it needs. The expansion
+//!   reads the indexed incidence of the vertices it reaches, so its cost
+//!   follows the reached neighbourhood, not the whole selected edge set;
 //! - `--k <n>` bounds the hits (default 10), `--vertex-label <label>`
 //!   restricts the corpus and `--as-of <seq>` pins a committed sequence.
 //!
@@ -563,8 +565,11 @@ pub(super) fn run<V: Vfs + Clone>(
             include_seeds: graph.include_seeds,
             limits: ExpansionLimits::default(),
         };
+        // The indexed sibling expands through snapshot incidence of the
+        // reached vertices only; semantics are the whole-graph API's, which
+        // tests/cli_robot.rs keeps as its oracle.
         let hits = db
-            .beacon_search_graph(cx, &read, query, expansion)
+            .beacon_search_graph_indexed(cx, &read, query, expansion)
             .map_err(Failure::query)?;
         let columns: Vec<String> = [
             "vertex",
