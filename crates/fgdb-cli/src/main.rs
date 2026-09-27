@@ -88,6 +88,9 @@ All input is read and bound before the database opens. - reads stdin (one input 
 --types-file lines are kind<TAB>name (int64, uint64, int, text, bool, null); undeclared
 parameters keep native inference. --max-input-bytes bounds the CSV (default 16 MiB);
 --max-changes bounds effects/new vertices/new edges for the whole file (default 100000).
+load commits the NDJSON input in chunks of --rows-per-chunk rows (at most 65536).
+By default it takes the largest power of two whose every chunk carries at most 4 MiB
+of source transcript, chosen from the input itself, so a resume chooses the same.
 compact rewrites the storage layout durably; query results are unchanged.
 scrub verifies every capsule, repairs damaged redundancy in place, and re-reads every
 block; each damaged object is reported, and any loss exits 5 after the reports.
@@ -215,7 +218,7 @@ struct Options {
     certify_to: Option<PathBuf>,
     certificate: Option<PathBuf>,
     input: Option<PathBuf>,
-    rows_per_chunk: usize,
+    rows_per_chunk: Option<usize>,
     checkpoint: Option<PathBuf>,
     steps: Vec<transaction::Step>,
     rollback: bool,
@@ -510,7 +513,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         certify_to,
         certificate,
         input,
-        rows_per_chunk: rows_per_chunk.unwrap_or(1000),
+        rows_per_chunk,
         checkpoint,
         steps,
         rollback,

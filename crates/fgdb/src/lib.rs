@@ -119,7 +119,7 @@
 mod bulk_load;
 pub use bulk_load::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
-    BulkVertex,
+    BulkVertex, ChunkFit,
 };
 
 mod fcw;

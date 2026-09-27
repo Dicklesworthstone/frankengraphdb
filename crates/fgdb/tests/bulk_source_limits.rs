@@ -3,7 +3,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    BulkEdge, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys,
+    BulkEdge, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, ChunkFit, Database,
+    DatabaseKeys,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
@@ -293,6 +294,73 @@ fn canonical_chunk_bytes_are_exact_and_never_silently_change_transaction_boundar
             db.vertices().unwrap().is_empty(),
             "do not turn one transaction into smaller committed chunks"
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// `ChunkFit` (fgdb-hkp7k) reports the largest power of two whose every
+/// chunk fits the budget by the independent `row_bytes` oracle, and the real
+/// preflight agrees: that width loads under the same `max_chunk_bytes`, and
+/// twice it is refused as chunk_bytes before anything commits. A row that
+/// alone exceeds the budget has no width.
+#[test]
+fn chunk_fit_takes_the_largest_power_of_two_the_preflight_admits() {
+    let ((), report) = run_async_under_lab(0x000b_5209, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        // Uneven rows, so each width has a different widest chunk.
+        let input: Vec<BulkRow> = (0..40)
+            .map(|n| vertex(&format!("v{n}{}", "x".repeat(n * 29 % 97))))
+            .collect();
+        let widest = |rows: usize| {
+            input
+                .chunks(rows)
+                .map(|chunk| chunk.iter().map(row_bytes).sum::<usize>())
+                .max()
+                .unwrap()
+        };
+        let fitted = |budget: usize| {
+            let mut fit = ChunkFit::new(budget);
+            for row in &input {
+                fit.push(&cx, row).unwrap();
+            }
+            fit.rows_per_chunk()
+        };
+        for k in 0..=6 {
+            let budget = widest(1 << k);
+            let expected = (0..=16)
+                .rev()
+                .map(|j| 1usize << j)
+                .find(|&rows| widest(rows) <= budget)
+                .unwrap();
+            assert_eq!(fitted(budget), Some(expected), "budget {budget}");
+            let mut policy = BulkLoadPolicy::new(expected, RelationId(1));
+            policy.max_chunk_bytes = budget;
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let done = db
+                .bulk_load(&cx, &commit, input.clone(), policy.clone())
+                .await
+                .unwrap();
+            assert_eq!(done.committed_chunks, input.len().div_ceil(expected));
+            if expected < input.len() {
+                policy.rows_per_chunk = expected * 2;
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let error = db
+                    .bulk_load(&cx, &commit, input.clone(), policy)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error.kind,
+                    BulkLoadErrorKind::SourceLimit {
+                        dimension: "chunk_bytes",
+                        ..
+                    }
+                ));
+                assert!(db.vertices().unwrap().is_empty());
+            }
+        }
+        assert_eq!(fitted(input.iter().map(row_bytes).max().unwrap() - 1), None);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

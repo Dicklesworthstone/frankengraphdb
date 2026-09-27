@@ -98,6 +98,61 @@ impl BulkLoadPolicy {
         self
     }
 }
+// ChunkFit's candidates 2^0 ..= 2^16 are exactly the powers of two up to the cap.
+const _: () = assert!(BulkLoadPolicy::MAX_ROWS_PER_CHUNK.is_power_of_two());
+
+/// Fits `rows_per_chunk` to a source: fed every row in source order, it
+/// reports the largest power of two, at most
+/// [`BulkLoadPolicy::MAX_ROWS_PER_CHUNK`], under which every chunk carries at
+/// most `budget` bytes of source transcript, the same measure preflight
+/// refuses past `max_chunk_bytes`. Chunks start at row 0, as in preflight and
+/// on resume, so the answer is a function of the source alone and a resumed
+/// load recomputes it exactly.
+#[derive(Clone, Debug)]
+pub struct ChunkFit {
+    budget: usize,
+    rows: usize,
+    /// Running transcript bytes of the current chunk for 2^k rows per chunk.
+    open: [usize; Self::SIZES],
+    fits: [bool; Self::SIZES],
+}
+impl ChunkFit {
+    const SIZES: usize = BulkLoadPolicy::MAX_ROWS_PER_CHUNK.ilog2() as usize + 1;
+
+    #[must_use]
+    pub const fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            rows: 0,
+            open: [0; Self::SIZES],
+            fits: [true; Self::SIZES],
+        }
+    }
+
+    pub fn push(&mut self, cx: &QueryCx, row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
+        let bytes = source::transcript_len(cx, self.rows, row)?;
+        for (k, (open, fits)) in self.open.iter_mut().zip(&mut self.fits).enumerate() {
+            if self.rows.is_multiple_of(1 << k) {
+                *open = 0;
+            }
+            *open = open.saturating_add(bytes);
+            *fits &= *open <= self.budget;
+        }
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .ok_or(BulkLoadErrorKind::CounterOverflow)?;
+        Ok(())
+    }
+
+    /// The fitted rows per chunk, or `None` when one row alone exceeds the
+    /// budget.
+    #[must_use]
+    pub fn rows_per_chunk(&self) -> Option<usize> {
+        self.fits.iter().rposition(|&fits| fits).map(|k| 1 << k)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BulkLoadCheckpoint {
     pub vertices: BTreeMap<String, VId>,

@@ -8,7 +8,8 @@ mod input;
 use super::{Failure, Options, emit, hex, parameter};
 use asupersync::fs::Vfs;
 use fgdb::{
-    BulkEdge, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, Database,
+    BulkEdge, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, ChunkFit,
+    Database,
 };
 use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlParameterValue;
@@ -34,10 +35,16 @@ pub(super) async fn run<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let cx = contexts.query();
-    let mut policy = BulkLoadPolicy::new(options.rows_per_chunk, options.coordinate);
+    let mut policy = BulkLoadPolicy::new(options.rows_per_chunk.unwrap_or(1), options.coordinate);
     if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
         return Err(Failure::usage("invalid rows-per-chunk"));
     }
+    // Without --rows-per-chunk, fit chunks to the source. A chunk commits as
+    // one capsule, whose container measured 1.29x its source transcript on a
+    // 42,048-row load (3,302,237 -> 4,249,172 bytes), and a V1 capsule carries
+    // at most 14.4 MB; half of the preflight cap leaves room for rows whose
+    // templates outweigh their transcript by more (fgdb-hkp7k).
+    let mut fit = ChunkFit::new(policy.max_chunk_bytes / 2);
     // Preserve Saved V1's full raw source/binding identity while sealing it
     // without keeping the entire source file or its decoded rows resident.
     let binding = format!(
@@ -81,6 +88,12 @@ pub(super) async fn run<V: Vfs + Clone>(
                 .filter(|&bytes| bytes <= policy.max_total_key_bytes)
                 .ok_or_else(|| line_error(index + 1, "SourceLimit", "total_key_bytes"))?;
             keys.insert(key.clone());
+            if options.rows_per_chunk.is_none() {
+                fit.push(&cx, &row).map_err(|kind| match kind {
+                    BulkLoadErrorKind::Write(error) => super::execution_failure(error),
+                    kind => line_error(index + 1, "BulkLoad", format!("{kind:?}")),
+                })?;
+            }
             match &row {
                 BulkRow::Vertex(v) => {
                     fgdb_strata::vertex::admit_row_content(&v.labels, &v.props)
@@ -103,6 +116,12 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         key_bytes
     };
+    // A row past the fitted budget still loads alone when it fits the cap;
+    // past the cap, preflight refuses it with its typed chunk_bytes error.
+    let rows_per_chunk = options
+        .rows_per_chunk
+        .unwrap_or_else(|| fit.rows_per_chunk().unwrap_or(1));
+    policy.rows_per_chunk = rows_per_chunk;
     let checkpoint_limits =
         checkpoint::Limits::new(source.records(), key_bytes, policy.max_key_bytes)
             .map_err(invalid)?;
@@ -119,7 +138,7 @@ pub(super) async fn run<V: Vfs + Clone>(
         None
     };
     let (base, base_marker) = if let Some(saved) = &saved {
-        if saved.source_hash != source_hash || saved.rows_per_chunk != options.rows_per_chunk {
+        if saved.source_hash != source_hash || saved.rows_per_chunk != rows_per_chunk {
             return Err(invalid("source or chunk policy changed"));
         }
         if saved.checkpoint.frontier.0 > current.0 || saved.base.0 > saved.checkpoint.frontier.0 {
@@ -149,7 +168,7 @@ pub(super) async fn run<V: Vfs + Clone>(
                 batch,
                 &mut replay,
                 source.records(),
-                options.rows_per_chunk,
+                rows_per_chunk,
                 &mut checkpoint,
             )?;
             if checkpoint.frontier == saved.checkpoint.frontier {
@@ -165,7 +184,7 @@ pub(super) async fn run<V: Vfs + Clone>(
                 base,
                 base_marker: &base_marker,
                 source_hash: &source_hash,
-                rows_per_chunk: options.rows_per_chunk,
+                rows_per_chunk,
             };
             checkpoint::persist(&contexts.commit(), path, saved, checkpoint_limits)?;
         }
@@ -179,7 +198,7 @@ pub(super) async fn run<V: Vfs + Clone>(
         // process could not announce. Persist that recovered state first.
         for chunk in saved.checkpoint.committed_chunks..checkpoint.committed_chunks {
             let count = (chunk + 1)
-                .saturating_mul(options.rows_per_chunk)
+                .saturating_mul(rows_per_chunk)
                 .min(source.records());
             let seq = base.0 + chunk as u64 + 1;
             if robot {

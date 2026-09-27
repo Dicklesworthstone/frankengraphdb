@@ -160,11 +160,6 @@ impl ChunkHasher {
         Ok(())
     }
 
-    fn bytes(&mut self, cx: &QueryCx, bytes: &[u8]) -> Result<(), BulkLoadErrorKind> {
-        self.raw(cx, &(bytes.len() as u64).to_be_bytes())?;
-        self.raw(cx, bytes)
-    }
-
     pub fn push(&mut self, cx: &QueryCx, row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
         checkpoint(cx)?;
         let ordinal = self
@@ -174,38 +169,7 @@ impl ChunkHasher {
         ordinal
             .checked_add(1)
             .ok_or(BulkLoadErrorKind::CounterOverflow)?;
-        let props = match row {
-            BulkRow::Vertex(vertex) => {
-                self.raw(cx, &[0])?;
-                self.bytes(cx, vertex.key.as_bytes())?;
-                self.raw(cx, &(vertex.labels.len() as u64).to_be_bytes())?;
-                for label in &vertex.labels {
-                    checkpoint(cx)?;
-                    self.raw(cx, &label.0.to_be_bytes())?;
-                }
-                &vertex.props
-            }
-            BulkRow::Edge(edge) => {
-                self.raw(cx, &[1])?;
-                self.bytes(cx, edge.key.as_bytes())?;
-                self.bytes(cx, edge.source.as_bytes())?;
-                self.bytes(cx, edge.destination.as_bytes())?;
-                self.raw(cx, &edge.relation.0.to_be_bytes())?;
-                &edge.props
-            }
-        };
-        self.raw(cx, &(props.len() as u64).to_be_bytes())?;
-        for (key, value) in props {
-            checkpoint(cx)?;
-            self.raw(cx, &key.0.to_be_bytes())?;
-            let bytes = value
-                .encode()
-                .map_err(|source| BulkLoadErrorKind::SourceEncoding {
-                    row: ordinal,
-                    source,
-                })?;
-            self.bytes(cx, &bytes)?;
-        }
+        transcript_row(cx, ordinal, row, &mut |bytes| self.raw(cx, bytes))?;
         self.rows += 1;
         Ok(())
     }
@@ -218,6 +182,72 @@ impl ChunkHasher {
             digest: self.hasher.finalize(),
         }
     }
+}
+
+/// Feed `row`'s source-transcript bytes to `emit` in the order a chunk seal
+/// hashes and counts them against `max_chunk_bytes`.
+fn transcript_row(
+    cx: &QueryCx,
+    ordinal: usize,
+    row: &BulkRow,
+    emit: &mut impl FnMut(&[u8]) -> Result<(), BulkLoadErrorKind>,
+) -> Result<(), BulkLoadErrorKind> {
+    fn framed(
+        emit: &mut impl FnMut(&[u8]) -> Result<(), BulkLoadErrorKind>,
+        bytes: &[u8],
+    ) -> Result<(), BulkLoadErrorKind> {
+        emit(&(bytes.len() as u64).to_be_bytes())?;
+        emit(bytes)
+    }
+    let props = match row {
+        BulkRow::Vertex(vertex) => {
+            emit(&[0])?;
+            framed(emit, vertex.key.as_bytes())?;
+            emit(&(vertex.labels.len() as u64).to_be_bytes())?;
+            for label in &vertex.labels {
+                checkpoint(cx)?;
+                emit(&label.0.to_be_bytes())?;
+            }
+            &vertex.props
+        }
+        BulkRow::Edge(edge) => {
+            emit(&[1])?;
+            framed(emit, edge.key.as_bytes())?;
+            framed(emit, edge.source.as_bytes())?;
+            framed(emit, edge.destination.as_bytes())?;
+            emit(&edge.relation.0.to_be_bytes())?;
+            &edge.props
+        }
+    };
+    emit(&(props.len() as u64).to_be_bytes())?;
+    for (key, value) in props {
+        checkpoint(cx)?;
+        emit(&key.0.to_be_bytes())?;
+        let bytes = value
+            .encode()
+            .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                row: ordinal,
+                source,
+            })?;
+        framed(emit, &bytes)?;
+    }
+    Ok(())
+}
+
+/// The source-transcript bytes `row` adds to its chunk.
+pub(super) fn transcript_len(
+    cx: &QueryCx,
+    ordinal: usize,
+    row: &BulkRow,
+) -> Result<usize, BulkLoadErrorKind> {
+    let mut len = 0usize;
+    transcript_row(cx, ordinal, row, &mut |bytes| {
+        len = len
+            .checked_add(bytes.len())
+            .ok_or(BulkLoadErrorKind::CounterOverflow)?;
+        Ok(())
+    })?;
+    Ok(len)
 }
 
 pub(super) fn expect_end<E: core::error::Error + Send + Sync + 'static>(
