@@ -2,8 +2,28 @@
 // exact-effect append/field policies, an ENSURE may change its no-op decision.
 // The native ordered evaluator alone derives the new effects and dependencies.
 
+#[derive(Default)]
+struct IdempotentRebaseFootprint {
+    proposals: std::collections::BTreeSet<ElementId>,
+    protected: MixedRebaseFootprint,
+}
+
+impl IdempotentRebaseFootprint {
+    fn record(&mut self, row: &PendingRow) -> Result<(), WriteTxnError> {
+        let proposal = match row {
+            PendingRow::Vertex { vid, ensure: true, .. } => ElementId::Vertex(*vid),
+            PendingRow::Edge { eid, ensure: true, .. } => ElementId::Edge(*eid),
+            // Reuse, do not weaken or duplicate, the existing raw-instruction
+            // independence laws for every non-idempotent instruction.
+            _ => return self.protected.record(row),
+        };
+        self.proposals.insert(proposal);
+        Ok(())
+    }
+}
+
 impl WriteTxn {
-    /// Finalize an ENSURE program at the current healthy writer frontier.
+    /// Finalize an ordered program containing ENSURE at the healthy frontier.
     ///
     /// `ensure_vertex` retains an already-live vertex, including its winner's
     /// labels/properties. `ensure_edge_by_triple` retains a live relationship
@@ -25,12 +45,29 @@ impl WriteTxn {
     /// Every point, negative, scan and expansion observation validates over the
     /// ORIGINAL basis interval before replay. A changed observation refuses
     /// with FG-LAW-FCW-READ-01. If the basis advances, an observed proposed
-    /// identity is conservatively ineligible even when its net effect vanished:
-    /// staged metadata or values may already have escaped. Unrelated unchanged
-    /// reads are allowed. Savepoints and active mixed-program scopes refuse.
-    /// Non-ENSURE instructions and unknown/schema/constraint history families
-    /// refuse with MixedRebaseIneligible; existing finalization policies retain
-    /// their own, unchanged eligibility and exact-effect contracts.
+    /// identity is conservatively ineligible even when its net effect vanished.
+    /// This includes projected property/label/topology reads, not just complete
+    /// rows: triple deduplication can remove a proposed edge whose fields were
+    /// observed, without any concurrent write naming that proposed edge ID.
+    /// Unrelated unchanged reads are allowed. Savepoints and active mixed-
+    /// program scopes refuse.
+    ///
+    /// ENSURE may be interleaved with unconditional creations, property/label
+    /// edits, CAS and edge/vertex retirement across relation coordinates. Each
+    /// non-ENSURE instruction retains the existing mixed-rebase independence
+    /// law: no identity collision, changed raw field/guard, lifetime change or
+    /// cascade-incidence phantom. A write-and-restoration still conflicts. In
+    /// particular, ENSURE followed by SET/DELETE cannot overwrite or retire a
+    /// concurrently created winner merely by reevaluating its existence test.
+    /// An ENSURE alone does not protect a triple from changes: rechecking that
+    /// predicate is this explicit policy's purpose. Reading that neighborhood
+    /// separately still records an ordinary, non-replayable observation.
+    ///
+    /// At least one ENSURE is required. Unknown instructions, schema/constraint
+    /// rows, or coordinate schema/binding drift refuse with MixedRebaseIneligible.
+    /// Other finalization policies retain their unchanged eligibility and exact-
+    /// effect contracts. One native re-evaluation covers the ENTIRE program;
+    /// there are no per-relation commits, conditional retries or partial receipts.
     ///
     /// `max_expanded_rows` bounds the entire relation-expanded replay input
     /// before payload cloning. It is not a byte-memory or history-work budget.
@@ -124,34 +161,59 @@ impl WriteTxn {
             return Err(WriteTxnError::MixedRebaseIneligible);
         }
         database.admit_ordered_write_rows(self.staged.iter(), max_expanded_rows)?;
-        let mut proposals = std::collections::BTreeSet::new();
+        let mut footprint = IdempotentRebaseFootprint::default();
         for batch in &self.staged {
             checkpoint()?;
             for row in &batch.rows {
                 checkpoint()?;
-                let proposal = match row {
-                    PendingRow::Vertex { vid, ensure: true, .. } => ElementId::Vertex(*vid),
-                    PendingRow::Edge { eid, ensure: true, .. } => ElementId::Edge(*eid),
-                    _ => return Err(WriteTxnError::MixedRebaseIneligible),
-                };
-                proposals.insert(proposal);
+                footprint.record(row)?;
             }
         }
+        if footprint.proposals.is_empty() {
+            return Err(WriteTxnError::MixedRebaseIneligible);
+        }
+        footprint.protected.protect_vertex_cascades(&previous.template, checkpoint)?;
         if frontier != self.basis {
-            self.validate_unobserved_creations(&proposals, checkpoint)
+            self.validate_unobserved_creations(&footprint.proposals, checkpoint)
+                .map_err(mixed_rebase_error)?;
+            // Exact-effect rebase need only protect escaped birth metadata.
+            // ENSURE can instead remove an entire proposed creation, so its
+            // projected observations cannot be validated by committed history
+            // alone: a matching winner can have a DIFFERENT edge identity.
+            let projected = self.point_reads.borrow();
+            for element in &footprint.proposals {
+                checkpoint()?;
+                if projected.0.contains_key(element) {
+                    return Err(WriteTxnError::MixedRebaseIneligible);
+                }
+            }
+            self.validate_unobserved_creations(&footprint.protected.append.creations, checkpoint)
                 .map_err(mixed_rebase_error)?;
         }
-        // Even without reads, demand a complete retained suffix. An empty
-        // append footprint supplies the existing closed history-family law;
-        // it imposes no artificial conflict on idempotent existence decisions.
-        let history = AppendRebaseFootprint::default();
+        // Even without reads, require the complete suffix. Metadata is part of
+        // the boundary too: a row-free schema transition cannot evade the row
+        // family's fail-closed check. Current ordinary templates have one
+        // common graph/branch/schema binding across their relation coordinates.
+        let binding = previous.template.coordinate_entries().first()
+            .ok_or(WriteTxnError::MixedRebaseIneligible)?;
         for batch in database.delta_since(self.basis)? {
             checkpoint()?;
             for coordinate in batch.coordinate_entries() {
                 checkpoint()?;
+                if coordinate.graph != binding.graph
+                    || coordinate.branch != binding.branch
+                    || coordinate.schema_epoch != binding.schema_epoch
+                    || coordinate.schema_transition != binding.schema_transition
+                {
+                    return Err(WriteTxnError::MixedRebaseIneligible);
+                }
                 for row in &coordinate.rows {
-                    if history.conflicts(row, checkpoint).map_err(mixed_rebase_error)? {
-                        return Err(WriteTxnError::MixedRebaseIneligible);
+                    if footprint.protected.conflicts(row, checkpoint)? {
+                        return Err(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-01",
+                            detail: "idempotent rebase crossed a protected identity, field or lifetime"
+                                .to_owned(),
+                        }.into());
                     }
                 }
             }
@@ -428,6 +490,392 @@ mod idempotent_rebase_tests {
                     assert!(db.edge(PROPOSAL).unwrap().is_none());
                     assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
                 }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    async fn mixed_seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
+        seed(db, cx).await;
+        let mut batch = WriteBatch::new(R);
+        batch.add_edge(EId(10), VId(2), VId(3), vec![(P, CanonicalScalar::Int(0))]);
+        db.write(cx, batch).await.unwrap();
+    }
+
+    fn mixed_requests() -> Vec<WriteBatch> {
+        let mut second = WriteBatch::new(RelationId(2));
+        second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(40)));
+        second.create_vertex(VId(50), vec![], vec![(P, CanonicalScalar::Int(5))]);
+        second.add_edge(EId(60), VId(2), NEW, vec![]);
+        second.add_edge(EId(61), NEW, VId(50), vec![]);
+        second.set_vertex_property(VId(50), P, Some(CanonicalScalar::Int(6)));
+        let mut third = WriteBatch::new(R);
+        third.delete_edge(EId(10));
+        vec![requests(), second, third]
+    }
+
+    fn mixed_winner() -> WriteBatch {
+        let mut batch = winner();
+        batch.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(99)));
+        batch
+    }
+
+    #[test]
+    fn mixed_ensure_creations_edits_and_retirement_across_relations_equal_serial_execution() {
+        let ((), report) = run_async_under_lab(0xa1de_0010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            mixed_seed(&mut db, &cx).await;
+            let mut tx = db.begin(&txcx).unwrap();
+            tx.vertex(&db, VId(3)).unwrap(); // an unrelated observation remains valid
+            tx.write_ordered(&mut db, mixed_requests()).unwrap();
+            let frontier = db.write(&cx, mixed_winner()).await.unwrap();
+            let seq = tx.commit_idempotent_rebased(&mut db, &cx, 64).await.unwrap();
+            assert_eq!(seq, CommitSeq(frontier.0 + 1));
+            assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
+            assert!(db.edge(PROPOSAL).unwrap().is_none());
+            assert!(db.edge(WINNER).unwrap().is_some());
+            assert!(db.edge(EId(10)).unwrap().is_none());
+            assert_eq!(db.edge(EId(60)).unwrap().unwrap().entry.relation, RelationId(2));
+            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(40)), (PropertyKeyId(2), CanonicalScalar::Int(99))]);
+            let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
+            mixed_seed(&mut serial, &cx).await;
+            serial.write(&cx, mixed_winner()).await.unwrap();
+            let mut serial_tx = serial.begin(&txcx).unwrap();
+            serial_tx.write_ordered(&mut serial, mixed_requests()).unwrap();
+            serial_tx.commit(&mut serial, &cx).await.unwrap();
+            assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
+            assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
+            let expected = (db.vertices().unwrap(), db.edges().unwrap());
+            drop(db);
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            assert_eq!(reopened.frontier().unwrap(), seq);
+            assert_eq!((reopened.vertices().unwrap(), reopened.edges().unwrap()), expected);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn mixed_raw_field_guards_retirement_and_identity_aba_are_still_conflicts() {
+        let ((), report) = run_async_under_lab(0xa1de_0011, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for case in 0..6 {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                mixed_seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                let mut pending = WriteBatch::new(R);
+                pending.ensure_vertex(NEW, vec![], vec![]);
+                match case {
+                    0 => {
+                        pending.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
+                        pending.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
+                    }
+                    1 => { pending.compare_and_set_vertex_property(VId(1), P,
+                        Some(CanonicalScalar::Int(99)), CanonicalScalar::Int(7),
+                        crate::WriteMismatchPolicy::NoOp); }
+                    2 => {
+                        pending.set_vertex_label(VId(1), LabelId(99), true);
+                        pending.set_vertex_label(VId(1), LabelId(99), false);
+                    }
+                    3 => { pending.delete_edge(EId(10)); }
+                    4 => { pending.delete_vertex(VId(2)); }
+                    _ => { pending.create_vertex(VId(50), vec![], vec![]); }
+                }
+                tx.write(&mut db, pending).unwrap();
+                let mut first = winner();
+                let mut second = WriteBatch::new(R);
+                match case {
+                    0 | 1 => {
+                        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
+                        second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
+                    }
+                    2 => {
+                        first.set_vertex_label(VId(1), LabelId(99), true);
+                        second.set_vertex_label(VId(1), LabelId(99), false);
+                    }
+                    3 => { first.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(1))); }
+                    4 => { first.add_edge(EId(77), VId(2), VId(3), vec![]); }
+                    _ => {
+                        first.create_vertex(VId(50), vec![], vec![]);
+                        second.delete_vertex(VId(50));
+                    }
+                }
+                db.write(&cx, first).await.unwrap();
+                if !second.is_empty() {
+                    db.write(&cx, second).await.unwrap();
+                }
+                let frontier = db.frontier().unwrap();
+                let before = (db.vertices().unwrap(), db.edges().unwrap());
+                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-01", ..
+                    }))), "case {case}");
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn ensure_then_edit_or_delete_never_overwrites_a_concurrent_winner() {
+        let ((), report) = run_async_under_lab(0xa1de_0012, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for delete in [false, true] {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                let mut pending = requests();
+                if delete { pending.delete_vertex(NEW); }
+                else { pending.set_vertex_property(NEW, P, Some(CanonicalScalar::Int(42))); }
+                tx.write(&mut db, pending).unwrap();
+                let frontier = db.write(&cx, winner()).await.unwrap();
+                let before = (db.vertices().unwrap(), db.edges().unwrap());
+                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-01", ..
+                    }))));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn normalized_away_ensure_births_do_not_erase_escaped_metadata() {
+        let ((), report) = run_async_under_lab(0xa1de_0013, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            seed(&mut db, &cx).await;
+            let mut tx = db.begin(&txcx).unwrap();
+            tx.write(&mut db, requests()).unwrap();
+            tx.vertex(&db, NEW).unwrap();
+            let mut deletion = WriteBatch::new(R);
+            deletion.delete_vertex(NEW);
+            tx.write(&mut db, deletion).unwrap();
+            let mut drift = WriteBatch::new(R);
+            drift.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+            let frontier = db.write(&cx, drift).await.unwrap();
+            assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                Err(WriteTxnError::MixedRebaseIneligible)));
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert!(db.vertex(NEW).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    async fn drifted(cx: &CommitCx, txcx: &TxnCx) -> (Database<MemVfs>, WriteTxn) {
+        let mut db = Database::open_memory(cx, keys()).await.unwrap();
+        seed(&mut db, cx).await;
+        let mut tx = db.begin(txcx).unwrap();
+        tx.write(&mut db, requests()).unwrap();
+        db.write(cx, winner()).await.unwrap();
+        (db, tx)
+    }
+
+    #[test]
+    fn every_replay_and_finalization_control_refusal_leaves_no_commit_or_workspace() {
+        let ((), report) = run_async_under_lab(0xa1de_0014, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let (mut db, mut tx) = drifted(&cx, &txcx).await;
+            let mut count = 0;
+            tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
+                count += 1;
+                Ok(())
+            }).await.unwrap();
+            assert!(count > 10);
+            for stop in 1..=count {
+                let (mut db, mut tx) = drifted(&cx, &txcx).await;
+                let frontier = db.frontier().unwrap();
+                let before = (db.vertices().unwrap(), db.edges().unwrap());
+                let mut seen = 0;
+                let result = tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
+                    seen += 1;
+                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
+                }).await;
+                assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)), "stop {stop}");
+                assert_eq!(seen, stop);
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(db.delta_since(frontier).unwrap().count(), 0);
+                assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                assert!(tx.pin.is_none());
+                assert!(tx.prepared.is_none());
+                assert!(tx.staged.is_empty());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn actual_commit_faults_keep_unknown_distinct_from_prepublication_abort() {
+        use fgdb_chronicle::commit::CrashPoint;
+        let ((), report) = run_async_under_lab(0xa1de_0015, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for crash in [CrashPoint::BeforeCapsule, CrashPoint::AfterMarkerBeforeD2] {
+                let (mut db, mut tx) = drifted(&cx, &txcx).await;
+                let frontier = db.frontier().unwrap();
+                let result = tx.commit_idempotent_rebased_controlled(
+                    &mut db, &cx, 2, Some(crash), || Ok(()),
+                ).await;
+                if crash == CrashPoint::BeforeCapsule {
+                    assert!(matches!(result, Err(WriteTxnError::Write(WriteError::Commit(_)))));
+                    assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                } else {
+                    assert!(matches!(result,
+                        Err(WriteTxnError::Write(WriteError::CommitOutcomeUnknown { .. }))));
+                    assert_eq!(tx.state(), EmbeddedTxnState::CommitOutcomeUnknown {
+                        published_frontier: frontier,
+                    });
+                }
+                assert!(tx.prepared.is_none());
+                assert!(tx.pin.is_none());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn final_prepublication_unwind_cleans_both_replay_and_completion_guards() {
+        use std::future::Future;
+        use std::task::Poll;
+        let ((), report) = run_async_under_lab(0xa1de_0016, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let (mut db, mut tx) = drifted(&cx, &txcx).await;
+            let mut count = 0;
+            tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
+                count += 1;
+                Ok(())
+            }).await.unwrap();
+            let (mut db, mut tx) = drifted(&cx, &txcx).await;
+            let frontier = db.frontier().unwrap();
+            let mut seen = 0;
+            let mut future = Box::pin(tx.commit_idempotent_rebased_controlled(
+                &mut db, &cx, 2, None, || {
+                    seen += 1;
+                    assert_ne!(seen, count, "injected final prepublication unwind");
+                    Ok(())
+                },
+            ));
+            let panicked = std::future::poll_fn(|task| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    future.as_mut().poll(task)
+                }));
+                Poll::Ready(result.is_err())
+            }).await;
+            drop(future);
+            assert!(panicked);
+            assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert!(tx.staged.is_empty());
+            assert!(tx.prepared.is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn savepoints_active_program_scopes_and_nonensure_programs_remain_ineligible() {
+        let ((), report) = run_async_under_lab(0xa1de_0017, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for case in 0..3 {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                let mut pending = requests();
+                if case == 2 {
+                    pending = WriteBatch::new(R);
+                    pending.create_vertex(NEW, vec![], vec![]);
+                }
+                tx.write(&mut db, pending).unwrap();
+                if case == 0 { tx.savepoint(&db, "keep").unwrap(); }
+                if case == 1 { tx.program_multi_relation = true; }
+                let frontier = db.frontier().unwrap();
+                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                    Err(WriteTxnError::MixedRebaseIneligible)));
+                assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(NEW).unwrap().is_none());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn projected_ensure_values_cannot_escape_a_changed_existence_decision() {
+        let ((), report) = run_async_under_lab(0xa1de_0018, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for case in 0..4 {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                let mut pending = WriteBatch::new(R);
+                let mut drift = WriteBatch::new(R);
+                if case < 2 {
+                    pending.ensure_edge_by_triple(PROPOSAL, VId(1), VId(2),
+                        vec![(P, CanonicalScalar::Int(7))]);
+                    drift.add_edge(WINNER, VId(1), VId(2),
+                        vec![(P, CanonicalScalar::Int(9))]);
+                } else {
+                    pending.ensure_vertex(NEW, vec![LabelId(7)],
+                        vec![(P, CanonicalScalar::Int(7))]);
+                    drift.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+                }
+                tx.write(&mut db, pending).unwrap();
+                match case {
+                    0 => assert_eq!(tx.edge_property(&db, PROPOSAL, P).unwrap(),
+                        Some(CanonicalScalar::Int(7))),
+                    1 => assert_eq!(tx.edge_property(&db, PROPOSAL, PropertyKeyId(99)).unwrap(), None),
+                    2 => assert_eq!(tx.vertex_property(&db, NEW, P).unwrap(),
+                        Some(CanonicalScalar::Int(7))),
+                    _ => assert_eq!(tx.vertex_has_label(&db, NEW, LabelId(7)).unwrap(), Some(true)),
+                }
+                assert!(tx.read_set.borrow().is_empty());
+                assert!(!tx.point_reads.borrow().is_empty());
+                let frontier = db.write(&cx, drift).await.unwrap();
+                // A distinct matching edge never writes the proposed EId.
+                // Prove this reaches the replay observation check rather than
+                // accidentally succeeding because ordinary validation refused.
+                assert!(tx.transaction_conflict_in(&db, ConflictScope::Reads,
+                    &mut || Ok(())).unwrap().is_none());
+                let before = (db.vertices().unwrap(), db.edges().unwrap());
+                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 1).await,
+                    Err(WriteTxnError::MixedRebaseIneligible)));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+                assert!(db.edge(PROPOSAL).unwrap().is_none());
+                assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
         });
