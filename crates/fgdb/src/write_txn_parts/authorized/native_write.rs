@@ -176,3 +176,6 @@ impl<V: Vfs + Clone> Database<V> {
 #[cfg(test)]
 #[path = "native_write_tests.rs"]
 mod tests;
+
+#[path = "write_session.rs"]
+mod session;
