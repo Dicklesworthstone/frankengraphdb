@@ -85,8 +85,9 @@ Only a final result AND successful exit confirm complete delivery; EOF/error is 
 import-csv binds every CSV record (header = parameter names) to the statement and
 runs the whole file as ONE atomic native program: any failure commits nothing.
 All input is read and bound before the database opens. - reads stdin (one input only).
---types-file lines are kind<TAB>name (int64, uint64, int, text, bool, null); undeclared
-parameters keep native inference. --max-input-bytes bounds the CSV (default 16 MiB);
+--types-file lines are kind<TAB>name (int64, uint64, int, text, bool, null). Types come
+from the statement, never from values: an undeclared property parameter is int64, so
+declare every text or bool column. --max-input-bytes bounds the CSV (default 16 MiB);
 --max-changes bounds effects/new vertices/new edges for the whole file (default 100000).
 load commits the NDJSON input in chunks of --rows-per-chunk rows (at most 65536).
 By default it takes the largest power of two whose every chunk carries at most 4 MiB

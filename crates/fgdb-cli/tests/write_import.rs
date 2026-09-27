@@ -501,3 +501,31 @@ fn failed_stdout_does_not_relabel_a_durable_write_as_rolled_back() {
     assert!(!stderr.contains("rolled"), "{stderr}");
     fixture.count(1);
 }
+
+#[test]
+fn an_undeclared_text_column_names_the_types_file_fix_and_imports_once_declared() {
+    let fixture = Fixture::new();
+    let statement = "CREATE (n:Person {id:$id,name:$name})";
+    fixture.file("people.csv", "name,id\nEdsger,1\nBarbara,2\n");
+    // Types come from the statement, never from values: `$name` is an
+    // undeclared property parameter, hence int64, and `Edsger` refuses.
+    let undeclared = fixture.run("import-csv", &["--input", "people.csv", statement]);
+    refusal(&undeclared, 3, "query");
+    let out = String::from_utf8_lossy(&undeclared.stdout);
+    assert!(
+        out.contains("int64") && out.contains("--types-file"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Edsger"),
+        "a refusal never echoes a value: {out}"
+    );
+    fixture.count(0);
+    fixture.file("types", "text\tname\n");
+    let imported = success(fixture.run(
+        "import-csv",
+        &["--input", "people.csv", "--types-file", "types", statement],
+    ));
+    assert!(imported.contains("\"records\":2"), "{imported}");
+    fixture.count(2);
+}

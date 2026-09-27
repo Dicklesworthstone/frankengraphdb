@@ -13,7 +13,7 @@
 use super::{Failure, Options, emit, execution_failure, policy};
 use asupersync::fs::Vfs;
 use fgdb::Database;
-use fgdb_gql::csv_parameters::CsvParameterLimits;
+use fgdb_gql::csv_parameters::{CsvParameterErrorKind, CsvParameterLimits};
 use fgdb_gql::csv_write_script::GraphWriteScriptCsvStreamError;
 use fgdb_gql::{
     GqlParameterType, GqlParameterValue, GqlParameters, GraphWriteProgramPolicy,
@@ -182,6 +182,16 @@ fn stream_failure(error: GraphWriteScriptCsvStreamError<Failure>) -> Failure {
         // Preserve the caller's exit code and redacted diagnostics, rather
         // than relabeling a source failure/cancellation as malformed CSV.
         E::Source(source) | E::Interrupted(source) => source,
+        // Types come from the statement, never from a value: an undeclared
+        // stored-property parameter is int64. Say so instead of only a byte
+        // offset, since the usual cause is a text column (fgdb-vty1w).
+        E::Csv(source) if matches!(source.kind, CsvParameterErrorKind::InvalidValue) => {
+            Failure::query(format!(
+                "{source} (the field does not decode as its parameter's type; an undeclared \
+                 property parameter is int64, so declare text or bool columns with \
+                 --types-file, e.g. text<TAB>name)"
+            ))
+        }
         E::Csv(source) => Failure::query(source),
         E::Framing(source) => Failure::query(source),
         E::Binding(source) => Failure::query(source),
@@ -279,7 +289,8 @@ fn read_bounded(cx: &QueryCx, path: &Path, limit: u64, flag: &str) -> Result<Str
     String::from_utf8(bytes).map_err(|_| Failure::query(format!("{flag} is not UTF-8")))
 }
 
-/// `kind<TAB>name` lines. Undeclared parameters keep native inference.
+/// `kind<TAB>name` lines. Undeclared parameters keep the statement's own
+/// type (a stored property value is int64); values never choose a type.
 fn parse_types(text: &str) -> Result<Vec<(&str, GqlParameterType)>, Failure> {
     let mut declarations = Vec::new();
     // Reuse the native parameter-name, count and duplicate validation.
