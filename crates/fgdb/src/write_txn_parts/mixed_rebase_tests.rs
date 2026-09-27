@@ -286,7 +286,7 @@ fn original_positive_negative_and_empty_scan_observations_cannot_be_rebased_away
 }
 
 #[test]
-fn raw_ensure_delete_scopes_and_exposed_creation_records_refuse_as_a_whole() {
+fn raw_ensure_scopes_and_creation_reads_refuse_but_absent_vertex_delete_rebases() {
     let ((), report) = run_async_under_lab(0x91ed_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
@@ -314,11 +314,17 @@ fn raw_ensure_delete_scopes_and_exposed_creation_records_refuse_as_a_whole() {
             let mut drift = WriteBatch::new(R);
             drift.set_vertex_property(VId(3), Q, Some(CanonicalScalar::Int(9)));
             let frontier = db.write(&cx, drift).await.unwrap();
-            assert!(matches!(txn.commit_mixed_rebased(&mut db, &cx, 64).await,
-                Err(WriteTxnError::MixedRebaseIneligible)));
-            assert_eq!(db.frontier().unwrap(), frontier);
-            assert!(db.vertex(VId(50)).unwrap().is_none());
-            assert_eq!(txn.state(), EmbeddedTxnState::Aborted);
+            let result = txn.commit_mixed_rebased(&mut db, &cx, 64).await;
+            if case == 1 {
+                assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+                assert!(db.vertex(VId(50)).unwrap().is_some());
+                assert!(db.vertex(VId(99)).unwrap().is_none());
+            } else {
+                assert!(matches!(result, Err(WriteTxnError::MixedRebaseIneligible)));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(50)).unwrap().is_none());
+                assert_eq!(txn.state(), EmbeddedTxnState::Aborted);
+            }
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
     });
@@ -644,11 +650,12 @@ fn owner_unpolled_and_native_crash_outcomes_preserve_the_single_commit_contract(
             let result = txn.complete_rebased_controlled(&mut db, &cx, Some(crash), true,
                 Some(RebasePreparation::Mixed(12)), || Ok(())).await;
             assert!(result.is_err());
-            assert_eq!(txn.state(), if crash == CrashPoint::BeforeCapsule {
+            let expected = if crash == CrashPoint::BeforeCapsule {
                 EmbeddedTxnState::Aborted
             } else {
                 EmbeddedTxnState::CommitOutcomeUnknown { published_frontier: frontier }
-            });
+            };
+            assert_eq!(txn.state(), expected);
             assert!(txn.prepared.is_none());
             assert!(txn.pin.is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);

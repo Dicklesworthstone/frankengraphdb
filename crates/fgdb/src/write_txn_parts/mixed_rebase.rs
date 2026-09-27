@@ -6,6 +6,7 @@ struct MixedRebaseFootprint {
     append: AppendRebaseFootprint,
     fields: FieldRebaseFootprint,
     retired_edges: std::collections::BTreeSet<EId>,
+    retired_vertices: std::collections::BTreeSet<VId>,
 }
 
 fn mixed_rebase_error(error: WriteTxnError) -> WriteTxnError {
@@ -29,6 +30,7 @@ impl MixedRebaseFootprint {
                 | PendingRow::SetLabel { .. }
                 | PendingRow::CompareAndSet { .. }
                 | PendingRow::DeleteEdge { .. }
+                | PendingRow::DeleteVertex { .. }
         )
     }
 
@@ -44,9 +46,50 @@ impl MixedRebaseFootprint {
                 self.retired_edges.insert(*eid);
                 Ok(())
             }
+            PendingRow::DeleteVertex { vid, .. } => {
+                // Retain even an absent delete-if-present and a create/delete
+                // pair normalized away by the native evaluator.
+                self.retired_vertices.insert(*vid);
+                Ok(())
+            }
             _ => self.fields.record(row),
         }
         .map_err(mixed_rebase_error)
+    }
+
+    fn protect_vertex_cascades(
+        &mut self,
+        template: &fgdb_delta_types::LogicalDeltaTemplate,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<(), WriteTxnError> {
+        if self.retired_vertices.is_empty() {
+            return Ok(());
+        }
+        // The native NENF already owns the complete BASIS incident-edge image,
+        // including explicit earlier edge deletions absorbed into a cascade.
+        // Borrow it rather than scanning a newer graph or rebuilding an image.
+        // Same-program creations that NENF cancels retain raw append guards.
+        for coordinate in template.coordinate_entries() {
+            checkpoint()?;
+            for row in &coordinate.rows {
+                checkpoint()?;
+                if let fgdb_delta_types::DeltaRow::DeleteVertex {
+                    vid,
+                    sorted_retired_incident_edges,
+                    ..
+                } = row
+                {
+                    if !self.retired_vertices.contains(vid) {
+                        return Err(WriteTxnError::MixedRebaseIneligible);
+                    }
+                    for eid in sorted_retired_incident_edges {
+                        checkpoint()?;
+                        self.retired_edges.insert(*eid);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn conflicts(
@@ -68,16 +111,26 @@ impl MixedRebaseFootprint {
         {
             return Ok(true);
         }
-        if self.retired_edges.is_empty() {
+        if self.retired_edges.is_empty() && self.retired_vertices.is_empty() {
             return Ok(false);
         }
-        // A retirement protects the entire edge, not just fields named by
-        // other updates. Deleting an endpoint can retire it without emitting
-        // a DeleteEdge row, so the engine-derived cascade is authoritative.
+        // Retirement protects complete element contents and lifetimes. New
+        // incidence is a phantom even when its edge is deleted again later.
+        // Existing incidence is guarded by its canonical cascade identities.
         use fgdb_delta_types::DeltaRow;
         match row {
-            DeltaRow::CreateEdge { eid, .. }
-            | DeltaRow::DeleteEdge { eid, .. }
+            DeltaRow::CreateVertex { vid, .. }
+            | DeltaRow::LabelMembership { vid, .. }
+            | DeltaRow::Property {
+                elem: ElementId::Vertex(vid),
+                ..
+            } => Ok(self.retired_vertices.contains(vid)),
+            DeltaRow::CreateEdge { eid, src, dst, .. } => Ok(
+                self.retired_edges.contains(eid)
+                    || self.retired_vertices.contains(src)
+                    || self.retired_vertices.contains(dst),
+            ),
+            DeltaRow::DeleteEdge { eid, .. }
             | DeltaRow::Property {
                 elem: ElementId::Edge(eid),
                 ..
@@ -85,9 +138,13 @@ impl MixedRebaseFootprint {
                 Ok(self.retired_edges.contains(eid))
             }
             DeltaRow::DeleteVertex {
+                vid,
                 sorted_retired_incident_edges,
                 ..
             } => {
+                if self.retired_vertices.contains(vid) {
+                    return Ok(true);
+                }
                 for eid in sorted_retired_incident_edges {
                     checkpoint()?;
                     if self.retired_edges.contains(eid) {
@@ -102,7 +159,7 @@ impl MixedRebaseFootprint {
 }
 
 impl WriteTxn {
-    /// Rebase an ordered program of appends, field edits and edge retirements.
+    /// Rebase an ordered program of appends, field edits and element retirements.
     ///
     /// Unconditional vertex/edge creation may be interleaved with property
     /// SET/unset, label updates and property CAS, including edits of elements
@@ -113,8 +170,14 @@ impl WriteTxn {
     /// Edge retirement protects the complete edge, including a delete-if-present
     /// decision on an absent identity. Concurrent updates, identity ABA and
     /// endpoint cascades refuse even if the final edge looks unchanged/absent.
-    /// ENSURE and vertex deletion remain ineligible even if their effect vanished:
-    /// vertex cascades need a separate incident-set independence law.
+    /// Vertex retirement protects its complete contents and lifetime, every
+    /// existing incident edge in the original native cascade, and the absence
+    /// of new incoming/outgoing edges across ALL relations. Parallel edges and
+    /// self-loops are included. Changed-and-restored contents or topology still
+    /// conflict. Even an absent delete-if-present retains its vertex identity.
+    /// The cascade image comes only from the already prepared canonical effects;
+    /// no source graph is rescanned to infer which earlier edges existed.
+    /// ENSURE remains ineligible even when its net effect vanished.
     /// Savepoints and active mixed-program rollback scopes remain ineligible.
     ///
     /// The shared completion guard validates every recorded point, negative,
@@ -209,6 +272,7 @@ impl WriteTxn {
             checkpoint()?;
             footprint.record(row)?;
         }
+        footprint.protect_vertex_cascades(&previous.template, checkpoint)?;
         if frontier != self.basis {
             self.validate_unobserved_creations(&footprint.append.creations, checkpoint)
                 .map_err(mixed_rebase_error)?;
@@ -251,4 +315,9 @@ impl WriteTxn {
 #[cfg(test)]
 mod mixed_rebase_tests {
     include!("mixed_rebase_tests.rs");
+}
+
+#[cfg(test)]
+mod vertex_rebase_tests {
+    include!("vertex_rebase_tests.rs");
 }
