@@ -407,11 +407,16 @@ pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// The replay authority is the security namespace. Together with the
+    /// certified snapshot's chain commitment it names the evidence closure
+    /// (FG-INV-19). The directory spelling is not part of it: v1 hashed the
+    /// open path, so reopening via another spelling, moving or copying a
+    /// database refused every certificate it had issued
+    /// (fgdb-replay-path-identity-p3lsc).
     fn replay_database_identity(&self) -> Digest {
         let mut hasher = fgdb_crypto::Hasher::new();
-        hasher.update(b"fgdb:local-replay-authority:v1");
+        hasher.update(b"fgdb:local-replay-authority:v2");
         hasher.update(&self.keys.namespace.0);
-        hasher.update(self.path().as_os_str().as_encoded_bytes());
         hasher.finalize()
     }
     /// Execute a native read at one selected snapshot and certify its ordered
@@ -462,8 +467,9 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Re-execute a certified native read at its certified snapshot and prove
     /// byte-identical results (FG-INV-19 local grade).
-    /// Local authority includes namespace and the database path supplied at
-    /// open. Reopen with the same path spelling; relocation is not supported.
+    /// The authority is the security namespace plus the chain commitment at
+    /// the certified seq, so a reopened, moved or copied database with that
+    /// history replays; a different history or namespace refuses.
     /// No archive leases or nondeterministic-operator seeds are claimed.
     ///
     /// The statement re-prepares through the exact native classification; the

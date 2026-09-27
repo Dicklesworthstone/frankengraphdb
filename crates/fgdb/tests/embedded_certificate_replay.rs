@@ -170,7 +170,34 @@ fn every_class_replays_original_certificate_after_commits_and_reopen() {
                     .unwrap(),
             );
         }
+        drop(reopened);
+        // The authority is the namespace plus the certified history, not the
+        // directory spelling: another spelling and a byte copy both replay.
+        let copy = std::env::temp_dir().join(format!("fgdb-replay-copy-{}", std::process::id()));
+        copy_tree(&dir, &copy);
+        for path in [dir.join("."), copy] {
+            let moved = Database::open(&commit, &path, keys()).await.unwrap();
+            for (params, original, cert) in &certified {
+                assert_rows_equal(
+                    original,
+                    &moved.replay(&cx, cert, params, symbols, policy()).unwrap(),
+                );
+            }
+        }
     });
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
 }
 
 #[test]
