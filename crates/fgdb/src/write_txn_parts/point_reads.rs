@@ -1,10 +1,19 @@
-// Explicit point observations (plan 7.3), never a refinement of a full-row
-// getter or query witness. Canonical staged effects still own read-your-writes.
+// Explicit projections and local adjacency domains (plan 7.3), never a
+// refinement of an already recorded full-row getter or query witness.
+// Canonical staged effects still own read-your-writes.
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PointReadField {
     Property(fgdb_delta_types::PropertyKeyId),
     Label(LabelId),
+    /// All current AND absent edges of this type and direction at the vertex.
+    /// The full domain is retained even when no neighbour was returned.
+    Adjacency {
+        relation: RelationId,
+        incoming: bool,
+    },
+    /// Immutable incidence and existence, not the edge's property payload.
+    EdgeTopology,
 }
 
 #[derive(Default)]
@@ -15,6 +24,26 @@ struct PointReads(
 impl PointReads {
     fn record(&mut self, element: ElementId, field: PointReadField) {
         self.0.entry(element).or_default().insert(field);
+    }
+
+    fn record_adjacency(
+        &mut self,
+        vertex: VId,
+        relation: RelationId,
+        incoming: bool,
+        edges: impl IntoIterator<Item = EId>,
+    ) {
+        // The anchor covers the insertion gap and its own lifetime; the EIds
+        // cover retirement, including vertex-delete cascades. Keep all matching
+        // basis and staged edges, not just one edge per distinct neighbour.
+        // Union with earlier observations; never remove a broad read or slot.
+        self.record(
+            ElementId::Vertex(vertex),
+            PointReadField::Adjacency { relation, incoming },
+        );
+        for eid in edges {
+            self.record(ElementId::Edge(eid), PointReadField::EdgeTopology);
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -31,9 +60,9 @@ impl PointReads {
             .is_some_and(|fields| fields.contains(&field))
     }
 
-    /// The domain is the requested slot (present OR absent) and its element's
-    /// lifetime. Current-value equality cannot erase an intervening write.
-    /// Unknown families conservatively affect every nonempty point-read set.
+    /// Slots and adjacency gaps share one original-basis validation law.
+    /// Current-value equality cannot erase an intervening write. Unknown
+    /// families conservatively affect every nonempty projected-read set.
     fn conflict(
         &self,
         row: &fgdb_delta_types::DeltaRow,
@@ -58,9 +87,30 @@ impl PointReads {
                     .then_some(element));
             }
             DeltaRow::CreateVertex { vid, .. } => ElementId::Vertex(*vid),
-            DeltaRow::CreateEdge { eid, .. } | DeltaRow::DeleteEdge { eid, .. } => {
+            DeltaRow::CreateEdge {
+                eid,
+                src,
+                relation,
+                dst,
+                ..
+            } => {
+                // Test the logical range, not just the EIds returned earlier.
+                // Self-loops satisfy both orientations; the tests are a union.
+                for (anchor, incoming) in [(*src, false), (*dst, true)] {
+                    let element = ElementId::Vertex(anchor);
+                    if self.contains(
+                        element,
+                        PointReadField::Adjacency {
+                            relation: *relation,
+                            incoming,
+                        },
+                    ) {
+                        return Ok(Some(element));
+                    }
+                }
                 ElementId::Edge(*eid)
             }
+            DeltaRow::DeleteEdge { eid, .. } => ElementId::Edge(*eid),
             DeltaRow::DeleteVertex {
                 vid,
                 sorted_retired_incident_edges,
@@ -224,4 +274,9 @@ mod point_read_tests {
 #[cfg(test)]
 mod point_label_tests {
     include!("point_label_tests.rs");
+}
+
+#[cfg(test)]
+mod topology_read_tests {
+    include!("topology_read_tests.rs");
 }

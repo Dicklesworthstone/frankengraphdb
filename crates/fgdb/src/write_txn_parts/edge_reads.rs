@@ -197,6 +197,15 @@ impl WriteTxn {
     /// Read outgoing neighbours from the pinned basis plus prepared net
     /// effects. Parallel edges keep a neighbour live until its last edge is
     /// removed; the returned vertex identities are sorted and deduplicated.
+    ///
+    /// Retain the complete outgoing relation domain, including insertion gaps,
+    /// and every observed edge lifetime. Properties, labels and incidence of
+    /// other types/directions are not returned and do not become broad reads.
+    /// Earlier full-row/query observations remain unchanged. Retiring even one
+    /// parallel edge may conservatively conflict although another still gives
+    /// the same neighbour. Completion, refresh and explicit rebase all validate
+    /// the original history; neither rollback nor an empty answer drops a gap.
+    /// This raw embedded projection does not add authorization or full SSI.
     pub fn neighbours<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -207,7 +216,8 @@ impl WriteTxn {
     }
 
     /// Read incoming neighbours through the same canonical overlay as outgoing
-    /// reads, including engine-derived vertex-delete cascades.
+    /// reads, including engine-derived vertex-delete cascades. The retained gap
+    /// is scoped to the incoming relation, with the same rules as neighbours().
     pub fn in_neighbours<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -276,13 +286,12 @@ impl WriteTxn {
         incoming: bool,
     ) -> Result<Vec<VId>, WriteTxnError> {
         // Do not call edges(): that would turn a local expansion into a global
-        // edge-scan conflict witness. The endpoint read below also detects a
-        // previously empty incoming adjacency through adjacency_endpoints.
+        // edge-scan conflict witness. Retain the logical relation/direction
+        // gap below, without accidentally observing endpoint/edge properties.
         let mut matching =
             self.adjacency_basis(database, vertex, relation, incoming, &mut |_| Ok(()))?;
         let mut observed_edges: std::collections::BTreeSet<EId> =
             matching.keys().copied().collect();
-        let mut deleted_vertices = std::collections::BTreeSet::new();
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
                 for effect in &coordinate.rows {
@@ -305,16 +314,13 @@ impl WriteTxn {
                             matching.remove(eid);
                         }
                         fgdb_delta_types::DeltaRow::DeleteVertex {
-                            vid,
                             sorted_retired_incident_edges,
                             ..
                         } => {
                             // Apply only the authoritative cascade image. Do
                             // not rescan every surviving edge for each delete.
                             for eid in sorted_retired_incident_edges {
-                                if matching.remove(eid).is_some() {
-                                    deleted_vertices.insert(*vid);
-                                }
+                                matching.remove(eid);
                             }
                         }
                         _ => {}
@@ -322,16 +328,9 @@ impl WriteTxn {
                 }
             }
         }
-        let mut read_set = self.read_set.borrow_mut();
-        read_set.insert(ElementId::Vertex(vertex));
-        read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
-        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
-        drop(read_set);
-        if !incoming {
-            self.match_expansions
-                .borrow_mut()
-                .insert((vertex, relation));
-        }
+        self.point_reads
+            .borrow_mut()
+            .record_adjacency(vertex, relation, incoming, observed_edges);
         // Deduplicate once, after applying all edge identities. In particular,
         // deletion of one parallel edge never removes a surviving neighbour.
         Ok(matching
@@ -493,10 +492,16 @@ mod adjacency_overlay_tests {
                             .is_empty()
                     );
                     assert!(!txn.scanned_edges.get());
-                    assert_eq!(
-                        *txn.read_set.borrow(),
-                        [ElementId::Vertex(VId(1))].into_iter().collect()
-                    );
+                    assert!(txn.read_set.borrow().is_empty());
+                    assert!(txn.match_expansions.borrow().is_empty());
+                    assert!(txn.point_reads.borrow().contains(
+                        ElementId::Vertex(VId(1)),
+                        PointReadField::Adjacency {
+                            relation: RelationId(1),
+                            incoming,
+                        },
+                    ));
+                    assert_eq!(txn.point_reads.borrow().0.len(), 1);
                     let (src, dst) = if touches_anchor {
                         if incoming { (2, 1) } else { (1, 2) }
                     } else {
@@ -601,8 +606,10 @@ mod adjacency_overlay_tests {
                 );
             }
             assert!(!pinned.scanned_edges.get());
+            assert!(pinned.read_set.borrow().is_empty());
+            assert!(pinned.match_expansions.borrow().is_empty());
             assert_eq!(
-                *pinned.read_set.borrow(),
+                pinned.point_reads.borrow().0.keys().copied().collect::<std::collections::BTreeSet<_>>(),
                 [
                     ElementId::Vertex(VId(0)),
                     ElementId::Edge(EId(0)),
@@ -613,6 +620,15 @@ mod adjacency_overlay_tests {
                 .into_iter()
                 .collect()
             );
+            for incoming in [false, true] {
+                assert!(pinned.point_reads.borrow().contains(
+                    ElementId::Vertex(VId(0)),
+                    PointReadField::Adjacency {
+                        relation: RelationId(1),
+                        incoming,
+                    },
+                ));
+            }
 
             let current = db.begin(&txcx).unwrap();
             assert_eq!(
@@ -627,8 +643,8 @@ mod adjacency_overlay_tests {
                 current.neighbours(&db, VId(0), RelationId(2)).unwrap(),
                 vec![VId(2)]
             );
-            assert!(!current.read_set.borrow().contains(&ElementId::Edge(EId(0))));
-            assert!(!current.read_set.borrow().contains(&ElementId::Edge(EId(8))));
+            assert!(!current.point_reads.borrow().0.contains_key(&ElementId::Edge(EId(0))));
+            assert!(!current.point_reads.borrow().0.contains_key(&ElementId::Edge(EId(8))));
             current.abort();
             assert!(matches!(
                 pinned.finish(&mut db, &commit).await,
@@ -681,6 +697,7 @@ mod adjacency_overlay_tests {
                     assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
                     assert_eq!(calls, stop);
                     assert!(txn.read_set.borrow().is_empty());
+                    assert!(txn.point_reads.borrow().is_empty());
                     assert!(!txn.scanned_edges.get());
                     assert_eq!(
                         txn.adjacency_basis(&db, VId(0), RelationId(1), incoming, &mut |_| Ok(()),)
@@ -784,6 +801,7 @@ mod adjacency_overlay_tests {
                     }
                 }
                 assert_eq!(*txn.read_set.borrow(), expected_reads);
+                assert!(txn.point_reads.borrow().is_empty());
                 assert_eq!(*txn.match_expansions.borrow(), expected_expansions);
                 assert!(!txn.scanned_edges.get());
                 assert!(!txn.scanned_vertices.get());
