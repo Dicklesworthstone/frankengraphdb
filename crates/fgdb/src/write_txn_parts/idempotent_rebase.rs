@@ -280,6 +280,122 @@ mod idempotent_rebase_tests {
         ));
     }
 
+    fn stage_ensure(
+        transaction: &mut WriteTxn,
+        database: &mut Database<MemVfs>,
+        entrypoint: usize,
+        batch: WriteBatch,
+    ) -> Result<(), WriteTxnError> {
+        match entrypoint {
+            0 => transaction.write(database, batch),
+            1 => transaction.write_atomic(database, vec![batch]),
+            2 => transaction.write_ordered(database, vec![batch]),
+            3 => transaction.write_ordered_bounded(database, vec![batch], 64),
+            _ => unreachable!("four native staging entrypoints"),
+        }
+    }
+
+    #[test]
+    fn ensure_decisions_replay_but_explicit_empty_scans_remain_observations() {
+        let ((), report) = run_async_under_lab(0xa1de_0019, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for entrypoint in 0..4 {
+                for explicit_scan in [false, true] {
+                    let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                    seed(&mut db, &cx).await;
+                    let mut replay = db.begin(&txcx).unwrap();
+                    let mut ordinary = db.begin(&txcx).unwrap();
+                    if explicit_scan {
+                        assert!(replay.edges(&db).unwrap().is_empty());
+                    }
+                    stage_ensure(&mut replay, &mut db, entrypoint, requests()).unwrap();
+                    stage_ensure(&mut ordinary, &mut db, entrypoint, requests()).unwrap();
+                    let frontier = db.write(&cx, winner()).await.unwrap();
+                    assert!(matches!(
+                        ordinary.commit(&mut db, &cx).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ));
+                    let result = replay.commit_idempotent_rebased(&mut db, &cx, 2).await;
+                    if explicit_scan {
+                        assert_read_conflict(result);
+                        assert_eq!(db.frontier().unwrap(), frontier);
+                    } else {
+                        assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+                    }
+                    assert!(db.edge(PROPOSAL).unwrap().is_none());
+                    assert_eq!(
+                        db.edge(WINNER).unwrap().unwrap().props,
+                        vec![(P, CanonicalScalar::Int(9))]
+                    );
+                    assert_eq!(db.vertex(NEW).unwrap().unwrap().labels, vec![LabelId(9)]);
+                    assert_eq!(txcx.outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn discarded_ensure_preparations_keep_alias_and_absent_triple_observations() {
+        let ((), report) = run_async_under_lab(0xa1de_0020, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for failed_preparation in [false, true] {
+                for existing_alias in [false, true] {
+                    let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                    seed(&mut db, &cx).await;
+                    if existing_alias {
+                        db.write(&cx, winner()).await.unwrap();
+                    }
+                    let mut tx = db.begin(&txcx).unwrap();
+                    if failed_preparation {
+                        let mut rejected = requests();
+                        rejected.compare_and_set_vertex_property(
+                            VId(3),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(1),
+                            crate::WriteMismatchPolicy::AbortWrite,
+                        );
+                        assert!(matches!(
+                            tx.write(&mut db, rejected),
+                            Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))
+                        ));
+                    } else {
+                        tx.savepoint(&db, "before_ensure").unwrap();
+                        tx.write_ordered(&mut db, vec![requests()]).unwrap();
+                        tx.rollback_to_savepoint(&db, "before_ensure").unwrap();
+                        tx.release_savepoint(&db, "before_ensure").unwrap();
+                    }
+                    assert!(tx.prepared.is_none());
+                    assert!(tx.staged.is_empty());
+                    // Retrying a valid ENSURE cannot erase the previous error
+                    // or discarded preparation's externally relevant reads.
+                    tx.write(&mut db, requests()).unwrap();
+                    let concurrent = if existing_alias {
+                        let mut batch = WriteBatch::new(R);
+                        batch.set_edge_property(WINNER, P, Some(CanonicalScalar::Int(19)));
+                        batch
+                    } else {
+                        winner()
+                    };
+                    let frontier = db.write(&cx, concurrent).await.unwrap();
+                    let before = (db.vertices().unwrap(), db.edges().unwrap());
+                    assert_read_conflict(tx.commit_idempotent_rebased(&mut db, &cx, 2).await);
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
+                    assert!(db.edge(PROPOSAL).unwrap().is_none());
+                    assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                    assert_eq!(txcx.outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     #[test]
     fn concurrent_ensure_converges_to_native_serial_winner_and_survives_reopen() {
         let ((), report) = run_async_under_lab(0xa1de_0001, |root| async move {

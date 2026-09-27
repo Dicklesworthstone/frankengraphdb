@@ -93,15 +93,11 @@ impl WriteTxn {
                 found: batch.relation,
             });
         }
-        if batch
-            .rows
-            .iter()
-            .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
-        {
-            // Keep actual ensure aliases and insertion witnesses even if
-            // subsequent preparation fails or normalizes the ensure to no-op.
-            drop(self.edges(database)?);
-        }
+        // Preparation retains ENSURE aliases and insertion dependencies in
+        // PreparedDependencies. They are mutation inputs, not escaped reads:
+        // calling edges() here would manufacture a public full-graph scan and
+        // prevent idempotent finalization from reevaluating existence. Failed
+        // or rolled-back preparations separately retain their observations.
         let previous_len = self.staged.len();
         self.staged.push(batch);
         let combined = Self::combined_batch(&self.staged)
@@ -181,13 +177,8 @@ impl WriteTxn {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if batches
-            .iter()
-            .flat_map(|batch| &batch.rows)
-            .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
-        {
-            drop(self.edges(database)?);
-        }
+        // As in write(), successful ENSURE dependencies belong to the
+        // prepared mutation. Public scans must only come from actual readers.
         let previous_len = self.staged.len();
         self.staged.extend(batches);
         let result = if ordered {
