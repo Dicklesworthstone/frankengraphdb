@@ -15,6 +15,8 @@ use std::cell::RefCell;
 
 #[path = "query_beacon/graph.rs"]
 pub(crate) mod graph;
+#[path = "query_beacon/indexed.rs"]
+pub(crate) mod indexed;
 #[path = "query_beacon/resident.rs"]
 mod resident;
 
