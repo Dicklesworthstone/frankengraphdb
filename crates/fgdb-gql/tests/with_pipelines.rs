@@ -466,7 +466,7 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
         "MATCH (n) WITH n.p AS p RETURN missing LIMIT 0",
         "MATCH (n) WITH n.p AS p ORDER BY missing RETURN p",
         "MATCH (n) WITH n.p AS p ORDER BY p,p RETURN p",
-        "MATCH (n) WITH COUNT(*) AS count RETURN count",
+        "MATCH (n) WITH COUNT(DISTINCT *) AS count RETURN count",
     ] {
         let calls = Cell::new(0);
         assert!(
@@ -488,6 +488,19 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
             .kind,
         GraphSetTextErrorKind::SetBuild(_)
     ));
+}
+
+#[test]
+fn formerly_refused_with_count_executes_over_real_nonempty_and_empty_graph_inputs() {
+    // fgdb-ezgeq deliberately changes the grammar, not the refusal gate.
+    // COUNT(DISTINCT *) above is still rejected before any catalog call.
+    let query = prepare("MATCH (n) WITH COUNT(*) AS count RETURN count");
+    for size in [0, 1, 5] {
+        let values = vec![CanonicalScalar::Null; size];
+        let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+        assert_eq!(ints(&result.value, 0), vec![Some(size as i64)]);
+        assert_eq!(result.rows.snapshot_records, size as u64);
+    }
 }
 
 #[test]

@@ -130,10 +130,17 @@ impl<'a> Parser<'a> {
                     self.leading_with_head(&schema, width, &mut inputs)?;
                 let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
                 types.extend(inputs.iter().map(|input| {
-                    if input.property.is_none() {
-                        GraphSetColumnType::Vertex
-                    } else {
-                        GraphSetColumnType::Scalar
+                    if input.property.is_some() {
+                        return GraphSetColumnType::Scalar;
+                    }
+                    match input.path {
+                        None => GraphSetColumnType::Vertex,
+                        Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
+                        Some(GraphPathFunction::Length | GraphPathFunction::Type) => GraphSetColumnType::Scalar,
+                        Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
+                        Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
+                        Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
+                        Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
                     }
                 }));
                 let next: pipeline::RowSchema<'a> = outputs
@@ -242,6 +249,12 @@ impl<'a> Parser<'a> {
         width: usize,
         inputs: &mut Vec<Projection<'a>>,
     ) -> Result<(Vec<(Name<'a>, ReadValueTemplate)>, bool, usize), GraphSetTextError> {
+        if self.with_has_aggregate()? {
+            let at = self.current.at;
+            let head = self.with_graph_head(&schema[..width], core::mem::take(inputs), false)?;
+            *inputs = head.inputs;
+            return Ok((head.outputs, false, at));
+        }
         let at = self.current.at;
         self.word("WITH")?;
         let distinct = self.take_word("DISTINCT")?;
@@ -336,6 +349,9 @@ impl<'a> Parser<'a> {
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
     /// WITH projection and row-stage parser, not a synthetic RETURN statement.
     fn graph_projection_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
+        if self.with_has_aggregate()? {
+            return self.with_graph_head(&[], Vec::new(), false);
+        }
         if self.is_word("UNWIND") {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();

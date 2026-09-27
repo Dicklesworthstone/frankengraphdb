@@ -536,6 +536,9 @@ impl<'a> Parser<'a> {
         mut inputs: Vec<Projection<'a>>,
         optional: bool,
     ) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
+        if self.with_has_aggregate()? {
+            return self.with_graph_head(incoming, inputs, optional);
+        }
         let with = self.take_word("WITH")?;
         if !with {
             self.word("RETURN")?;

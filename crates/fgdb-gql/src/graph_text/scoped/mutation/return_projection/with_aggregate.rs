@@ -6,6 +6,8 @@ use super::*;
 use crate::GraphAggregateFunction as Function;
 use crate::set_text::aggregate::{ReadAggregateSpec, ReadAggregateStage};
 
+mod graph;
+
 fn function(word: &str) -> Option<Function> {
     if word.eq_ignore_ascii_case("COUNT") {
         Some(Function::Count)
