@@ -39,6 +39,41 @@ pub(crate) fn next_from_view<C>(
 }
 
 impl AdjacencyIndex {
+    /// Resolve one visible coordinate with control over BOTH search paths.
+    /// No history ranks, candidate vector, payload copies or cursor allocation
+    /// are needed. Even an absent identity pays for the directory nodes it
+    /// inspected, and every history predecessor comparison is interruptible.
+    ///
+    /// This borrows the admitted generation, just like statement_at(). The
+    /// caller still owns health/cut admission and any logical record charges;
+    /// authorized callers must poll physical work without billing hidden rows.
+    pub(crate) fn statement_at_controlled<E>(
+        &self,
+        blocks: &[Vec<AdjacencyEntry>],
+        eid: EId,
+        as_of: CommitSeq,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<(usize, usize)>, E> {
+        control(SourceEvent::Work)?;
+        let mut node = self.histories.0.as_deref();
+        while let Some(current) = node {
+            control(SourceEvent::Work)?;
+            match eid.cmp(&current.key) {
+                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                core::cmp::Ordering::Equal => {
+                    let coordinate = history_coordinate(&current.value, as_of, control)?;
+                    // The newest statement can be a retirement. Never search
+                    // backwards again to substitute an older live statement.
+                    return Ok(coordinate.filter(|&(block, row)| {
+                        blocks[block][row].visible_at(as_of)
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Visit exact-cut winners directly from the admitted historical index.
     /// The ordered cursor retains at most the AVL height in borrowed pointers;
     /// no all-edge winner map or candidate vector is allocated before output.
@@ -62,20 +97,7 @@ impl AdjacencyIndex {
         }
         for (_, history) in self.histories.iter() {
             control(SourceEvent::Work)?;
-            let mut node = history.0.as_deref();
-            let mut winner = None;
-            while let Some(current) = node {
-                control(SourceEvent::Work)?;
-                // Rightmost (created_at, block, row) <= this sequence. A
-                // retirement restatement wins too: never revive an older row.
-                if current.key.0 <= as_of {
-                    winner = Some(current.key);
-                    node = current.right.0.as_deref();
-                } else {
-                    node = current.left.0.as_deref();
-                }
-            }
-            if let Some((_, block, row)) = winner {
+            if let Some((block, row)) = history_coordinate(history, as_of, control)? {
                 let entry = &blocks[block][row];
                 if entry.visible_at(as_of) {
                     visit(entry, block, row, control)?;
@@ -114,6 +136,28 @@ impl AdjacencyIndex {
             }
         }
     }
+}
+
+/// The point and whole-index scans use the same exact-cut predecessor rule.
+/// Compare the sequence without constructing as_of + 1 (the maximum sequence
+/// is valid). Descending right on equality retains the latest block/row tie.
+fn history_coordinate<E>(
+    history: &IndexMap<(CommitSeq, usize, usize), ()>,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<(usize, usize)>, E> {
+    let mut node = history.0.as_deref();
+    let mut winner = None;
+    while let Some(current) = node {
+        control(SourceEvent::Work)?;
+        if current.key.0 <= as_of {
+            winner = Some((current.key.1, current.key.2));
+            node = current.right.0.as_deref();
+        } else {
+            node = current.left.0.as_deref();
+        }
+    }
+    Ok(winner)
 }
 
 impl Snapshot {
@@ -366,6 +410,95 @@ mod indexed_scan_tests {
     }
 
     #[test]
+    fn controlled_point_history_agrees_with_independent_scan_and_legacy_lookup() {
+        for count in [0, 1, 7, 31] {
+            let blocks = histories(count);
+            let index = AdjacencyIndex::build(&blocks);
+            for cut in [0, 1, 2, 3, 4, 5, u64::MAX] {
+                let at = CommitSeq(cut);
+                let mut expected = Vec::new();
+                source::visit_edges(&blocks, at, &mut |_| Ok::<_, ()>(()), |row, _| {
+                    expected.push(row);
+                    Ok(())
+                })
+                .unwrap();
+                for id in (0..=count).chain([u128::MAX - 1, u128::MAX]) {
+                    let eid = EId(id);
+                    let mut work = 0;
+                    let coordinate = index
+                        .statement_at_controlled(&blocks, eid, at, &mut |event| {
+                            assert_eq!(event, SourceEvent::Work);
+                            work += 1;
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                    let actual = coordinate.map(|(block, row)| &blocks[block][row]);
+                    let wanted = expected.iter().copied().find(|row| row.eid == eid);
+                    assert_eq!(actual, wanted, "count={count} cut={cut} eid={id}");
+                    if let (Some(actual), Some(wanted)) = (actual, wanted) {
+                        assert!(std::ptr::eq(actual, wanted));
+                    }
+                    assert_eq!(coordinate, index.statement_at(&blocks, eid, at));
+                    let history_height = index.histories.get(&eid).map_or(0, IndexMap::height);
+                    assert!(work > 0);
+                    assert!(work <= 1 + index.histories.height() + history_height);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_point_directory_and_version_step_can_refuse_without_a_partial_winner() {
+        let mut blocks = histories(127);
+        // A long single-identity chain tests history work independently of
+        // the directory size. The final retirement must not reveal an older
+        // live row when the last control callback refuses.
+        for seq in 5..=68 {
+            blocks.push(vec![AdjacencyEntry {
+                eid: EId(0),
+                src: VId(0),
+                dst: VId(0),
+                relation: RelationId(1),
+                created_at: CommitSeq(seq),
+                retired_at: (seq == 68).then_some(CommitSeq(69)),
+            }]);
+        }
+        let index = AdjacencyIndex::build(&blocks);
+        for eid in [EId(0), EId(63), EId(128), EId(u128::MAX)] {
+            for cut in [0, 1, 67, 68, 69, u64::MAX] {
+                let run = |stop| {
+                    let mut calls = 0;
+                    let result = index.statement_at_controlled(
+                        &blocks,
+                        eid,
+                        CommitSeq(cut),
+                        &mut |event| {
+                            assert_eq!(event, SourceEvent::Work);
+                            calls += 1;
+                            if calls == stop { Err(stop) } else { Ok(()) }
+                        },
+                    );
+                    (result, calls)
+                };
+                let (expected, total) = run(usize::MAX);
+                assert!(total > 1);
+                if eid == EId(0) {
+                    assert!(total > 7, "version traversal disappeared from the controls");
+                }
+                for stop in 1..=total {
+                    assert_eq!(run(stop), (Err(stop), stop));
+                }
+                assert_eq!(run(usize::MAX), (expected, total));
+            }
+        }
+        let empty = AdjacencyIndex::build(&[]);
+        assert_eq!(
+            empty.statement_at_controlled(&[], EId(0), CommitSeq(0), &mut |_| Err(7)),
+            Err(7)
+        );
+    }
+
+    #[test]
     fn indexed_all_edge_scan_matches_independent_history_fold_at_every_cut() {
         for count in [0, 1, 7, 31] {
             let blocks = histories(count);
@@ -514,6 +647,13 @@ mod indexed_scan_tests {
             for ((a, ap), (b, bp)) in actual.iter().zip(&expected) {
                 assert!(std::ptr::eq(*a, *b));
                 assert!(std::ptr::eq(*ap, *bp));
+                let (block, row) = snapshot
+                    .adjacency_index
+                    .statement_at_controlled(&snapshot.blocks, a.eid, at, &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .unwrap();
+                assert!(std::ptr::eq(*a, &snapshot.blocks[block][row]));
+                assert!(std::ptr::eq(*ap, edge_properties_at(&snapshot.block_props, block, row)));
             }
         }
         let ((), report) = run_async_under_lab(0xa710, |root| async move {

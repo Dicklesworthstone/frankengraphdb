@@ -28,9 +28,10 @@ impl WriteTxn {
     /// it; normal terminal completion does. No database publication occurs here.
     ///
     /// Scratch counts logical entries (including reserved witness map/field
-    /// slots), not allocator bytes or transaction-lifetime memory. Individual
-    /// index-history lookups and B-tree operations remain synchronous. This raw
-    /// embedded API adds neither authorization, spill nor a full SSI claim.
+    /// slots), not allocator bytes or transaction-lifetime memory. B-tree
+    /// updates remain synchronous; indexed history searches checkpoint each
+    /// directory and version node. This raw embedded API adds neither
+    /// authorization, spill nor a full SSI claim.
     pub fn neighbours_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -132,7 +133,9 @@ impl WriteTxn {
             let Some(eid) = next else { break };
             after = Some(eid);
             control(AdjacencySourceEvent::Work)?;
-            let Some((block, row)) = index.statement_at(&snapshot.blocks, eid, self.basis) else {
+            let Some((block, row)) = index.statement_at_controlled(
+                &snapshot.blocks, eid, self.basis, control,
+            )? else {
                 continue;
             };
             let entry = &snapshot.blocks[block][row];

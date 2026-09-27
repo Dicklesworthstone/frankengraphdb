@@ -142,11 +142,12 @@ impl WriteTxn {
                 // Topology and payload use the SAME winning historical
                 // coordinate, including retirement restatements. This is the
                 // existing admitted index, not an independently built map.
-                let coordinate = snapshot.adjacency_index.statement_at(
+                let coordinate = snapshot.adjacency_index.statement_at_controlled(
                     &snapshot.blocks,
                     eid,
                     self.basis,
-                );
+                    control,
+                )?;
                 control(SourceEvent::Work)?;
                 match coordinate {
                     Some((block, row)) => {

@@ -72,8 +72,9 @@ impl WriteTxn {
     /// refusals do not install it. Staged effects, savepoints and pins survive.
     ///
     /// Logical entries and payload units are NOT allocator-byte or transaction-
-    /// lifetime caps. Resident history and the existing synchronous edge-index
-    /// lookup remain; one admitted scalar clone is not internally preemptible.
+    /// lifetime caps. Resident history remains, but each edge-directory and
+    /// version lookup step is controlled. An admitted scalar clone is not
+    /// internally preemptible.
     /// This raw embedded API adds no authorization, spill, or full SSI claim.
     pub fn vertex_property_governed<V: Vfs + Clone>(
         &self,
