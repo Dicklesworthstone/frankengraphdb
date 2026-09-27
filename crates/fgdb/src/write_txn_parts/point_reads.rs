@@ -175,14 +175,7 @@ impl PointReads {
     }
 }
 
-fn take_point_property(
-    properties: Vec<(fgdb_delta_types::PropertyKeyId, CanonicalScalar)>,
-    requested: fgdb_delta_types::PropertyKeyId,
-) -> Option<CanonicalScalar> {
-    properties
-        .into_iter()
-        .find_map(|(key, value)| (key == requested).then_some(value))
-}
+include!("point_projection.rs");
 
 impl WriteTxn {
     /// Read only one vertex property at the pinned basis plus canonical effects.
@@ -200,20 +193,22 @@ impl WriteTxn {
     /// keep their conservative write footprint; finer reads do not opt into a
     /// rebase or change its eligibility and exact-effect requirements.
     ///
-    /// This is a raw embedded read, not capability masking or full SSI. It uses
-    /// the existing resident row decoder and overlay helpers, not a property
-    /// index, byte-memory quota, spill path or internally preemptible read.
+    /// This is a raw embedded read, not capability masking or full SSI. It
+    /// borrows the admitted historical row and canonical effects, copying only
+    /// the selected scalar. It does not copy unrelated properties or labels.
+    /// History remains resident; this is not a byte-memory quota or spill path.
     pub fn vertex_property<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         vid: VId,
         property: fgdb_delta_types::PropertyKeyId,
     ) -> Result<Option<CanonicalScalar>, WriteTxnError> {
-        let row = self.point_vertex(database, vid)?;
+        let field = PointReadField::Property(property);
+        let row = self.point_projection(database, ElementId::Vertex(vid), field)?;
         self.point_reads
             .borrow_mut()
             .record(ElementId::Vertex(vid), PointReadField::Property(property));
-        Ok(row.and_then(|row| take_point_property(row.props, property)))
+        Ok(row.property.cloned())
     }
 
     /// The edge-property sibling of vertex_property, with identical absence,
@@ -225,11 +220,12 @@ impl WriteTxn {
         eid: EId,
         property: fgdb_delta_types::PropertyKeyId,
     ) -> Result<Option<CanonicalScalar>, WriteTxnError> {
-        let row = self.point_edge(database, eid)?;
+        let field = PointReadField::Property(property);
+        let row = self.point_projection(database, ElementId::Edge(eid), field)?;
         self.point_reads
             .borrow_mut()
             .record(ElementId::Edge(eid), PointReadField::Property(property));
-        Ok(row.and_then(|row| take_point_property(row.props, property)))
+        Ok(row.property.cloned())
     }
 
     /// Read one label membership without observing the complete vertex.
@@ -251,15 +247,16 @@ impl WriteTxn {
         vid: VId,
         label: LabelId,
     ) -> Result<Option<bool>, WriteTxnError> {
-        let row = self.point_vertex(database, vid)?;
+        let row = self.point_projection(database, ElementId::Vertex(vid), PointReadField::Label(label))?;
         self.point_reads
             .borrow_mut()
             .record(ElementId::Vertex(vid), PointReadField::Label(label));
-        Ok(row.map(|row| row.labels.binary_search(&label).is_ok()))
+        Ok(row.exists.then_some(row.label))
     }
 
-    // Only explicit point accessors use these private unobserved rows. They
-    // record the exposed domain before returning. Full getters are unchanged.
+    // Retain the original full-row resolution as an independent test oracle.
+    // Production point reads borrow their requested projection instead.
+    #[cfg(test)]
     fn point_vertex<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -281,6 +278,7 @@ impl WriteTxn {
         Ok(row)
     }
 
+    #[cfg(test)]
     fn point_edge<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
