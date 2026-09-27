@@ -20,9 +20,11 @@ fn edge_upsert_actions<E, A, C>(
         GraphEdgeMergeOutcome::Matched(edge) => {
             (GraphEdgeUpsertBranch::Match, upsert.on_match(), Some(edge))
         }
-        GraphEdgeMergeOutcome::Created(edge) => {
-            (GraphEdgeUpsertBranch::Create, upsert.on_create(), Some(edge))
-        }
+        GraphEdgeMergeOutcome::Created(edge) => (
+            GraphEdgeUpsertBranch::Create,
+            upsert.on_create(),
+            Some(edge),
+        ),
     };
     let observed = actions.len() as u128;
     if observed > u128::from(policy.max_actions) {
@@ -87,7 +89,10 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeUpsertPolicy,
         allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::GraphEdgeUpsertStats, fgdb_gql::GraphEdgeMergeOutcome),
+        (
+            fgdb_gql::GraphEdgeUpsertStats,
+            fgdb_gql::GraphEdgeMergeOutcome,
+        ),
         TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError};
@@ -96,14 +101,27 @@ impl WriteTxn {
             .map_err(|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)))?;
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let (merge_stats, outcome) = workspace.txn.execute_graph_edge_merge_governed(
-                database, cx, upsert.merge(), policy.merge, allocate,
-            ).map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
+            let (merge_stats, outcome) = workspace
+                .txn
+                .execute_graph_edge_merge_governed(
+                    database,
+                    cx,
+                    upsert.merge(),
+                    policy.merge,
+                    allocate,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
             let (stats, batch) = edge_upsert_actions::<WriteTxnError, A, _>(
-                upsert, policy, merge_stats, outcome, || cx.checkpoint(),
+                upsert,
+                policy,
+                merge_stats,
+                outcome,
+                || cx.checkpoint(),
             )?;
             if !batch.is_empty() {
-                workspace.txn.write(database, batch)
+                workspace
+                    .txn
+                    .write(database, batch)
                     .map_err(|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)))?;
             }
             // No fallible operation follows the atomic stage or acceptance.

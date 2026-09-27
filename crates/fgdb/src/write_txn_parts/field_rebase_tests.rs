@@ -195,14 +195,20 @@ fn raw_guards_cancelled_edits_and_absent_removals_remain_dependencies() {
                 match case {
                     0 => {
                         batch.compare_and_set_vertex_property(
-                            VId(1), P, Some(CanonicalScalar::Int(0)),
-                            CanonicalScalar::Int(7), WriteMismatchPolicy::AbortWrite,
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(0)),
+                            CanonicalScalar::Int(7),
+                            WriteMismatchPolicy::AbortWrite,
                         );
                     }
                     1 => {
                         batch.compare_and_set_vertex_property(
-                            VId(1), P, Some(CanonicalScalar::Int(99)),
-                            CanonicalScalar::Int(7), WriteMismatchPolicy::NoOp,
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(7),
+                            WriteMismatchPolicy::NoOp,
                         );
                     }
                     2 => {
@@ -214,8 +220,11 @@ fn raw_guards_cancelled_edits_and_absent_removals_remain_dependencies() {
                     }
                     _ => {
                         batch.compare_and_set_edge_property(
-                            EId(10), P, Some(CanonicalScalar::Int(99)),
-                            CanonicalScalar::Int(7), WriteMismatchPolicy::NoOp,
+                            EId(10),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(7),
+                            WriteMismatchPolicy::NoOp,
                         );
                     }
                 }
@@ -305,19 +314,37 @@ fn unchanged_reads_pass_and_changed_reads_or_ineligible_work_refuse() {
             let mut transaction = database.begin(&txcx).unwrap();
             let mut batch = edit(P, 7);
             match case {
-                5 => { batch.ensure_vertex(VId(1), vec![], vec![]); }
-                6 => { batch.delete_edge_if_present(EId(99)); }
-                7 => { batch.create_vertex(VId(99), vec![], vec![]); }
+                5 => {
+                    batch.ensure_vertex(VId(1), vec![], vec![]);
+                }
+                6 => {
+                    batch.delete_edge_if_present(EId(99));
+                }
+                7 => {
+                    batch.create_vertex(VId(99), vec![], vec![]);
+                }
                 _ => {}
             }
             transaction.write(&mut database, batch).unwrap();
             match case {
-                0 => { transaction.vertex(&database, VId(1)).unwrap(); }
-                1 => { transaction.vertex(&database, VId(99)).unwrap(); }
-                2 => { transaction.vertices(&database).unwrap(); }
-                3 => { transaction.edges(&database).unwrap(); }
-                4 => { transaction.savepoint(&database, "held").unwrap(); }
-                8 => { transaction.program_multi_relation = true; }
+                0 => {
+                    transaction.vertex(&database, VId(1)).unwrap();
+                }
+                1 => {
+                    transaction.vertex(&database, VId(99)).unwrap();
+                }
+                2 => {
+                    transaction.vertices(&database).unwrap();
+                }
+                3 => {
+                    transaction.edges(&database).unwrap();
+                }
+                4 => {
+                    transaction.savepoint(&database, "held").unwrap();
+                }
+                8 => {
+                    transaction.program_multi_relation = true;
+                }
                 _ => {}
             }
             let mut concurrent = edit(Q, 8);
@@ -333,9 +360,13 @@ fn unchanged_reads_pass_and_changed_reads_or_ineligible_work_refuse() {
                 assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
             } else {
                 if case <= 3 {
-                    assert!(matches!(result, Err(WriteTxnError::Write(
-                        WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }
-                    ))));
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
                 } else {
                     assert!(matches!(result, Err(WriteTxnError::FieldRebaseIneligible)));
                 }
@@ -383,7 +414,10 @@ fn multi_relation_rebase_admits_the_whole_expanded_input() {
             if limit == 7 {
                 assert!(matches!(
                     result,
-                    Err(WriteTxnError::OrderedWriteBudgetExceeded { limit: 7, required: 8 })
+                    Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                        limit: 7,
+                        required: 8
+                    })
                 ));
                 assert_eq!(database.frontier().unwrap(), frontier);
                 assert!(database.edge(EId(20)).unwrap().unwrap().props.is_empty());
@@ -608,7 +642,12 @@ fn field_domains_keep_kinds_and_keys_distinct_and_refuse_unknown_history() {
 fn observed_write(append: bool, value: i64) -> WriteBatch {
     if append {
         let mut batch = WriteBatch::new(R);
-        batch.add_edge(EId(50), VId(1), VId(2), vec![(P, CanonicalScalar::Int(value))]);
+        batch.add_edge(
+            EId(50),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(value))],
+        );
         batch
     } else {
         edit(P, value)
@@ -622,9 +661,13 @@ async fn finish_observed(
     append: bool,
 ) -> Result<CommitSeq, WriteTxnError> {
     if append {
-        transaction.commit_append_only_rebased(database, cx, 1).await
+        transaction
+            .commit_append_only_rebased(database, cx, 1)
+            .await
     } else {
-        transaction.commit_disjoint_fields_rebased(database, cx, 1).await
+        transaction
+            .commit_disjoint_fields_rebased(database, cx, 1)
+            .await
     }
 }
 
@@ -638,7 +681,8 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
             let mut database = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
-                .await.unwrap();
+                .await
+                .unwrap();
             seed(&mut database, &cx).await;
             let pinned = database.read_session().unwrap();
             let mut transaction = database.begin(&txcx).unwrap();
@@ -661,14 +705,18 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             assert_eq!(transaction.basis(), basis);
             assert_eq!(transaction.vertex(&database, VId(3)).unwrap(), Some(read));
             let seq = finish_observed(&mut transaction, &mut database, &cx, append)
-                .await.unwrap();
+                .await
+                .unwrap();
             assert_eq!(seq, CommitSeq(frontier.0 + 1));
             {
                 let tail = database.delta_since(frontier).unwrap().collect::<Vec<_>>();
                 assert_eq!(tail.len(), 1);
                 assert_eq!(tail[0].coordinate_entries(), original.coordinate_entries());
             }
-            assert_eq!(pinned.vertex(VId(1)).unwrap().unwrap().props[1].1, CanonicalScalar::Int(0));
+            assert_eq!(
+                pinned.vertex(VId(1)).unwrap().unwrap().props[1].1,
+                CanonicalScalar::Int(0)
+            );
             let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
             seed(&mut serial, &cx).await;
             serial.write(&cx, concurrent).await.unwrap();
@@ -676,7 +724,9 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             assert_eq!(database.vertices().unwrap(), serial.vertices().unwrap());
             assert_eq!(database.edges().unwrap(), serial.edges().unwrap());
             drop(database);
-            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
             assert_eq!(reopened.frontier().unwrap(), seq);
             assert_eq!(reopened.vertices().unwrap(), serial.vertices().unwrap());
             assert_eq!(reopened.edges().unwrap(), serial.edges().unwrap());
@@ -697,7 +747,9 @@ fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_r
                 let mut database = Database::open_memory(&cx, keys()).await.unwrap();
                 seed(&mut database, &cx).await;
                 let mut transaction = database.begin(&txcx).unwrap();
-                transaction.write(&mut database, observed_write(append, 7)).unwrap();
+                transaction
+                    .write(&mut database, observed_write(append, 7))
+                    .unwrap();
                 // Do not add an unrelated endpoint/field change here: each
                 // negative must be rejected by its named read dependency.
                 let mut concurrent = WriteBatch::new(R);
@@ -715,11 +767,16 @@ fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_r
                         concurrent.add_edge(EId(99), VId(2), VId(3), vec![]);
                     }
                     3 | 4 => {
-                        assert!(transaction.execute_gql(
-                            &database,
-                            "MATCH (n:Missing) RETURN n",
-                            &RelationBind::new().with_label("Missing", LabelId(9)),
-                        ).unwrap().is_empty());
+                        assert!(
+                            transaction
+                                .execute_gql(
+                                    &database,
+                                    "MATCH (n:Missing) RETURN n",
+                                    &RelationBind::new().with_label("Missing", LabelId(9)),
+                                )
+                                .unwrap()
+                                .is_empty()
+                        );
                         if case == 3 {
                             concurrent.create_vertex(VId(99), vec![LabelId(9)], vec![]);
                         } else {
@@ -741,8 +798,12 @@ fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_r
                     _ => {
                         transaction.savepoint(&database, "before-read").unwrap();
                         transaction.vertex(&database, VId(3)).unwrap();
-                        transaction.rollback_to_savepoint(&database, "before-read").unwrap();
-                        transaction.release_savepoint(&database, "before-read").unwrap();
+                        transaction
+                            .rollback_to_savepoint(&database, "before-read")
+                            .unwrap();
+                        transaction
+                            .release_savepoint(&database, "before-read")
+                            .unwrap();
                         concurrent.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
                     }
                 }
@@ -752,17 +813,24 @@ fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_r
                     let mut restore = WriteBatch::new(R);
                     restore.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(0)));
                     database.write(&cx, restore).await.unwrap();
-                    assert_eq!(transaction.vertex(&database, VId(3)).unwrap(), database.vertex(VId(3)).unwrap());
+                    assert_eq!(
+                        transaction.vertex(&database, VId(3)).unwrap(),
+                        database.vertex(VId(3)).unwrap()
+                    );
                 }
                 let frontier = database.frontier().unwrap();
                 let expected_vertices = database.vertices().unwrap();
                 let expected_edges = database.edges().unwrap();
-                assert!(matches!(
-                    finish_observed(&mut transaction, &mut database, &cx, append).await,
-                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01", ..
-                    }))
-                ), "append={append}, read case={case}");
+                assert!(
+                    matches!(
+                        finish_observed(&mut transaction, &mut database, &cx, append).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ),
+                    "append={append}, read case={case}"
+                );
                 assert_eq!(database.frontier().unwrap(), frontier);
                 assert_eq!(database.vertices().unwrap(), expected_vertices);
                 assert_eq!(database.edges().unwrap(), expected_edges);
@@ -795,8 +863,14 @@ fn read_write_skew_cannot_hide_behind_independent_rebase_domains() {
                     assert!(right.edge(&database, EId(50)).unwrap().is_none());
                     right_write.add_edge(EId(60), VId(1), VId(2), vec![]);
                 } else {
-                    assert_eq!(left.vertex(&database, VId(2)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(0));
-                    assert_eq!(right.vertex(&database, VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(0));
+                    assert_eq!(
+                        left.vertex(&database, VId(2)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(0)
+                    );
+                    assert_eq!(
+                        right.vertex(&database, VId(1)).unwrap().unwrap().props[0].1,
+                        CanonicalScalar::Int(0)
+                    );
                     right_write.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
                 }
                 left.write(&mut database, left_write).unwrap();
@@ -804,21 +878,33 @@ fn read_write_skew_cannot_hide_behind_independent_rebase_domains() {
                 if reverse {
                     core::mem::swap(&mut left, &mut right);
                 }
-                let seq = finish_observed(&mut left, &mut database, &cx, append).await.unwrap();
+                let seq = finish_observed(&mut left, &mut database, &cx, append)
+                    .await
+                    .unwrap();
                 assert!(matches!(
                     finish_observed(&mut right, &mut database, &cx, append).await,
                     Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01", ..
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
                     }))
                 ));
                 assert_eq!(database.frontier().unwrap(), seq);
                 if append {
-                    assert_ne!(database.edge(EId(50)).unwrap().is_some(), database.edge(EId(60)).unwrap().is_some());
+                    assert_ne!(
+                        database.edge(EId(50)).unwrap().is_some(),
+                        database.edge(EId(60)).unwrap().is_some()
+                    );
                 } else {
                     let left_row = database.vertex(VId(1)).unwrap().unwrap();
                     let right_row = database.vertex(VId(2)).unwrap().unwrap();
-                    assert_eq!(left_row.props[0].1, CanonicalScalar::Int(if reverse { 0 } else { 1 }));
-                    assert_eq!(right_row.props[0].1, CanonicalScalar::Int(if reverse { 1 } else { 0 }));
+                    assert_eq!(
+                        left_row.props[0].1,
+                        CanonicalScalar::Int(if reverse { 0 } else { 1 })
+                    );
+                    assert_eq!(
+                        right_row.props[0].1,
+                        CanonicalScalar::Int(if reverse { 1 } else { 0 })
+                    );
                 }
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }

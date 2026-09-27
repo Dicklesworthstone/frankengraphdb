@@ -63,35 +63,49 @@ impl<'a> PointProjection<'a> {
     ) -> Result<(), E> {
         use fgdb_delta_types::DeltaRow;
         match effect {
-            DeltaRow::CreateVertex { vid, labels, props, .. }
-                if element == ElementId::Vertex(*vid) =>
-            {
+            DeltaRow::CreateVertex {
+                vid, labels, props, ..
+            } if element == ElementId::Vertex(*vid) => {
                 *self = Self::from_fields(field, labels, props, control)?;
             }
             DeltaRow::CreateEdge { eid, props, .. } if element == ElementId::Edge(*eid) => {
                 *self = Self::from_fields(field, &[], props, control)?;
             }
-            DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+            DeltaRow::DeleteVertex {
+                vid,
+                sorted_retired_incident_edges,
+                ..
+            } => {
                 let deleted = match element {
                     ElementId::Vertex(target) => target == *vid,
-                    ElementId::Edge(target) => point_find(
-                        sorted_retired_incident_edges, target, |eid| *eid, control,
-                    )?.is_some(),
+                    ElementId::Edge(target) => {
+                        point_find(sorted_retired_incident_edges, target, |eid| *eid, control)?
+                            .is_some()
+                    }
                 };
-                if deleted { *self = Self::default(); }
+                if deleted {
+                    *self = Self::default();
+                }
             }
             DeltaRow::DeleteEdge { eid, .. } if element == ElementId::Edge(*eid) => {
                 *self = Self::default();
             }
-            DeltaRow::Property { elem, property, after, .. }
-                if self.exists && *elem == element
-                    && field == PointReadField::Property(*property) =>
+            DeltaRow::Property {
+                elem,
+                property,
+                after,
+                ..
+            } if self.exists
+                && *elem == element
+                && field == PointReadField::Property(*property) =>
             {
                 self.property = after.as_ref();
             }
-            DeltaRow::LabelMembership { vid, label, after, .. }
-                if self.exists && element == ElementId::Vertex(*vid)
-                    && field == PointReadField::Label(*label) =>
+            DeltaRow::LabelMembership {
+                vid, label, after, ..
+            } if self.exists
+                && element == ElementId::Vertex(*vid)
+                && field == PointReadField::Label(*label) =>
             {
                 self.label = *after;
             }
@@ -124,9 +138,15 @@ impl WriteTxn {
     ) -> Result<PointProjection<'a>, E> {
         use crate::gql_exec::source::{SourceEvent, find_vertex};
         self.ensure_database(database).map_err(source_error)?;
-        database.ensure_readable().map_err(WriteTxnError::from).map_err(source_error)?;
+        database
+            .ensure_readable()
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
         let snapshot = &database.snapshot;
-        snapshot.check_frontier(self.basis).map_err(WriteTxnError::from).map_err(source_error)?;
+        snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut projected = match element {
             ElementId::Vertex(vid) => {
@@ -154,16 +174,16 @@ impl WriteTxn {
                         control(SourceEvent::SnapshotRecord)?;
                         let properties: &[(fgdb_delta_types::PropertyKeyId, CanonicalScalar)] =
                             match snapshot.block_props.get(block).and_then(Option::as_ref) {
-                            Some(block) => {
-                                let locator = block.locators[row];
-                                if locator == 0 {
-                                    &[]
-                                } else {
-                                    &block.rows[usize::from(locator) - 1]
+                                Some(block) => {
+                                    let locator = block.locators[row];
+                                    if locator == 0 {
+                                        &[]
+                                    } else {
+                                        &block.rows[usize::from(locator) - 1]
+                                    }
                                 }
-                            }
-                            None => &[],
-                        };
+                                None => &[],
+                            };
                         PointProjection::from_fields(field, &[], properties, control)?
                     }
                     None => PointProjection::default(),

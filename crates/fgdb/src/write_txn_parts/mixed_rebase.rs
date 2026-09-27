@@ -125,18 +125,14 @@ impl MixedRebaseFootprint {
                 elem: ElementId::Vertex(vid),
                 ..
             } => Ok(self.retired_vertices.contains(vid)),
-            DeltaRow::CreateEdge { eid, src, dst, .. } => Ok(
-                self.retired_edges.contains(eid)
-                    || self.retired_vertices.contains(src)
-                    || self.retired_vertices.contains(dst),
-            ),
+            DeltaRow::CreateEdge { eid, src, dst, .. } => Ok(self.retired_edges.contains(eid)
+                || self.retired_vertices.contains(src)
+                || self.retired_vertices.contains(dst)),
             DeltaRow::DeleteEdge { eid, .. }
             | DeltaRow::Property {
                 elem: ElementId::Edge(eid),
                 ..
-            } => {
-                Ok(self.retired_edges.contains(eid))
-            }
+            } => Ok(self.retired_edges.contains(eid)),
             DeltaRow::DeleteVertex {
                 vid,
                 sorted_retired_incident_edges,

@@ -48,13 +48,16 @@ fn neighbours(txn: &WriteTxn, db: &Database<MemVfs>, incoming: bool) -> Vec<VId>
 }
 
 fn assert_read_conflict(result: Result<EmbeddedTxnCompletion, WriteTxnError>) {
-    assert!(matches!(
-        &result,
-        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-            law: "FG-LAW-FCW-READ-01",
-            ..
-        }))
-    ), "{result:?}");
+    assert!(
+        matches!(
+            &result,
+            Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                law: "FG-LAW-FCW-READ-01",
+                ..
+            }))
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -73,18 +76,34 @@ fn both_directions_ignore_unobserved_payloads_and_other_topology_domains() {
                 let opposite = if incoming { EId(10) } else { EId(12) };
                 let mut change = WriteBatch::new(if case == 4 { S } else { R });
                 match case {
-                    0 => { change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7))); }
-                    1 => { change.set_edge_property(observed, P, Some(CanonicalScalar::Int(7))); }
-                    2 => { change.set_vertex_property(before[0], P, Some(CanonicalScalar::Int(7))); }
-                    3 => { change.set_vertex_label(VId(1), LabelId(9), true); }
-                    4 => { change.add_edge(EId(50), VId(1), VId(1), vec![]); }
+                    0 => {
+                        change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
+                    }
+                    1 => {
+                        change.set_edge_property(observed, P, Some(CanonicalScalar::Int(7)));
+                    }
+                    2 => {
+                        change.set_vertex_property(before[0], P, Some(CanonicalScalar::Int(7)));
+                    }
+                    3 => {
+                        change.set_vertex_label(VId(1), LabelId(9), true);
+                    }
+                    4 => {
+                        change.add_edge(EId(50), VId(1), VId(1), vec![]);
+                    }
                     5 => {
                         let (src, dst) = if incoming { (1, 4) } else { (4, 1) };
                         change.add_edge(EId(50), VId(src), VId(dst), vec![]);
                     }
-                    6 => { change.add_edge(EId(50), VId(2), VId(4), vec![]); }
-                    7 => { change.delete_edge(if incoming { EId(21) } else { EId(20) }); }
-                    _ => { change.delete_edge(opposite); }
+                    6 => {
+                        change.add_edge(EId(50), VId(2), VId(4), vec![]);
+                    }
+                    7 => {
+                        change.delete_edge(if incoming { EId(21) } else { EId(20) });
+                    }
+                    _ => {
+                        change.delete_edge(opposite);
+                    }
                 }
                 db.write(&cx, change).await.unwrap();
                 assert_eq!(neighbours(&txn, &db, incoming), before);
@@ -124,10 +143,18 @@ fn selected_insertions_retirements_cascades_and_self_loops_still_conflict() {
                         let (src, dst) = if incoming { (4, 1) } else { (1, 4) };
                         change.add_edge(EId(50), VId(src), VId(dst), vec![]);
                     }
-                    1 => { change.delete_edge(if incoming { EId(12) } else { EId(10) }); }
-                    2 => { change.delete_vertex(before[0]); }
-                    3 => { change.delete_vertex(VId(1)); }
-                    _ => { change.add_edge(EId(50), VId(1), VId(1), vec![]); }
+                    1 => {
+                        change.delete_edge(if incoming { EId(12) } else { EId(10) });
+                    }
+                    2 => {
+                        change.delete_vertex(before[0]);
+                    }
+                    3 => {
+                        change.delete_vertex(VId(1));
+                    }
+                    _ => {
+                        change.add_edge(EId(50), VId(1), VId(1), vec![]);
+                    }
                 }
                 db.write(&cx, change).await.unwrap();
                 // Historical answers remain pinned even after retirement.
@@ -181,9 +208,11 @@ fn complete_gaps_and_all_parallel_edges_survive_rollback_and_value_restoration()
         txn.rollback_to_savepoint(&db, "prefix").unwrap();
         txn.release_savepoint(&db, "prefix").unwrap();
         for eid in [EId(10), EId(11)] {
-            assert!(txn.point_reads.borrow().contains(
-                ElementId::Edge(eid), PointReadField::EdgeTopology,
-            ));
+            assert!(
+                txn.point_reads
+                    .borrow()
+                    .contains(ElementId::Edge(eid), PointReadField::EdgeTopology,)
+            );
         }
         let mut remove = WriteBatch::new(R);
         remove.delete_edge(EId(10));
@@ -203,7 +232,9 @@ fn topology_derived_field_rebase_matches_serial_execution_and_reopens() {
         let txcx = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &cx, true).await;
         let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
         seed(&mut serial, &cx, true).await;
@@ -211,7 +242,11 @@ fn topology_derived_field_rebase_matches_serial_execution_and_reopens() {
         let neighbours = txn.neighbours(&db, VId(1), R).unwrap();
         assert_eq!(neighbours, vec![VId(2)]);
         let mut write = WriteBatch::new(R);
-        write.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(neighbours.len() as i64)));
+        write.set_vertex_property(
+            VId(1),
+            P,
+            Some(CanonicalScalar::Int(neighbours.len() as i64)),
+        );
         txn.write(&mut db, write.clone()).unwrap();
         let mut other = WriteBatch::new(S);
         other.set_vertex_label(VId(1), LabelId(9), true);
@@ -222,7 +257,10 @@ fn topology_derived_field_rebase_matches_serial_execution_and_reopens() {
         let frontier = db.frontier().unwrap();
         // Mutation independence is still an explicit choice, not a relaxed
         // ordinary write conflict rule. The original R read must survive it.
-        let seq = txn.commit_disjoint_fields_rebased(&mut db, &cx, 1).await.unwrap();
+        let seq = txn
+            .commit_disjoint_fields_rebased(&mut db, &cx, 1)
+            .await
+            .unwrap();
         assert_eq!(seq, CommitSeq(frontier.0 + 1));
         assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
         serial.write(&cx, write).await.unwrap();
@@ -232,7 +270,9 @@ fn topology_derived_field_rebase_matches_serial_execution_and_reopens() {
         assert_eq!(db.edges().unwrap(), expected_edges);
         assert!(txn.point_reads.borrow().is_empty());
         drop(db);
-        let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&cx, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), seq);
         assert_eq!(db.vertices().unwrap(), expected_vertices);
         assert_eq!(db.edges().unwrap(), expected_edges);
@@ -252,7 +292,9 @@ fn projection_reads_never_remove_prior_or_later_broad_and_field_reads() {
                 let mut db = Database::open_memory(&cx, keys()).await.unwrap();
                 seed(&mut db, &cx, true).await;
                 let mut txn = db.begin(&txcx).unwrap();
-                if topology_first { neighbours(&txn, &db, false); }
+                if topology_first {
+                    neighbours(&txn, &db, false);
+                }
                 let mut change = WriteBatch::new(R);
                 match case {
                     0 => {
@@ -276,7 +318,9 @@ fn projection_reads_never_remove_prior_or_later_broad_and_field_reads() {
                         change.add_edge(EId(50), VId(3), VId(4), vec![]);
                     }
                 }
-                if !topology_first { neighbours(&txn, &db, false); }
+                if !topology_first {
+                    neighbours(&txn, &db, false);
+                }
                 db.write(&cx, change).await.unwrap();
                 assert_read_conflict(txn.finish(&mut db, &cx).await);
             }
@@ -298,8 +342,17 @@ fn negative_topology_write_skew_refuses_the_second_committer_in_both_orders() {
                 seed(&mut db, &cx, false).await;
                 let mut left = db.begin(&txcx).unwrap();
                 let mut right = db.begin(&txcx).unwrap();
-                assert!(left.adjacency_neighbours(&db, VId(1), R, incoming).unwrap().is_empty());
-                assert!(right.adjacency_neighbours(&db, VId(3), R, incoming).unwrap().is_empty());
+                assert!(
+                    left.adjacency_neighbours(&db, VId(1), R, incoming)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    right
+                        .adjacency_neighbours(&db, VId(3), R, incoming)
+                        .unwrap()
+                        .is_empty()
+                );
                 let mut a = WriteBatch::new(R);
                 let mut b = WriteBatch::new(R);
                 let (asrc, adst, bsrc, bdst) = if incoming { (4, 3, 2, 1) } else { (3, 4, 1, 2) };
@@ -307,13 +360,22 @@ fn negative_topology_write_skew_refuses_the_second_committer_in_both_orders() {
                 b.add_edge(EId(60), VId(bsrc), VId(bdst), vec![]);
                 left.write(&mut db, a).unwrap();
                 right.write(&mut db, b).unwrap();
-                let (first, second) = if reverse { (&mut right, &mut left) } else { (&mut left, &mut right) };
-                first.commit_append_only_rebased(&mut db, &cx, 1).await.unwrap();
+                let (first, second) = if reverse {
+                    (&mut right, &mut left)
+                } else {
+                    (&mut left, &mut right)
+                };
+                first
+                    .commit_append_only_rebased(&mut db, &cx, 1)
+                    .await
+                    .unwrap();
                 let frontier = db.frontier().unwrap();
                 let result = second.commit_append_only_rebased(&mut db, &cx, 1).await;
-                assert!(matches!(result,
+                assert!(matches!(
+                    result,
                     Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01", ..
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
                     }))
                 ));
                 assert_eq!(db.frontier().unwrap(), frontier);
@@ -338,10 +400,16 @@ fn refresh_retains_the_range_and_interruption_discards_only_terminal_work() {
         let mut update = WriteBatch::new(R);
         update.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(5)));
         db.write(&cx, update).await.unwrap();
-        assert_eq!(txn.refresh_snapshot(&db, &txcx).unwrap(), db.frontier().unwrap());
+        assert_eq!(
+            txn.refresh_snapshot(&db, &txcx).unwrap(),
+            db.frontier().unwrap()
+        );
         assert!(txn.point_reads.borrow().contains(
             ElementId::Vertex(VId(1)),
-            PointReadField::Adjacency { relation: R, incoming: false },
+            PointReadField::Adjacency {
+                relation: R,
+                incoming: false
+            },
         ));
         let mut insert = WriteBatch::new(R);
         insert.add_edge(EId(50), VId(1), VId(4), vec![]);
@@ -352,7 +420,9 @@ fn refresh_retains_the_range_and_interruption_discards_only_terminal_work() {
         // A scalable cascade over unobserved edges must also stay interruptible.
         let mut total = 0;
         for stop in std::iter::once(None).chain((1..).map(Some)) {
-            if stop.is_some_and(|stop| stop > total) { break; }
+            if stop.is_some_and(|stop| stop > total) {
+                break;
+            }
             let mut db = Database::open_memory(&cx, keys()).await.unwrap();
             seed(&mut db, &cx, true).await;
             let mut txn = db.begin(&txcx).unwrap();
@@ -363,10 +433,16 @@ fn refresh_retains_the_range_and_interruption_discards_only_terminal_work() {
             db.write(&cx, cascade).await.unwrap();
             let frontier = db.frontier().unwrap();
             let mut calls = 0;
-            let result = txn.complete_controlled(&mut db, &cx, None, false, || {
-                calls += 1;
-                if stop == Some(calls) { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
-            }).await;
+            let result = txn
+                .complete_controlled(&mut db, &cx, None, false, || {
+                    calls += 1;
+                    if stop == Some(calls) {
+                        Err(WriteTxnError::NoPreparedWrite)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
             if let Some(stop) = stop {
                 assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
                 assert_eq!(calls, stop);
@@ -389,32 +465,59 @@ fn logical_topology_domains_cover_every_small_graph_transition() {
     // An independent concrete-edge oracle. It knows no storage layout and
     // recomputes result sets; it must never see a changed answer with no conflict.
     type Edge = (EId, VId, RelationId, VId);
-    let universe: Vec<Edge> = (0..9_u128).map(|id| {
-        (EId(id), VId(id / 3), RelationId((id % 2) as u64 + 1), VId(id % 3))
-    }).collect();
+    let universe: Vec<Edge> = (0..9_u128)
+        .map(|id| {
+            (
+                EId(id),
+                VId(id / 3),
+                RelationId((id % 2) as u64 + 1),
+                VId(id % 3),
+            )
+        })
+        .collect();
     let before_version = ObjectId([0; 32]);
     for mask in 0..512_u16 {
-        let edges: Vec<_> = universe.iter().copied()
-            .filter(|(eid, _, _, _)| mask & (1_u16 << (eid.0 as u32)) != 0).collect();
+        let edges: Vec<_> = universe
+            .iter()
+            .copied()
+            .filter(|(eid, _, _, _)| mask & (1_u16 << (eid.0 as u32)) != 0)
+            .collect();
         for anchor in [VId(0), VId(1), VId(2)] {
             for relation in [R, S] {
                 for incoming in [false, true] {
-                    let selected = |edge: &Edge| edge.2 == relation
-                        && (if incoming { edge.3 } else { edge.1 }) == anchor;
+                    let selected = |edge: &Edge| {
+                        edge.2 == relation && (if incoming { edge.3 } else { edge.1 }) == anchor
+                    };
                     let answer = |state: &[Edge]| -> std::collections::BTreeSet<VId> {
-                        state.iter().filter(|edge| selected(edge))
-                            .map(|edge| if incoming { edge.1 } else { edge.3 }).collect()
+                        state
+                            .iter()
+                            .filter(|edge| selected(edge))
+                            .map(|edge| if incoming { edge.1 } else { edge.3 })
+                            .collect()
                     };
                     let mut reads = PointReads::default();
-                    reads.record_adjacency(anchor, relation, incoming,
-                        edges.iter().filter(|edge| selected(edge)).map(|edge| edge.0));
+                    reads.record_adjacency(
+                        anchor,
+                        relation,
+                        incoming,
+                        edges
+                            .iter()
+                            .filter(|edge| selected(edge))
+                            .map(|edge| edge.0),
+                    );
                     let before = answer(&edges);
                     for src in [VId(0), VId(1), VId(2)] {
                         for dst in [VId(0), VId(1), VId(2)] {
                             for r in [R, S] {
                                 let row = DeltaRow::CreateEdge {
-                                    eid: EId(100), birth_ordinal: 1, src, relation: r, dst,
-                                    canonical_key: None, props: vec![], valid_time: None,
+                                    eid: EId(100),
+                                    birth_ordinal: 1,
+                                    src,
+                                    relation: r,
+                                    dst,
+                                    canonical_key: None,
+                                    props: vec![],
+                                    valid_time: None,
                                 };
                                 let conflict = reads.conflict(&row, &mut || Ok(())).unwrap();
                                 let mut after = edges.clone();
@@ -425,24 +528,40 @@ fn logical_topology_domains_cover_every_small_graph_transition() {
                         }
                     }
                     for edge in &edges {
-                        let row = DeltaRow::DeleteEdge { eid: edge.0, before_version };
+                        let row = DeltaRow::DeleteEdge {
+                            eid: edge.0,
+                            before_version,
+                        };
                         let conflict = reads.conflict(&row, &mut || Ok(())).unwrap();
-                        let after: Vec<_> = edges.iter().copied().filter(|e| e.0 != edge.0).collect();
+                        let after: Vec<_> =
+                            edges.iter().copied().filter(|e| e.0 != edge.0).collect();
                         assert_eq!(conflict.is_some(), selected(edge));
                         assert!(answer(&after) == before || conflict.is_some());
                     }
                     for victim in [VId(0), VId(1), VId(2)] {
                         let row = DeltaRow::DeleteVertex {
-                            vid: victim, before_version,
-                            sorted_retired_incident_edges: edges.iter()
-                                .filter(|e| e.1 == victim || e.3 == victim).map(|e| e.0).collect(),
+                            vid: victim,
+                            before_version,
+                            sorted_retired_incident_edges: edges
+                                .iter()
+                                .filter(|e| e.1 == victim || e.3 == victim)
+                                .map(|e| e.0)
+                                .collect(),
                         };
-                        let after: Vec<_> = edges.iter().copied()
-                            .filter(|e| e.1 != victim && e.3 != victim).collect();
+                        let after: Vec<_> = edges
+                            .iter()
+                            .copied()
+                            .filter(|e| e.1 != victim && e.3 != victim)
+                            .collect();
                         let conflict = reads.conflict(&row, &mut || Ok(())).unwrap();
                         assert!(answer(&after) == before || conflict.is_some());
-                        assert_eq!(conflict.is_some(), victim == anchor || edges.iter()
-                            .any(|e| selected(e) && (e.1 == victim || e.3 == victim)));
+                        assert_eq!(
+                            conflict.is_some(),
+                            victim == anchor
+                                || edges
+                                    .iter()
+                                    .any(|e| selected(e) && (e.1 == victim || e.3 == victim))
+                        );
                     }
                 }
             }

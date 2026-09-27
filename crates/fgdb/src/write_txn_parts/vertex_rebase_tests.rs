@@ -9,19 +9,30 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 const NEW: u128 = u128::MAX;
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x71; 32], DatabaseSecurityNamespaceId([0x72; 32]), [0x73; 32])
+    DatabaseKeys::new(
+        [0x71; 32],
+        DatabaseSecurityNamespaceId([0x72; 32]),
+        [0x73; 32],
+    )
 }
 
 async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
     let mut batch = WriteBatch::new(RelationId(1));
     for id in 1..=6 {
-        batch.create_vertex(VId(id), vec![LabelId(1)], vec![
-            (P, CanonicalScalar::Int(0)), (Q, CanonicalScalar::Int(0)),
-        ]);
+        batch.create_vertex(
+            VId(id),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(0)), (Q, CanonicalScalar::Int(0))],
+        );
     }
     // Outgoing, incoming, self-loop, parallel, and unrelated edges.
     for (eid, src, dst) in [(10, 1, 2), (11, 2, 1), (12, 1, 1), (13, 1, 2), (30, 4, 5)] {
-        batch.add_edge(EId(eid), VId(src), VId(dst), vec![(Q, CanonicalScalar::Int(0))]);
+        batch.add_edge(
+            EId(eid),
+            VId(src),
+            VId(dst),
+            vec![(Q, CanonicalScalar::Int(0))],
+        );
     }
     db.write(cx, batch).await.unwrap();
     let mut other = WriteBatch::new(RelationId(2));
@@ -64,7 +75,9 @@ fn vertex_replacement_preserves_exact_cascades_single_publication_and_reopen() {
         let txcx = purposes.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &cx).await;
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
@@ -74,14 +87,22 @@ fn vertex_replacement_preserves_exact_cascades_single_publication_and_reopen() {
         let mut ordinary = db.begin(&txcx).unwrap();
         ordinary.write_ordered(&mut db, replacement()).unwrap();
         let frontier = db.write(&cx, unrelated()).await.unwrap();
-        assert!(matches!(ordinary.commit(&mut db, &cx).await,
-            Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+        assert!(matches!(
+            ordinary.commit(&mut db, &cx).await,
+            Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+        ));
         // Three vertex instructions replicated across two relations, one edge.
         let seq = txn.commit_mixed_rebased(&mut db, &cx, 7).await.unwrap();
         assert_eq!(seq, CommitSeq(frontier.0 + 1));
         assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
-        assert_eq!(db.delta_since(frontier).unwrap().next().unwrap().coordinate_entries(),
-            original.coordinate_entries());
+        assert_eq!(
+            db.delta_since(frontier)
+                .unwrap()
+                .next()
+                .unwrap()
+                .coordinate_entries(),
+            original.coordinate_entries()
+        );
         assert!(pinned.vertex(VId(1)).unwrap().is_some());
         assert!(pinned.vertex(VId(NEW)).unwrap().is_none());
         assert!(db.vertex(VId(1)).unwrap().is_none());
@@ -102,7 +123,9 @@ fn vertex_replacement_preserves_exact_cascades_single_publication_and_reopen() {
         assert_eq!(vertices, serial.vertices().unwrap());
         assert_eq!(edges, serial.edges().unwrap());
         drop(db);
-        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.frontier().unwrap(), seq);
         assert_eq!(reopened.vertices().unwrap(), vertices);
         assert_eq!(reopened.edges().unwrap(), edges);
@@ -135,7 +158,11 @@ fn all_vertex_and_incident_edge_changes_conflict_including_transient_phantoms() 
                     restore.set_vertex_label(VId(1), LabelId(9), false);
                 }
                 2..=4 => {
-                    let (src, dst) = match case { 2 => (4, 1), 3 => (1, 4), _ => (1, 1) };
+                    let (src, dst) = match case {
+                        2 => (4, 1),
+                        3 => (1, 4),
+                        _ => (1, 1),
+                    };
                     change.add_edge(EId(99), VId(src), VId(dst), vec![]);
                     restore.delete_edge(EId(99));
                 }
@@ -143,19 +170,36 @@ fn all_vertex_and_incident_edge_changes_conflict_including_transient_phantoms() 
                     change.set_edge_property(EId(20), Q, Some(CanonicalScalar::Int(9)));
                     restore.set_edge_property(EId(20), Q, Some(CanonicalScalar::Int(0)));
                 }
-                6 => { change.delete_edge(EId(20)); }
-                7 => { change.delete_vertex(VId(3)); }
-                8 => { change.delete_vertex(VId(1)); }
-                _ => { change.set_vertex_property(VId(6), Q, Some(CanonicalScalar::Int(9))); }
+                6 => {
+                    change.delete_edge(EId(20));
+                }
+                7 => {
+                    change.delete_vertex(VId(3));
+                }
+                8 => {
+                    change.delete_vertex(VId(1));
+                }
+                _ => {
+                    change.set_vertex_property(VId(6), Q, Some(CanonicalScalar::Int(9)));
+                }
             }
             db.write(&cx, change).await.unwrap();
-            if !restore.is_empty() { db.write(&cx, restore).await.unwrap(); }
+            if !restore.is_empty() {
+                db.write(&cx, restore).await.unwrap();
+            }
             let before = (db.vertices().unwrap(), db.edges().unwrap());
             let frontier = db.frontier().unwrap();
             let result = txn.commit_mixed_rebased(&mut db, &cx, 7).await;
-            let expected = if case == 9 { "FG-LAW-FCW-READ-01" } else { "FG-LAW-FCW-01" };
-            assert!(matches!(result, Err(WriteTxnError::Write(
-                WriteError::FirstCommitterWins { law, .. })) if law == expected), "case {case}");
+            let expected = if case == 9 {
+                "FG-LAW-FCW-READ-01"
+            } else {
+                "FG-LAW-FCW-01"
+            };
+            assert!(
+                matches!(result, Err(WriteTxnError::Write(
+                WriteError::FirstCommitterWins { law, .. })) if law == expected),
+                "case {case}"
+            );
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
             assert_eq!(txn.state(), EmbeddedTxnState::Aborted);
@@ -200,13 +244,24 @@ fn absent_and_cancelled_vertex_deletes_keep_raw_lifetime_guards() {
                 let frontier = db.frontier().unwrap();
                 let result = txn.commit_mixed_rebased(&mut db, &cx, 4).await;
                 if collision {
-                    assert!(matches!(result, Err(WriteTxnError::Write(
-                        WriteError::FirstCommitterWins { law: "FG-LAW-FCW-01", .. }))));
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-01",
+                            ..
+                        }))
+                    ));
                     assert_eq!(db.frontier().unwrap(), frontier);
                 } else {
                     assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
-                    assert_eq!(db.delta_since(frontier).unwrap().next().unwrap().coordinate_entries(),
-                        original.coordinate_entries());
+                    assert_eq!(
+                        db.delta_since(frontier)
+                            .unwrap()
+                            .next()
+                            .unwrap()
+                            .coordinate_entries(),
+                        original.coordinate_entries()
+                    );
                 }
                 assert!(db.vertex(VId(NEW)).unwrap().is_none());
                 assert!(db.edge(EId(NEW)).unwrap().is_none());
@@ -238,13 +293,17 @@ fn overlapping_cascades_are_borrowed_once_without_losing_absorbed_edge_deletes()
             footprint.record(row).unwrap();
         }
         let mut checkpoints = 0;
-        footprint.protect_vertex_cascades(template, &mut || {
-            checkpoints += 1;
-            Ok(())
-        }).unwrap();
+        footprint
+            .protect_vertex_cascades(template, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
         assert!(checkpoints >= 6);
-        assert_eq!(footprint.retired_edges.iter().copied().collect::<Vec<_>>(),
-            vec![EId(10), EId(11), EId(12), EId(13), EId(20), EId(21)]);
+        assert_eq!(
+            footprint.retired_edges.iter().copied().collect::<Vec<_>>(),
+            vec![EId(10), EId(11), EId(12), EId(13), EId(20), EId(21)]
+        );
         for stop in 1..=checkpoints {
             let mut partial = MixedRebaseFootprint::default();
             for row in txn.staged.iter().flat_map(|batch| &batch.rows) {
@@ -253,14 +312,22 @@ fn overlapping_cascades_are_borrowed_once_without_losing_absorbed_edge_deletes()
             let mut seen = 0;
             let result = partial.protect_vertex_cascades(template, &mut || {
                 seen += 1;
-                if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
+                if seen == stop {
+                    Err(WriteTxnError::NoPreparedWrite)
+                } else {
+                    Ok(())
+                }
             });
             assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
             assert_eq!(seen, stop);
         }
         // Same bits in the edge/vertex domains are never interchangeable.
-        let edge = DeltaRow::Property { elem: ElementId::Edge(EId(1)), property: Q,
-            before: None, after: Some(CanonicalScalar::Int(1)) };
+        let edge = DeltaRow::Property {
+            elem: ElementId::Edge(EId(1)),
+            property: Q,
+            before: None,
+            after: Some(CanonicalScalar::Int(1)),
+        };
         assert!(!footprint.conflicts(&edge, &mut || Ok(())).unwrap());
         db.write(&cx, unrelated()).await.unwrap();
         txn.commit_mixed_rebased(&mut db, &cx, 4).await.unwrap();
@@ -281,25 +348,53 @@ fn cascade_rebase_keeps_exact_row_limits_and_every_prepublication_refusal() {
         let txcx = purposes.txn();
         let (mut db, mut txn) = drifted(&cx, &txcx).await;
         let frontier = db.frontier().unwrap();
-        assert!(matches!(txn.commit_mixed_rebased(&mut db, &cx, 6).await,
-            Err(WriteTxnError::OrderedWriteBudgetExceeded { limit: 6, required: 7 })));
+        assert!(matches!(
+            txn.commit_mixed_rebased(&mut db, &cx, 6).await,
+            Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                limit: 6,
+                required: 7
+            })
+        ));
         assert_eq!(db.frontier().unwrap(), frontier);
         assert!(db.vertex(VId(1)).unwrap().is_some());
         let (mut db, mut txn) = drifted(&cx, &txcx).await;
         let mut total = 0;
-        txn.complete_rebased_controlled(&mut db, &cx, None, true,
-            Some(RebasePreparation::Mixed(7)), || { total += 1; Ok(()) }).await.unwrap();
+        txn.complete_rebased_controlled(
+            &mut db,
+            &cx,
+            None,
+            true,
+            Some(RebasePreparation::Mixed(7)),
+            || {
+                total += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
         assert!(total > 20);
         for stop in 1..=total {
             let (mut db, mut txn) = drifted(&cx, &txcx).await;
             let before = (db.vertices().unwrap(), db.edges().unwrap());
             let frontier = db.frontier().unwrap();
             let mut seen = 0;
-            let result = txn.complete_rebased_controlled(&mut db, &cx, None, true,
-                Some(RebasePreparation::Mixed(7)), || {
-                    seen += 1;
-                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
-                }).await;
+            let result = txn
+                .complete_rebased_controlled(
+                    &mut db,
+                    &cx,
+                    None,
+                    true,
+                    Some(RebasePreparation::Mixed(7)),
+                    || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(WriteTxnError::NoPreparedWrite)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
             assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
             assert_eq!(seen, stop);
             assert_eq!(db.frontier().unwrap(), frontier);
@@ -325,8 +420,10 @@ fn vertex_rebase_uses_native_ownership_and_ambiguous_commit_outcomes() {
         let original = txn.prepared.as_ref().unwrap().template.clone();
         drop(txn.commit_mixed_rebased(&mut db, &cx, 7));
         let mut foreign = Database::open_memory(&cx, keys()).await.unwrap();
-        assert!(matches!(txn.commit_mixed_rebased(&mut foreign, &cx, 7).await,
-            Err(WriteTxnError::WrongDatabase)));
+        assert!(matches!(
+            txn.commit_mixed_rebased(&mut foreign, &cx, 7).await,
+            Err(WriteTxnError::WrongDatabase)
+        ));
         assert_eq!(txn.basis(), basis);
         assert_eq!(txn.state(), EmbeddedTxnState::Active);
         assert_eq!(txn.prepared.as_ref().unwrap().template, original);
@@ -334,14 +431,27 @@ fn vertex_rebase_uses_native_ownership_and_ambiguous_commit_outcomes() {
         for crash in [CrashPoint::BeforeCapsule, CrashPoint::AfterMarkerBeforeD2] {
             let (mut db, mut txn) = drifted(&cx, &txcx).await;
             let frontier = db.frontier().unwrap();
-            let result = txn.complete_rebased_controlled(&mut db, &cx, Some(crash), true,
-                Some(RebasePreparation::Mixed(7)), || Ok(())).await;
+            let result = txn
+                .complete_rebased_controlled(
+                    &mut db,
+                    &cx,
+                    Some(crash),
+                    true,
+                    Some(RebasePreparation::Mixed(7)),
+                    || Ok(()),
+                )
+                .await;
             assert!(result.is_err());
-            assert_eq!(txn.state(), if crash == CrashPoint::BeforeCapsule {
-                EmbeddedTxnState::Aborted
-            } else {
-                EmbeddedTxnState::CommitOutcomeUnknown { published_frontier: frontier }
-            });
+            assert_eq!(
+                txn.state(),
+                if crash == CrashPoint::BeforeCapsule {
+                    EmbeddedTxnState::Aborted
+                } else {
+                    EmbeddedTxnState::CommitOutcomeUnknown {
+                        published_frontier: frontier,
+                    }
+                }
+            );
             assert!(txn.prepared.is_none());
             assert!(txn.pin.is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);

@@ -546,7 +546,13 @@ mod adjacency_overlay_tests {
             assert!(pinned.read_set.borrow().is_empty());
             assert!(pinned.match_expansions.borrow().is_empty());
             assert_eq!(
-                pinned.point_reads.borrow().0.keys().copied().collect::<std::collections::BTreeSet<_>>(),
+                pinned
+                    .point_reads
+                    .borrow()
+                    .0
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
                 [
                     ElementId::Vertex(VId(0)),
                     ElementId::Edge(EId(0)),
@@ -580,8 +586,20 @@ mod adjacency_overlay_tests {
                 current.neighbours(&db, VId(0), RelationId(2)).unwrap(),
                 vec![VId(2)]
             );
-            assert!(!current.point_reads.borrow().0.contains_key(&ElementId::Edge(EId(0))));
-            assert!(!current.point_reads.borrow().0.contains_key(&ElementId::Edge(EId(8))));
+            assert!(
+                !current
+                    .point_reads
+                    .borrow()
+                    .0
+                    .contains_key(&ElementId::Edge(EId(0)))
+            );
+            assert!(
+                !current
+                    .point_reads
+                    .borrow()
+                    .0
+                    .contains_key(&ElementId::Edge(EId(8)))
+            );
             current.abort();
             assert!(matches!(
                 pinned.finish(&mut db, &commit).await,

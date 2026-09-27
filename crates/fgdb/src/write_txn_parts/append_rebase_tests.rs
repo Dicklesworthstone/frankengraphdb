@@ -272,9 +272,13 @@ fn unchanged_negative_reads_pass_but_stale_reads_and_savepoints_refuse() {
                 if case == 5 {
                     assert!(matches!(result, Err(WriteTxnError::AppendRebaseIneligible)));
                 } else {
-                    assert!(matches!(result, Err(WriteTxnError::Write(
-                        WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }
-                    ))));
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
                 }
                 assert_eq!(transaction.state(), EmbeddedTxnState::Aborted);
                 assert_eq!(database.frontier().unwrap(), frontier);

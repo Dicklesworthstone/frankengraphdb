@@ -258,7 +258,11 @@ mod observed_creation_tests {
     const NEW: u128 = u128::MAX;
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0x81; 32], DatabaseSecurityNamespaceId([0x82; 32]), [0x83; 32])
+        DatabaseKeys::new(
+            [0x81; 32],
+            DatabaseSecurityNamespaceId([0x82; 32]),
+            [0x83; 32],
+        )
     }
 
     async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
@@ -359,7 +363,9 @@ mod observed_creation_tests {
             let txcx = purposes.txn();
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             seed(&mut db, &cx).await;
             let mut tx = db.begin(&txcx).unwrap();
             assert!(tx.vertex(&db, VId(1)).unwrap().is_some());
@@ -367,13 +373,18 @@ mod observed_creation_tests {
             tx.write(&mut db, append()).unwrap();
             let original = tx.prepared.as_ref().unwrap().template.clone();
             let frontier = advance(&mut db, &cx).await;
-            let seq = tx.commit_append_only_rebased(&mut db, &cx, 2).await.unwrap();
+            let seq = tx
+                .commit_append_only_rebased(&mut db, &cx, 2)
+                .await
+                .unwrap();
             assert_eq!(seq, CommitSeq(frontier.0 + 1));
             let tail = db.delta_since(frontier).unwrap().collect::<Vec<_>>();
             assert_eq!(tail.len(), 1);
             assert_eq!(tail[0].coordinate_entries(), original.coordinate_entries());
             drop(db);
-            let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            let db = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
             assert!(db.vertex(VId(NEW)).unwrap().is_some());
             assert_eq!(db.edge(EId(NEW)).unwrap().unwrap().entry.dst, VId(NEW));
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -391,18 +402,27 @@ mod observed_creation_tests {
             seed(&mut db, &cx).await;
             let tx = db.begin(&txcx).unwrap();
             tx.read_set.borrow_mut().insert(ElementId::Edge(EId(NEW)));
-            let creations = (1..=64).map(|id| ElementId::Vertex(VId(id)))
-                .chain([ElementId::Vertex(VId(NEW))]).collect();
+            let creations = (1..=64)
+                .map(|id| ElementId::Vertex(VId(id)))
+                .chain([ElementId::Vertex(VId(NEW))])
+                .collect();
             for stop in 1..=65 {
                 let mut seen = 0;
                 let result = tx.validate_unobserved_creations(&creations, &mut || {
                     seen += 1;
-                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
+                    if seen == stop {
+                        Err(WriteTxnError::NoPreparedWrite)
+                    } else {
+                        Ok(())
+                    }
                 });
                 assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
                 assert_eq!(seen, stop);
             }
-            assert!(tx.validate_unobserved_creations(&creations, &mut || Ok(())).is_ok());
+            assert!(
+                tx.validate_unobserved_creations(&creations, &mut || Ok(()))
+                    .is_ok()
+            );
             tx.abort();
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

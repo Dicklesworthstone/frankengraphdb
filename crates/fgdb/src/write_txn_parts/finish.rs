@@ -237,11 +237,9 @@ impl WriteTxn {
         // ordinary witness checker BEFORE either policy can replace the basis.
         // Only write conflicts receive policy-specific independence rules.
         if rebase.is_some()
-            && let Some((law, element, committed_at)) = attempt.transaction.transaction_conflict_in(
-                attempt.database,
-                ConflictScope::Reads,
-                &mut checkpoint,
-            )?
+            && let Some((law, element, committed_at)) = attempt
+                .transaction
+                .transaction_conflict_in(attempt.database, ConflictScope::Reads, &mut checkpoint)?
         {
             return Err(WriteError::FirstCommitterWins {
                 law,
@@ -261,9 +259,11 @@ impl WriteTxn {
             Some(RebasePreparation::DisjointFields(limit)) => attempt
                 .transaction
                 .prepare_field_rebase(attempt.database, limit, &mut checkpoint)?,
-            Some(RebasePreparation::Mixed(limit)) => attempt
-                .transaction
-                .prepare_mixed_rebase(attempt.database, limit, &mut checkpoint)?,
+            Some(RebasePreparation::Mixed(limit)) => attempt.transaction.prepare_mixed_rebase(
+                attempt.database,
+                limit,
+                &mut checkpoint,
+            )?,
             None => {}
         }
         if let Some((law, element, committed_at)) = attempt

@@ -27,7 +27,9 @@ async fn seed(database: &mut Database<MemVfs>, cx: &CommitCx) {
         );
     }
     batch.add_edge(
-        EId(10), VId(1), VId(2),
+        EId(10),
+        VId(1),
+        VId(2),
         vec![(P, CanonicalScalar::Int(0)), (Q, CanonicalScalar::Int(0))],
     );
     database.write(cx, batch).await.unwrap();
@@ -43,8 +45,11 @@ fn program() -> WriteBatch {
     batch.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(11)));
     batch.set_vertex_label(VId(1), LabelId(2), true);
     batch.compare_and_set_vertex_property(
-        VId(1), P, Some(CanonicalScalar::Int(7)),
-        CanonicalScalar::Int(8), WriteMismatchPolicy::AbortWrite,
+        VId(1),
+        P,
+        Some(CanonicalScalar::Int(7)),
+        CanonicalScalar::Int(8),
+        WriteMismatchPolicy::AbortWrite,
     );
     batch.set_vertex_property(VId(1), ABSENT, None);
     batch
@@ -76,7 +81,8 @@ fn mixed_creation_updates_and_cas_publish_once_and_match_serial_reopen() {
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
         let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
-            .await.unwrap();
+            .await
+            .unwrap();
         seed(&mut db, &cx).await;
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
@@ -99,23 +105,42 @@ fn mixed_creation_updates_and_cas_publish_once_and_match_serial_reopen() {
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
         assert!(pinned.vertex(VId(50)).unwrap().is_none());
-        assert_eq!(pinned.vertex(VId(1)).unwrap().unwrap().labels, vec![LabelId(1)]);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, vec![LabelId(1), LabelId(2), LabelId(3)]);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(8));
-        assert_eq!(db.vertex(VId(50)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(7));
-        assert_eq!(db.edge(EId(60)).unwrap().unwrap().props[0].1, CanonicalScalar::Int(9));
+        assert_eq!(
+            pinned.vertex(VId(1)).unwrap().unwrap().labels,
+            vec![LabelId(1)]
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().labels,
+            vec![LabelId(1), LabelId(2), LabelId(3)]
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(8)
+        );
+        assert_eq!(
+            db.vertex(VId(50)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(7)
+        );
+        assert_eq!(
+            db.edge(EId(60)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(9)
+        );
         let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
         seed(&mut serial, &cx).await;
         serial.write(&cx, concurrent()).await.unwrap();
         let mut serial_txn = serial.begin(&txcx).unwrap();
-        serial_txn.write_ordered(&mut serial, vec![program()]).unwrap();
+        serial_txn
+            .write_ordered(&mut serial, vec![program()])
+            .unwrap();
         serial_txn.commit(&mut serial, &cx).await.unwrap();
         assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
         assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.frontier().unwrap(), seq);
         assert_eq!(reopened.vertices().unwrap(), vertices);
         assert_eq!(reopened.edges().unwrap(), edges);
@@ -157,9 +182,15 @@ fn both_independence_laws_protect_aba_identity_and_cascade_lifetimes() {
                     first.add_edge(EId(60), VId(3), VId(4), vec![]);
                     second.delete_edge(EId(60));
                 }
-                5 => { first.delete_vertex(VId(1)); }
-                6 => { first.delete_vertex(VId(2)); }
-                _ => { first.delete_edge(EId(10)); }
+                5 => {
+                    first.delete_vertex(VId(1));
+                }
+                6 => {
+                    first.delete_vertex(VId(2));
+                }
+                _ => {
+                    first.delete_edge(EId(10));
+                }
             }
             db.write(&cx, first).await.unwrap();
             if !second.is_empty() {
@@ -167,7 +198,10 @@ fn both_independence_laws_protect_aba_identity_and_cascade_lifetimes() {
             }
             let frontier = db.frontier().unwrap();
             let before = (db.vertices().unwrap(), db.edges().unwrap());
-            assert_conflict(txn.commit_mixed_rebased(&mut db, &cx, 64).await, "FG-LAW-FCW-01");
+            assert_conflict(
+                txn.commit_mixed_rebased(&mut db, &cx, 64).await,
+                "FG-LAW-FCW-01",
+            );
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
             assert_eq!(txn.state(), EmbeddedTxnState::Aborted);
@@ -198,16 +232,26 @@ fn cancelled_assignments_and_noop_guards_protect_their_raw_slots() {
                         batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
                         batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
                     }
-                    1 => { batch.set_vertex_property(VId(1), ABSENT, None); }
+                    1 => {
+                        batch.set_vertex_property(VId(1), ABSENT, None);
+                    }
                     2 => {
-                        batch.compare_and_set_vertex_property(VId(1), P,
-                            Some(CanonicalScalar::Int(99)), CanonicalScalar::Int(7),
-                            WriteMismatchPolicy::NoOp);
+                        batch.compare_and_set_vertex_property(
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(7),
+                            WriteMismatchPolicy::NoOp,
+                        );
                     }
                     _ => {
-                        batch.compare_and_set_edge_property(EId(10), P,
-                            Some(CanonicalScalar::Int(99)), CanonicalScalar::Int(7),
-                            WriteMismatchPolicy::NoOp);
+                        batch.compare_and_set_edge_property(
+                            EId(10),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(7),
+                            WriteMismatchPolicy::NoOp,
+                        );
                     }
                 }
                 txn.write_ordered(&mut db, vec![batch]).unwrap();
@@ -216,7 +260,11 @@ fn cancelled_assignments_and_noop_guards_protect_their_raw_slots() {
                 if overlap && case == 3 {
                     drift.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(8)));
                 } else {
-                    let key = if overlap { if case == 1 { ABSENT } else { P } } else { Q };
+                    let key = if overlap {
+                        if case == 1 { ABSENT } else { P }
+                    } else {
+                        Q
+                    };
                     drift.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(8)));
                 }
                 let frontier = db.write(&cx, drift).await.unwrap();
@@ -259,7 +307,11 @@ fn original_positive_negative_and_empty_scan_observations_cannot_be_rebased_away
                 }
                 2 => {
                     let bind = RelationBind::new().with_label("Empty", LabelId(9));
-                    assert!(txn.execute_gql(&db, "MATCH (n:Empty) RETURN n", &bind).unwrap().is_empty());
+                    assert!(
+                        txn.execute_gql(&db, "MATCH (n:Empty) RETURN n", &bind)
+                            .unwrap()
+                            .is_empty()
+                    );
                     drift.create_vertex(VId(99), vec![LabelId(9)], vec![]);
                 }
                 3 => {
@@ -274,7 +326,10 @@ fn original_positive_negative_and_empty_scan_observations_cannot_be_rebased_away
             txn.write_ordered(&mut db, vec![program()]).unwrap();
             let basis = txn.basis();
             let frontier = db.write(&cx, drift).await.unwrap();
-            assert_conflict(txn.commit_mixed_rebased(&mut db, &cx, 64).await, "FG-LAW-FCW-READ-01");
+            assert_conflict(
+                txn.commit_mixed_rebased(&mut db, &cx, 64).await,
+                "FG-LAW-FCW-READ-01",
+            );
             assert_eq!(txn.basis(), basis);
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertex(VId(50)).unwrap().is_none());
@@ -297,16 +352,28 @@ fn raw_ensure_scopes_and_creation_reads_refuse_but_absent_vertex_delete_rebases(
             let mut txn = db.begin(&txcx).unwrap();
             let mut batch = program();
             match case {
-                0 => { batch.ensure_vertex(VId(4), vec![], vec![]); }
-                1 => { batch.delete_vertex_if_present(VId(99)); }
+                0 => {
+                    batch.ensure_vertex(VId(4), vec![], vec![]);
+                }
+                1 => {
+                    batch.delete_vertex_if_present(VId(99));
+                }
                 _ => {}
             }
             txn.write_ordered(&mut db, vec![batch]).unwrap();
             match case {
-                2 => { txn.savepoint(&db, "held").unwrap(); }
-                3 => { txn.program_multi_relation = true; }
-                4 => { txn.vertex(&db, VId(50)).unwrap(); }
-                5 => { txn.edge(&db, EId(60)).unwrap(); }
+                2 => {
+                    txn.savepoint(&db, "held").unwrap();
+                }
+                3 => {
+                    txn.program_multi_relation = true;
+                }
+                4 => {
+                    txn.vertex(&db, VId(50)).unwrap();
+                }
+                5 => {
+                    txn.edge(&db, EId(60)).unwrap();
+                }
                 _ => {}
             }
             // Drift outside every explicit witness so eligibility, not stale
@@ -339,7 +406,9 @@ fn combined_footprint_is_domain_separated_and_refuses_unknown_history() {
     batch.set_vertex_property(VId(2), P, None);
     batch.set_edge_property(EId(10), Q, None);
     let mut footprint = MixedRebaseFootprint::default();
-    for row in &batch.rows { footprint.record(row).unwrap(); }
+    for row in &batch.rows {
+        footprint.record(row).unwrap();
+    }
     for (elem, property, wanted) in [
         (ElementId::Vertex(VId(u128::MAX)), Q, true),
         (ElementId::Edge(EId(u128::MAX)), Q, true),
@@ -350,8 +419,12 @@ fn combined_footprint_is_domain_separated_and_refuses_unknown_history() {
         (ElementId::Edge(EId(10)), Q, true),
         (ElementId::Vertex(VId(10)), Q, false),
     ] {
-        let row = DeltaRow::Property { elem, property, before: None,
-            after: Some(CanonicalScalar::Int(1)) };
+        let row = DeltaRow::Property {
+            elem,
+            property,
+            before: None,
+            after: Some(CanonicalScalar::Int(1)),
+        };
         assert_eq!(footprint.conflicts(&row, &mut || Ok(())).unwrap(), wanted);
     }
     for (vid, edges, wanted) in [
@@ -361,16 +434,26 @@ fn combined_footprint_is_domain_separated_and_refuses_unknown_history() {
         (VId(3), vec![EId(11)], false),
         (VId(3), vec![EId(u128::MAX)], true),
     ] {
-        let row = DeltaRow::DeleteVertex { vid, before_version: ObjectId([0; 32]),
-            sorted_retired_incident_edges: edges };
+        let row = DeltaRow::DeleteVertex {
+            vid,
+            before_version: ObjectId([0; 32]),
+            sorted_retired_incident_edges: edges,
+        };
         assert_eq!(footprint.conflicts(&row, &mut || Ok(())).unwrap(), wanted);
     }
-    let schema = DeltaRow::Schema { transition_oid: ObjectId([0; 32]),
-        before_epoch: SchemaEpoch(1), after_epoch: SchemaEpoch(2) };
-    assert!(matches!(footprint.conflicts(&schema, &mut || Ok(())),
-        Err(WriteTxnError::MixedRebaseIneligible)));
-    assert!(matches!(footprint.conflicts(&schema, &mut || Err(WriteTxnError::NoPreparedWrite)),
-        Err(WriteTxnError::NoPreparedWrite)));
+    let schema = DeltaRow::Schema {
+        transition_oid: ObjectId([0; 32]),
+        before_epoch: SchemaEpoch(1),
+        after_epoch: SchemaEpoch(2),
+    };
+    assert!(matches!(
+        footprint.conflicts(&schema, &mut || Ok(())),
+        Err(WriteTxnError::MixedRebaseIneligible)
+    ));
+    assert!(matches!(
+        footprint.conflicts(&schema, &mut || Err(WriteTxnError::NoPreparedWrite)),
+        Err(WriteTxnError::NoPreparedWrite)
+    ));
 }
 
 fn replacement() -> Vec<WriteBatch> {
@@ -406,7 +489,9 @@ fn relationship_replacement_is_one_commit_across_relations_and_reopen() {
         let txcx = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &cx).await;
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
@@ -419,25 +504,41 @@ fn relationship_replacement_is_one_commit_across_relations_and_reopen() {
         let seq = txn.commit_mixed_rebased(&mut db, &cx, 12).await.unwrap();
         assert_eq!(seq, CommitSeq(frontier.0 + 1));
         assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
-        assert_eq!(db.delta_since(frontier).unwrap().next().unwrap().coordinate_entries(),
-            original.coordinate_entries());
+        assert_eq!(
+            db.delta_since(frontier)
+                .unwrap()
+                .next()
+                .unwrap()
+                .coordinate_entries(),
+            original.coordinate_entries()
+        );
         assert!(pinned.edge(EId(10)).unwrap().is_some());
         assert!(pinned.edge(EId(50)).unwrap().is_none());
         assert!(db.edge(EId(10)).unwrap().is_none());
-        assert_eq!(db.edge(EId(50)).unwrap().unwrap().entry.relation, RelationId(9));
-        assert_eq!(db.edge(EId(60)).unwrap().unwrap().entry.relation, RelationId(2));
+        assert_eq!(
+            db.edge(EId(50)).unwrap().unwrap().entry.relation,
+            RelationId(9)
+        );
+        assert_eq!(
+            db.edge(EId(60)).unwrap().unwrap().entry.relation,
+            RelationId(2)
+        );
         let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
         seed(&mut serial, &cx).await;
         serial.write(&cx, drift).await.unwrap();
         let mut serial_txn = serial.begin(&txcx).unwrap();
-        serial_txn.write_ordered(&mut serial, replacement()).unwrap();
+        serial_txn
+            .write_ordered(&mut serial, replacement())
+            .unwrap();
         serial_txn.commit(&mut serial, &cx).await.unwrap();
         assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
         assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.frontier().unwrap(), seq);
         assert_eq!(reopened.vertices().unwrap(), vertices);
         assert_eq!(reopened.edges().unwrap(), edges);
@@ -461,8 +562,11 @@ fn edge_retirement_protects_all_fields_noop_identity_decisions_and_cascades() {
             batch.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(7)));
             // No append endpoint or field target overlaps edge 10: only the
             // retirement's complete-identity law can reject these histories.
-            if case == 2 { batch.delete_edge_if_present(EId(99)); }
-            else { batch.delete_edge(EId(10)); }
+            if case == 2 {
+                batch.delete_edge_if_present(EId(99));
+            } else {
+                batch.delete_edge(EId(10));
+            }
             txn.write_ordered(&mut db, vec![batch]).unwrap();
             let mut first = WriteBatch::new(R);
             let mut second = WriteBatch::new(R);
@@ -477,13 +581,20 @@ fn edge_retirement_protects_all_fields_noop_identity_decisions_and_cascades() {
                     first.add_edge(EId(99), VId(1), VId(2), vec![]);
                     second.delete_edge(EId(99));
                 }
-                _ => { first.delete_vertex(VId(2)); }
+                _ => {
+                    first.delete_vertex(VId(2));
+                }
             }
             db.write(&cx, first).await.unwrap();
-            if !second.is_empty() { db.write(&cx, second).await.unwrap(); }
+            if !second.is_empty() {
+                db.write(&cx, second).await.unwrap();
+            }
             let before = (db.vertices().unwrap(), db.edges().unwrap());
             let frontier = db.frontier().unwrap();
-            assert_conflict(txn.commit_mixed_rebased(&mut db, &cx, 64).await, "FG-LAW-FCW-01");
+            assert_conflict(
+                txn.commit_mixed_rebased(&mut db, &cx, 64).await,
+                "FG-LAW-FCW-01",
+            );
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -527,8 +638,14 @@ fn cancelled_new_edges_keep_raw_identity_guards_without_publishing_them() {
                 assert_eq!(db.frontier().unwrap(), frontier);
             } else {
                 assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
-                assert_eq!(db.delta_since(frontier).unwrap().next().unwrap().coordinate_entries(),
-                    original.coordinate_entries());
+                assert_eq!(
+                    db.delta_since(frontier)
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .coordinate_entries(),
+                    original.coordinate_entries()
+                );
             }
             assert!(db.edge(EId(u128::MAX)).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -549,9 +666,13 @@ fn complete_relation_expansion_is_bounded_before_replacement_is_prepared() {
             let frontier = db.frontier().unwrap();
             let result = txn.commit_mixed_rebased(&mut db, &cx, limit).await;
             if limit == 11 {
-                assert!(matches!(result, Err(WriteTxnError::OrderedWriteBudgetExceeded {
-                    limit: 11, required: 12
-                })));
+                assert!(matches!(
+                    result,
+                    Err(WriteTxnError::OrderedWriteBudgetExceeded {
+                        limit: 11,
+                        required: 12
+                    })
+                ));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.edge(EId(10)).unwrap().is_some());
                 assert!(db.edge(EId(50)).unwrap().is_none());
@@ -576,20 +697,42 @@ fn each_checkpoint_and_unwind_leave_no_partial_relationship_replacement() {
         let txcx = contexts.txn();
         let (mut db, mut txn) = replacement_drifted(&cx, &txcx).await;
         let mut total = 0;
-        txn.complete_rebased_controlled(&mut db, &cx, None, true,
-            Some(RebasePreparation::Mixed(12)), || { total += 1; Ok(()) })
-            .await.unwrap();
+        txn.complete_rebased_controlled(
+            &mut db,
+            &cx,
+            None,
+            true,
+            Some(RebasePreparation::Mixed(12)),
+            || {
+                total += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
         assert!(total > 20);
         for stop in 1..=total {
             let (mut db, mut txn) = replacement_drifted(&cx, &txcx).await;
             let frontier = db.frontier().unwrap();
             let before = (db.vertices().unwrap(), db.edges().unwrap());
             let mut seen = 0;
-            let result = txn.complete_rebased_controlled(&mut db, &cx, None, true,
-                Some(RebasePreparation::Mixed(12)), || {
-                    seen += 1;
-                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
-                }).await;
+            let result = txn
+                .complete_rebased_controlled(
+                    &mut db,
+                    &cx,
+                    None,
+                    true,
+                    Some(RebasePreparation::Mixed(12)),
+                    || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(WriteTxnError::NoPreparedWrite)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
             assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
             assert_eq!(seen, stop);
             assert_eq!(db.frontier().unwrap(), frontier);
@@ -603,16 +746,25 @@ fn each_checkpoint_and_unwind_leave_no_partial_relationship_replacement() {
         let (mut db, mut txn) = replacement_drifted(&cx, &txcx).await;
         let frontier = db.frontier().unwrap();
         let mut seen = 0;
-        let mut future = Box::pin(txn.complete_rebased_controlled(&mut db, &cx, None, true,
-            Some(RebasePreparation::Mixed(12)), || {
+        let mut future = Box::pin(txn.complete_rebased_controlled(
+            &mut db,
+            &cx,
+            None,
+            true,
+            Some(RebasePreparation::Mixed(12)),
+            || {
                 seen += 1;
                 assert_ne!(seen, total, "unwind at final acceptance");
                 Ok(())
-            }));
+            },
+        ));
         let panicked = std::future::poll_fn(|task| {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(task)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                future.as_mut().poll(task)
+            }));
             Poll::Ready(result.is_err())
-        }).await;
+        })
+        .await;
         drop(future);
         assert!(panicked);
         assert_eq!(db.frontier().unwrap(), frontier);
@@ -636,24 +788,38 @@ fn owner_unpolled_and_native_crash_outcomes_preserve_the_single_commit_contract(
         let basis = txn.basis();
         drop(txn.commit_mixed_rebased(&mut db, &cx, 12));
         let mut foreign = Database::open_memory(&cx, keys()).await.unwrap();
-        assert!(matches!(txn.commit_mixed_rebased(&mut foreign, &cx, 12).await,
-            Err(WriteTxnError::WrongDatabase)));
+        assert!(matches!(
+            txn.commit_mixed_rebased(&mut foreign, &cx, 12).await,
+            Err(WriteTxnError::WrongDatabase)
+        ));
         assert_eq!(txn.basis(), basis);
         assert_eq!(txn.state(), EmbeddedTxnState::Active);
         assert_eq!(txn.prepared.as_ref().unwrap().template, original);
         txn.commit_mixed_rebased(&mut db, &cx, 12).await.unwrap();
-        assert!(matches!(txn.commit_mixed_rebased(&mut db, &cx, 12).await,
-            Err(WriteTxnError::Finished)));
+        assert!(matches!(
+            txn.commit_mixed_rebased(&mut db, &cx, 12).await,
+            Err(WriteTxnError::Finished)
+        ));
         for crash in [CrashPoint::BeforeCapsule, CrashPoint::AfterMarkerBeforeD2] {
             let (mut db, mut txn) = replacement_drifted(&cx, &txcx).await;
             let frontier = db.frontier().unwrap();
-            let result = txn.complete_rebased_controlled(&mut db, &cx, Some(crash), true,
-                Some(RebasePreparation::Mixed(12)), || Ok(())).await;
+            let result = txn
+                .complete_rebased_controlled(
+                    &mut db,
+                    &cx,
+                    Some(crash),
+                    true,
+                    Some(RebasePreparation::Mixed(12)),
+                    || Ok(()),
+                )
+                .await;
             assert!(result.is_err());
             let expected = if crash == CrashPoint::BeforeCapsule {
                 EmbeddedTxnState::Aborted
             } else {
-                EmbeddedTxnState::CommitOutcomeUnknown { published_frontier: frontier }
+                EmbeddedTxnState::CommitOutcomeUnknown {
+                    published_frontier: frontier,
+                }
             };
             assert_eq!(txn.state(), expected);
             assert!(txn.prepared.is_none());
@@ -675,17 +841,27 @@ fn retirement_cascade_checks_preserve_every_control_refusal() {
     let row = DeltaRow::DeleteVertex {
         vid: VId(99),
         before_version: ObjectId([0; 32]),
-        sorted_retired_incident_edges: (1..=64).map(EId)
-            .chain([EId(u128::MAX)]).collect(),
+        sorted_retired_incident_edges: (1..=64).map(EId).chain([EId(u128::MAX)]).collect(),
     };
     let mut total = 0;
-    assert!(footprint.conflicts(&row, &mut || { total += 1; Ok(()) }).unwrap());
+    assert!(
+        footprint
+            .conflicts(&row, &mut || {
+                total += 1;
+                Ok(())
+            })
+            .unwrap()
+    );
     assert!(total > 65);
     for stop in 1..=total {
         let mut seen = 0;
         let result = footprint.conflicts(&row, &mut || {
             seen += 1;
-            if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
+            if seen == stop {
+                Err(WriteTxnError::NoPreparedWrite)
+            } else {
+                Ok(())
+            }
         });
         assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
         assert_eq!(seen, stop);

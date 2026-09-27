@@ -13,7 +13,9 @@ impl Drop for ProjectionReadAttempt<'_> {
             // No callback runs while the witness RefCell is borrowed. This
             // allocation-free superset preserves information conveyed by a
             // data-dependent refusal, even when precise witnesses did not fit.
-            self.reads.borrow_mut().retain_refused_projection(self.element);
+            self.reads
+                .borrow_mut()
+                .retain_refused_projection(self.element);
         }
     }
 }
@@ -36,8 +38,11 @@ fn point_payload_admission<E>(
         CanonicalScalar::Timestamp(value) => {
             [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
         }
-        CanonicalScalar::Null | CanonicalScalar::Bool(_) | CanonicalScalar::Int(_)
-        | CanonicalScalar::Decimal(_) | CanonicalScalar::Float(_) => [0, 0],
+        CanonicalScalar::Null
+        | CanonicalScalar::Bool(_)
+        | CanonicalScalar::Int(_)
+        | CanonicalScalar::Decimal(_)
+        | CanonicalScalar::Float(_) => [0, 0],
     };
     for bytes in sizes {
         for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
@@ -83,11 +88,18 @@ impl WriteTxn {
         vertex: VId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>> {
-        cx.with_restriction(|| self.point_governed_with_checkpoint(
-            database, ElementId::Vertex(vertex), PointReadField::Property(property), policy,
-            || cx.checkpoint(), |projection| projection.property.cloned(),
-        ))
+    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
+    {
+        cx.with_restriction(|| {
+            self.point_governed_with_checkpoint(
+                database,
+                ElementId::Vertex(vertex),
+                PointReadField::Property(property),
+                policy,
+                || cx.checkpoint(),
+                |projection| projection.property.cloned(),
+            )
+        })
     }
 
     /// Edge-property sibling with the same one-row, absence and admission law.
@@ -100,11 +112,18 @@ impl WriteTxn {
         edge: EId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>> {
-        cx.with_restriction(|| self.point_governed_with_checkpoint(
-            database, ElementId::Edge(edge), PointReadField::Property(property), policy,
-            || cx.checkpoint(), |projection| projection.property.cloned(),
-        ))
+    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
+    {
+        cx.with_restriction(|| {
+            self.point_governed_with_checkpoint(
+                database,
+                ElementId::Edge(edge),
+                PointReadField::Property(property),
+                policy,
+                || cx.checkpoint(),
+                |projection| projection.property.cloned(),
+            )
+        })
     }
 
     /// One governed label-membership row: None for an absent vertex, Some(false)
@@ -118,10 +137,16 @@ impl WriteTxn {
         label: LabelId,
         policy: fgdb_gql::GqlQueryPolicy,
     ) -> Result<fgdb_gql::GqlQueryExecution<Option<bool>>, TxnGqlError<WriteTxnError>> {
-        cx.with_restriction(|| self.point_governed_with_checkpoint(
-            database, ElementId::Vertex(vertex), PointReadField::Label(label), policy,
-            || cx.checkpoint(), |projection| projection.exists.then_some(projection.label),
-        ))
+        cx.with_restriction(|| {
+            self.point_governed_with_checkpoint(
+                database,
+                ElementId::Vertex(vertex),
+                PointReadField::Label(label),
+                policy,
+                || cx.checkpoint(),
+                |projection| projection.exists.then_some(projection.label),
+            )
+        })
     }
 
     // The delivery closure is private and only converts this borrowed result
@@ -138,10 +163,17 @@ impl WriteTxn {
     ) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<WriteTxnError, C>> {
         use crate::gql_exec::source::SourceEvent;
         use fgdb_gql::{GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError};
-        self.ensure_database(database).map_err(GqlQueryError::Source)?;
-        database.ensure_readable().map_err(WriteTxnError::from).map_err(GqlQueryError::Source)?;
-        database.snapshot.check_frontier(self.basis)
-            .map_err(WriteTxnError::from).map_err(GqlQueryError::Source)?;
+        self.ensure_database(database)
+            .map_err(GqlQueryError::Source)?;
+        database
+            .ensure_readable()
+            .map_err(WriteTxnError::from)
+            .map_err(GqlQueryError::Source)?;
+        database
+            .snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)
+            .map_err(GqlQueryError::Source)?;
         let mut usage = crate::gql_exec::AdmissionUsage::default();
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe(policy, SourceEvent::Work)?;
@@ -155,11 +187,17 @@ impl WriteTxn {
             let mut control = |event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                 usage.observe(policy, event)?;
-                if event == SourceEvent::SnapshotRecord { snapshot_records += 1; }
+                if event == SourceEvent::SnapshotRecord {
+                    snapshot_records += 1;
+                }
                 Ok(())
             };
             let projection = self.point_projection_with_control(
-                database, element, field, &mut control, &GqlQueryError::Source,
+                database,
+                element,
+                field,
+                &mut control,
+                &GqlQueryError::Source,
             )?;
             if let Some(value) = projection.property {
                 point_payload_admission(value, &mut control)?;
@@ -169,17 +207,26 @@ impl WriteTxn {
             control(SourceEvent::ScratchEntry)?;
             control(SourceEvent::ScratchEntry)?;
             self.point_reads.borrow_mut().record(element, field);
-            policy.rows.check(GqlBudgetDimension::ResultRows, 1).map_err(GqlQueryError::Rows)?;
+            policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, 1)
+                .map_err(GqlQueryError::Rows)?;
             control(SourceEvent::ScratchEntry)?;
             control(SourceEvent::Work)?;
             vec![deliver(projection)]
         };
         attempt.accepted = true;
-        usage.finish(policy, Ok(fgdb_gql::GqlQueryExecution {
-            value,
-            rows: GqlExecutionStats { snapshot_records, result_rows: 1 },
-            evaluator: GlaExecutionStats::default(),
-        }))
+        usage.finish(
+            policy,
+            Ok(fgdb_gql::GqlQueryExecution {
+                value,
+                rows: GqlExecutionStats {
+                    snapshot_records,
+                    result_rows: 1,
+                },
+                evaluator: GlaExecutionStats::default(),
+            }),
+        )
     }
 }
 

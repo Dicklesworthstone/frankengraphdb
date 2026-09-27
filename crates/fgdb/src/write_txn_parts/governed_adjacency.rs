@@ -42,7 +42,12 @@ impl WriteTxn {
     ) -> Result<fgdb_gql::GqlQueryExecution, TxnGqlError<WriteTxnError>> {
         cx.with_restriction(|| {
             self.adjacency_governed_with_checkpoint(
-                database, vertex, relation, false, policy, || cx.checkpoint(),
+                database,
+                vertex,
+                relation,
+                false,
+                policy,
+                || cx.checkpoint(),
             )
         })
     }
@@ -59,7 +64,12 @@ impl WriteTxn {
     ) -> Result<fgdb_gql::GqlQueryExecution, TxnGqlError<WriteTxnError>> {
         cx.with_restriction(|| {
             self.adjacency_governed_with_checkpoint(
-                database, vertex, relation, true, policy, || cx.checkpoint(),
+                database,
+                vertex,
+                relation,
+                true,
+                policy,
+                || cx.checkpoint(),
             )
         })
     }
@@ -86,9 +96,12 @@ impl WriteTxn {
                 match event {
                     AdjacencyReadEvent::Source(event) => usage.observe(policy, event),
                     AdjacencyReadEvent::ResultRow => {
-                        let next = result_rows.checked_add(1)
+                        let next = result_rows
+                            .checked_add(1)
                             .expect("resident result row count fits u64");
-                        policy.rows.check(GqlBudgetDimension::ResultRows, next)
+                        policy
+                            .rows
+                            .check(GqlBudgetDimension::ResultRows, next)
                             .map_err(GqlQueryError::Rows)?;
                         usage.observe(policy, AdjacencySourceEvent::Work)?;
                         result_rows = next;
@@ -98,11 +111,17 @@ impl WriteTxn {
             },
             &GqlQueryError::Source,
         )?;
-        usage.finish(policy, Ok(fgdb_gql::GqlQueryExecution {
-            value,
-            rows: GqlExecutionStats { snapshot_records, result_rows },
-            evaluator: GlaExecutionStats::default(),
-        }))
+        usage.finish(
+            policy,
+            Ok(fgdb_gql::GqlQueryExecution {
+                value,
+                rows: GqlExecutionStats {
+                    snapshot_records,
+                    result_rows,
+                },
+                evaluator: GlaExecutionStats::default(),
+            }),
+        )
     }
 
     fn adjacency_basis_controlled<V: Vfs + Clone, E>(
@@ -116,10 +135,20 @@ impl WriteTxn {
     ) -> Result<std::collections::BTreeMap<EId, VId>, E> {
         use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
         self.ensure_database(database).map_err(source_error)?;
-        database.ensure_readable().map_err(WriteTxnError::from).map_err(source_error)?;
+        database
+            .ensure_readable()
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
         let snapshot = &database.snapshot;
-        snapshot.check_frontier(self.basis).map_err(WriteTxnError::from).map_err(source_error)?;
-        let direction = if incoming { GlaDirection::Reverse } else { GlaDirection::Forward };
+        snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
+        let direction = if incoming {
+            GlaDirection::Reverse
+        } else {
+            GlaDirection::Forward
+        };
         let index = &snapshot.adjacency_index;
         let mut matching = std::collections::BTreeMap::new();
         let mut after = None;
@@ -127,19 +156,25 @@ impl WriteTxn {
             let next = index.next_incident_edge(vertex, direction, after, &mut |event| {
                 control(match event {
                     GlaExecutionEvent::ScratchEntry => AdjacencySourceEvent::ScratchEntry,
-                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => AdjacencySourceEvent::Work,
+                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                        AdjacencySourceEvent::Work
+                    }
                 })
             })?;
             let Some(eid) = next else { break };
             after = Some(eid);
             control(AdjacencySourceEvent::Work)?;
-            let Some((block, row)) = index.statement_at_controlled(
-                &snapshot.blocks, eid, self.basis, control,
-            )? else {
+            let Some((block, row)) =
+                index.statement_at_controlled(&snapshot.blocks, eid, self.basis, control)?
+            else {
                 continue;
             };
             let entry = &snapshot.blocks[block][row];
-            let (anchor, neighbour) = if incoming { (entry.dst, entry.src) } else { (entry.src, entry.dst) };
+            let (anchor, neighbour) = if incoming {
+                (entry.dst, entry.src)
+            } else {
+                (entry.src, entry.dst)
+            };
             // A historical incidence entry is a candidate, never a second truth.
             if anchor == vertex && entry.relation == relation {
                 control(AdjacencySourceEvent::SnapshotRecord)?;
@@ -166,19 +201,31 @@ impl WriteTxn {
 
         // Do not install any observation for a foreign owner or unhealthy cut.
         self.ensure_database(database).map_err(source_error)?;
-        database.ensure_readable().map_err(WriteTxnError::from).map_err(source_error)?;
-        database.snapshot.check_frontier(self.basis)
-            .map_err(WriteTxnError::from).map_err(source_error)?;
+        database
+            .ensure_readable()
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
+        database
+            .snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)
+            .map_err(source_error)?;
         control(Source(Work))?;
         let mut attempt = ProjectionReadAttempt {
-            reads: &self.point_reads, element: ElementId::Vertex(vertex), accepted: false,
+            reads: &self.point_reads,
+            element: ElementId::Vertex(vertex),
+            accepted: false,
         };
         let mut matching = self.adjacency_basis_controlled(
-            database, vertex, relation, incoming,
-            &mut |event| control(Source(event)), source_error,
+            database,
+            vertex,
+            relation,
+            incoming,
+            &mut |event| control(Source(event)),
+            source_error,
         )?;
-        let snapshot_records = u64::try_from(matching.len())
-            .expect("resident source row count fits u64");
+        let snapshot_records =
+            u64::try_from(matching.len()).expect("resident source row count fits u64");
         let mut observed_edges = BTreeSet::new();
         for eid in matching.keys() {
             control(Source(ScratchEntry))?;
@@ -191,17 +238,33 @@ impl WriteTxn {
                 for effect in &coordinate.rows {
                     control(Source(Work))?;
                     match effect {
-                        DeltaRow::CreateEdge { eid, src, relation: edge_relation, dst, .. } => {
-                            let (anchor, neighbour) = if incoming { (*dst, *src) } else { (*src, *dst) };
+                        DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation: edge_relation,
+                            dst,
+                            ..
+                        } => {
+                            let (anchor, neighbour) =
+                                if incoming { (*dst, *src) } else { (*src, *dst) };
                             if anchor == vertex && *edge_relation == relation {
-                                if !matching.contains_key(eid) { control(Source(ScratchEntry))?; }
-                                if !observed_edges.contains(eid) { control(Source(ScratchEntry))?; }
+                                if !matching.contains_key(eid) {
+                                    control(Source(ScratchEntry))?;
+                                }
+                                if !observed_edges.contains(eid) {
+                                    control(Source(ScratchEntry))?;
+                                }
                                 matching.insert(*eid, neighbour);
                                 observed_edges.insert(*eid);
                             }
                         }
-                        DeltaRow::DeleteEdge { eid, .. } => { matching.remove(eid); }
-                        DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
+                        DeltaRow::DeleteEdge { eid, .. } => {
+                            matching.remove(eid);
+                        }
+                        DeltaRow::DeleteVertex {
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
                             for eid in sorted_retired_incident_edges {
                                 control(Source(Work))?;
                                 matching.remove(eid);
@@ -227,7 +290,11 @@ impl WriteTxn {
             value.push(neighbour);
         }
         self.point_reads.borrow_mut().record_adjacency_controlled(
-            vertex, relation, incoming, observed_edges, &mut || {
+            vertex,
+            relation,
+            incoming,
+            observed_edges,
+            &mut || {
                 // Reserve a map entry plus its field slot even on warm reads.
                 // Warm witnesses never discount this invocation's admission.
                 control(Source(ScratchEntry))?;

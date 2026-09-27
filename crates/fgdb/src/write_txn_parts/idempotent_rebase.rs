@@ -11,8 +11,12 @@ struct IdempotentRebaseFootprint {
 impl IdempotentRebaseFootprint {
     fn record(&mut self, row: &PendingRow) -> Result<(), WriteTxnError> {
         let proposal = match row {
-            PendingRow::Vertex { vid, ensure: true, .. } => ElementId::Vertex(*vid),
-            PendingRow::Edge { eid, ensure: true, .. } => ElementId::Edge(*eid),
+            PendingRow::Vertex {
+                vid, ensure: true, ..
+            } => ElementId::Vertex(*vid),
+            PendingRow::Edge {
+                eid, ensure: true, ..
+            } => ElementId::Edge(*eid),
             // Reuse, do not weaken or duplicate, the existing raw-instruction
             // independence laws for every non-idempotent instruction.
             _ => return self.protected.record(row),
@@ -147,7 +151,10 @@ impl WriteTxn {
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<(), WriteTxnError> {
         let frontier = database.frontier()?;
-        let previous = self.prepared.as_ref().ok_or(WriteTxnError::NoPreparedWrite)?;
+        let previous = self
+            .prepared
+            .as_ref()
+            .ok_or(WriteTxnError::NoPreparedWrite)?;
         if !std::sync::Arc::ptr_eq(&self.handle_owner, &previous.handle_owner) {
             return Err(WriteTxnError::WrongDatabase);
         }
@@ -172,7 +179,9 @@ impl WriteTxn {
         if footprint.proposals.is_empty() {
             return Err(WriteTxnError::MixedRebaseIneligible);
         }
-        footprint.protected.protect_vertex_cascades(&previous.template, checkpoint)?;
+        footprint
+            .protected
+            .protect_vertex_cascades(&previous.template, checkpoint)?;
         if frontier != self.basis {
             self.validate_unobserved_creations(&footprint.proposals, checkpoint)
                 .map_err(mixed_rebase_error)?;
@@ -194,7 +203,10 @@ impl WriteTxn {
         // the boundary too: a row-free schema transition cannot evade the row
         // family's fail-closed check. Current ordinary templates have one
         // common graph/branch/schema binding across their relation coordinates.
-        let binding = previous.template.coordinate_entries().first()
+        let binding = previous
+            .template
+            .coordinate_entries()
+            .first()
             .ok_or(WriteTxnError::MixedRebaseIneligible)?;
         for batch in database.delta_since(self.basis)? {
             checkpoint()?;
@@ -211,9 +223,11 @@ impl WriteTxn {
                     if footprint.protected.conflicts(row, checkpoint)? {
                         return Err(WriteError::FirstCommitterWins {
                             law: "FG-LAW-FCW-01",
-                            detail: "idempotent rebase crossed a protected identity, field or lifetime"
-                                .to_owned(),
-                        }.into());
+                            detail:
+                                "idempotent rebase crossed a protected identity, field or lifetime"
+                                    .to_owned(),
+                        }
+                        .into());
                     }
                 }
             }
@@ -247,7 +261,11 @@ mod idempotent_rebase_tests {
     const WINNER: EId = EId(u128::MAX - 2);
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32])
+        DatabaseKeys::new(
+            [0xa1; 32],
+            DatabaseSecurityNamespaceId([0xa2; 32]),
+            [0xa3; 32],
+        )
     }
 
     async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
@@ -273,9 +291,11 @@ mod idempotent_rebase_tests {
     }
 
     fn assert_read_conflict(result: Result<CommitSeq, WriteTxnError>) {
-        assert!(matches!(result,
+        assert!(matches!(
+            result,
             Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                law: "FG-LAW-FCW-READ-01", ..
+                law: "FG-LAW-FCW-READ-01",
+                ..
             }))
         ));
     }
@@ -404,7 +424,9 @@ mod idempotent_rebase_tests {
             let txcx = contexts.txn();
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             seed(&mut db, &cx).await;
             let pinned = db.read_session().unwrap();
             let mut tx = db.begin(&txcx).unwrap();
@@ -412,12 +434,17 @@ mod idempotent_rebase_tests {
             let mut ordinary = db.begin(&txcx).unwrap();
             ordinary.write(&mut db, requests()).unwrap();
             let frontier = db.write(&cx, winner()).await.unwrap();
-            assert!(matches!(ordinary.commit(&mut db, &cx).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+            assert!(matches!(
+                ordinary.commit(&mut db, &cx).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ));
             let seq = tx.commit_idempotent_rebased(&mut db, &cx, 2).await.unwrap();
             assert_eq!(seq, CommitSeq(frontier.0 + 1));
             assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
-            assert_eq!(db.vertex(NEW).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(9))]);
+            assert_eq!(
+                db.vertex(NEW).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(9))]
+            );
             assert!(db.edge(PROPOSAL).unwrap().is_none());
             assert!(db.edge(WINNER).unwrap().is_some());
             assert!(pinned.vertex(NEW).unwrap().is_none());
@@ -431,9 +458,14 @@ mod idempotent_rebase_tests {
             assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
             let expected = (db.vertices().unwrap(), db.edges().unwrap());
             drop(db);
-            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
             assert_eq!(reopened.frontier().unwrap(), seq);
-            assert_eq!((reopened.vertices().unwrap(), reopened.edges().unwrap()), expected);
+            assert_eq!(
+                (reopened.vertices().unwrap(), reopened.edges().unwrap()),
+                expected
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -459,7 +491,10 @@ mod idempotent_rebase_tests {
             let edge = db.edge(PROPOSAL).unwrap().unwrap();
             assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), NEW));
             assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7))]);
-            assert_eq!(db.vertex(NEW).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(9))]);
+            assert_eq!(
+                db.vertex(NEW).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(9))]
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -509,8 +544,10 @@ mod idempotent_rebase_tests {
             let mut drift = WriteBatch::new(R);
             drift.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
             let frontier = db.write(&cx, drift).await.unwrap();
-            assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 2).await,
-                Err(WriteTxnError::MixedRebaseIneligible)));
+            assert!(matches!(
+                tx.commit_idempotent_rebased(&mut db, &cx, 2).await,
+                Err(WriteTxnError::MixedRebaseIneligible)
+            ));
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertex(NEW).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -536,11 +573,20 @@ mod idempotent_rebase_tests {
                 drift.delete_vertex(if spent { NEW } else { VId(1) });
                 let frontier = db.write(&cx, drift).await.unwrap();
                 let before = (db.vertices().unwrap(), db.edges().unwrap());
-                let error = tx.commit_idempotent_rebased(&mut db, &cx, 2).await.unwrap_err();
+                let error = tx
+                    .commit_idempotent_rebased(&mut db, &cx, 2)
+                    .await
+                    .unwrap_err();
                 if spent {
-                    assert!(matches!(error, WriteTxnError::Write(WriteError::IdentitySpent { .. })));
+                    assert!(matches!(
+                        error,
+                        WriteTxnError::Write(WriteError::IdentitySpent { .. })
+                    ));
                 } else {
-                    assert!(matches!(error, WriteTxnError::Write(WriteError::DanglingEndpoint { .. })));
+                    assert!(matches!(
+                        error,
+                        WriteTxnError::Write(WriteError::DanglingEndpoint { .. })
+                    ));
                 }
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
@@ -566,8 +612,10 @@ mod idempotent_rebase_tests {
             let before = tx.prepared.as_ref().unwrap().template.clone();
             let basis = tx.basis();
             drop(tx.commit_idempotent_rebased(&mut db, &cx, 2));
-            assert!(matches!(tx.commit_idempotent_rebased(&mut other, &cx, 2).await,
-                Err(WriteTxnError::WrongDatabase)));
+            assert!(matches!(
+                tx.commit_idempotent_rebased(&mut other, &cx, 2).await,
+                Err(WriteTxnError::WrongDatabase)
+            ));
             assert_eq!(tx.basis(), basis);
             assert_eq!(tx.prepared.as_ref().unwrap().template, before);
             assert_eq!(txcx.outstanding_obligations(), 1);
@@ -645,34 +693,54 @@ mod idempotent_rebase_tests {
             let txcx = contexts.txn();
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             mixed_seed(&mut db, &cx).await;
             let mut tx = db.begin(&txcx).unwrap();
             tx.vertex(&db, VId(3)).unwrap(); // an unrelated observation remains valid
             tx.write_ordered(&mut db, mixed_requests()).unwrap();
             let frontier = db.write(&cx, mixed_winner()).await.unwrap();
-            let seq = tx.commit_idempotent_rebased(&mut db, &cx, 64).await.unwrap();
+            let seq = tx
+                .commit_idempotent_rebased(&mut db, &cx, 64)
+                .await
+                .unwrap();
             assert_eq!(seq, CommitSeq(frontier.0 + 1));
             assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
             assert!(db.edge(PROPOSAL).unwrap().is_none());
             assert!(db.edge(WINNER).unwrap().is_some());
             assert!(db.edge(EId(10)).unwrap().is_none());
-            assert_eq!(db.edge(EId(60)).unwrap().unwrap().entry.relation, RelationId(2));
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(40)), (PropertyKeyId(2), CanonicalScalar::Int(99))]);
+            assert_eq!(
+                db.edge(EId(60)).unwrap().unwrap().entry.relation,
+                RelationId(2)
+            );
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(40)),
+                    (PropertyKeyId(2), CanonicalScalar::Int(99))
+                ]
+            );
             let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
             mixed_seed(&mut serial, &cx).await;
             serial.write(&cx, mixed_winner()).await.unwrap();
             let mut serial_tx = serial.begin(&txcx).unwrap();
-            serial_tx.write_ordered(&mut serial, mixed_requests()).unwrap();
+            serial_tx
+                .write_ordered(&mut serial, mixed_requests())
+                .unwrap();
             serial_tx.commit(&mut serial, &cx).await.unwrap();
             assert_eq!(db.vertices().unwrap(), serial.vertices().unwrap());
             assert_eq!(db.edges().unwrap(), serial.edges().unwrap());
             let expected = (db.vertices().unwrap(), db.edges().unwrap());
             drop(db);
-            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+                .await
+                .unwrap();
             assert_eq!(reopened.frontier().unwrap(), seq);
-            assert_eq!((reopened.vertices().unwrap(), reopened.edges().unwrap()), expected);
+            assert_eq!(
+                (reopened.vertices().unwrap(), reopened.edges().unwrap()),
+                expected
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -695,16 +763,28 @@ mod idempotent_rebase_tests {
                         pending.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
                         pending.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
                     }
-                    1 => { pending.compare_and_set_vertex_property(VId(1), P,
-                        Some(CanonicalScalar::Int(99)), CanonicalScalar::Int(7),
-                        crate::WriteMismatchPolicy::NoOp); }
+                    1 => {
+                        pending.compare_and_set_vertex_property(
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(99)),
+                            CanonicalScalar::Int(7),
+                            crate::WriteMismatchPolicy::NoOp,
+                        );
+                    }
                     2 => {
                         pending.set_vertex_label(VId(1), LabelId(99), true);
                         pending.set_vertex_label(VId(1), LabelId(99), false);
                     }
-                    3 => { pending.delete_edge(EId(10)); }
-                    4 => { pending.delete_vertex(VId(2)); }
-                    _ => { pending.create_vertex(VId(50), vec![], vec![]); }
+                    3 => {
+                        pending.delete_edge(EId(10));
+                    }
+                    4 => {
+                        pending.delete_vertex(VId(2));
+                    }
+                    _ => {
+                        pending.create_vertex(VId(50), vec![], vec![]);
+                    }
                 }
                 tx.write(&mut db, pending).unwrap();
                 let mut first = winner();
@@ -718,8 +798,12 @@ mod idempotent_rebase_tests {
                         first.set_vertex_label(VId(1), LabelId(99), true);
                         second.set_vertex_label(VId(1), LabelId(99), false);
                     }
-                    3 => { first.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(1))); }
-                    4 => { first.add_edge(EId(77), VId(2), VId(3), vec![]); }
+                    3 => {
+                        first.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(1)));
+                    }
+                    4 => {
+                        first.add_edge(EId(77), VId(2), VId(3), vec![]);
+                    }
                     _ => {
                         first.create_vertex(VId(50), vec![], vec![]);
                         second.delete_vertex(VId(50));
@@ -731,10 +815,16 @@ mod idempotent_rebase_tests {
                 }
                 let frontier = db.frontier().unwrap();
                 let before = (db.vertices().unwrap(), db.edges().unwrap());
-                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
-                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-01", ..
-                    }))), "case {case}");
+                assert!(
+                    matches!(
+                        tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-01",
+                            ..
+                        }))
+                    ),
+                    "case {case}"
+                );
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
                 assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
@@ -755,15 +845,21 @@ mod idempotent_rebase_tests {
                 seed(&mut db, &cx).await;
                 let mut tx = db.begin(&txcx).unwrap();
                 let mut pending = requests();
-                if delete { pending.delete_vertex(NEW); }
-                else { pending.set_vertex_property(NEW, P, Some(CanonicalScalar::Int(42))); }
+                if delete {
+                    pending.delete_vertex(NEW);
+                } else {
+                    pending.set_vertex_property(NEW, P, Some(CanonicalScalar::Int(42)));
+                }
                 tx.write(&mut db, pending).unwrap();
                 let frontier = db.write(&cx, winner()).await.unwrap();
                 let before = (db.vertices().unwrap(), db.edges().unwrap());
-                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                assert!(matches!(
+                    tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
                     Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-01", ..
-                    }))));
+                        law: "FG-LAW-FCW-01",
+                        ..
+                    }))
+                ));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
                 assert_eq!(txcx.outstanding_obligations(), 0);
@@ -789,8 +885,10 @@ mod idempotent_rebase_tests {
             let mut drift = WriteBatch::new(R);
             drift.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
             let frontier = db.write(&cx, drift).await.unwrap();
-            assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
-                Err(WriteTxnError::MixedRebaseIneligible)));
+            assert!(matches!(
+                tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                Err(WriteTxnError::MixedRebaseIneligible)
+            ));
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertex(NEW).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -818,18 +916,29 @@ mod idempotent_rebase_tests {
             tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
                 count += 1;
                 Ok(())
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(count > 10);
             for stop in 1..=count {
                 let (mut db, mut tx) = drifted(&cx, &txcx).await;
                 let frontier = db.frontier().unwrap();
                 let before = (db.vertices().unwrap(), db.edges().unwrap());
                 let mut seen = 0;
-                let result = tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
-                    seen += 1;
-                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
-                }).await;
-                assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)), "stop {stop}");
+                let result = tx
+                    .commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(WriteTxnError::NoPreparedWrite)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .await;
+                assert!(
+                    matches!(result, Err(WriteTxnError::NoPreparedWrite)),
+                    "stop {stop}"
+                );
                 assert_eq!(seen, stop);
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!(db.delta_since(frontier).unwrap().count(), 0);
@@ -854,18 +963,28 @@ mod idempotent_rebase_tests {
             for crash in [CrashPoint::BeforeCapsule, CrashPoint::AfterMarkerBeforeD2] {
                 let (mut db, mut tx) = drifted(&cx, &txcx).await;
                 let frontier = db.frontier().unwrap();
-                let result = tx.commit_idempotent_rebased_controlled(
-                    &mut db, &cx, 2, Some(crash), || Ok(()),
-                ).await;
+                let result = tx
+                    .commit_idempotent_rebased_controlled(&mut db, &cx, 2, Some(crash), || Ok(()))
+                    .await;
                 if crash == CrashPoint::BeforeCapsule {
-                    assert!(matches!(result, Err(WriteTxnError::Write(WriteError::Commit(_)))));
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::Commit(_)))
+                    ));
                     assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
                 } else {
-                    assert!(matches!(result,
-                        Err(WriteTxnError::Write(WriteError::CommitOutcomeUnknown { .. }))));
-                    assert_eq!(tx.state(), EmbeddedTxnState::CommitOutcomeUnknown {
-                        published_frontier: frontier,
-                    });
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(
+                            WriteError::CommitOutcomeUnknown { .. }
+                        ))
+                    ));
+                    assert_eq!(
+                        tx.state(),
+                        EmbeddedTxnState::CommitOutcomeUnknown {
+                            published_frontier: frontier,
+                        }
+                    );
                 }
                 assert!(tx.prepared.is_none());
                 assert!(tx.pin.is_none());
@@ -888,23 +1007,27 @@ mod idempotent_rebase_tests {
             tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
                 count += 1;
                 Ok(())
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let (mut db, mut tx) = drifted(&cx, &txcx).await;
             let frontier = db.frontier().unwrap();
             let mut seen = 0;
-            let mut future = Box::pin(tx.commit_idempotent_rebased_controlled(
-                &mut db, &cx, 2, None, || {
-                    seen += 1;
-                    assert_ne!(seen, count, "injected final prepublication unwind");
-                    Ok(())
-                },
-            ));
+            let mut future =
+                Box::pin(
+                    tx.commit_idempotent_rebased_controlled(&mut db, &cx, 2, None, || {
+                        seen += 1;
+                        assert_ne!(seen, count, "injected final prepublication unwind");
+                        Ok(())
+                    }),
+                );
             let panicked = std::future::poll_fn(|task| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     future.as_mut().poll(task)
                 }));
                 Poll::Ready(result.is_err())
-            }).await;
+            })
+            .await;
             drop(future);
             assert!(panicked);
             assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
@@ -932,11 +1055,17 @@ mod idempotent_rebase_tests {
                     pending.create_vertex(NEW, vec![], vec![]);
                 }
                 tx.write(&mut db, pending).unwrap();
-                if case == 0 { tx.savepoint(&db, "keep").unwrap(); }
-                if case == 1 { tx.program_multi_relation = true; }
+                if case == 0 {
+                    tx.savepoint(&db, "keep").unwrap();
+                }
+                if case == 1 {
+                    tx.program_multi_relation = true;
+                }
                 let frontier = db.frontier().unwrap();
-                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
-                    Err(WriteTxnError::MixedRebaseIneligible)));
+                assert!(matches!(
+                    tx.commit_idempotent_rebased(&mut db, &cx, 64).await,
+                    Err(WriteTxnError::MixedRebaseIneligible)
+                ));
                 assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.vertex(NEW).unwrap().is_none());
@@ -959,23 +1088,39 @@ mod idempotent_rebase_tests {
                 let mut pending = WriteBatch::new(R);
                 let mut drift = WriteBatch::new(R);
                 if case < 2 {
-                    pending.ensure_edge_by_triple(PROPOSAL, VId(1), VId(2),
-                        vec![(P, CanonicalScalar::Int(7))]);
-                    drift.add_edge(WINNER, VId(1), VId(2),
-                        vec![(P, CanonicalScalar::Int(9))]);
+                    pending.ensure_edge_by_triple(
+                        PROPOSAL,
+                        VId(1),
+                        VId(2),
+                        vec![(P, CanonicalScalar::Int(7))],
+                    );
+                    drift.add_edge(WINNER, VId(1), VId(2), vec![(P, CanonicalScalar::Int(9))]);
                 } else {
-                    pending.ensure_vertex(NEW, vec![LabelId(7)],
-                        vec![(P, CanonicalScalar::Int(7))]);
+                    pending.ensure_vertex(
+                        NEW,
+                        vec![LabelId(7)],
+                        vec![(P, CanonicalScalar::Int(7))],
+                    );
                     drift.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
                 }
                 tx.write(&mut db, pending).unwrap();
                 match case {
-                    0 => assert_eq!(tx.edge_property(&db, PROPOSAL, P).unwrap(),
-                        Some(CanonicalScalar::Int(7))),
-                    1 => assert_eq!(tx.edge_property(&db, PROPOSAL, PropertyKeyId(99)).unwrap(), None),
-                    2 => assert_eq!(tx.vertex_property(&db, NEW, P).unwrap(),
-                        Some(CanonicalScalar::Int(7))),
-                    _ => assert_eq!(tx.vertex_has_label(&db, NEW, LabelId(7)).unwrap(), Some(true)),
+                    0 => assert_eq!(
+                        tx.edge_property(&db, PROPOSAL, P).unwrap(),
+                        Some(CanonicalScalar::Int(7))
+                    ),
+                    1 => assert_eq!(
+                        tx.edge_property(&db, PROPOSAL, PropertyKeyId(99)).unwrap(),
+                        None
+                    ),
+                    2 => assert_eq!(
+                        tx.vertex_property(&db, NEW, P).unwrap(),
+                        Some(CanonicalScalar::Int(7))
+                    ),
+                    _ => assert_eq!(
+                        tx.vertex_has_label(&db, NEW, LabelId(7)).unwrap(),
+                        Some(true)
+                    ),
                 }
                 assert!(tx.read_set.borrow().is_empty());
                 assert!(!tx.point_reads.borrow().is_empty());
@@ -983,11 +1128,16 @@ mod idempotent_rebase_tests {
                 // A distinct matching edge never writes the proposed EId.
                 // Prove this reaches the replay observation check rather than
                 // accidentally succeeding because ordinary validation refused.
-                assert!(tx.transaction_conflict_in(&db, ConflictScope::Reads,
-                    &mut || Ok(())).unwrap().is_none());
+                assert!(
+                    tx.transaction_conflict_in(&db, ConflictScope::Reads, &mut || Ok(()))
+                        .unwrap()
+                        .is_none()
+                );
                 let before = (db.vertices().unwrap(), db.edges().unwrap());
-                assert!(matches!(tx.commit_idempotent_rebased(&mut db, &cx, 1).await,
-                    Err(WriteTxnError::MixedRebaseIneligible)));
+                assert!(matches!(
+                    tx.commit_idempotent_rebased(&mut db, &cx, 1).await,
+                    Err(WriteTxnError::MixedRebaseIneligible)
+                ));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), before);
                 assert!(db.edge(PROPOSAL).unwrap().is_none());

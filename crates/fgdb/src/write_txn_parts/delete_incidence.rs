@@ -31,18 +31,33 @@ impl<Checkpoint> DeleteAdmission<Checkpoint> {
             self.policy
                 .query
                 .rows
-                .check(GqlBudgetDimension::SnapshotRecords, next.selection.snapshot_records)
+                .check(
+                    GqlBudgetDimension::SnapshotRecords,
+                    next.selection.snapshot_records,
+                )
                 .map_err(GqlQueryError::Rows)?;
         }
         let work = u128::from(next.evaluator.work_units) + 1;
         let scratch = u128::from(next.evaluator.scratch_entries)
             + u128::from(event == DeleteSourceEvent::ScratchEntry);
         for (observed, limit, dimension) in [
-            (work, self.policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (scratch, self.policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                work,
+                self.policy.query.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                self.policy.query.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > u128::from(limit) {
-                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
             }
         }
         next.evaluator.work_units = work as u64;
@@ -67,14 +82,24 @@ impl WriteTxn {
         use fgdb_gql::{GqlQueryError, GraphDeleteError};
         let source = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
         self.ensure_database(database).map_err(source)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
         if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
         }
         if targets.is_empty() && edge_targets.is_empty() {
             return Ok((stats, targets, edge_targets));
         }
-        let mut admission = DeleteAdmission { policy, stats, checkpoint };
+        let mut admission = DeleteAdmission {
+            policy,
+            stats,
+            checkpoint,
+        };
         self.prove_delete_incidence(database, &targets, &edge_targets, &mut |event| {
             admission.observe(event)
         })?;
@@ -108,10 +133,18 @@ impl WriteTxn {
         use std::collections::{BTreeMap, BTreeSet};
         let source = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
         self.ensure_database(database).map_err(source)?;
-        database.ensure_readable().map_err(WriteTxnError::from).map_err(source)?;
-        database.snapshot.check_frontier(self.basis)
-            .map_err(WriteTxnError::from).map_err(source)?;
-        let Some(&anchor) = targets.first() else { return Ok(()); };
+        database
+            .ensure_readable()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
+        database
+            .snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
+        let Some(&anchor) = targets.first() else {
+            return Ok(());
+        };
         // Health/ownership and cancellation before traversal reveal no graph
         // content. Once traversal starts, even a refused budget can reveal it.
         event(DeleteSourceEvent::Work)?;
@@ -128,8 +161,8 @@ impl WriteTxn {
             event(DeleteSourceEvent::ScratchEntry)?;
             self.read_set.borrow_mut().insert(ElementId::Vertex(vertex));
         }
-        let touches = |src, dst| targets.binary_search(&src).is_ok()
-            || targets.binary_search(&dst).is_ok();
+        let touches =
+            |src, dst| targets.binary_search(&src).is_ok() || targets.binary_search(&dst).is_ok();
         let incident = || GqlQueryError::Source(GraphDeleteError::IncidentRelationships);
         // Only net topology edits are owned. Do not copy edge/vertex properties,
         // replay raw ENSURE/CAS instructions, or clone the durable edge map.
@@ -140,11 +173,12 @@ impl WriteTxn {
                 for effect in &coordinate.rows {
                     event(DeleteSourceEvent::Work)?;
                     let (eid, value) = match effect {
-                        DeltaRow::CreateEdge { eid, src, dst, .. } => {
-                            (*eid, Some((*src, *dst)))
-                        }
+                        DeltaRow::CreateEdge { eid, src, dst, .. } => (*eid, Some((*src, *dst))),
                         DeltaRow::DeleteEdge { eid, .. } => (*eid, None),
-                        DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
+                        DeltaRow::DeleteVertex {
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
                             for &eid in sorted_retired_incident_edges {
                                 event(DeleteSourceEvent::ScratchEntry)?;
                                 overlay.insert(eid, None);
@@ -164,17 +198,22 @@ impl WriteTxn {
         for &vertex in targets {
             event(DeleteSourceEvent::Work)?;
             let mut after = None;
-            while let Some(eid) = index.next_incident_edge(
-                vertex, GlaDirection::Undirected, after, &mut |kind| event(match kind {
-                    GlaExecutionEvent::ScratchEntry => DeleteSourceEvent::ScratchEntry,
-                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => DeleteSourceEvent::Work,
-                }),
-            )? {
+            while let Some(eid) =
+                index.next_incident_edge(vertex, GlaDirection::Undirected, after, &mut |kind| {
+                    event(match kind {
+                        GlaExecutionEvent::ScratchEntry => DeleteSourceEvent::ScratchEntry,
+                        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                            DeleteSourceEvent::Work
+                        }
+                    })
+                })?
+            {
                 // Strict successor handles EId(0) and EId(u128::MAX) without
                 // arithmetic. Historical candidates are never visible rows.
                 after = Some(eid);
                 event(DeleteSourceEvent::Work)?;
-                let Some((block, row)) = index.statement_at(&snapshot.blocks, eid, self.basis) else {
+                let Some((block, row)) = index.statement_at(&snapshot.blocks, eid, self.basis)
+                else {
                     continue;
                 };
                 let edge = &snapshot.blocks[block][row];
@@ -188,7 +227,10 @@ impl WriteTxn {
                 // Retain even a staged tombstone: rollback cannot erase the
                 // proof's observation of the original edge or its lifetime.
                 self.read_set.borrow_mut().insert(ElementId::Edge(eid));
-                let final_edge = overlay.get(&eid).copied().unwrap_or(Some((edge.src, edge.dst)));
+                let final_edge = overlay
+                    .get(&eid)
+                    .copied()
+                    .unwrap_or(Some((edge.src, edge.dst)));
                 if final_edge.is_some_and(|(src, dst)| touches(src, dst))
                     && edge_targets.binary_search(&eid).is_err()
                 {

@@ -37,13 +37,10 @@ impl PointReads {
         incoming: bool,
         edges: impl IntoIterator<Item = EId>,
     ) {
-        let result = self.record_adjacency_controlled(
-            vertex,
-            relation,
-            incoming,
-            edges,
-            &mut || Ok::<(), core::convert::Infallible>(()),
-        );
+        let result =
+            self.record_adjacency_controlled(vertex, relation, incoming, edges, &mut || {
+                Ok::<(), core::convert::Infallible>(())
+            });
         match result {
             Ok(()) => {}
             Err(never) => match never {},
