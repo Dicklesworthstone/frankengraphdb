@@ -665,3 +665,266 @@ fn standalone_bad_properties_fail_even_with_an_empty_database_before_allocation(
     assert!(result.intents().is_empty());
     assert_eq!(result.stats().selection.result_rows, 0);
 }
+
+#[test]
+fn unwind_creation_is_the_native_relation_with_ordered_duplicate_occurrences() {
+    use fgdb_gql::{GqlScalarParameter, GraphMutationValue, GraphSetValue, PreparedGraphSet};
+    let query = prepare("UNWIND [3,1,3] AS x CREATE (:Copy {p:x})");
+    let input = PreparedGraphSet::singleton()
+        .unwind(
+            "x".to_owned(),
+            GraphSetValue::List(
+                [3, 1, 3]
+                    .into_iter()
+                    .map(|value| {
+                        GraphSetValue::Literal(
+                            GqlScalarParameter::new(CanonicalScalar::Int(value)).unwrap(),
+                        )
+                    })
+                    .collect(),
+            ),
+        )
+        .unwrap();
+    let expected = PreparedGraphInsert::prepare_relation(
+        input,
+        R,
+        vec![GraphInsertVertex {
+            labels: vec![COPY],
+            properties: vec![(P, GraphMutationValue::Column(0))],
+        }],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(query.canonical_bytes(), expected.canonical_bytes());
+    assert!(!query.is_standalone());
+    assert!(!query.requires_read());
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| panic!("literal UNWIND must never access the graph"),
+        identity,
+        || Ok(()),
+    );
+    let batch = result.unwrap();
+    assert_eq!(batch.stats().selection.snapshot_records, 0);
+    assert_eq!(batch.stats().selection.result_rows, 3);
+    assert_eq!(
+        batch.intents(),
+        [3, 1, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(row, value)| {
+                GraphInsertIntent::Vertex {
+                    vertex: VId(100 + row as u128 * 16),
+                    labels: vec![COPY],
+                    properties: vec![(P, CanonicalScalar::Int(value))],
+                }
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        query.canonical_bytes(),
+        prepare("UNWIND [3,1,3] AS x INSERT (:Copy {p:x})").canonical_bytes()
+    );
+}
+
+#[test]
+fn multiple_unwinds_feed_computed_fields_and_row_local_creation_chains() {
+    let query = prepare(
+        "UNWIND [[3,1],[2]] AS xs UNWIND xs AS x \
+        CREATE (a:Copy {p:x,q:CASE WHEN x=1 THEN 9 ELSE x*2 END})\
+        -[:R {p:x+10}]->(b {p:x-1}),(b)-[:S]->(a)",
+    );
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| panic!("nested UNWIND must never access the graph"),
+        identity,
+        || Ok(()),
+    );
+    let batch = result.unwrap();
+    assert_eq!(
+        (batch.stats().created_vertices, batch.stats().created_edges),
+        (6, 6)
+    );
+    let mut expected = Vec::new();
+    for (row, value) in [3, 1, 2].into_iter().enumerate() {
+        let a = VId(100 + row as u128 * 16);
+        let b = VId(a.0 + 1);
+        expected.extend([
+            GraphInsertIntent::Vertex {
+                vertex: a,
+                labels: vec![COPY],
+                properties: vec![
+                    (P, CanonicalScalar::Int(value)),
+                    (
+                        Q,
+                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }),
+                    ),
+                ],
+            },
+            GraphInsertIntent::Vertex {
+                vertex: b,
+                labels: vec![],
+                properties: vec![(P, CanonicalScalar::Int(value - 1))],
+            },
+            GraphInsertIntent::Edge {
+                edge: EId(1_000 + row as u128 * 16),
+                relation: R,
+                source: a,
+                destination: b,
+                properties: vec![(P, CanonicalScalar::Int(value + 10))],
+            },
+            GraphInsertIntent::Edge {
+                edge: EId(1_001 + row as u128 * 16),
+                relation: RelationId(2),
+                source: b,
+                destination: a,
+                properties: vec![],
+            },
+        ]);
+    }
+    assert_eq!(batch.intents(), expected);
+}
+
+#[test]
+fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
+    use fgdb_gql::algebra::GraphValue;
+    let text = "UNWIND $items AS x CREATE (:Copy {p:x,q:$offset+x})";
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertText::prepare(text, R, |kind, name| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert_eq!(calls.get(), 3);
+    assert_eq!(template.parameter_schema()[0].name, "items");
+    assert_eq!(
+        template.parameter_schema()[0].parameter_type,
+        GqlParameterType::List
+    );
+    let args = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap()
+        .with_int64("offset", 2)
+        .unwrap();
+    let query = template.bind_parameters(&args).unwrap();
+    assert_eq!(
+        query.canonical_bytes(),
+        template.bind_parameters(&args).unwrap().canonical_bytes()
+    );
+    assert_eq!(calls.get(), 3);
+    let batch = run(&query, &[], &[], &Props::new()).unwrap();
+    assert_eq!(
+        batch.intents(),
+        &[
+            GraphInsertIntent::Vertex {
+                vertex: VId(100),
+                labels: vec![COPY],
+                properties: vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(9))]
+            },
+            GraphInsertIntent::Vertex {
+                vertex: VId(116),
+                labels: vec![COPY],
+                properties: vec![(P, CanonicalScalar::Null), (Q, CanonicalScalar::Null)]
+            },
+        ]
+    );
+    for text in [
+        "UNWIND [] AS x CREATE (:Copy {p:1/0})",
+        "UNWIND NULL AS x CREATE (:Copy {p:1/0})",
+        "UNWIND [1,2] AS x UNWIND [] AS y CREATE (:Copy {p:x})",
+    ] {
+        let query = prepare(text);
+        let result: ResultOf = query.execute_governed(
+            policy(),
+            |_, _| panic!("no graph source"),
+            |_| panic!("no identities for an empty relation"),
+            || Ok(()),
+        );
+        let batch = result.unwrap();
+        assert!(batch.intents().is_empty());
+        assert_eq!(batch.stats().selection.result_rows, 0);
+    }
+    let missing = template.bind_parameters(&GqlParameters::new()).unwrap_err();
+    assert_eq!(missing.offset, text.find('$').unwrap());
+    assert!(matches!(
+        missing.kind,
+        GraphInsertTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter)
+    ));
+    let wrong = GqlParameters::new()
+        .with_int64("items", 1)
+        .unwrap()
+        .with_int64("offset", 1)
+        .unwrap();
+    assert!(matches!(
+        template.bind_parameters(&wrong).unwrap_err().kind,
+        GraphInsertTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })
+    ));
+    let extra = args.with_int64("extra", 1).unwrap();
+    assert_eq!(
+        template.bind_parameters(&extra).unwrap_err().offset,
+        text.len()
+    );
+}
+
+#[test]
+fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() {
+    for text in [
+        "UNWIND [1] AS x UNWIND [2] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1] AS x CREATE (x:Copy)",
+        "UNWIND [1] AS x CREATE (:Copy {p:y})",
+        "UNWIND [1] AS x CREATE (:Copy {p:x.name})",
+        "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
+        "UNWIND $items AS x CREATE (:Copy {p:$items})",
+        "UNWIND [1] AS x MATCH (n) CREATE (:Copy {p:x})",
+        "UNWIND [1] AS x CREATE (n:Copy {p:x}) RETURN n",
+        "UNWIND [1] AS x MERGE (:Copy {p:x})",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertText::prepare(text, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphInsertText::prepare_with_parameter_types(
+            "UNWIND [1] AS x CREATE (:Copy {p:x})",
+            R,
+            &[("unused", GqlParameterType::Int64)],
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn every_unwind_property_is_validated_before_the_first_identity() {
+    for text in [
+        "UNWIND [2,0] AS x CREATE (:Copy {p:10/x})",
+        "UNWIND [1,[2]] AS x CREATE (:Copy {p:x})",
+    ] {
+        let query = prepare(text);
+        let result: ResultOf = query.execute_governed(
+            policy(),
+            |_, _| panic!("no graph source"),
+            |_| panic!("late bad values must prevent all allocation"),
+            || Ok(()),
+        );
+        assert!(result.is_err(), "{text}");
+    }
+}

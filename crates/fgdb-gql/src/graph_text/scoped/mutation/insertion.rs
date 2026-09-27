@@ -11,8 +11,8 @@ use crate::insertion_text::{
     GraphInsertTextError, GraphInsertTextErrorKind, InsertEdgeTemplate, InsertTextInput,
     InsertVertexTemplate, PreparedGraphInsertText,
 };
-use crate::set_text::ReadValueTemplate;
-use crate::{GraphIntegerExpression, GraphIntegerOp};
+use crate::set_text::{BoundSetTextInput, ReadStageTemplate, ReadValueTemplate};
+use crate::{GraphIntegerExpression, GraphIntegerOp, GraphSetColumnType, PreparedGraphSet};
 
 type ParsedFields<'a> = Vec<(Name<'a>, ReadValueTemplate)>;
 struct NewVertex<'a> {
@@ -43,6 +43,24 @@ fn expected(at: usize, message: &'static str) -> GraphInsertTextError {
 }
 
 impl<'a> Parser<'a> {
+    /// Parse the ordinary source-free UNWIND stages without evaluating them.
+    /// Script dispatch uses this same native grammar to find CREATE/INSERT.
+    pub(super) fn insertion_unwind_prefix(
+        &mut self,
+    ) -> Result<
+        (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>),
+        crate::GraphSetTextError,
+    > {
+        let mut stages = Vec::new();
+        let mut schema = Vec::new();
+        while self.is_word("UNWIND") {
+            let at = self.current.at;
+            self.advance()?;
+            stages.push(self.unwind_stage(&mut schema, at)?);
+        }
+        Ok((stages, schema))
+    }
+
     fn insertion_field_capacity(&self, fields: &mut usize) -> Result<(), GraphInsertTextError> {
         if *fields >= MAX_GRAPH_INSERT_FIELDS {
             return Err(insertion_build(
@@ -74,6 +92,7 @@ impl<'a> Parser<'a> {
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         fields: &mut usize,
+        row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<ParsedFields<'a>, GraphInsertTextError> {
         let mut properties: ParsedFields<'a> = Vec::new();
         if !self.take(b'{')? {
@@ -95,16 +114,37 @@ impl<'a> Parser<'a> {
             }
             self.punct(b':', ":")?;
             let at = self.current.at;
-            let value = match self.mutation_expression(inputs)? {
-                Operand::Column(column) => ReadValueTemplate::Column(column),
-                Operand::Literal(value) => ReadValueTemplate::Literal(value),
-                Operand::Number(Number::Literal(value)) => {
-                    ReadValueTemplate::Literal(scalar(value, at)?)
+            let value = if let Some(schema) = row_schema {
+                let value = self.read_row_value(schema, 0)?;
+                let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
+                if !matches!(
+                    value.column_type(&types, &self.syntax.parameters),
+                    GraphSetColumnType::Scalar | GraphSetColumnType::Any
+                ) {
+                    return Err(expected(at, "scalar CREATE property expression"));
                 }
-                Operand::Number(Number::Parameter(index)) => {
-                    ReadValueTemplate::Parameter { index, at }
+                if matches!(
+                    value,
+                    ReadValueTemplate::List(_)
+                        | ReadValueTemplate::Index { .. }
+                        | ReadValueTemplate::Size(_)
+                        | ReadValueTemplate::In { .. }
+                ) {
+                    return Err(expected(at, "scalar CREATE property expression"));
                 }
-                Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
+                value
+            } else {
+                match self.mutation_expression(inputs)? {
+                    Operand::Column(column) => ReadValueTemplate::Column(column),
+                    Operand::Literal(value) => ReadValueTemplate::Literal(value),
+                    Operand::Number(Number::Literal(value)) => {
+                        ReadValueTemplate::Literal(scalar(value, at)?)
+                    }
+                    Operand::Number(Number::Parameter(index)) => {
+                        ReadValueTemplate::Parameter { index, at }
+                    }
+                    Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
+                }
             };
             properties.push((key, value));
             if self.take(b'}')? {
@@ -123,6 +163,7 @@ impl<'a> Parser<'a> {
         parsed: &mut InsertionSyntax<'a>,
         fields: &mut usize,
         pending_edges: usize,
+        row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<GraphInsertEndpoint, GraphInsertTextError> {
         self.punct(b'(', "(")?;
         let at = self.current.at;
@@ -132,6 +173,14 @@ impl<'a> Parser<'a> {
             None
         };
         let existing = if let Some(name) = name {
+            if row_schema
+                .is_some_and(|schema| schema.iter().any(|(alias, _)| alias.text == name.text))
+            {
+                return Err(expected(
+                    name.at,
+                    "new CREATE vertex name, not a UNWIND row alias",
+                ));
+            }
             if self
                 .syntax
                 .variables
@@ -177,7 +226,7 @@ impl<'a> Parser<'a> {
             }
             labels.push(label);
         }
-        let properties = self.insertion_properties(&mut parsed.projections, fields)?;
+        let properties = self.insertion_properties(&mut parsed.projections, fields, row_schema)?;
         self.punct(b')', ")")?;
         let vertex = parsed.vertices.len();
         parsed.vertices.push(NewVertex {
@@ -188,7 +237,10 @@ impl<'a> Parser<'a> {
         Ok(GraphInsertEndpoint::CreatedVertex(vertex))
     }
 
-    fn insertion_clauses(&mut self) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
+    fn insertion_clauses(
+        &mut self,
+        row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
         let create_at = self.current.at;
         if !self.take_word("INSERT")? {
             self.word("CREATE")?;
@@ -200,7 +252,7 @@ impl<'a> Parser<'a> {
         };
         let mut fields = 0;
         loop {
-            let mut left = self.insertion_node(&mut parsed, &mut fields, 0)?;
+            let mut left = self.insertion_node(&mut parsed, &mut fields, 0, row_schema)?;
             while self.is_punct(b'-') || self.is_punct(b'<') {
                 self.insertion_declaration_capacity(parsed.vertices.len() + parsed.edges.len())?;
                 let incoming = self.take(b'<')?;
@@ -208,7 +260,8 @@ impl<'a> Parser<'a> {
                 self.punct(b'[', "[")?;
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
-                let properties = self.insertion_properties(&mut parsed.projections, &mut fields)?;
+                let properties =
+                    self.insertion_properties(&mut parsed.projections, &mut fields, row_schema)?;
                 self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
                 let outgoing = self.take(b'>')?;
@@ -217,7 +270,7 @@ impl<'a> Parser<'a> {
                 }
                 // Reserve this not-yet-pushed edge while the right node may
                 // admit another vertex. A chain cannot step past the total cap.
-                let right = self.insertion_node(&mut parsed, &mut fields, 1)?;
+                let right = self.insertion_node(&mut parsed, &mut fields, 1, row_schema)?;
                 let (source, destination) = if incoming {
                     (right, left)
                 } else {
@@ -325,6 +378,24 @@ fn bind_fields(
     Ok(properties)
 }
 
+// These values compile the original parameterized operator's shape only.
+// They never evaluate an UNWIND list or allocate an identity.
+fn shape_arguments(parameters: &[GqlParameterSpec]) -> Vec<GqlParameterValue> {
+    parameters
+        .iter()
+        .map(|spec| match spec.parameter_type {
+            GqlParameterType::Int64 => GqlParameterValue::Int64(0),
+            GqlParameterType::UInt64 => GqlParameterValue::UInt64(0),
+            GqlParameterType::Scalar(_) => GqlParameterValue::Scalar(
+                GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
+            ),
+            GqlParameterType::List => GqlParameterValue::List(
+                crate::GqlListParameter::new(Vec::new()).expect("bounded empty list"),
+            ),
+        })
+        .collect()
+}
+
 impl PreparedGraphInsertText {
     /// Prepare INSERT (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
     /// The openCypher CREATE spelling lowers to the identical insertion program.
@@ -354,12 +425,52 @@ impl PreparedGraphInsertText {
     ) -> Result<Self, GraphInsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let matched = parser.is_word("MATCH");
+        let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         if matched {
             parser.parse_match_prefix()?;
         }
         let at = parser.current.at;
-        let parsed = parser.insertion_clauses()?;
+        let parsed =
+            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()))?;
         let syntax = parser.syntax;
+        let relational = if leading.is_empty() {
+            None
+        } else {
+            let input = BoundSetTextInput {
+                selection: None,
+                parameters: syntax.parameters.clone(),
+                parameter_offsets: syntax.parameter_offsets.clone(),
+                return_at: statement.len(),
+                projection: None,
+                quantifier: crate::GraphSetQuantifier::All,
+                pipeline: leading,
+                singleton: true,
+                leading: Vec::new(),
+                correlations: Vec::new(),
+            };
+            // Compile all source and property expression shapes before any
+            // catalog callback, including statically unreachable empty lists.
+            let values = shape_arguments(&syntax.parameters);
+            let shape = input.bind_values(&values)?;
+            shape.check_parent_depth().map_err(|kind| {
+                insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
+            })?;
+            for (_, value) in parsed
+                .vertices
+                .iter()
+                .flat_map(|v| &v.properties)
+                .chain(parsed.edges.iter().flat_map(|e| &e.properties))
+            {
+                let value = return_projection::bind_read_value(value, &values)?;
+                crate::GraphSetProjection::admit_output(&value, shape.column_types(), 0).map_err(
+                    |kind| crate::GraphSetTextError {
+                        offset: at,
+                        kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
+                    },
+                )?;
+            }
+            Some(input)
+        };
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -465,6 +576,15 @@ impl PreparedGraphInsertText {
                 reverse_catalog: None,
             };
             (InsertTextInput::Match(selection), Some(shape))
+        } else if let Some(input) = relational {
+            debug_assert!(parsed.projections.is_empty());
+            (
+                InsertTextInput::Relation {
+                    statement: statement.to_owned(),
+                    input,
+                },
+                None,
+            )
         } else {
             debug_assert!(parsed.projections.is_empty());
             (
@@ -493,6 +613,7 @@ impl PreparedGraphInsertText {
     pub fn statement(&self) -> &str {
         match &self.input {
             InsertTextInput::Match(selection) => selection.statement(),
+            InsertTextInput::Relation { statement, .. } => statement,
             InsertTextInput::Unit { statement, .. } => statement,
         }
     }
@@ -500,6 +621,7 @@ impl PreparedGraphInsertText {
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         match &self.input {
             InsertTextInput::Match(selection) => selection.parameter_schema(),
+            InsertTextInput::Relation { input, .. } => input.parameter_schema(),
             InsertTextInput::Unit { parameters, .. } => parameters,
         }
     }
@@ -512,6 +634,10 @@ impl PreparedGraphInsertText {
             InsertTextInput::Match(selection) => {
                 let values = selection.checked_arguments(arguments)?;
                 self.instantiate(Some(selection.bind_values(&values)?), Some(&values))
+            }
+            InsertTextInput::Relation { input, .. } => {
+                let values = input.checked_arguments(arguments)?;
+                self.instantiate(None, Some(&values))
             }
             InsertTextInput::Unit {
                 statement,
@@ -569,6 +695,19 @@ impl PreparedGraphInsertText {
                 relation: edge.relation,
                 properties: bind_fields(&edge.properties, values)?,
             });
+        }
+        if let InsertTextInput::Relation { input, .. } = &self.input {
+            let shape;
+            let values = match values {
+                Some(values) => values,
+                None => {
+                    shape = shape_arguments(input.parameter_schema());
+                    &shape
+                }
+            };
+            let relation: PreparedGraphSet = input.bind_values(values)?;
+            return PreparedGraphInsert::prepare_relation(relation, self.relation, vertices, edges)
+                .map_err(|kind| insertion_build(self.create_at, kind));
         }
         match selection {
             Some(selection) => {

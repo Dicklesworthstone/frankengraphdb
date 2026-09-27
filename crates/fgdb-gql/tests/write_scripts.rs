@@ -449,3 +449,63 @@ fn late_batch_argument_failure_retains_record_statement_and_original_byte_offset
     assert_eq!(source.statement, Some(1));
     assert_eq!(source.offset, text.find('$').unwrap());
 }
+
+#[test]
+fn unwind_insert_scripts_preserve_native_dispatch_parameters_and_literal_keywords() {
+    use fgdb_gql::algebra::GraphValue;
+    let statements = [
+        "UNWIND ['CREATE; UNWIND', 'MERGE'] AS value CREATE (:Person {p:value})",
+        "UNWIND $items AS x UNWIND [x,x+1] AS y INSERT (:Person {p:y,q:$step})",
+    ];
+    let text = statements.join(";");
+    let calls = RefCell::new(BTreeSet::new());
+    let script = PreparedGraphWriteScript::prepare(&text, R, |kind, name| {
+        assert!(calls.borrow_mut().insert((kind, name.to_owned())));
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert!(!script.requires_read());
+    assert_eq!(
+        script.parameter_schema()[0].parameter_type,
+        GqlParameterType::List
+    );
+    let args = GqlParameters::new()
+        .with_list("items", vec![GraphValue::Scalar(CanonicalScalar::Int(3))])
+        .unwrap()
+        .with_int64("step", 7)
+        .unwrap();
+    let local = [GqlParameters::new(), args.clone()];
+    let expected = PreparedGraphWriteProgram::prepare(
+        statements
+            .iter()
+            .zip(local)
+            .map(|(statement, args)| {
+                PreparedGraphInsertText::prepare(statement, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&args)
+                    .unwrap()
+                    .into()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let actual = script.bind_parameters(&args).unwrap();
+    assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
+    assert_eq!(calls.borrow().len(), 3);
+    for bad in [
+        "UNWIND [1] AS x RETURN x",
+        "UNWIND [1] AS x MERGE (:Person {p:x})",
+        "UNWIND [1] AS x MATCH (n) CREATE (:Person {p:x})",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphWriteScript::prepare(bad, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{bad}"
+        );
+        assert_eq!(calls.get(), 0);
+    }
+}

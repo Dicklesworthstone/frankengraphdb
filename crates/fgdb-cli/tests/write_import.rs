@@ -191,6 +191,83 @@ fn typed_writes_and_csv_imports_survive_separate_process_reopens() {
 }
 
 #[test]
+fn unwind_write_preserves_duplicate_occurrences_and_staged_updates_across_reopens() {
+    let fixture = Fixture::new();
+    let written = success(fixture.run(
+        "write",
+        &["UNWIND [3,1,3] AS x CREATE (:Person {id:x});
+           MATCH (n:Person) SET n.score=n.id*10"],
+    ));
+    assert_eq!(seq(&written, "written"), fixture.created + 1);
+    fixture.count(3);
+    let query = "MATCH (n:Person) RETURN n AS vertex,n.id AS id,n.score AS score ORDER BY vertex";
+    let before = success(fixture.run("query", &[query]));
+    let rows = |output: &str| -> Vec<String> {
+        output
+            .lines()
+            .filter(|line| line.contains("\"event\":\"row\""))
+            .map(str::to_owned)
+            .collect()
+    };
+    let expected = rows(&before);
+    assert_eq!(expected.len(), 3, "{before}");
+    for (row, (vertex, value)) in expected.iter().zip([(1, 3), (2, 1), (3, 3)]) {
+        let cells = format!(
+            "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
+             {{\"type\":\"int\",\"value\":\"{value}\"}},\
+             {{\"type\":\"int\",\"value\":\"{}\"}}]",
+            value * 10
+        );
+        assert!(row.contains(&cells), "{row}");
+    }
+    success(fixture.run("compact", &[]));
+    let reopened = success(fixture.run("query", &[query]));
+    assert_eq!(rows(&reopened), expected);
+    assert_eq!(seq(&reopened, "rows"), fixture.created + 1);
+}
+
+#[test]
+fn empty_and_failed_unwind_writes_publish_nothing_and_late_script_failure_is_atomic() {
+    let fixture = Fixture::new();
+    let empty = success(fixture.run("write", &["UNWIND [] AS x CREATE (:Person {id:x})"]));
+    assert_eq!(seq(&empty, "written"), fixture.created);
+    refusal(
+        &fixture.run(
+            "write",
+            &["UNWIND [4,2,0] AS x CREATE (:Person {id:100/x})"],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(0);
+    let query = "MATCH (n:Person) RETURN n AS vertex,n.id AS id ORDER BY vertex";
+    let unchanged = success(fixture.run("query", &[query]));
+    assert_eq!(seq(&unchanged, "rows"), fixture.created);
+
+    let written = success(fixture.run("write", &["UNWIND [11,12] AS x CREATE (:Person {id:x})"]));
+    assert_eq!(seq(&written, "written"), fixture.created + 1);
+    let before = success(fixture.run("query", &[query]));
+    for (vertex, value) in [(1, 11), (2, 12)] {
+        let cells = format!(
+            "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
+             {{\"type\":\"int\",\"value\":\"{value}\"}}]"
+        );
+        assert!(before.contains(&cells), "{before}");
+    }
+    refusal(
+        &fixture.run(
+            "write",
+            &["UNWIND [7,8] AS x CREATE (:Person {id:x});
+               MATCH (n:Person) WHERE n.id=8 SET n.score=1/0"],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(2);
+    assert_eq!(success(fixture.run("query", &[query])), before);
+}
+
+#[test]
 fn a_late_execution_failure_rolls_back_every_earlier_csv_record() {
     let fixture = Fixture::new();
     fixture.file(

@@ -205,9 +205,9 @@ impl PreparedGraphWriteScript {
         self.program.parameter_schema()
     }
 
-    /// Structural read requirement before parameter binding. Only standalone
-    /// INSERT/CREATE has unit input; every other current statement family may
-    /// inspect graph state even when its eventual selection is empty. This is
+    /// Structural read requirement before parameter binding. Standalone and
+    /// source-free UNWIND INSERT/CREATE need no graph reads; every other current
+    /// statement family may inspect graph state even when its eventual selection is empty. This is
     /// definition metadata, not a grant or a replacement for source admission.
     #[must_use]
     pub fn requires_read(&self) -> bool {

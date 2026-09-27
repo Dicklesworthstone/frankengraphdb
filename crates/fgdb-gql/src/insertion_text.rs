@@ -12,6 +12,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 #[derive(Debug)]
 pub enum GraphInsertTextErrorKind {
     Query(GraphPatternTextErrorKind),
+    Relation(crate::GraphSetTextErrorKind),
     Expression(GraphMutationTextErrorKind),
     Build(GraphInsertBuildError),
 }
@@ -50,6 +51,18 @@ impl From<GraphMutationTextError> for GraphInsertTextError {
         }
     }
 }
+impl From<crate::GraphSetTextError> for GraphInsertTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => GraphInsertTextErrorKind::Query(kind),
+            kind => GraphInsertTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct InsertVertexTemplate {
@@ -70,6 +83,10 @@ pub(crate) struct InsertEdgeTemplate {
 #[derive(Clone)]
 pub(crate) enum InsertTextInput {
     Match(PreparedGraphText),
+    Relation {
+        statement: String,
+        input: crate::set_text::BoundSetTextInput,
+    },
     Unit {
         statement: String,
         parameters: Vec<GqlParameterSpec>,
@@ -77,7 +94,12 @@ pub(crate) enum InsertTextInput {
     },
 }
 
-/// Native bounded CREATE, optionally preceded by MATCH. Standalone CREATE
+/// Native bounded CREATE, optionally preceded by MATCH or leading UNWIND
+/// stages over literals and parameters. Every UNWIND occurrence creates its
+/// own structure, including duplicates; empty and null lists create nothing.
+/// Row aliases feed scalar properties but cannot name existing endpoints.
+/// Graph MATCH after UNWIND and write RETURN remain outside this subset.
+/// Standalone CREATE
 /// initializes an empty graph or adds one structure without scanning it. Node
 /// patterns can declare vertices inline in directed chains, reuse a named node,
 /// or create anonymous nodes. A name's first occurrence declares its labels and

@@ -487,7 +487,7 @@ impl<'a> Parser<'a> {
         Ok((projection, next_schema))
     }
 
-    pub(super) fn unwind_stage(
+    pub(in crate::graph_text) fn unwind_stage(
         &mut self,
         schema: &mut RowSchema<'a>,
         at: usize,

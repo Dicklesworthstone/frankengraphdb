@@ -195,6 +195,23 @@ fn classify(
     declarations: &[(&str, GqlParameterType)],
 ) -> Result<Kind, GraphPatternTextError> {
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;
+    if parser.is_word("UNWIND") {
+        parser.insertion_unwind_prefix().map_err(|source| {
+            let kind = match source.kind {
+                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                _ => GraphPatternTextErrorKind::Expected("a bounded native UNWIND source"),
+            };
+            error(source.offset, kind)
+        })?;
+        return if parser.is_word("CREATE") || parser.is_word("INSERT") {
+            Ok(Kind::Insert)
+        } else {
+            Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected("CREATE or INSERT after UNWIND"),
+            ))
+        };
+    }
     let matched = parser.is_word("MATCH");
     if matched {
         parser.parse_match_prefix()?;
