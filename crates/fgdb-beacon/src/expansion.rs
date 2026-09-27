@@ -247,107 +247,189 @@ impl ExpansionGraph {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
-        work.charge(1)?;
-        if seeds.len() > self.limits.max_seed_ids {
-            return Err(BeaconError::ResourceLimit {
-                resource: "expansion seed IDs",
-                limit: self.limits.max_seed_ids,
-            });
-        }
-        let k = usize::try_from(candidates)
-            .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?;
-        if k == 0 {
-            return Ok(Vec::new());
-        }
-        let mut distance = BTreeMap::new();
-        let mut frontier = VecDeque::new();
-        for &id in seeds {
-            work.charge(tree_work(self.vertices.len()) + tree_work(distance.len()))?;
-            if self.contains(id) && !distance.contains_key(&id) {
-                self.admit_visit(distance.len())?;
-                distance.insert(id, 0_u32);
-                frontier.push_back((id, 0_u32));
-            }
-        }
-        while let Some((id, hops)) = frontier.pop_front() {
-            work.charge(1)?;
-            if hops == max_hops {
-                continue;
-            }
-            // Keep the first refusal even if a defective source swallows a
-            // visitor error and continues. It cannot publish a partial search.
-            let mut failure: Option<BeaconError> = None;
-            let result = source.visit_neighbors(id, work, &mut |next, work| {
-                if let Some(error) = &failure {
-                    return Err(error.clone());
-                }
-                let result: Result<(), BeaconError> = (|| {
-                    work.charge(tree_work(self.vertices.len()) + tree_work(distance.len()))?;
-                    if !self.contains(next) {
-                        return Err(BeaconError::InvalidQuery(
-                            "expansion endpoint outside selected corpus",
-                        ));
-                    }
-                    if distance.contains_key(&next) {
-                        return Ok(());
-                    }
-                    self.admit_visit(distance.len())?;
-                    // hops < max_hops <= u32::MAX.
-                    let next_hops = hops + 1;
-                    distance.insert(next, next_hops);
-                    frontier.push_back((next, next_hops));
-                    Ok(())
-                })();
-                if let Err(error) = &result {
-                    failure = Some(error.clone());
-                }
-                result
-            });
-            if let Some(error) = failure {
-                return Err(error);
-            }
-            result?;
-        }
-        let mut best = BinaryHeap::new();
-        for (id, hops) in distance {
-            work.charge(2 * tree_work(best.len()))?;
-            if hops == 0 && !include_seeds {
-                continue;
-            }
-            let candidate = (hops, id);
-            if best.len() < k {
-                best.push(candidate);
-            } else if best.peek().is_some_and(|worst| candidate < *worst) {
-                best.pop();
-                best.push(candidate);
-            }
-        }
-        let mut rows = Vec::new();
-        while !best.is_empty() {
-            work.charge(tree_work(best.len()))?;
-            let (hops, id) = best
-                .pop()
-                .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
-            rows.push(GraphHit { id, hops });
-        }
-        for i in 0..rows.len() / 2 {
-            work.charge(1)?;
-            let other = rows.len() - i - 1;
-            rows.swap(i, other);
-        }
-        work.charge(1)?;
-        Ok(rows)
+        expand_controlled(
+            seeds, max_hops, include_seeds, candidates, self.limits,
+            &mut |id, entries, work| {
+                // Preserve the resident profile's existing combined charge.
+                work.charge(tree_work(self.vertices.len()) + tree_work(entries))?;
+                Ok(self.contains(id))
+            },
+            source, work,
+        )
     }
+}
 
-    fn admit_visit(&self, count: usize) -> Result<(), BeaconError> {
-        if count >= self.limits.max_visited_vertices {
-            Err(BeaconError::ResourceLimit {
-                resource: "expansion visited vertices",
-                limit: self.limits.max_visited_vertices,
-            })
-        } else {
-            Ok(())
+/// Membership in one immutable, already-admitted graph selection. A host may
+/// resolve just this vertex through its pinned historical index rather than
+/// constructing a complete selected-ID directory. Charge/poll the SAME control
+/// before observation, traversal or allocation. Values must not change during
+/// an expansion, and membership and adjacency must name the SAME logical cut.
+/// Neither this trait nor the expansion kernel authenticates that contract.
+pub trait ExpansionMembership {
+    fn contains_vertex(
+        &self,
+        vertex: VId,
+        work: &mut dyn WorkControl,
+    ) -> Result<bool, BeaconError>;
+}
+
+impl ExpansionMembership for ExpansionGraph {
+    fn contains_vertex(
+        &self,
+        vertex: VId,
+        work: &mut dyn WorkControl,
+    ) -> Result<bool, BeaconError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
         }
+        work.charge(tree_work(self.vertices.len()))?;
+        Ok(self.contains(vertex))
+    }
+}
+
+/// The same complete BFS/ranking kernel with demand-driven vertex membership.
+/// No full vertex directory or adjacency is constructed. Absent seeds are
+/// skipped; an out-of-selection neighbor is a source error, never a filtered
+/// successful prefix. Neighbor sources must mask BOTH endpoints before calling
+/// their visitor. A swallowed visitor/membership failure remains terminal.
+///
+/// This profile bounds retained visits by min(max_vertices, max_visited_vertices)
+/// and checks max_seed_ids before demand. It does NOT count the full selected
+/// population. The host owns incidence and source-scratch limits; all work
+/// shares the supplied control. Zero candidates demand no membership/adjacency;
+/// one candidate still requires complete bounded exploration. State is resident
+/// O(visited vertices + candidates), excluding the host's source representation.
+#[allow(clippy::too_many_arguments)]
+pub fn expand_from_membership(
+    seeds: &[VId],
+    max_hops: u32,
+    include_seeds: bool,
+    candidates: u32,
+    limits: ExpansionLimits,
+    membership: &impl ExpansionMembership,
+    source: &mut impl ExpansionNeighbors,
+    work: &mut dyn WorkControl,
+) -> Result<Vec<GraphHit>, BeaconError> {
+    expand_controlled(
+        seeds, max_hops, include_seeds, candidates, limits,
+        &mut |id, entries, work| {
+            work.charge(tree_work(entries))?;
+            membership.contains_vertex(id, work)
+        },
+        source, work,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_controlled(
+    seeds: &[VId],
+    max_hops: u32,
+    include_seeds: bool,
+    candidates: u32,
+    limits: ExpansionLimits,
+    contains: &mut impl FnMut(VId, usize, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+    source: &mut impl ExpansionNeighbors,
+    work: &mut dyn WorkControl,
+) -> Result<Vec<GraphHit>, BeaconError> {
+    work.charge(1)?;
+    if seeds.len() > limits.max_seed_ids {
+        return Err(BeaconError::ResourceLimit {
+            resource: "expansion seed IDs",
+            limit: limits.max_seed_ids,
+        });
+    }
+    let k = usize::try_from(candidates)
+        .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?;
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    let mut distance = BTreeMap::new();
+    let mut frontier = VecDeque::new();
+    for &id in seeds {
+        if contains(id, distance.len(), work)? && !distance.contains_key(&id) {
+            admit_visit(distance.len(), limits)?;
+            distance.insert(id, 0_u32);
+            frontier.push_back((id, 0_u32));
+        }
+    }
+    while let Some((id, hops)) = frontier.pop_front() {
+        work.charge(1)?;
+        if hops == max_hops {
+            continue;
+        }
+        // Keep the first refusal even if a defective source swallows a
+        // visitor error and continues. It cannot publish a partial search.
+        let mut failure: Option<BeaconError> = None;
+        let result = source.visit_neighbors(id, work, &mut |next, work| {
+            if let Some(error) = &failure {
+                return Err(error.clone());
+            }
+            let result: Result<(), BeaconError> = (|| {
+                if !contains(next, distance.len(), work)? {
+                    return Err(BeaconError::InvalidQuery(
+                        "expansion endpoint outside selected corpus",
+                    ));
+                }
+                if distance.contains_key(&next) {
+                    return Ok(());
+                }
+                admit_visit(distance.len(), limits)?;
+                // hops < max_hops <= u32::MAX.
+                let next_hops = hops + 1;
+                distance.insert(next, next_hops);
+                frontier.push_back((next, next_hops));
+                Ok(())
+            })();
+            if let Err(error) = &result {
+                failure = Some(error.clone());
+            }
+            result
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        result?;
+    }
+    let mut best = BinaryHeap::new();
+    for (id, hops) in distance {
+        work.charge(2 * tree_work(best.len()))?;
+        if hops == 0 && !include_seeds {
+            continue;
+        }
+        let candidate = (hops, id);
+        if best.len() < k {
+            best.push(candidate);
+        } else if best.peek().is_some_and(|worst| candidate < *worst) {
+            best.pop();
+            best.push(candidate);
+        }
+    }
+    let mut rows = Vec::new();
+    while !best.is_empty() {
+        work.charge(tree_work(best.len()))?;
+        let (hops, id) = best
+            .pop()
+            .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
+        rows.push(GraphHit { id, hops });
+    }
+    for i in 0..rows.len() / 2 {
+        work.charge(1)?;
+        let other = rows.len() - i - 1;
+        rows.swap(i, other);
+    }
+    work.charge(1)?;
+    Ok(rows)
+}
+
+fn admit_visit(count: usize, limits: ExpansionLimits) -> Result<(), BeaconError> {
+    let limit = limits.max_vertices.min(limits.max_visited_vertices);
+    if count >= limit {
+        Err(BeaconError::ResourceLimit {
+            resource: "expansion visited vertices",
+            limit,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -615,10 +697,122 @@ mod source_tests {
                                 graph.expand(&seeds, hops, include, k, &mut work).unwrap(),
                                 expected
                             );
+                            let mut input = source(arcs.clone());
+                            assert_eq!(
+                                expand_from_membership(
+                                    &seeds, hops, include, k, ExpansionLimits::default(),
+                                    &graph, &mut input, &mut work,
+                                ).unwrap(),
+                                expected
+                            );
                         }
                     }
                 }
             }
+        }
+    }
+
+    struct Membership {
+        calls: std::cell::Cell<usize>,
+        absent: Option<VId>,
+        refused: Option<VId>,
+    }
+    impl ExpansionMembership for Membership {
+        fn contains_vertex(&self, id: VId, work: &mut dyn WorkControl) -> Result<bool, BeaconError> {
+            work.charge(1)?;
+            self.calls.set(self.calls.get() + 1);
+            if self.refused == Some(id) {
+                return Err(BeaconError::Invariant("injected membership refusal"));
+            }
+            Ok(self.absent != Some(id))
+        }
+    }
+    fn membership() -> Membership {
+        Membership { calls: std::cell::Cell::new(0), absent: None, refused: None }
+    }
+
+    #[test]
+    fn unenumerated_full_width_membership_demands_only_reached_vertices() {
+        // Membership covers the entire identity space without constructing it.
+        let domain = membership();
+        let high = VId(u128::MAX);
+        let mut input = source(vec![(VId(0), high), (VId(7), VId(8)), (high, VId(9))]);
+        let mut limits = ExpansionLimits::default();
+        limits.max_vertices = 2;
+        limits.max_visited_vertices = 2;
+        let rows = expand_from_membership(&[VId(0), VId(0)], 1, true, 2, limits,
+            &domain, &mut input, &mut WorkBudget::new(1000)).unwrap();
+        assert_eq!(rows, vec![GraphHit { id: VId(0), hops: 0 }, GraphHit { id: high, hops: 1 }]);
+        assert_eq!(domain.calls.get(), 3);
+        assert_eq!(input.calls, vec![VId(0)]);
+    }
+
+    #[test]
+    fn membership_refusal_remains_exact_even_if_neighbor_source_swallows_it() {
+        let mut domain = membership();
+        domain.refused = Some(VId(2));
+        let mut input = source(vec![(VId(1), VId(2)), (VId(1), VId(3))]);
+        input.swallow = true;
+        let result = expand_from_membership(&[VId(1)], 1, true, 1,
+            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000));
+        assert!(matches!(result, Err(BeaconError::Invariant("injected membership refusal"))));
+        assert_eq!(domain.calls.get(), 2, "no membership demand after retained refusal");
+    }
+
+    #[test]
+    fn demand_membership_preserves_zero_absence_and_both_visit_ceilings() {
+        let mut domain = membership();
+        domain.absent = Some(VId(99));
+        domain.refused = Some(VId(2));
+        let mut input = source(vec![]);
+        assert!(expand_from_membership(&[VId(2)], u32::MAX, true, 0,
+            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000))
+            .unwrap().is_empty());
+        assert_eq!(domain.calls.get(), 0);
+        assert!(expand_from_membership(&[VId(99)], u32::MAX, true, 1,
+            ExpansionLimits::default(), &domain, &mut input, &mut WorkBudget::new(1000))
+            .unwrap().is_empty());
+        assert!(input.calls.is_empty());
+        for vertices in [false, true] {
+            let mut limits = ExpansionLimits::default();
+            if vertices { limits.max_vertices = 0; }
+            else { limits.max_visited_vertices = 0; }
+            assert!(matches!(expand_from_membership(&[VId(1)], 0, true, 1,
+                limits, &domain, &mut input, &mut WorkBudget::new(1000)),
+                Err(BeaconError::ResourceLimit { resource: "expansion visited vertices", limit: 0 })));
+        }
+        let before = domain.calls.get();
+        assert!(matches!(expand_from_membership(&[VId(1)], 1, true, 1,
+            ExpansionLimits { max_seed_ids: 0, ..ExpansionLimits::default() },
+            &domain, &mut input, &mut WorkBudget::new(1000)),
+            Err(BeaconError::ResourceLimit { resource: "expansion seed IDs", limit: 0 })));
+        assert_eq!(domain.calls.get(), before);
+    }
+
+    #[test]
+    fn every_membership_and_neighbor_work_cut_discards_the_private_result() {
+        struct Cut { calls: usize, stop: usize }
+        impl WorkControl for Cut {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+            }
+        }
+        let run = |stop| {
+            let mut work = Cut { calls: 0, stop };
+            let domain = membership();
+            let mut input = source(vec![(VId(0), VId(1)), (VId(1), VId(2)), (VId(2), VId(0))]);
+            let result = expand_from_membership(&[VId(0)], 3, true, 1,
+                ExpansionLimits::default(), &domain, &mut input, &mut work);
+            (result, work.calls)
+        };
+        let (rows, count) = run(usize::MAX);
+        assert_eq!(rows.unwrap(), vec![GraphHit { id: VId(0), hops: 0 }]);
+        assert!(count > 10);
+        for stop in 1..=count {
+            let (result, seen) = run(stop);
+            assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}");
+            assert_eq!(seen, stop);
         }
     }
 }
