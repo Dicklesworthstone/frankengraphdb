@@ -298,8 +298,13 @@ fn real_singleton_depth_is_admitted_without_a_phantom_graph_level() {
 
 #[test]
 fn invalid_terminal_shapes_and_parameters_fail_before_any_source_or_catalog() {
+    // An aggregate WITH stage is legal since fgdb-ezgeq, so this shape moved
+    // from the refusal list to an executed answer: one singleton row counted
+    // once, then summed.
+    let staged = run(&prepare("WITH COUNT(*) AS n RETURN SUM(n)")).value;
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].values()[0].as_integer(), Some(1));
     for text in [
-        "WITH COUNT(*) AS n RETURN SUM(n)",
         "UNWIND [1] AS x RETURN SUM(SUM(x))",
         "UNWIND [1] AS x RETURN SUM(missing)",
         "UNWIND [1] AS x WITH x AS y RETURN SUM(x)",

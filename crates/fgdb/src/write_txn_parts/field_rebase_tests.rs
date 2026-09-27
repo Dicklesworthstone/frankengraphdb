@@ -810,12 +810,15 @@ fn old_basis_reads_gaps_phantoms_cascades_and_rolled_back_observations_survive_r
                 database.write(&cx, concurrent).await.unwrap();
                 if case == 0 {
                     // Equality against the latest value would miss this ABA.
+                    // Compare content: the basis row's version lifetime now
+                    // ends at the concurrent write (fgdb-asof-lifetime-leak-d49rt).
                     let mut restore = WriteBatch::new(R);
                     restore.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(0)));
                     database.write(&cx, restore).await.unwrap();
+                    let content = |row: Option<VertexRow>| row.map(|row| (row.labels, row.props));
                     assert_eq!(
-                        transaction.vertex(&database, VId(3)).unwrap(),
-                        database.vertex(VId(3)).unwrap()
+                        content(transaction.vertex(&database, VId(3)).unwrap()),
+                        content(database.vertex(VId(3)).unwrap())
                     );
                 }
                 let frontier = database.frontier().unwrap();

@@ -3,7 +3,7 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{CommitCx, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
@@ -58,6 +58,27 @@ fn collect(owner: &OverlayRows<'_, MemVfs>) -> (Vec<VertexRow>, Vec<EdgeRecord>)
         Ok(())
     }) {
         result.unwrap();
+    }
+    (vertices, edges)
+}
+
+/// Rows as of `basis`. A version row carries its whole lifetime
+/// (Database::vertex_at), so a later commit that retires a basis version
+/// stamps a `retired_at` beyond the basis. That stamp is not content;
+/// fgdb-asof-lifetime-leak-d49rt owns whether reads should clamp it.
+fn as_of(
+    (mut vertices, mut edges): (Vec<VertexRow>, Vec<EdgeRecord>),
+    basis: CommitSeq,
+) -> (Vec<VertexRow>, Vec<EdgeRecord>) {
+    for row in &mut vertices {
+        if row.retired_at.is_some_and(|at| at > basis) {
+            row.retired_at = None;
+        }
+    }
+    for record in &mut edges {
+        if record.entry.retired_at.is_some_and(|at| at > basis) {
+            record.entry.retired_at = None;
+        }
     }
     (vertices, edges)
 }
@@ -234,7 +255,10 @@ fn historical_basis_and_staged_tombstones_never_fall_back_to_newer_rows() {
         db.write(&cx, live).await.unwrap();
         {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
-            assert_eq!(collect(&owner), expected);
+            assert_eq!(
+                as_of(collect(&owner), txn.basis),
+                as_of(expected.clone(), txn.basis)
+            );
             assert!(
                 !expected
                     .0
@@ -412,7 +436,19 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
         let expansions = txn.match_expansions.borrow().clone();
         assert!(reads.contains(&ElementId::Vertex(VId(900))));
         assert!(reads.contains(&ElementId::Edge(EId(901))));
-        assert!(expansions.contains(&(VId(777), S)));
+        // Since daa2b8de an adjacency read is scoped to its relation and
+        // direction, so the empty neighbourhood is a point witness rather
+        // than a match expansion.
+        fn gap(txn: &WriteTxn) -> bool {
+            txn.point_reads.borrow().contains(
+                ElementId::Vertex(VId(777)),
+                super::super::PointReadField::Adjacency {
+                    relation: S,
+                    incoming: false,
+                },
+            )
+        }
+        assert!(gap(&txn));
         for refuse in [true, false] {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
             let result =
@@ -431,6 +467,7 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
             }
             assert!(reads.is_subset(&txn.read_set.borrow()));
             assert!(expansions.is_subset(&txn.match_expansions.borrow()));
+            assert!(gap(&txn));
         }
         // The original negative observation still rejects a newly published
         // identity. No sparse scan may silently replace transaction history.

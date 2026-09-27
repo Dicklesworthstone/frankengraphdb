@@ -453,11 +453,17 @@ fn exact_cumulative_quotas_and_every_cancellation_checkpoint_span_join_and_group
 
 #[test]
 fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
+    // An aggregate WITH stage is legal since fgdb-ezgeq. It drops `n`, so the
+    // second MATCH binds a fresh `n` over all four vertices of the one-row
+    // stage: four rows, not a refusal.
+    let staged =
+        execute("MATCH (n) WITH COUNT(*) AS count MATCH (n) WITH n RETURN COUNT(*) AS rows");
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].values()[0].as_count(), Some(4));
     for text in [
         "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(n) AS bad",
         "MATCH (n) WITH n MATCH (n) WITH n AS kept RETURN n,COUNT(*) AS rows",
-        "MATCH (n) WITH COUNT(*) AS count MATCH (n) WITH n RETURN COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows HAVING missing>0",
         "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS bad RETURN SUM(bad)",
     ] {

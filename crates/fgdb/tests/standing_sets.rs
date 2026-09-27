@@ -345,9 +345,13 @@ fn operand_windows_wide_identities_schema_and_owner_checks_are_not_sampled_from_
         let topology = db
             .register_standing_components(&cx, RelationId(1), policy())
             .unwrap();
+        // Component membership is a two-column (vertex, component) row
+        // operand since 6d729f6e, so the schema check refuses it here.
         assert!(matches!(
             db.register_standing_set(&cx, &topology, &vertex, SetOperation::UnionAll, policy()),
-            Err(StandingQueryError::Unsupported)
+            Err(StandingQueryError::SetSchema(
+                GraphSetBuildError::ColumnCount { left: 2, right: 1 }
+            ))
         ));
         let identities = db
             .register_standing_set(&cx, &vertex, &vertex, SetOperation::UnionDistinct, policy())

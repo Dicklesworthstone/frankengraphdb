@@ -77,6 +77,14 @@ fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
 fn values() -> PreparedGraphPattern<GraphValueRow> {
     query("MATCH (n:Visible) RETURN n.p AS p, n.secret AS hidden ORDER BY p")
 }
+/// A query meant to prepare and then fail on every row: division by zero.
+/// This grammar compiles arithmetic in WHERE only, not in RETURN items.
+/// Today this family evaluates 1/0 to null instead of raising
+/// DivisionByZero as the set family does, so the tests using it stay red
+/// until fgdb-div-zero-families-iq02p makes the families agree.
+fn invalid() -> PreparedGraphPattern<GraphValueRow> {
+    query("MATCH (n:Visible) WHERE n.p / (n.p - n.p) = 0 RETURN n.p AS invalid")
+}
 fn update() -> PreparedGraphWriteProgram {
     program("MATCH (n:Visible) WHERE n.p=10 SET n.p=11")
 }
@@ -248,11 +256,7 @@ fn final_query_error_or_result_quota_rolls_back_every_staged_write() {
                 db.vertices().unwrap(),
                 db.edges().unwrap(),
             );
-            let result_query = if mode == 0 {
-                query("MATCH (n:Visible) RETURN n.p / (n.p - n.p) AS invalid")
-            } else {
-                values()
-            };
+            let result_query = if mode == 0 { invalid() } else { values() };
             let token = token
                 .attenuate(Restriction::MaxRows(if mode == 0 { 100 } else { mode - 1 }))
                 .unwrap();
@@ -439,7 +443,7 @@ fn program_failure_is_not_retried_or_replaced_by_a_result_query_failure() {
             db.edges().unwrap(),
         );
         let program = program("MATCH (n:Visible) WHERE n.p=10 SET n.p=11, n.secret=n.secret");
-        let invalid = query("MATCH (n:Visible) RETURN n.p / (n.p - n.p) AS invalid");
+        let invalid = invalid();
         let error = db
             .execute_graph_write_program_then_query_authorized(
                 &txn,
