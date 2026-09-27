@@ -72,6 +72,13 @@ fn canonical_sparse_rows_match_bulk_effects_and_conflict_witnesses() {
 
         // Independent incumbent reconstruction owns its entire base map and
         // applies each net effect in place, rather than merging sparse streams.
+        // Isolate BOTH measurements from observations made during staging.
+        // In particular ensure-by-triple scanned the original incidence before
+        // deletion; those earlier expansion witnesses are not scan outputs.
+        txn.read_set.borrow_mut().clear();
+        txn.match_expansions.borrow_mut().clear();
+        txn.scanned_vertices.set(false);
+        txn.scanned_edges.set(false);
         let expected = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
         let reads = txn.read_set.borrow().clone();
         let expansions = txn.match_expansions.borrow().clone();
@@ -311,6 +318,54 @@ fn foreign_and_finished_transactions_refuse_before_copying_or_calling_controls()
         }).err().unwrap();
         assert!(matches!(error, WriteTxnError::Finished));
         assert_eq!(controls, 0);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses() {
+    let ((), report) = run_async_under_lab(0xa707, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seed(&cx, 8).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        // Real native observations that the later snapshot scan cannot
+        // rediscover: absent identities and an empty expansion coordinate.
+        assert!(txn.vertex(&db, VId(900)).unwrap().is_none());
+        assert!(txn.edge(&db, EId(901)).unwrap().is_none());
+        assert!(txn.neighbours(&db, VId(777), S).unwrap().is_empty());
+        let mut batch = WriteBatch::new(R);
+        batch.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(22)));
+        txn.write(&mut db, batch).unwrap();
+        let reads = txn.read_set.borrow().clone();
+        let expansions = txn.match_expansions.borrow().clone();
+        assert!(reads.contains(&ElementId::Vertex(VId(900))));
+        assert!(reads.contains(&ElementId::Edge(EId(901))));
+        assert!(expansions.contains(&(VId(777), S)));
+        for refuse in [true, false] {
+            let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
+            let result = owner.visit_vertices(&mut |_| Ok(()), |_, _| {
+                if refuse { Err(17) } else { Ok(()) }
+            });
+            assert_eq!(result, if refuse { Err(17) } else { Ok(()) });
+            if !refuse {
+                owner.visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                    .unwrap().unwrap();
+            }
+            assert!(reads.is_subset(&txn.read_set.borrow()));
+            assert!(expansions.is_subset(&txn.match_expansions.borrow()));
+        }
+        // The original negative observation still rejects a newly published
+        // identity. No sparse scan may silently replace transaction history.
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.create_vertex(VId(900), vec![], vec![]);
+        let frontier = db.write(&cx, concurrent).await.unwrap();
+        assert!(txn.commit(&mut db, &cx).await.is_err());
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(db.vertex(VId(2)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(10))]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
