@@ -84,7 +84,7 @@ pub enum WriteTxnError {
     /// Explicit field rebase cannot preserve the observed decisions, target
     /// lifetimes, supported intent family or exact field effects.
     FieldRebaseIneligible,
-    /// A combined append/field rebase cannot preserve the raw decisions,
+    /// A mixed creation/field/edge-retirement rebase cannot preserve raw decisions,
     /// exposed creation metadata, target lifetimes or exact native effects.
     MixedRebaseIneligible,
     /// The requested 128-bit identity domain has no remaining successor.
@@ -149,7 +149,7 @@ impl core::fmt::Display for WriteTxnError {
                 formatter.write_str("transaction is not eligible for disjoint-field rebase")
             }
             Self::MixedRebaseIneligible => {
-                formatter.write_str("transaction is not eligible for mixed append/field rebase")
+                formatter.write_str("transaction is not eligible for mixed mutation rebase")
             }
             Self::Interrupted(source) => {
                 write!(formatter, "transaction operation interrupted: {source}")
@@ -221,7 +221,8 @@ impl From<GqlError> for WriteTxnError {
 /// workspace into re-evaluation at finalization, never an active read refresh.
 /// `commit_disjoint_fields_rebased` separately admits field-local writes whose
 /// raw property/label dependencies have not changed, without widening reads.
-/// `commit_mixed_rebased` admits both families in one ordered native program,
+/// `commit_mixed_rebased` admits both families plus identity-addressed edge
+/// retirement in one ordered native program,
 /// preserving original read witnesses and publishing the whole effect once.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,

@@ -5,6 +5,7 @@
 struct MixedRebaseFootprint {
     append: AppendRebaseFootprint,
     fields: FieldRebaseFootprint,
+    retired_edges: std::collections::BTreeSet<EId>,
 }
 
 fn mixed_rebase_error(error: WriteTxnError) -> WriteTxnError {
@@ -27,6 +28,7 @@ impl MixedRebaseFootprint {
                 | PendingRow::SetEdgeProperty { .. }
                 | PendingRow::SetLabel { .. }
                 | PendingRow::CompareAndSet { .. }
+                | PendingRow::DeleteEdge { .. }
         )
     }
 
@@ -36,6 +38,12 @@ impl MixedRebaseFootprint {
         }
         match row {
             PendingRow::Vertex { .. } | PendingRow::Edge { .. } => self.append.record(row),
+            PendingRow::DeleteEdge { eid, .. } => {
+                // Even delete-if-present on an absent identity is a decision:
+                // preserve it when the net template contains no retirement.
+                self.retired_edges.insert(*eid);
+                Ok(())
+            }
             _ => self.fields.record(row),
         }
         .map_err(mixed_rebase_error)
@@ -53,20 +61,60 @@ impl MixedRebaseFootprint {
         {
             return Ok(true);
         }
-        self.fields
+        if self
+            .fields
             .conflicts(row, checkpoint)
-            .map_err(mixed_rebase_error)
+            .map_err(mixed_rebase_error)?
+        {
+            return Ok(true);
+        }
+        if self.retired_edges.is_empty() {
+            return Ok(false);
+        }
+        // A retirement protects the entire edge, not just fields named by
+        // other updates. Deleting an endpoint can retire it without emitting
+        // a DeleteEdge row, so the engine-derived cascade is authoritative.
+        use fgdb_delta_types::DeltaRow;
+        match row {
+            DeltaRow::CreateEdge { eid, .. }
+            | DeltaRow::DeleteEdge { eid, .. }
+            | DeltaRow::Property {
+                elem: ElementId::Edge(eid),
+                ..
+            } => {
+                Ok(self.retired_edges.contains(eid))
+            }
+            DeltaRow::DeleteVertex {
+                sorted_retired_incident_edges,
+                ..
+            } => {
+                for eid in sorted_retired_incident_edges {
+                    checkpoint()?;
+                    if self.retired_edges.contains(eid) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false), // Unknown families already refused above.
+        }
     }
 }
 
 impl WriteTxn {
-    /// Rebase one ordered program containing both appends and field-local edits.
+    /// Rebase an ordered program of appends, field edits and edge retirements.
     ///
     /// Unconditional vertex/edge creation may be interleaved with property
     /// SET/unset, label updates and property CAS, including edits of elements
-    /// created earlier in this program. All raw slots remain protected even
+    /// created earlier in this program. Identity-addressed edge deletion may
+    /// replace existing relationships atomically with new edges and fields.
+    /// All raw slots remain protected even
     /// when normalization removes an update or a CAS selects its no-op branch.
-    /// ENSURE and deletion are not admitted, even if their net effect vanished.
+    /// Edge retirement protects the complete edge, including a delete-if-present
+    /// decision on an absent identity. Concurrent updates, identity ABA and
+    /// endpoint cascades refuse even if the final edge looks unchanged/absent.
+    /// ENSURE and vertex deletion remain ineligible even if their effect vanished:
+    /// vertex cascades need a separate incident-set independence law.
     /// Savepoints and active mixed-program rollback scopes remain ineligible.
     ///
     /// The shared completion guard validates every recorded point, negative,
