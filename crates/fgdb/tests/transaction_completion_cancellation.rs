@@ -342,3 +342,102 @@ fn dropping_commit_or_finish_future_releases_pin_at_each_real_durability_phase()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+#[test]
+fn dropping_authorized_session_commands_closes_handles_without_guessing_commit_outcomes() {
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy};
+    use fgdb_warden::{Authority, Error, Grant, QueryLimits, Rights, Scope};
+
+    let ((), report) = run_async_under_lab(0xf171_0202, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        for batch_mode in [false, true] {
+            for mode in 1..=3 {
+                let memory = MemVfs::new().unwrap();
+                let path = memory.database_dir();
+                let pause = Arc::new(Pause::default());
+                let vfs = PausingVfs { inner: memory, pause: Arc::clone(&pause) };
+                let namespace = DatabaseSecurityNamespaceId([0x85; 32]);
+                let keys = DatabaseKeys::new([0x84; 32], namespace, [0x86; 32]);
+                let mut database = Database::create_with_vfs(&commit, vfs, &path, keys).await.unwrap();
+                let basis = database.frontier().unwrap();
+                let authority = Authority::new(AuthKey::from_seed(0xf171_0202), namespace,
+                    "host-graph", SchemaEpoch(1), 1).unwrap();
+                let token = authority.issue_at(&Grant {
+                    branch: "host-route".into(),
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits { max_nodes: 100_000, max_work: 1_000_000, max_rows: 100 },
+                    expires_at_ms: 10_000,
+                }, 100).unwrap();
+                let policy = GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 100_000), 100, 100, 100,
+                );
+                let mut session = database.authorized_write_session(
+                    &txn, &commit, &authority, &token, "host-route",
+                    |kind, name| if kind == GraphSymbolKind::Relation && name == "R" {
+                        Some(GraphSymbol::Relation(RelationId(1)))
+                    } else { None },
+                    RelationId(1), policy, 64, || 100,
+                ).unwrap();
+                let text = "CREATE (a), (b), (a)-[:R]->(b)";
+                let params = GqlParameters::new();
+                let prepared = session.prepare(&query, text, &params).unwrap();
+                let arguments = [GqlParameters::new(), GqlParameters::new()];
+                assert_eq!(txn.outstanding_obligations(), 0);
+                pause.arm(mode);
+                let mut future = Box::pin(async {
+                    if batch_mode {
+                        session.execute_batch(&query, &prepared, &arguments).await
+                    } else {
+                        session.query(&query, text, &params).await
+                    }
+                });
+                std::future::poll_fn(|task| match future.as_mut().poll(task) {
+                    Poll::Pending if pause.reached.load(Ordering::SeqCst) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(result) => panic!("session durability pause {mode} did not fire: {result:?}"),
+                }).await;
+                drop(future);
+                assert!(session.is_closed(), "dropping a polled command cannot reopen its request handle");
+                assert_eq!(txn.outstanding_obligations(), 0);
+                let error = session.query(&query, text, &params).await.unwrap_err();
+                let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(&error);
+                let mut stopped = false;
+                while let Some(error) = cause {
+                    stopped |= matches!(error.downcast_ref::<WriteTxnError>(),
+                        Some(WriteTxnError::Authorization(Error::ExecutionStopped)));
+                    cause = error.source();
+                }
+                assert!(stopped, "closed session must refuse rather than silently retrying");
+                drop(session);
+                if mode == 3 {
+                    assert!(matches!(database.state(), DatabaseState::NeedsAuthoritativeRecovery(_)));
+                } else {
+                    assert!(matches!(database.state(), DatabaseState::CommitOutcomeUnknown { .. }));
+                }
+                pause.mode.store(0, Ordering::SeqCst);
+                let recovered = database.recover_authoritatively(&commit).await.unwrap();
+                if mode == 1 {
+                    assert_eq!(recovered.frontier().unwrap(), basis);
+                    assert!(recovered.vertices().unwrap().is_empty());
+                    assert!(recovered.edges().unwrap().is_empty());
+                } else {
+                    assert_eq!(recovered.frontier().unwrap(), CommitSeq(basis.0 + 1));
+                    let records = if batch_mode { 2 } else { 1 };
+                    assert_eq!(recovered.vertices().unwrap().len(), 2 * records);
+                    assert_eq!(recovered.edges().unwrap().len(), records);
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
