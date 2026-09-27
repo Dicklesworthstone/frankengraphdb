@@ -117,3 +117,107 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         self.pool.allocate_inner(bytes, 0).map_err(SpillError::Memory)
     }
 }
+
+impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
+    /// Spill exactly len bytes from an async producer without collecting them.
+    ///
+    /// Unlike whole-buffer append, this explicitly admits runs larger than the
+    /// pool's effective resident ceiling. max_run_bytes, max_file_bytes and
+    /// max_runs still apply to the complete logical extent before source demand.
+    /// One reusable pool-charged buffer (at most 64 KiB, at least one byte for
+    /// nonempty input) covers both producer reads and scratch writes. The
+    /// producer's own memory, side effects and cancellation law remain its
+    /// responsibility; this method does not provide a whole-query RSS bound.
+    ///
+    /// The producer is consumed only through the declared prefix, with no EOF
+    /// probe into a subsequent record. A shorter source is an I/O error. The
+    /// reserved extent and attempt are never reused after source/write/flush
+    /// failure or cancellation. Pending source reads also conservatively poison
+    /// the scratch owner. The producer is NOT rewound on failure.
+    ///
+    /// Publication requires complete transfer, the ordinary flush and final
+    /// checkpoint. The run uses the SAME checksum transcript as append, not a
+    /// new scratch format. Read large runs through restore_window; restore
+    /// continues to enforce its full resident allocation, without a fallback.
+    pub async fn append_from<R: AsyncRead + Unpin>(
+        &mut self,
+        cx: &QueryCx,
+        source: &mut R,
+        len: usize,
+    ) -> Result<SpillRun, SpillError> {
+        cx.with_restriction_async(self.append_from_inner(source, len, || {
+            cx.checkpoint().map_err(SpillError::Interrupted)
+        }))
+        .await
+    }
+
+    pub(super) async fn append_from_inner<R: AsyncRead + Unpin>(
+        &mut self,
+        source: &mut R,
+        len: usize,
+        mut checkpoint: impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<SpillRun, SpillError> {
+        checkpoint()?;
+        if self.io_pending {
+            return Err(SpillError::PoisonedFile);
+        }
+        if len > self.limits.max_run_bytes {
+            return Err(SpillError::RunTooLarge {
+                bytes: len,
+                limit: self.limits.max_run_bytes,
+            });
+        }
+        if self.stats.reserved_runs >= self.limits.max_runs {
+            return Err(SpillError::RunLimit {
+                limit: self.limits.max_runs,
+            });
+        }
+        let extent = u64::try_from(len).map_err(|_| SpillError::SizeOverflow)?;
+        let available = self.limits.max_file_bytes - self.stats.reserved_bytes;
+        if extent > available {
+            return Err(SpillError::FileLimit {
+                requested: extent,
+                available,
+            });
+        }
+        // Admission failure cannot consume the producer or burn file capacity.
+        // All allocations precede the first possibly-pending source/file I/O.
+        let mut buffer = self.stream_buffer(len)?;
+        let offset = self.stats.reserved_bytes;
+        let id = self.stats.reserved_runs + 1;
+        self.stats.reserved_bytes += extent;
+        self.stats.reserved_runs = id;
+        self.io_pending = true;
+        let actual = self.file.seek(SeekFrom::Start(offset)).await?;
+        if actual != offset {
+            return Err(SpillError::UnexpectedPosition {
+                expected: offset,
+                actual,
+            });
+        }
+        let mut hash = run_hasher(id, offset, extent);
+        let mut remaining = len;
+        while remaining != 0 {
+            checkpoint()?;
+            let count = remaining.min(buffer.len());
+            let chunk = &mut buffer.as_mut()[..count];
+            source.read_exact(chunk).await?;
+            checkpoint()?;
+            self.file.write_all(chunk).await?;
+            hash.update(chunk);
+            remaining -= count;
+        }
+        checkpoint()?;
+        self.file.flush().await?;
+        self.io_pending = false;
+        checkpoint()?;
+        self.stats.published_runs += 1;
+        Ok(SpillRun {
+            owner: Arc::clone(&self.owner),
+            id,
+            offset,
+            len,
+            checksum: hash.finalize().0,
+        })
+    }
+}
