@@ -245,7 +245,7 @@ mod tests {
         expected: WardenError,
     ) {
         assert!(matches!(result,
-            Err(BeaconReadError::Interrupted(QueryError::Authorization(error))) if error == expected));
+            Err(BeaconReadError::Interrupted(QueryError::Authorization(error))) if error == expected)); // ubs:ignore -- a public WardenError authorization verdict in a test helper; no secret, token or MAC is compared here.
     }
 
     #[test]

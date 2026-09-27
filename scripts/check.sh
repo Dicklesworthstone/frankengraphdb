@@ -1424,10 +1424,39 @@ run_ubs() {
 # - fgdb-gql: loom_access_tests.rs +1 (89c8daa5), tests/path_values.rs +1
 #   (034400e5), tests/with_pipelines.rs +1 (ea1be312).
 # Secret/token comparisons and Command::new are unchanged at 16 and 1.
+# fgdb-u3hv1 re-pin (2026-09-27, UBS v5.4.9, regex mode, 1,669 tracked files):
+# the toolchain-less stream landed ~50 uncompiled commits after 127a2be8, and
+# once they compiled (bcf61011, then this landing's repair) the tree read 807.
+# Tool control: today's ubs over 127a2be8 reads 771/16/1. The 118 .rs files
+# changed 127a2be8..bcf61011, scanned jointly, read 36 then 69 (771 - 36 + 69
+# = 804 at bcf61011); the three commits after it add 3 (governed_point_tests).
+# Anchored per-file attribution sums to +36 over 26 files:
+# - 28 in test files or cfg(test) modules: standing_query components
+#   relational_tests +5 (83d9a0f6), relation/tests +1 (f58c9be2);
+#   set_ops/aggregate/stage/tests +4 (3ea2ac7e); governed_point_tests +3
+#   (2148641a); delete_incidence_tests +2 (6c0b23e5); point_read_tests +2
+#   (5a02f25f); authorized native_write_tests +2 (b6d7aff3), write_query_tests
+#   +1 (f86f422a), write_script_tests +1 (a2f5f30c), write_session_tests +1
+#   (491c69f3), edge_upsert_tests +1 (72489b5f); overlay_tests +1 (9190b5bf);
+#   field_rebase_tests +1 (ffa0cb5f); governed_adjacency_tests +1 (c79cb7d3);
+#   overlay_scan_tests +1 (21180be0); tests/transaction_completion_cancellation
+#   +1 (5046bd71); and the cfg(test) halves of the next four files.
+# - 8 in files with inline test modules: csv_write_script.rs +2 (ffe9c67d;
+#   two production unreachable!s on decoder invariants - an empty CSV cannot
+#   hold a header, a header-only frame cannot hold records), write_script.rs +2
+#   (3d2b7371), set_ops/aggregate/rows.rs +2 (d3152107), components/rows.rs +2
+#   (6d729f6e).
+# Secret/token read 17 at bcf61011: one new hit, a WardenError equality in a
+# test helper (query_authorized/beacon_indexed.rs), adjudicated at the site with
+# a reasoned ubs:ignore, so the class stays 16. Command::new unchanged at 1.
+# Three more uncompiled commits landed before this pin could: at ac05789c the
+# tree reads 827. Anchored scans against d2afc90d attribute the +20, all test
+# code: insertion/relational_tests.rs +10 (bfaff477), tests/graph_insert_text.rs
+# +6 and tests/write_script_execution.rs +4 (5765cc1b).
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=771"
+  "panic!/unreachable!/todo!/unimplemented!=827"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1446,7 +1475,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=771"
+  "panic!/unreachable!/todo!/unimplemented!=827"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
