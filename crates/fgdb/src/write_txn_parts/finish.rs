@@ -309,6 +309,7 @@ impl WriteTxn {
         self.prepared = None;
         self.savepoints.clear();
         self.read_set.get_mut().clear();
+        self.point_reads.get_mut().clear();
         self.match_expansions.get_mut().clear();
         self.scanned_vertex_labels.get_mut().clear();
         self.scanned_vertices.set(false);
@@ -406,6 +407,7 @@ impl WriteTxn {
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
         let read_set = self.read_set.borrow();
+        let point_reads = self.point_reads.borrow();
         let match_expansions = self.match_expansions.borrow();
         let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
         let mutation_footprint = match scope {
@@ -415,6 +417,7 @@ impl WriteTxn {
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         if read_set.is_empty()
+            && point_reads.is_empty()
             && match_expansions.is_empty()
             && scanned_vertex_labels.is_empty()
             && mutation_footprint.is_empty()
@@ -470,6 +473,9 @@ impl WriteTxn {
                             return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Edge(*eid), seq)));
                         }
                         _ => {}
+                    }
+                    if let Some(element) = point_reads.conflict(row, checkpoint)? {
+                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
                     }
                     crate::adjacency_endpoints(row, &mut endpoints);
                     validation_touches(row, &mut touched, checkpoint)?;

@@ -223,6 +223,8 @@ pub struct WriteTxn {
     /// Enabled only while a mixed write program owns its rollback workspace.
     program_multi_relation: bool,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
+    /// Explicit field getters retain point domains without narrowing full reads.
+    point_reads: std::cell::RefCell<PointReads>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     scanned_vertex_labels: std::cell::RefCell<std::collections::BTreeSet<LabelId>>,
     /// A scan depends on absent rows too, even if it returned nothing or its

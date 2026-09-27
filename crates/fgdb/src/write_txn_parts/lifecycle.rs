@@ -14,6 +14,7 @@ impl WriteTxn {
             savepoints: Vec::new(),
             program_multi_relation: false,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            point_reads: std::cell::RefCell::new(PointReads::default()),
             match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertices: std::cell::Cell::new(false),
