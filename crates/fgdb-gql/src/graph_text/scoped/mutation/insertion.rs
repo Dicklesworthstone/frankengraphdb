@@ -42,15 +42,15 @@ fn expected(at: usize, message: &'static str) -> GraphInsertTextError {
     error(at, GraphPatternTextErrorKind::Expected(message)).into()
 }
 
+/// Parsed source-free UNWIND stages and the column schema they bind.
+type UnwindPrefix<'a> = (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>);
+
 impl<'a> Parser<'a> {
     /// Parse the ordinary source-free UNWIND stages without evaluating them.
     /// Script dispatch uses this same native grammar to find CREATE/INSERT.
     pub(super) fn insertion_unwind_prefix(
         &mut self,
-    ) -> Result<
-        (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>),
-        crate::GraphSetTextError,
-    > {
+    ) -> Result<UnwindPrefix<'a>, crate::GraphSetTextError> {
         let mut stages = Vec::new();
         let mut schema = Vec::new();
         while self.is_word("UNWIND") {

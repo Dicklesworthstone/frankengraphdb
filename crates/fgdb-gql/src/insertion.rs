@@ -275,7 +275,8 @@ struct Edge {
 enum Input {
     Unit,
     Pattern(PreparedGraphPattern<GraphValueRow>),
-    Relation(PreparedGraphSet),
+    // Boxed: a prepared relation is several times the size of the other arms.
+    Relation(Box<PreparedGraphSet>),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -324,7 +325,12 @@ impl PreparedGraphInsert {
         selection
             .check_parent_depth()
             .map_err(GraphInsertBuildError::RelationalInput)?;
-        Self::prepare_input(Input::Relation(selection), relation, vertices, edges)
+        Self::prepare_input(
+            Input::Relation(Box::new(selection)),
+            relation,
+            vertices,
+            edges,
+        )
     }
 
     /// Create one structure without scanning the graph. The source schema is
@@ -440,7 +446,7 @@ impl PreparedGraphInsert {
     #[must_use]
     pub fn relational_selection(&self) -> Option<&PreparedGraphSet> {
         match &self.input {
-            Input::Relation(relation) => Some(relation),
+            Input::Relation(relation) => Some(relation.as_ref()),
             Input::Unit | Input::Pattern(_) => None,
         }
     }
