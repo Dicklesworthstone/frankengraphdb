@@ -10,10 +10,11 @@
 
 mod collect;
 
-use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection};
+use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphIntegerError, GraphMutationValue, GraphSetProjection, GraphSetValue,
+    GraphIntegerError, GraphMutationValue, GraphSetColumnType, GraphSetExecutionError,
+    GraphSetProjection, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -55,6 +56,7 @@ impl core::fmt::Debug for GraphInsertEdge {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphInsertBuildError {
+    RelationalInput(crate::GraphSetBuildError),
     Empty,
     TooManyDeclarations { limit: usize, observed: usize },
     TooManyFields { limit: usize, observed: usize },
@@ -89,6 +91,8 @@ pub enum GraphInsertLimitDimension {
 #[derive(Debug)]
 pub enum GraphInsertError<E, A> {
     Source(E),
+    /// The complete relational source failed before identity allocation.
+    InputRelation(GraphSetExecutionError<E>),
     IdentitySource(A),
     InvalidSourceStatistics,
     InputSchema {
@@ -122,6 +126,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphI
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
+            Self::InputRelation(error) => write!(f, "insertion input relation: {error}"),
             Self::IdentitySource(error) => write!(f, "insertion identity allocation: {error}"),
             Self::InvalidSourceStatistics => {
                 f.write_str("insertion source returned inconsistent statistics")
@@ -163,6 +168,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::InputRelation(error) => Some(error),
             Self::IdentitySource(error) => Some(error),
             Self::Arithmetic { error, .. } => Some(error),
             _ => None,
@@ -266,9 +272,16 @@ struct Edge {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+enum Input {
+    Unit,
+    Pattern(PreparedGraphPattern<GraphValueRow>),
+    Relation(PreparedGraphSet),
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphInsert {
-    /// None is the relational unit, not an empty MATCH result.
-    selection: Option<PreparedGraphPattern<GraphValueRow>>,
+    input: Input,
+    column_types: Vec<GraphSetColumnType>,
     relation: RelationId,
     vertices: Vec<Vertex>,
     edges: Vec<Edge>,
@@ -278,7 +291,7 @@ impl core::fmt::Debug for PreparedGraphInsert {
         f.debug_struct("PreparedGraphInsert")
             .field("vertices_per_row", &self.vertices.len())
             .field("edges_per_row", &self.edges.len())
-            .field("standalone", &self.selection.is_none())
+            .field("standalone", &self.is_standalone())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -294,7 +307,24 @@ impl PreparedGraphInsert {
         vertices: Vec<GraphInsertVertex>,
         edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
-        Self::prepare_input(Some(selection), relation, vertices, edges)
+        Self::prepare_input(Input::Pattern(selection), relation, vertices, edges)
+    }
+
+    /// Create one structure for every occurrence of a typed relation, including
+    /// source-free UNWIND, projection, filtering and set composition. The whole
+    /// relation is evaluated before properties or identities are collected.
+    /// Its row order and duplicates are preserved. Dynamic scalar columns are
+    /// checked against their actual values before requesting any identity.
+    pub fn prepare_relation(
+        selection: PreparedGraphSet,
+        relation: RelationId,
+        vertices: Vec<GraphInsertVertex>,
+        edges: Vec<GraphInsertEdge>,
+    ) -> Result<Self, GraphInsertBuildError> {
+        selection
+            .check_parent_depth()
+            .map_err(GraphInsertBuildError::RelationalInput)?;
+        Self::prepare_input(Input::Relation(selection), relation, vertices, edges)
     }
 
     /// Create one structure without scanning the graph. The source schema is
@@ -306,11 +336,11 @@ impl PreparedGraphInsert {
         vertices: Vec<GraphInsertVertex>,
         edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
-        Self::prepare_input(None, relation, vertices, edges)
+        Self::prepare_input(Input::Unit, relation, vertices, edges)
     }
 
     fn prepare_input(
-        selection: Option<PreparedGraphPattern<GraphValueRow>>,
+        input: Input,
         relation: RelationId,
         vertices: Vec<GraphInsertVertex>,
         edges: Vec<GraphInsertEdge>,
@@ -338,14 +368,21 @@ impl PreparedGraphInsert {
                 observed: fields,
             });
         }
-        let columns = selection
-            .as_ref()
-            .map_or(&[][..], |pattern| pattern.value_columns());
+        let column_types = match &input {
+            Input::Unit => Vec::new(),
+            Input::Pattern(pattern) => pattern
+                .value_columns()
+                .iter()
+                .map(GraphSetColumnType::from)
+                .collect(),
+            Input::Relation(relation) => relation.column_types().to_vec(),
+        };
+        let columns = &column_types;
         for (edge, declaration) in edges.iter().enumerate() {
             for endpoint in [declaration.source, declaration.destination] {
                 match endpoint {
                     GraphInsertEndpoint::Column(column) => {
-                        if !matches!(columns.get(column), Some(ValueProjection::Vertex { .. })) {
+                        if !matches!(columns.get(column), Some(GraphSetColumnType::Vertex)) {
                             return Err(GraphInsertBuildError::EndpointColumn { edge, column });
                         }
                     }
@@ -382,17 +419,45 @@ impl PreparedGraphInsert {
             });
         }
         Ok(Self {
-            selection,
+            input,
+            column_types,
             relation,
             vertices: bound_vertices,
             edges: bound_edges,
         })
     }
 
-    /// None denotes standalone creation with one zero-column input occurrence.
+    /// The original graph pattern for pattern-selected creation. Returns None
+    /// for both standalone creation and relational input; use `is_standalone`
+    /// or `relational_selection` to distinguish those cases.
     #[must_use]
     pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
-        self.selection.as_ref()
+        match &self.input {
+            Input::Pattern(pattern) => Some(pattern),
+            Input::Unit | Input::Relation(_) => None,
+        }
+    }
+    #[must_use]
+    pub fn relational_selection(&self) -> Option<&PreparedGraphSet> {
+        match &self.input {
+            Input::Relation(relation) => Some(relation),
+            Input::Unit | Input::Pattern(_) => None,
+        }
+    }
+    /// True only for one implicit zero-column occurrence. A source-free
+    /// relation may produce zero, one or many occurrences instead.
+    #[must_use]
+    pub const fn is_standalone(&self) -> bool {
+        matches!(self.input, Input::Unit)
+    }
+    /// Whether evaluating this input requires access to a graph source.
+    #[must_use]
+    pub const fn requires_read(&self) -> bool {
+        match &self.input {
+            Input::Unit => false,
+            Input::Pattern(_) => true,
+            Input::Relation(relation) => relation.operand_count() != 0,
+        }
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -409,8 +474,10 @@ impl PreparedGraphInsert {
 
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
-    /// The source callback is not called for standalone creation: its unit
-    /// occurrence consumes the selected-row allowance but admits no graph rows.
+    /// The source callback is not called for standalone or source-free relational
+    /// creation. Each selected occurrence consumes the selected-row allowance.
+    /// When a relation has multiple graph leaves, the host must supply one pinned
+    /// snapshot/transaction overlay and authorization context for every call.
     /// No allocator call precedes data validation and creation-count admission.
     /// Empty MATCH selections allocate no IDs. Duplicate occurrences are NOT merged.
     ///
@@ -423,7 +490,7 @@ impl PreparedGraphInsert {
     pub fn execute_governed<E, A, C>(
         &self,
         policy: GraphInsertPolicy,
-        source: impl FnOnce(
+        source: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
@@ -435,20 +502,20 @@ impl PreparedGraphInsert {
 
     /// Application definition, not a durable effect encoding or allocation log.
     /// Edge relations are included alongside their endpoints and properties.
-    /// Unit-input definitions have a distinct domain from graph-selected templates.
+    /// Unit, graph-pattern and relational inputs have distinct domains.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = if self.selection.is_some() {
-            b"fgdb:query-graph-insert:v1\0".to_vec()
-        } else {
-            b"fgdb:standalone-graph-insert:v1\0".to_vec()
+        let mut bytes = match &self.input {
+            Input::Pattern(_) => b"fgdb:query-graph-insert:v1\0".to_vec(),
+            Input::Unit => b"fgdb:standalone-graph-insert:v1\0".to_vec(),
+            Input::Relation(_) => b"fgdb:relational-graph-insert:v1\0".to_vec(),
         };
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        let selection = self
-            .selection
-            .as_ref()
-            .map(|pattern| pattern.canonical_bytes())
-            .unwrap_or_default();
+        let selection = match &self.input {
+            Input::Unit => Vec::new(),
+            Input::Pattern(pattern) => pattern.canonical_bytes(),
+            Input::Relation(relation) => relation.canonical_bytes(),
+        };
         bytes.extend_from_slice(&(selection.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&selection);
         bytes.extend_from_slice(&(self.vertices.len() as u64).to_be_bytes());
@@ -479,7 +546,7 @@ impl PreparedGraphInsert {
 impl Properties {
     fn prepare(
         mut fields: Vec<(PropertyKeyId, GraphMutationValue)>,
-        columns: &[ValueProjection],
+        columns: &[GraphSetColumnType],
         declaration: usize,
     ) -> Result<Self, GraphInsertBuildError> {
         if fields.len() > MAX_PATTERN_VERTICES {
@@ -496,9 +563,10 @@ impl Properties {
         let mut projection = Vec::new();
         for (at, (key, value)) in fields.into_iter().enumerate() {
             let check = |column| {
-                if columns.get(column).is_some_and(|column| {
-                    crate::GraphSetColumnType::from(column) == crate::GraphSetColumnType::Scalar
-                }) {
+                if matches!(
+                    columns.get(column),
+                    Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+                ) {
                     Ok(())
                 } else {
                     Err(GraphInsertBuildError::ValueColumn {
@@ -562,3 +630,6 @@ impl Properties {
         }
     }
 }
+
+#[cfg(test)]
+mod relational_tests;

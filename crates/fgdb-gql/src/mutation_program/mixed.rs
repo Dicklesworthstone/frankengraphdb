@@ -559,7 +559,7 @@ impl MixedMeter {
         let rows = u128::from(stats.selection.result_rows);
         if u128::from(stats.created_vertices) != rows * input.vertices_per_row() as u128
             || u128::from(stats.created_edges) != rows * input.edges_per_row() as u128
-            || (input.selection().is_none()
+            || (input.is_standalone()
                 && (stats.selection.result_rows != 1 || stats.selection.snapshot_records != 0))
         {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());

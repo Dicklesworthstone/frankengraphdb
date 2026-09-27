@@ -181,6 +181,144 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
 }
 
 #[test]
+fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
+    lab(0xa94a, |contexts| async move {
+        use fgdb_gql::insertion::GraphInsertVertex;
+        use fgdb_gql::{GraphMutationValue, PreparedGraphSetText};
+
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(H);
+        seed.create_vertex(VId(900), vec![HIDDEN], vec![(P, CanonicalScalar::Int(99))]);
+        db.write(&commit, seed).await.unwrap();
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let relation = |text: &str| {
+            PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+        };
+        let insertion = |input| {
+            PreparedGraphInsert::prepare_relation(
+                input,
+                R,
+                vec![GraphInsertVertex {
+                    labels: vec![L],
+                    properties: vec![(P, GraphMutationValue::Column(0))],
+                }],
+                vec![],
+            )
+            .unwrap()
+        };
+        let source_free = insertion(relation("UNWIND [3, 1, 3] AS p RETURN p"));
+        assert!(!source_free.requires_read());
+        assert!(!source_free.is_standalone());
+        let before = db.frontier().unwrap();
+        let (stats, vertices, _, completion) = db
+            .execute_graph_insert_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &source_free,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.selection.snapshot_records, 0);
+        assert_eq!(stats.selection.result_rows, 3);
+        assert_eq!(stats.created_vertices, 3);
+        assert_eq!(vertices.len(), 3);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        for (id, expected) in vertices.iter().zip([3, 1, 3]) {
+            assert_eq!(
+                db.vertex(*id).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(expected))]
+            );
+        }
+
+        // A relational graph leaf still requires read authority, even when a
+        // result window would discard every row. No private workspace or ID
+        // allocation is admitted ahead of this structural check.
+        let graph_input = relation("MATCH (n) RETURN n.p AS p");
+        let denied = insertion(graph_input.clone().with_page(0, Some(0)));
+        assert!(denied.requires_read());
+        let before_denial = db.frontier().unwrap();
+        let error = db
+            .execute_graph_insert_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &denied,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(authorization(error), Error::PermissionDenied);
+        assert_eq!(db.frontier().unwrap(), before_denial);
+
+        let token = authority
+            .issue_at(
+                &Grant {
+                    rights: Rights::ReadWrite,
+                    ..grant()
+                },
+                NOW,
+            )
+            .unwrap();
+        let (stats, copied, _, _) = db
+            .execute_graph_insert_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &insertion(graph_input),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.created_vertices, 3,
+            "the hidden vertex must never reach CREATE"
+        );
+        let properties: Vec<_> = copied
+            .iter()
+            .map(|id| db.vertex(*id).unwrap().unwrap().props)
+            .collect();
+        assert_eq!(
+            properties,
+            vec![
+                vec![(P, CanonicalScalar::Int(3))],
+                vec![(P, CanonicalScalar::Int(1))],
+                vec![(P, CanonicalScalar::Int(3))],
+            ]
+        );
+        assert_eq!(
+            db.vertex(VId(900)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99))]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn forbidden_creation_tail_aborts_every_relation_and_retries_without_reusing_ids() {
     lab(0xa932, |contexts| async move {
         let commit = contexts.commit();

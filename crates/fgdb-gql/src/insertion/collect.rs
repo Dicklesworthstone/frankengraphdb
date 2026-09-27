@@ -109,9 +109,12 @@ fn fields<E, A, C>(
         // Use the same scalar/CASE VM as mutation, RETURN and aggregation.
         // Computed values already own their charged payload; move, never copy.
         let value = match expression.value() {
-            GraphSetValue::Column(column) => row[*column]
-                .as_scalar()
-                .expect("the complete input schema was validated"),
+            GraphSetValue::Column(column) => row[*column].as_scalar().ok_or(
+                GqlQueryError::Source(GraphInsertError::InputSchema {
+                    row: row_at,
+                    column: *column,
+                }),
+            )?,
             GraphSetValue::Literal(value) => value.value(),
             GraphSetValue::Value(value) => match value.as_scalar() {
                 Some(scalar) => scalar,
@@ -211,7 +214,7 @@ fn allocate_id<E, A, C>(
 pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
-    source: impl FnOnce(
+    mut source: impl FnMut(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
@@ -219,8 +222,8 @@ pub(super) fn execute<E, A, C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> ResultOf<GraphInsertBatch, E, A, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let (selected_rows, selection, evaluator) = match &insertion.selection {
-        Some(pattern) => {
+    let (selected_rows, selection, evaluator) = match &insertion.input {
+        Input::Pattern(pattern) => {
             let selected = source(pattern, policy.query)
                 .map_err(|error| error.map_source(GraphInsertError::Source))?;
             if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
@@ -230,7 +233,13 @@ pub(super) fn execute<E, A, C>(
             }
             (selected.value, selected.rows, selected.evaluator)
         }
-        None => (
+        Input::Relation(relation) => {
+            let selected = relation
+                .execute_governed(policy.query, &mut source, &mut checkpoint)
+                .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
+            (selected.value, selected.rows, selected.evaluator)
+        }
+        Input::Unit => (
             Vec::new(),
             GqlExecutionStats {
                 snapshot_records: 0,
@@ -300,15 +309,12 @@ pub(super) fn execute<E, A, C>(
         checkpoint,
     };
     meter.event(GlaExecutionEvent::Work)?;
-    let columns = insertion
-        .selection
-        .as_ref()
-        .map_or(&[][..], |pattern| pattern.value_columns());
+    let columns = &insertion.column_types;
     let mut drafts = Vec::new();
     // A unit occurrence has no values or graph identity. Ordinary rows retain
     // their existing order and are freed as their draft is completed. Neither
     // path duplicates graph matching or property evaluation.
-    let unit = insertion.selection.is_none().then_some(None);
+    let unit = insertion.is_standalone().then_some(None);
     for (row_at, row) in selected_rows.into_iter().map(Some).chain(unit).enumerate() {
         let row = row.as_ref().map_or(&[][..], GraphValueRow::values);
         meter.event(GlaExecutionEvent::Work)?;
@@ -318,9 +324,9 @@ pub(super) fn execute<E, A, C>(
                 column: row.len().min(columns.len()),
             }));
         }
-        for (column, (value, expression)) in row.iter().zip(columns).enumerate() {
+        for (column, (value, kind)) in row.iter().zip(columns).enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let valid = crate::GraphSetColumnType::from(expression).accepts(value);
+            let valid = kind.accepts(value);
             if !valid {
                 return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
                     row: row_at,

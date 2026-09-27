@@ -126,7 +126,7 @@ impl<V: Vfs + Clone> Database<V> {
         let permit = verified
             .begin_write_at(branch, now)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-        if insertion.selection().is_some() && !verified.predicates().rights().can_read() {
+        if insertion.requires_read() && !verified.predicates().rights().can_read() {
             return Err(source(WriteTxnError::Authorization(
                 Error::PermissionDenied,
             )));

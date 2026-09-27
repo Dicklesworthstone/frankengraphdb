@@ -172,7 +172,7 @@ impl PreparedGraphVertexMerge {
         ) {
             return Err(GraphVertexMergeBuildError::TargetColumn { column: target });
         }
-        if creation.selection().is_some() {
+        if !creation.is_standalone() {
             return Err(GraphVertexMergeBuildError::CreationMustBeStandalone);
         }
         if creation.vertices_per_row() != 1 {

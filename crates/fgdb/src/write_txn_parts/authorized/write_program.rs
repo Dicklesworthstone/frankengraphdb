@@ -255,7 +255,7 @@ impl<V: Vfs + Clone> Database<V> {
                             .map_err(&fail)?;
                         execution.poll().map_err(&fail)?;
                         let reads = match statement {
-                            GraphWriteStatement::Insert(input) => input.selection().is_some(),
+                            GraphWriteStatement::Insert(input) => input.requires_read(),
                             GraphWriteStatement::Mutation(_)
                             | GraphWriteStatement::Delete(_)
                             | GraphWriteStatement::VertexMerge(_)
