@@ -4,6 +4,7 @@
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PointReadField {
     Property(fgdb_delta_types::PropertyKeyId),
+    Label(LabelId),
 }
 
 #[derive(Default)]
@@ -50,7 +51,12 @@ impl PointReads {
                     .contains(*elem, PointReadField::Property(*property))
                     .then_some(*elem));
             }
-            DeltaRow::LabelMembership { .. } => return Ok(None),
+            DeltaRow::LabelMembership { vid, label, .. } => {
+                let element = ElementId::Vertex(*vid);
+                return Ok(self
+                    .contains(element, PointReadField::Label(*label))
+                    .then_some(element));
+            }
             DeltaRow::CreateVertex { vid, .. } => ElementId::Vertex(*vid),
             DeltaRow::CreateEdge { eid, .. } | DeltaRow::DeleteEdge { eid, .. } => {
                 ElementId::Edge(*eid)
@@ -139,6 +145,32 @@ impl WriteTxn {
         Ok(row.and_then(|row| take_point_property(row.props, property)))
     }
 
+    /// Read one label membership without observing the complete vertex.
+    ///
+    /// Some(true/false) is membership on an existing vertex; None means the
+    /// vertex is absent. The selected membership AND vertex lifetime remain
+    /// dependencies, including negative answers and staged effects. Other
+    /// labels, properties and incidence are not exposed by this accessor.
+    /// Property and label IDs inhabit distinct read domains even when their
+    /// numeric values are equal. Full getters and scans retain their broader
+    /// witnesses; rollback never removes any point observations.
+    ///
+    /// The same original-basis validator handles finish, explicit refresh and
+    /// rebase. A remove/re-add is still a conflict. This inherits the raw
+    /// embedded authority, residency and isolation limits of vertex_property.
+    pub fn vertex_has_label<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        vid: VId,
+        label: LabelId,
+    ) -> Result<Option<bool>, WriteTxnError> {
+        let row = self.point_vertex(database, vid)?;
+        self.point_reads
+            .borrow_mut()
+            .record(ElementId::Vertex(vid), PointReadField::Label(label));
+        Ok(row.map(|row| row.labels.binary_search(&label).is_ok()))
+    }
+
     // Only explicit point accessors use these private unobserved rows. They
     // record the exposed domain before returning. Full getters are unchanged.
     fn point_vertex<V: Vfs + Clone>(
@@ -187,4 +219,9 @@ impl WriteTxn {
 #[cfg(test)]
 mod point_read_tests {
     include!("point_read_tests.rs");
+}
+
+#[cfg(test)]
+mod point_label_tests {
+    include!("point_label_tests.rs");
 }
