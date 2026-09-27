@@ -23,6 +23,11 @@ impl WriteTxn {
     /// writes to proposed identities and retirement of any endpoint all refuse.
     /// Reusing an identity that was concurrently created then deleted is refused
     /// even when the current writer no longer contains it.
+    /// If the basis must advance, a proposed creation must not have been read:
+    /// its staged created_at is a basis placeholder already visible to callers.
+    /// The current witness cannot separate those reads from earlier negative
+    /// reads of the same identity, so both refuse conservatively. Observations
+    /// of existing unrelated elements remain eligible after read validation.
     ///
     /// Re-evaluation must produce the EXACT original canonical template. This
     /// preserves IDs, payloads, creation ordering and already-issued identities;
@@ -128,6 +133,9 @@ impl WriteTxn {
                 _ => unreachable!("raw append eligibility was checked"),
             }
         }
+        if frontier != self.basis {
+            self.validate_unobserved_creations(&creations, checkpoint)?;
+        }
         // A current-state lookup alone misses create/delete identity races and
         // retired endpoints. Admission needs the COMPLETE original-basis tail.
         for batch in database.delta_since(self.basis)? {
@@ -186,9 +194,192 @@ impl WriteTxn {
         self.basis = frontier;
         Ok(())
     }
+
+    // Chronicle history cannot validate an observation of a staged creation:
+    // it is not in that history yet. Preserve the original-basis read contract
+    // rather than changing escaped metadata while retaining identical deltas.
+    fn validate_unobserved_creations(
+        &self,
+        creations: &std::collections::BTreeSet<ElementId>,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<(), WriteTxnError> {
+        let observations = self.read_set.borrow();
+        for element in creations {
+            checkpoint()?;
+            if observations.contains(element) {
+                return Err(WriteTxnError::AppendRebaseIneligible);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod append_rebase_tests {
     include!("append_rebase_tests.rs");
+}
+
+#[cfg(test)]
+mod observed_creation_tests {
+    use super::*;
+    use crate::{DatabaseKeys, MemVfs};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const NEW: u128 = u128::MAX;
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new([0x81; 32], DatabaseSecurityNamespaceId([0x82; 32]), [0x83; 32])
+    }
+
+    async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=3 {
+            batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(0))]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(cx, batch).await.unwrap();
+    }
+
+    fn append() -> WriteBatch {
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(NEW), vec![], vec![]);
+        batch.add_edge(EId(NEW), VId(1), VId(NEW), vec![]);
+        batch
+    }
+
+    async fn advance(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
+        let mut batch = WriteBatch::new(R);
+        batch.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+        db.write(cx, batch).await.unwrap()
+    }
+
+    #[test]
+    fn staged_vertex_and_edge_metadata_reads_refuse_a_changed_basis() {
+        let ((), report) = run_async_under_lab(0x81a0_0001, |root| async move {
+            let purposes = PurposeContexts::narrow_runtime_root(&root);
+            let cx = purposes.commit();
+            let txcx = purposes.txn();
+            for edge in [false, true] {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                tx.write(&mut db, append()).unwrap();
+                let observed = if edge {
+                    tx.edge(&db, EId(NEW)).unwrap().unwrap().entry.created_at
+                } else {
+                    tx.vertex(&db, VId(NEW)).unwrap().unwrap().created_at
+                };
+                assert_eq!(observed, tx.basis());
+                let frontier = advance(&mut db, &cx).await;
+                assert!(matches!(
+                    tx.commit_append_only_rebased(&mut db, &cx, 2).await,
+                    Err(WriteTxnError::AppendRebaseIneligible)
+                ));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(NEW)).unwrap().is_none());
+                assert!(db.edge(EId(NEW)).unwrap().is_none());
+                assert_eq!(tx.state(), EmbeddedTxnState::Aborted);
+                assert!(tx.prepared.is_none());
+                assert!(tx.staged.is_empty());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn negative_creation_reads_refuse_but_no_drift_keeps_read_your_writes() {
+        let ((), report) = run_async_under_lab(0x81a0_0002, |root| async move {
+            let purposes = PurposeContexts::narrow_runtime_root(&root);
+            let cx = purposes.commit();
+            let txcx = purposes.txn();
+            for drift in [false, true] {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                seed(&mut db, &cx).await;
+                let mut tx = db.begin(&txcx).unwrap();
+                assert!(tx.vertex(&db, VId(NEW)).unwrap().is_none());
+                assert!(tx.edge(&db, EId(NEW)).unwrap().is_none());
+                tx.write(&mut db, append()).unwrap();
+                assert!(tx.vertex(&db, VId(NEW)).unwrap().is_some());
+                assert!(tx.edge(&db, EId(NEW)).unwrap().is_some());
+                if drift {
+                    advance(&mut db, &cx).await;
+                }
+                let frontier = db.frontier().unwrap();
+                let result = tx.commit_append_only_rebased(&mut db, &cx, 2).await;
+                if drift {
+                    assert!(matches!(result, Err(WriteTxnError::AppendRebaseIneligible)));
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                } else {
+                    assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+                    assert!(db.vertex(VId(NEW)).unwrap().is_some());
+                    assert!(db.edge(EId(NEW)).unwrap().is_some());
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn existing_observations_and_unobserved_appends_still_rebase_and_reopen() {
+        let ((), report) = run_async_under_lab(0x81a0_0003, |root| async move {
+            let purposes = PurposeContexts::narrow_runtime_root(&root);
+            let cx = purposes.commit();
+            let txcx = purposes.txn();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
+            seed(&mut db, &cx).await;
+            let mut tx = db.begin(&txcx).unwrap();
+            assert!(tx.vertex(&db, VId(1)).unwrap().is_some());
+            assert!(tx.edge(&db, EId(10)).unwrap().is_some());
+            tx.write(&mut db, append()).unwrap();
+            let original = tx.prepared.as_ref().unwrap().template.clone();
+            let frontier = advance(&mut db, &cx).await;
+            let seq = tx.commit_append_only_rebased(&mut db, &cx, 2).await.unwrap();
+            assert_eq!(seq, CommitSeq(frontier.0 + 1));
+            let tail = db.delta_since(frontier).unwrap().collect::<Vec<_>>();
+            assert_eq!(tail.len(), 1);
+            assert_eq!(tail[0].coordinate_entries(), original.coordinate_entries());
+            drop(db);
+            let db = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+            assert!(db.vertex(VId(NEW)).unwrap().is_some());
+            assert_eq!(db.edge(EId(NEW)).unwrap().unwrap().entry.dst, VId(NEW));
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn creation_observation_walk_is_cancellable_and_keeps_identity_domains() {
+        let ((), report) = run_async_under_lab(0x81a0_0004, |root| async move {
+            let purposes = PurposeContexts::narrow_runtime_root(&root);
+            let cx = purposes.commit();
+            let txcx = purposes.txn();
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            seed(&mut db, &cx).await;
+            let tx = db.begin(&txcx).unwrap();
+            tx.read_set.borrow_mut().insert(ElementId::Edge(EId(NEW)));
+            let creations = (1..=64).map(|id| ElementId::Vertex(VId(id)))
+                .chain([ElementId::Vertex(VId(NEW))]).collect();
+            for stop in 1..=65 {
+                let mut seen = 0;
+                let result = tx.validate_unobserved_creations(&creations, &mut || {
+                    seen += 1;
+                    if seen == stop { Err(WriteTxnError::NoPreparedWrite) } else { Ok(()) }
+                });
+                assert!(matches!(result, Err(WriteTxnError::NoPreparedWrite)));
+                assert_eq!(seen, stop);
+            }
+            assert!(tx.validate_unobserved_creations(&creations, &mut || Ok(())).is_ok());
+            tx.abort();
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
