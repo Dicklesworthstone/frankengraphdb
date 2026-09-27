@@ -14,6 +14,9 @@ use fgdb_types::QueryCx;
 use fgdb_warden::{Authority, CapabilityToken, Error as WardenError, LimitDimension};
 use std::cell::RefCell;
 
+#[path = "beacon_indexed.rs"]
+mod indexed;
+
 type Error = BeaconReadError<ReadError, QueryError>;
 
 fn control_error(error: QueryError) -> Error {
