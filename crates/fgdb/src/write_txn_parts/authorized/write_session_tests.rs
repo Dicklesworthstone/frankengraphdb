@@ -389,3 +389,172 @@ fn each_success_gets_one_per_execution_budget_not_a_lifetime_grant_or_phase_rese
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+
+#[test]
+fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps() {
+    lab(0xac11, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let calls = AtomicUsize::new(0);
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, "host-branch",
+            |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
+            R, policy(), 72, || NOW,
+        ).unwrap();
+        let template = session.prepare(&query,
+            "MERGE (n:Visible {p:0}); MERGE (n:Visible {p:$key}) ON CREATE SET n.q=$value; \
+             MATCH (a:Visible),(b:Visible) WHERE a.p=0 AND b.p=$key MERGE (a)-[:R]->(b)",
+            &arguments(1, 11),
+        ).unwrap();
+        let args: Vec<_> = (1..=24).map(|key| arguments(key, key + 10)).collect();
+        let batch = session.bind_batch(&query, &template, &args).unwrap();
+        assert_eq!(batch.argument_sets(), 24);
+        assert_eq!(batch.location(71).unwrap().argument_set, 23);
+        assert_eq!(batch.location(71).unwrap().statement, 2);
+        assert!(batch.location(72).is_none());
+        assert!(format!("{batch:?}").contains("[REDACTED]"));
+        assert!(!format!("{batch:?}").contains("Visible"));
+        let resolved = calls.load(Ordering::Relaxed);
+        assert_eq!(txn.outstanding_obligations(), 0);
+        let (receipt, completion) = session.execute_bound_batch(&query, &batch).await.unwrap();
+        assert_eq!(receipt.stats().completed_statements, 72);
+        assert_eq!((receipt.stats().created_vertices, receipt.stats().created_edges), (25, 24));
+        assert_eq!(receipt.stats().mutation_effects, 24);
+        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: CommitSeq(basis.0 + 1) });
+        for record in 0..24 {
+            let steps = batch.record_receipts(&receipt, record).unwrap();
+            assert_eq!(steps.len(), 3);
+            assert_eq!(steps[0].merged_vertex().unwrap().vertex(), VId(1));
+            assert_eq!(steps[2].created_edges(), Some(&[EId(record as u128 + 1)][..]));
+        }
+        assert!(batch.record_receipts(&receipt, 24).is_none());
+        let (repeat, completion) = session.execute_bound_batch(&query, &batch).await.unwrap();
+        assert_eq!((repeat.stats().created_vertices, repeat.stats().created_edges), (0, 0));
+        assert_eq!(repeat.stats().mutation_effects, 0);
+        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+        let (stats, completion) = session.execute_bound_batch_stats(&query, &batch).await.unwrap();
+        assert_eq!(stats, repeat.stats());
+        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+        assert_eq!(calls.load(Ordering::Relaxed), resolved);
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.vertices().unwrap().len(), 25);
+        assert_eq!(db.edges().unwrap().len(), 24);
+        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn bound_batches_do_not_outlive_their_owner_or_live_credentials() {
+    lab(0xac15, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        for mode in 0..3 {
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), NOW).unwrap();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let time = AtomicU64::new(NOW);
+            let mut session = db.authorized_write_session(
+                &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64,
+                || time.load(Ordering::Relaxed),
+            ).unwrap();
+            let template = session.prepare(&query, "CREATE (n:Visible {p:$key, q:$value})", &arguments(1, 10)).unwrap();
+            let batch = session.bind_batch(&query, &template, &[arguments(1, 10), arguments(2, 20)]).unwrap();
+            if mode == 0 {
+                drop(session);
+                let mut other = db.authorized_write_session(
+                    &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
+                ).unwrap();
+                let error = other.execute_bound_batch(&query, &batch).await.unwrap_err();
+                assert!(matches!(error, Fault::Program(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
+                ))));
+                assert!(other.is_closed());
+                drop(other);
+            } else {
+                if mode == 1 { time.store(10_000, Ordering::Relaxed); } else { issuer.retire(); }
+                let error = session.execute_bound_batch(&query, &batch).await.unwrap_err();
+                assert_eq!(authorization(&error), Some(if mode == 1 { Error::Expired } else { Error::AuthorityRetired }));
+                assert!(session.is_closed());
+                drop(session);
+            }
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap(),
+                ElementId::Vertex(VId(1)));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
+    lab(0xac14, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let args: Vec<_> = (1..=3).map(|key| arguments(key, key + 10)).collect();
+        let mut floors = Vec::new();
+        for bound in [false, true] {
+            let (mut low, mut high) = (0_u64, 16384_u64);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let mut scope = grant();
+                scope.limits.max_work = middle;
+                scope.limits.max_rows = 0;
+                let token = issuer.issue_at(&scope, NOW).unwrap();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let mut session = db.authorized_write_session(
+                    &txn, &commit, &issuer, &token, "host-branch", symbols, R, policy(), 64, || NOW,
+                ).unwrap();
+                let result = async {
+                    let template = session.prepare(&query,
+                        "CREATE (n:Visible {p:$key}); MATCH (n:Visible) WHERE n.p=$key SET n.q=$value",
+                        &args[0],
+                    )?;
+                    if bound {
+                        let batch = session.bind_batch(&query, &template, &args)?;
+                        session.execute_bound_batch_stats(&query, &batch).await
+                    } else {
+                        session.execute_batch_stats(&query, &template, &args).await
+                    }
+                }.await;
+                let success = match result {
+                    Ok((stats, _)) => { assert_eq!(stats.created_vertices, 3); true }
+                    Err(error) => {
+                        assert_eq!(authorization(&error), Some(Error::LimitExceeded(LimitDimension::Work)));
+                        assert!(session.is_closed());
+                        false
+                    }
+                };
+                drop(session);
+                if success { high = middle; } else {
+                    low = middle + 1;
+                    assert_eq!(db.frontier().unwrap(), before);
+                    assert!(db.vertices().unwrap().is_empty());
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+            assert!(low > 0 && low < 16384);
+            floors.push(low);
+        }
+        assert_eq!(floors[0], floors[1] + 6 + 3 + 1);
+    });
+}
