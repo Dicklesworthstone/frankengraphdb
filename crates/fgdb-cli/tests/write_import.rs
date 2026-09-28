@@ -290,7 +290,10 @@ fn create_return_reports_exact_occurrence_identities_at_one_durable_frontier() {
     ));
     assert_eq!(seq(&written, "written"), fixture.created + 1);
     assert_eq!(written.matches("\"event\":\"result\"").count(), 1);
-    assert!(written.contains("\"count\":3,\"statements\":1"), "{written}");
+    assert!(
+        written.contains("\"count\":3,\"statements\":1"),
+        "{written}"
+    );
     let rows = row_frames(&written);
     assert_eq!(rows.len(), 3, "{written}");
     for (row, (source, edge, destination, value)) in
@@ -366,10 +369,7 @@ fn late_create_return_failure_exposes_no_rows_and_commits_no_creations() {
         let unchanged = success(fixture.run("query", &["MATCH (n:Person) RETURN n"]));
         assert_eq!(seq(&unchanged, "rows"), fixture.created);
     }
-    let valid = success(fixture.run(
-        "write",
-        &["CREATE (n:Person {id:11}) RETURN n.id AS id"],
-    ));
+    let valid = success(fixture.run("write", &["CREATE (n:Person {id:11}) RETURN n.id AS id"]));
     assert_eq!(seq(&valid, "written"), fixture.created + 1);
     assert_eq!(row_frames(&valid).len(), 1);
     fixture.count(1);
@@ -447,12 +447,12 @@ fn create_return_transport_failure_reports_io_after_the_durable_write() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("rolled"), "{stderr}");
     fixture.count(1);
-    let stored = success(fixture.run(
-        "query",
-        &["MATCH (n:Person) RETURN n.id AS id"],
-    ));
+    let stored = success(fixture.run("query", &["MATCH (n:Person) RETURN n.id AS id"]));
     assert_eq!(seq(&stored, "rows"), fixture.created + 1);
-    assert!(stored.contains("\"type\":\"int\",\"value\":\"17\""), "{stored}");
+    assert!(
+        stored.contains("\"type\":\"int\",\"value\":\"17\""),
+        "{stored}"
+    );
 }
 
 #[test]

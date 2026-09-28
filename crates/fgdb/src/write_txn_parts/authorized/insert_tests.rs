@@ -1064,7 +1064,10 @@ fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
             assert_eq!(result.value, expected);
             let seq = db.frontier().unwrap();
             assert_eq!(seq.0, before.0 + 1);
-            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+            );
             let vertices = db.vertices().unwrap();
             let edges = db.edges().unwrap();
             assert_eq!((vertices.len(), edges.len()), (6, 3));
@@ -1079,8 +1082,13 @@ fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
             );
             db.compact(&commit).await.unwrap();
             drop(db);
-            let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-            assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), (vertices, edges));
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(
+                (db.vertices().unwrap(), db.edges().unwrap()),
+                (vertices, edges)
+            );
             assert_eq!(db.frontier().unwrap(), seq);
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -1109,7 +1117,15 @@ fn insertion_query_requires_readwrite_before_identity_allocation_even_with_limit
             let token = authority.issue_at(&denied, NOW).unwrap();
             let error = db
                 .execute_graph_insert_query_authorized(
-                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || NOW,
+                    &txn,
+                    &query_cx,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(),
+                    || NOW,
                 )
                 .await
                 .unwrap_err();
@@ -1140,7 +1156,11 @@ fn insertion_query_projection_quota_and_creation_scope_failures_publish_nothing(
         let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
         for mode in 0..4 {
             let mut db = matched_fixture(&commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let insertion = if mode == 3 {
                 insert("CREATE (a:Visible {p:2}), (b:Visible {secret:1})")
             } else {
@@ -1187,31 +1207,49 @@ fn insertion_query_projection_quota_and_creation_scope_failures_publish_nothing(
             }
             let error = db
                 .execute_graph_insert_query_authorized(
-                    &txn, &query_cx, &commit, &authority, &token, "main", &query, bounded, || NOW,
+                    &txn,
+                    &query_cx,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    bounded,
+                    || NOW,
                 )
                 .await
                 .unwrap_err();
             match mode {
-                0 => assert!(matches!(
-                    &error,
-                    GqlQueryError::Source(GraphInsertQueryError::Returning(
-                        GraphSetExecutionError::Projection {
-                            row: 1,
-                            column: 0,
-                            error: fgdb_gql::GraphIntegerError {
-                                kind: GraphIntegerErrorKind::DivisionByZero,
-                                ..
-                            },
-                        }
-                    ))
-                ), "{error:?}"),
-                1 => assert_eq!(query_authorization(&error), Some(Error::LimitExceeded(LimitDimension::Rows))),
+                0 => assert!(
+                    matches!(
+                        &error,
+                        GqlQueryError::Source(GraphInsertQueryError::Returning(
+                            GraphSetExecutionError::Projection {
+                                row: 1,
+                                column: 0,
+                                error: fgdb_gql::GraphIntegerError {
+                                    kind: GraphIntegerErrorKind::DivisionByZero,
+                                    ..
+                                },
+                            }
+                        ))
+                    ),
+                    "{error:?}"
+                ),
+                1 => assert_eq!(
+                    query_authorization(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Rows))
+                ),
                 2 => assert!(matches!(&error, GqlQueryError::Rows(_)), "{error:?}"),
                 3 => assert_eq!(query_authorization(&error), Some(Error::ScopeDenied)),
                 _ => unreachable!(),
             }
             assert_eq!(
-                (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
                 before,
                 "mode={mode}"
             );
@@ -1263,7 +1301,15 @@ fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
             let before = db.frontier().unwrap();
             let (stats, result, completion) = db
                 .execute_graph_insert_query_authorized(
-                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || NOW,
+                    &txn,
+                    &query_cx,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(),
+                    || NOW,
                 )
                 .await
                 .unwrap();
@@ -1280,11 +1326,17 @@ fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
                 ]
             );
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
-            assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { .. }
+            ));
             results.push((stats, result));
             assert_eq!(txn.outstanding_obligations(), 0);
         }
-        assert_eq!(results[0], results[1], "hidden records changed public values or usage");
+        assert_eq!(
+            results[0], results[1],
+            "hidden records changed public values or usage"
+        );
     });
 }
 
@@ -1307,7 +1359,15 @@ fn insertion_query_expiry_through_final_admission_aborts_all_effects() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut total = 0;
         db.execute_graph_insert_query_authorized(
-            &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || {
+            &txn,
+            &query_cx,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &query,
+            policy(),
+            || {
                 total += 1;
                 NOW
             },
@@ -1321,14 +1381,26 @@ fn insertion_query_expiry_through_final_admission_aborts_all_effects() {
             let mut calls = 0;
             let error = db
                 .execute_graph_insert_query_authorized(
-                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || {
+                    &txn,
+                    &query_cx,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(),
+                    || {
                         calls += 1;
                         if calls >= cutoff { 10_000 } else { NOW }
                     },
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(query_authorization(&error), Some(Error::Expired), "cutoff={cutoff}");
+            assert_eq!(
+                query_authorization(&error),
+                Some(Error::Expired),
+                "cutoff={cutoff}"
+            );
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
             assert!(db.edges().unwrap().is_empty());

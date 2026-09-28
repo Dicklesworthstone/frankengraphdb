@@ -18,12 +18,18 @@ struct File {
     fail_flush: bool,
 }
 impl AsyncRead for File {
-    fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>)
-        -> Poll<io::Result<()>>
-    {
-        if self.pending_read { return Poll::Pending; }
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.pending_read {
+            return Poll::Pending;
+        }
         let at = self.data.position() as usize;
-        let count = out.remaining().min(self.data.get_ref().len().saturating_sub(at));
+        let count = out
+            .remaining()
+            .min(self.data.get_ref().len().saturating_sub(at));
         if count != 0 {
             out.put_slice(&self.data.get_ref()[at..at + count]);
             self.data.set_position((at + count) as u64);
@@ -34,47 +40,80 @@ impl AsyncRead for File {
     }
 }
 impl AsyncWrite for File {
-    fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8])
-        -> Poll<io::Result<usize>>
-    {
-        if self.pending_write { return Poll::Pending; }
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.pending_write {
+            return Poll::Pending;
+        }
         let count = self.write_limit.unwrap_or(bytes.len()).min(bytes.len());
-        if count == 0 && !bytes.is_empty() { return Poll::Ready(Err(io::Error::other("write cut"))); }
+        if count == 0 && !bytes.is_empty() {
+            return Poll::Ready(Err(io::Error::other("write cut")));
+        }
         let result = std::io::Write::write(&mut self.data, &bytes[..count]);
-        if let Some(left) = &mut self.write_limit { *left -= count; }
+        if let Some(left) = &mut self.write_limit {
+            *left -= count;
+        }
         Poll::Ready(result)
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(if self.fail_flush { Err(io::Error::other("flush cut")) } else { Ok(()) })
+        Poll::Ready(if self.fail_flush {
+            Err(io::Error::other("flush cut"))
+        } else {
+            Ok(())
+        })
     }
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 }
 impl AsyncSeek for File {
-    fn poll_seek(mut self: Pin<&mut Self>, _: &mut Context<'_>, position: SeekFrom)
-        -> Poll<io::Result<u64>>
-    {
-        if self.pending_seek { return Poll::Pending; }
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        position: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        if self.pending_seek {
+            return Poll::Pending;
+        }
         let result = self.data.seek(position);
-        Poll::Ready(if self.wrong_seek { result.map(|at| at + 1) } else { result })
+        Poll::Ready(if self.wrong_seek {
+            result.map(|at| at + 1)
+        } else {
+            result
+        })
     }
 }
 fn complete<T>(future: impl Future<Output = T>) -> T {
     let mut future = std::pin::pin!(future);
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("unexpected suspension"),
     }
 }
 fn file(pool: MemoryPool) -> SpillFile<File> {
-    complete(SpillFile::new_inner(File::default(), pool, SpillLimits {
-        max_file_bytes: 4_000_000, max_runs: 100, max_run_bytes: 1_000_000,
-    }, || Ok(()))).unwrap()
+    complete(SpillFile::new_inner(
+        File::default(),
+        pool,
+        SpillLimits {
+            max_file_bytes: 4_000_000,
+            max_runs: 100,
+            max_run_bytes: 1_000_000,
+        },
+        || Ok(()),
+    ))
+    .unwrap()
 }
 fn append(file: &mut SpillFile<File>, bytes: &[u8], size: usize, chunk: usize) -> PagedSpillRun {
     let mut writer = file.paged_writer_inner(size).unwrap();
-    for bytes in bytes.chunks(chunk) { complete(writer.write_inner(bytes, &mut || Ok(()))).unwrap(); }
+    for bytes in bytes.chunks(chunk) {
+        complete(writer.write_inner(bytes, &mut || Ok(()))).unwrap();
+    }
     complete(writer.finish_inner(&mut || Ok(()))).unwrap()
 }
 fn read(file: &mut SpillFile<File>, run: &PagedSpillRun) -> Vec<u8> {
@@ -94,7 +133,10 @@ fn paged_runs_exceed_resident_memory_and_need_only_a_logarithmic_proof_per_read(
     let run = append(&mut scratch, &input, 1024, 137);
     assert!(run.len() > pool.limit());
     assert_eq!(pool.used(), 0);
-    assert_eq!(scratch.stats.reserved_bytes, input.len() as u64 + (run.page_count() - 1) * 128);
+    assert_eq!(
+        scratch.stats.reserved_bytes,
+        input.len() as u64 + (run.page_count() - 1) * 128
+    );
     assert_eq!(scratch.stats.published_runs, 1);
     for page in (0..run.page_count()).rev() {
         let before = scratch.file.read_bytes;
@@ -120,9 +162,16 @@ fn corruption_before_finish_cannot_be_blessed_by_rereading_untrusted_metadata() 
     writer.scratch.file.data.get_mut()[0] ^= 1;
     let run = complete(writer.finish_inner(&mut || Ok(()))).unwrap();
     assert_eq!(scratch.file.read_calls, 0);
-    assert!(matches!(complete(scratch.restore_page_inner(&run, 0, || Ok(()))),
-        Err(SpillError::ChecksumMismatch)));
-    assert_eq!(complete(scratch.restore_page_inner(&run, 1, || Ok(()))).unwrap().as_ref(), b"ijklmnop");
+    assert!(matches!(
+        complete(scratch.restore_page_inner(&run, 0, || Ok(()))),
+        Err(SpillError::ChecksumMismatch)
+    ));
+    assert_eq!(
+        complete(scratch.restore_page_inner(&run, 1, || Ok(())))
+            .unwrap()
+            .as_ref(),
+        b"ijklmnop"
+    );
     assert_eq!(pool.used(), 0);
 }
 
@@ -157,7 +206,10 @@ fn every_stored_payload_and_branch_byte_is_detected_by_complete_consumption() {
         for page in 0..run.page_count() {
             match complete(scratch.restore_page_inner(&run, page, || Ok(()))) {
                 Ok(bytes) => drop(bytes),
-                Err(SpillError::ChecksumMismatch) => { refused = true; break; }
+                Err(SpillError::ChecksumMismatch) => {
+                    refused = true;
+                    break;
+                }
                 other => panic!("unexpected corruption result: {other:?}"),
             }
         }
@@ -166,7 +218,10 @@ fn every_stored_payload_and_branch_byte_is_detected_by_complete_consumption() {
         assert_eq!(pool.used(), 0);
         scratch.file.data.get_mut()[byte] ^= 1;
     }
-    assert_eq!(read(&mut scratch, &run), b"abcdefghijklmnopqrstuvwxyz0123456789");
+    assert_eq!(
+        read(&mut scratch, &run),
+        b"abcdefghijklmnopqrstuvwxyz0123456789"
+    );
 }
 
 #[test]
@@ -178,8 +233,10 @@ fn page_authentication_is_not_mislabeled_as_unread_payload_verification() {
     scratch.file.data.get_mut()[7] ^= 1;
     let first = complete(scratch.restore_page_inner(&run, 0, || Ok(()))).unwrap();
     assert_eq!(first.as_ref(), b"first__");
-    assert!(matches!(complete(scratch.restore_page_inner(&run, 1, || Ok(()))),
-        Err(SpillError::ChecksumMismatch)));
+    assert!(matches!(
+        complete(scratch.restore_page_inner(&run, 1, || Ok(()))),
+        Err(SpillError::ChecksumMismatch)
+    ));
 }
 
 #[test]
@@ -188,14 +245,26 @@ fn foreign_empty_out_of_range_and_memory_refusals_do_no_io() {
     let mut a = file(pool.clone());
     let mut b = file(pool.clone());
     let run = append(&mut a, b"abcdef", 3, 7);
-    assert!(matches!(complete(b.restore_page_inner(&run, 0, || Ok(()))), Err(SpillError::ForeignRun)));
+    assert!(matches!(
+        complete(b.restore_page_inner(&run, 0, || Ok(()))),
+        Err(SpillError::ForeignRun)
+    ));
     for page in [run.page_count(), u64::MAX] {
-        assert!(matches!(complete(a.restore_page_inner(&run, page, || Ok(()))), Err(SpillError::InvalidRun)));
+        assert!(matches!(
+            complete(a.restore_page_inner(&run, page, || Ok(()))),
+            Err(SpillError::InvalidRun)
+        ));
     }
     let empty = append(&mut a, b"", 3, 7);
-    assert!(matches!(complete(a.restore_page_inner(&empty, 0, || Ok(()))), Err(SpillError::InvalidRun)));
+    assert!(matches!(
+        complete(a.restore_page_inner(&empty, 0, || Ok(()))),
+        Err(SpillError::InvalidRun)
+    ));
     let occupied = pool.allocate_inner(pool.available(), 0).unwrap();
-    assert!(matches!(complete(a.restore_page_inner(&run, 0, || Ok(()))), Err(SpillError::Memory(_))));
+    assert!(matches!(
+        complete(a.restore_page_inner(&run, 0, || Ok(()))),
+        Err(SpillError::Memory(_))
+    ));
     assert_eq!((a.file.read_calls, b.file.read_calls), (0, 0));
     assert!(!a.is_poisoned() && !b.is_poisoned());
     drop(occupied);
@@ -210,20 +279,32 @@ fn full_quotas_include_branch_records_and_unaccepted_attempts() {
     let run = append(&mut scratch, b"abcde", 3, 100);
     assert_eq!(scratch.stats.reserved_bytes, scratch.limits.max_file_bytes);
     assert_eq!(read(&mut scratch, &run), b"abcde");
-    assert!(matches!(scratch.paged_writer_inner(3), Err(SpillError::RunLimit { limit: 1 })));
+    assert!(matches!(
+        scratch.paged_writer_inner(3),
+        Err(SpillError::RunLimit { limit: 1 })
+    ));
     let mut scratch = file(MemoryPool::new(32_768, 0).unwrap());
     scratch.limits.max_file_bytes = 5 + BRANCH_BYTES as u64 - 1;
     let mut writer = scratch.paged_writer_inner(3).unwrap();
     complete(writer.write_inner(b"abcde", &mut || Ok(()))).unwrap();
-    assert!(matches!(complete(writer.finish_inner(&mut || Ok(()))), Err(SpillError::FileLimit { .. })));
+    assert!(matches!(
+        complete(writer.finish_inner(&mut || Ok(()))),
+        Err(SpillError::FileLimit { .. })
+    ));
     assert_eq!(scratch.stats.published_runs, 0);
     assert!(scratch.is_poisoned());
     assert_eq!(scratch.pool.used(), 0);
     let mut scratch = file(MemoryPool::new(32_768, 0).unwrap());
     scratch.limits.max_run_bytes = 4;
     let mut writer = scratch.paged_writer_inner(3).unwrap();
-    assert!(matches!(complete(writer.write_inner(b"abcde", &mut || Ok(()))), Err(SpillError::RunTooLarge { .. })));
-    assert!(matches!(complete(writer.finish_inner(&mut || Ok(()))), Err(SpillError::PoisonedFile)));
+    assert!(matches!(
+        complete(writer.write_inner(b"abcde", &mut || Ok(()))),
+        Err(SpillError::RunTooLarge { .. })
+    ));
+    assert!(matches!(
+        complete(writer.finish_inner(&mut || Ok(()))),
+        Err(SpillError::PoisonedFile)
+    ));
     assert_eq!(scratch.stats.reserved_bytes, 0);
     assert_eq!(scratch.stats.reserved_runs, 1);
     assert!(scratch.is_poisoned());
@@ -237,14 +318,26 @@ fn every_write_finish_and_read_checkpoint_refuses_without_leaking_a_prefix_or_ch
         let mut calls = 0;
         let mut gate = || {
             calls += 1;
-            if calls == stop { Err(SpillError::Io(io::Error::other("control cut"))) } else { Ok(()) }
+            if calls == stop {
+                Err(SpillError::Io(io::Error::other("control cut")))
+            } else {
+                Ok(())
+            }
         };
         let result = complete(async {
             let mut writer = scratch.paged_writer_inner(4)?;
-            writer.write_inner(b"a partial final page", &mut gate).await?;
+            writer
+                .write_inner(b"a partial final page", &mut gate)
+                .await?;
             writer.finish_inner(&mut gate).await
         });
-        (result.is_ok(), calls, scratch.stats(), scratch.is_poisoned(), pool.used())
+        (
+            result.is_ok(),
+            calls,
+            scratch.stats(),
+            scratch.is_poisoned(),
+            pool.used(),
+        )
     }
     let (_, count, _, _, _) = execute(usize::MAX);
     for stop in 1..=count {
@@ -259,15 +352,28 @@ fn every_write_finish_and_read_checkpoint_refuses_without_leaking_a_prefix_or_ch
     let mut scratch = file(pool.clone());
     let run = append(&mut scratch, b"a partial final page", 4, 9);
     let mut count = 0;
-    drop(complete(scratch.restore_page_inner(&run, 4, || { count += 1; Ok(()) })).unwrap());
+    drop(
+        complete(scratch.restore_page_inner(&run, 4, || {
+            count += 1;
+            Ok(())
+        }))
+        .unwrap(),
+    );
     for stop in 1..=count {
         let mut scratch = file(pool.clone());
         let run = append(&mut scratch, b"a partial final page", 4, 9);
         let mut calls = 0;
-        assert!(complete(scratch.restore_page_inner(&run, 4, || {
-            calls += 1;
-            if calls == stop { Err(SpillError::Io(io::Error::other("read cut"))) } else { Ok(()) }
-        })).is_err());
+        assert!(
+            complete(scratch.restore_page_inner(&run, 4, || {
+                calls += 1;
+                if calls == stop {
+                    Err(SpillError::Io(io::Error::other("read cut")))
+                } else {
+                    Ok(())
+                }
+            }))
+            .is_err()
+        );
         assert_eq!(calls, stop);
         assert_eq!(scratch.stats.restored_runs, 0);
         assert_eq!(scratch.is_poisoned(), stop != 1 && stop != count);
@@ -288,7 +394,12 @@ fn dropped_pending_io_and_abandoned_buffered_writers_fence_the_file() {
         } else {
             let mut gate = || Ok(());
             let mut future = std::pin::pin!(writer.write_inner(b"one full page", &mut gate));
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
         drop(writer);
         assert!(scratch.is_poisoned());
@@ -301,7 +412,12 @@ fn dropped_pending_io_and_abandoned_buffered_writers_fence_the_file() {
     scratch.file.pending_read = true;
     {
         let mut future = std::pin::pin!(scratch.restore_page_inner(&run, 0, || Ok(())));
-        assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
     }
     assert!(scratch.is_poisoned());
     assert_eq!(pool.used(), 0);
@@ -318,14 +434,22 @@ fn actual_io_failures_and_unwind_never_issue_a_run_handle() {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             complete(async {
                 let mut writer = scratch.paged_writer_inner(4)?;
-                writer.write_inner(b"not a successful prefix", &mut || Ok(())).await?;
-                writer.finish_inner(&mut || {
-                    assert_ne!(case, 3, "injected finish unwind");
-                    Ok(())
-                }).await
+                writer
+                    .write_inner(b"not a successful prefix", &mut || Ok(()))
+                    .await?;
+                writer
+                    .finish_inner(&mut || {
+                        assert_ne!(case, 3, "injected finish unwind");
+                        Ok(())
+                    })
+                    .await
             })
         }));
-        if case == 3 { assert!(outcome.is_err()); } else { assert!(outcome.unwrap().is_err()); }
+        if case == 3 {
+            assert!(outcome.is_err());
+        } else {
+            assert!(outcome.unwrap().is_err());
+        }
         assert!(scratch.is_poisoned());
         assert_eq!(scratch.stats.published_runs, 0);
         assert_eq!(pool.used(), 0);
@@ -338,12 +462,23 @@ fn public_query_context_path_composes_with_existing_run_formats() {
         let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let pool = MemoryPool::new(32_768, 0).unwrap();
-        let mut scratch = SpillFile::new(&cx, File::default(), pool.clone(), SpillLimits {
-            max_file_bytes: 1_000_000, max_runs: 10, max_run_bytes: 200_000,
-        }).await.unwrap();
+        let mut scratch = SpillFile::new(
+            &cx,
+            File::default(),
+            pool.clone(),
+            SpillLimits {
+                max_file_bytes: 1_000_000,
+                max_runs: 10,
+                max_run_bytes: 200_000,
+            },
+        )
+        .await
+        .unwrap();
         let old = scratch.append(&cx, b"old format").await.unwrap();
         let mut writer = scratch.paged_writer(&cx, 512).unwrap();
-        for _ in 0..1000 { writer.write(&cx, b"new format fragment").await.unwrap(); }
+        for _ in 0..1000 {
+            writer.write(&cx, b"new format fragment").await.unwrap();
+        }
         assert_eq!(writer.len(), 19_000);
         let run = writer.finish(&cx).await.unwrap();
         let later = scratch.append(&cx, b"later format").await.unwrap();
@@ -353,8 +488,14 @@ fn public_query_context_path_composes_with_existing_run_formats() {
             bytes.extend_from_slice(output.as_ref());
         }
         assert_eq!(bytes, b"new format fragment".repeat(1000));
-        assert_eq!(scratch.restore(&cx, &old).await.unwrap().as_ref(), b"old format");
-        assert_eq!(scratch.restore(&cx, &later).await.unwrap().as_ref(), b"later format");
+        assert_eq!(
+            scratch.restore(&cx, &old).await.unwrap().as_ref(),
+            b"old format"
+        );
+        assert_eq!(
+            scratch.restore(&cx, &later).await.unwrap().as_ref(),
+            b"later format"
+        );
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

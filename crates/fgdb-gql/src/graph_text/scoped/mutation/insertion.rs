@@ -176,8 +176,15 @@ impl<'a> Parser<'a> {
             None
         };
         let existing = if let Some(name) = name {
-            if parsed.edges.iter().any(|edge| edge.name.is_some_and(|old| old.text == name.text)) {
-                return Err(expected(name.at, "CREATE vertex name distinct from edge bindings"));
+            if parsed
+                .edges
+                .iter()
+                .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+            {
+                return Err(expected(
+                    name.at,
+                    "CREATE vertex name distinct from edge bindings",
+                ));
             }
             if row_schema
                 .is_some_and(|schema| schema.iter().any(|(alias, _)| alias.text == name.text))
@@ -267,9 +274,16 @@ impl<'a> Parser<'a> {
                 self.punct(b'[', "[")?;
                 let name = if returning && matches!(self.current.kind, TokenKind::Word(_)) {
                     let name = self.name()?;
-                    if row_schema.is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
-                        || parsed.vertices.iter().any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
-                        || parsed.edges.iter().any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                    if row_schema
+                        .is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
+                        || parsed
+                            .vertices
+                            .iter()
+                            .any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                        || parsed
+                            .edges
+                            .iter()
+                            .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
                     {
                         return Err(expected(name.at, "new CREATE edge binding"));
                     }
@@ -291,9 +305,15 @@ impl<'a> Parser<'a> {
                 // admit another vertex. A chain cannot step past the total cap.
                 let right = self.insertion_node(&mut parsed, &mut fields, 1, row_schema)?;
                 if let Some(name) = name
-                    && parsed.vertices.iter().any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                    && parsed
+                        .vertices
+                        .iter()
+                        .any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
                 {
-                    return Err(expected(name.at, "CREATE edge name distinct from vertex bindings"));
+                    return Err(expected(
+                        name.at,
+                        "CREATE edge name distinct from vertex bindings",
+                    ));
                 }
                 let (source, destination) = if incoming {
                     (right, left)
@@ -457,19 +477,30 @@ impl PreparedGraphInsertText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         returning: bool,
-    ) -> Result<(Self, Option<crate::insertion_query_text::InsertReturnTemplate>), GraphInsertTextError> {
+    ) -> Result<
+        (
+            Self,
+            Option<crate::insertion_query_text::InsertReturnTemplate>,
+        ),
+        GraphInsertTextError,
+    > {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let matched = parser.is_word("MATCH");
         if returning && matched {
-            return Err(expected(parser.current.at, "standalone or UNWIND CREATE before RETURN"));
+            return Err(expected(
+                parser.current.at,
+                "standalone or UNWIND CREATE before RETURN",
+            ));
         }
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         if matched {
             parser.parse_match_prefix()?;
         }
         let at = parser.current.at;
-        let parsed =
-            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()), returning)?;
+        let parsed = parser.insertion_clauses(
+            (!leading.is_empty()).then_some(row_schema.as_slice()),
+            returning,
+        )?;
         let returning = if returning {
             Some(parser.insertion_return(&parsed, &row_schema)?)
         } else {
@@ -503,12 +534,14 @@ impl PreparedGraphInsertText {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
             if returning.is_some() {
-                shape.check_ancestor_depth(2).map_err(|kind| GraphInsertTextError {
-                    offset: at,
-                    kind: GraphInsertTextErrorKind::ReturnBuild(
-                        crate::GraphInsertQueryBuildError::InputDepth(kind),
-                    ),
-                })?;
+                shape
+                    .check_ancestor_depth(2)
+                    .map_err(|kind| GraphInsertTextError {
+                        offset: at,
+                        kind: GraphInsertTextErrorKind::ReturnBuild(
+                            crate::GraphInsertQueryBuildError::InputDepth(kind),
+                        ),
+                    })?;
             }
             for (_, value) in parsed
                 .vertices
@@ -589,7 +622,9 @@ impl PreparedGraphInsertText {
                 properties: resolve_properties(edge.properties, &mut symbol)?,
             });
         }
-        let returning = returning.map(|returning| returning.resolve(&mut symbol)).transpose()?;
+        let returning = returning
+            .map(|returning| returning.resolve(&mut symbol))
+            .transpose()?;
         let (input, shape) = if let Some((builder, filters, scopes)) = matching {
             let mut columns = Vec::new();
             for (index, projection) in parsed.projections.into_iter().enumerate() {

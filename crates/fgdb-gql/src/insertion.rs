@@ -297,6 +297,9 @@ impl core::fmt::Debug for PreparedGraphInsert {
             .finish()
     }
 }
+/// A returning insertion's batch and its RETURN rows, or the insertion error.
+type ReturningInsert<E, A, C> =
+    Result<(GraphInsertBatch, Vec<GraphValueRow>), GqlQueryError<GraphInsertError<E, A>, C>>;
 impl PreparedGraphInsert {
     /// Freeze a creation template. Properties read only the original selection;
     /// created vertices may be edge endpoints but are not RHS temporaries.
@@ -506,8 +509,7 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
-        collect::execute(self, policy, None, source, allocate, checkpoint)
-            .map(|(batch, _)| batch)
+        collect::execute(self, policy, None, source, allocate, checkpoint).map(|(batch, _)| batch)
     }
 
     pub(crate) fn execute_returning<E, A, C>(
@@ -520,7 +522,7 @@ impl PreparedGraphInsert {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<(GraphInsertBatch, Vec<GraphValueRow>), GqlQueryError<GraphInsertError<E, A>, C>> {
+    ) -> ReturningInsert<E, A, C> {
         collect::execute(self, policy, Some(bindings), source, allocate, checkpoint)
     }
 

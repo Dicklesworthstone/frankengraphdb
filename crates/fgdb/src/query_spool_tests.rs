@@ -6,7 +6,9 @@ use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GraphSymbol, GraphSymbolKind};
 use fgdb_strata::tiered::memory::{MemoryPool, SpillLimits, SpillStats};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::io::{self, Cursor, Seek, SeekFrom};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -24,12 +26,18 @@ fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
-fn policy() -> GqlQueryPolicy { GqlQueryPolicy::new(10_000, 10_000, 100_000_000, 1_000_000) }
+fn policy() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(10_000, 10_000, 100_000_000, 1_000_000)
+}
 fn plan(text: &str) -> PreparedNativeRead {
     PreparedNativeRead::prepare(text, &GqlParameters::new(), resolve).unwrap()
 }
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x91; 32], DatabaseSecurityNamespaceId([0x92; 32]), [0x93; 32])
+    DatabaseKeys::new(
+        [0x91; 32],
+        DatabaseSecurityNamespaceId([0x92; 32]),
+        [0x93; 32],
+    )
 }
 async fn seed(cx: &CommitCx, count: u128) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, keys()).await.unwrap();
@@ -37,12 +45,23 @@ async fn seed(cx: &CommitCx, count: u128) -> Database<MemVfs> {
     let text = CanonicalScalar::ucs_basic_text(&"payload:é\n".repeat(60)).unwrap();
     for id in 0..count {
         let mut props = vec![(PropertyKeyId(1), text.clone())];
-        if id % 3 == 0 { props.push((PropertyKeyId(2), CanonicalScalar::Null)); }
-        else if id % 3 == 1 { props.push((PropertyKeyId(2), CanonicalScalar::Int(-(id as i64)))); }
+        if id % 3 == 0 {
+            props.push((PropertyKeyId(2), CanonicalScalar::Null));
+        } else if id % 3 == 1 {
+            props.push((PropertyKeyId(2), CanonicalScalar::Int(-(id as i64))));
+        }
         batch.create_vertex(VId(id), vec![LabelId(1)], props);
-        if id != 0 { batch.add_edge(EId(id), VId(0), VId(id), vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))]); }
+        if id != 0 {
+            batch.add_edge(
+                EId(id),
+                VId(0),
+                VId(id),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+        }
     }
-    if count > 1 { // Parallel relationship identity must survive spooling.
+    if count > 1 {
+        // Parallel relationship identity must survive spooling.
         batch.add_edge(EId(u128::MAX), VId(0), VId(1), vec![]);
     }
     db.write(cx, batch).await.unwrap();
@@ -62,11 +81,19 @@ struct State {
 #[derive(Clone, Default)]
 struct File(Arc<Mutex<State>>);
 impl AsyncRead for File {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let mut state = self.0.lock().unwrap();
-        if state.pending_read { return Poll::Pending; }
+        if state.pending_read {
+            return Poll::Pending;
+        }
         let at = state.bytes.position() as usize;
-        let count = out.remaining().min(state.bytes.get_ref().len().saturating_sub(at));
+        let count = out
+            .remaining()
+            .min(state.bytes.get_ref().len().saturating_sub(at));
         if count != 0 {
             out.put_slice(&state.bytes.get_ref()[at..at + count]);
             state.bytes.set_position((at + count) as u64);
@@ -76,20 +103,36 @@ impl AsyncRead for File {
     }
 }
 impl AsyncWrite for File {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let mut state = self.0.lock().unwrap();
-        if state.pending_write { return Poll::Pending; }
+        if state.pending_write {
+            return Poll::Pending;
+        }
         let count = state.write_limit.unwrap_or(bytes.len()).min(bytes.len());
-        if count == 0 && !bytes.is_empty() { return Poll::Ready(Err(io::Error::other("injected write failure"))); }
+        if count == 0 && !bytes.is_empty() {
+            return Poll::Ready(Err(io::Error::other("injected write failure")));
+        }
         let result = std::io::Write::write(&mut state.bytes, &bytes[..count]);
-        if let Some(left) = &mut state.write_limit { *left -= count; }
+        if let Some(left) = &mut state.write_limit {
+            *left -= count;
+        }
         state.writes += 1;
         Poll::Ready(result)
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(if self.0.lock().unwrap().fail_flush { Err(io::Error::other("injected flush failure")) } else { Ok(()) })
+        Poll::Ready(if self.0.lock().unwrap().fail_flush {
+            Err(io::Error::other("injected flush failure"))
+        } else {
+            Ok(())
+        })
     }
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 impl AsyncSeek for File {
     fn poll_seek(self: Pin<&mut Self>, _: &mut Context<'_>, at: SeekFrom) -> Poll<io::Result<u64>> {
@@ -98,15 +141,30 @@ impl AsyncSeek for File {
 }
 async fn scratch(cx: &QueryCx, pool: &MemoryPool) -> (SpillFile<File>, File) {
     let file = File::default();
-    let scratch = SpillFile::new(cx, file.clone(), pool.clone(), SpillLimits {
-        max_file_bytes: 4_000_000, max_runs: 100, max_run_bytes: 1_000_000,
-    }).await.unwrap();
+    let scratch = SpillFile::new(
+        cx,
+        file.clone(),
+        pool.clone(),
+        SpillLimits {
+            max_file_bytes: 4_000_000,
+            max_runs: 100,
+            max_run_bytes: 1_000_000,
+        },
+    )
+    .await
+    .unwrap();
     (scratch, file)
 }
-async fn contents(spool: &NativeResultSpool, scratch: &mut SpillFile<File>, cx: &QueryCx) -> Vec<Vec<u8>> {
+async fn contents(
+    spool: &NativeResultSpool,
+    scratch: &mut SpillFile<File>,
+    cx: &QueryCx,
+) -> Vec<Vec<u8>> {
     let mut reader = spool.reader(scratch);
     let mut rows = Vec::new();
-    while let Some(row) = reader.next_row(cx).await.unwrap() { rows.push(row.as_ref().to_vec()); }
+    while let Some(row) = reader.next_row(cx).await.unwrap() {
+        rows.push(row.as_ref().to_vec());
+    }
     assert_eq!(reader.state(), ScanState::Exhausted);
     assert!(reader.next_row(cx).await.unwrap().is_none());
     rows
@@ -124,18 +182,29 @@ fn native_vertex_and_edge_rows_spill_beyond_the_pool_without_changing_order_or_c
             let prepared = plan(text);
             let params = GqlParameters::new();
             let (columns, mut incumbent) = prepared.stream(&db, &cx, &params, policy()).unwrap();
-            let expected: Vec<_> = incumbent.by_ref().map(|row| row.unwrap().canonical_bytes().unwrap()).collect();
+            let expected: Vec<_> = incumbent
+                .by_ref()
+                .map(|row| row.unwrap().canonical_bytes().unwrap())
+                .collect();
             let rows = incumbent.row_stats();
             let evaluator = incumbent.evaluator_stats();
-            let spool = prepared.spool(&db, &cx, &params, policy(), &mut scratch, 257, 4096).await.unwrap();
+            let spool = prepared
+                .spool(&db, &cx, &params, policy(), &mut scratch, 257, 4096)
+                .await
+                .unwrap();
             assert_eq!(spool.columns(), columns);
             assert_eq!(spool.kind(), kind);
             assert_eq!(spool.snapshot_seq(), db.frontier().unwrap());
             assert_eq!(spool.row_stats(), rows);
             assert_eq!(spool.evaluator_stats(), evaluator);
             assert_eq!(spool.row_count(), expected.len() as u64);
-            assert_eq!(spool.encoded_len(), expected.iter().map(|row| 8 + row.len()).sum::<usize>());
-            if kind == ScanKind::Vertex { assert!(spool.encoded_len() > pool.limit()); }
+            assert_eq!(
+                spool.encoded_len(),
+                expected.iter().map(|row| 8 + row.len()).sum::<usize>()
+            );
+            if kind == ScanKind::Vertex {
+                assert!(spool.encoded_len() > pool.limit());
+            }
             assert_eq!(pool.used(), 0);
             assert_eq!(contents(&spool, &mut scratch, &cx).await, expected);
             assert_eq!(pool.used(), 0);
@@ -156,8 +225,12 @@ fn future_pins_at_open_and_completed_spool_retains_neither_snapshot_nor_template
         let at = db.frontier().unwrap();
         let prepared = plan(NODE);
         let params = GqlParameters::new();
-        let (_, cursor) = prepared.stream_in_view(&view, &cx, &params, policy()).unwrap();
-        let expected: Vec<_> = cursor.map(|row| row.unwrap().canonical_bytes().unwrap()).collect();
+        let (_, cursor) = prepared
+            .stream_in_view(&view, &cx, &params, policy())
+            .unwrap();
+        let expected: Vec<_> = cursor
+            .map(|row| row.unwrap().canonical_bytes().unwrap())
+            .collect();
         let pool = MemoryPool::new(16_384, 0).unwrap();
         let (mut first_file, _) = scratch(&cx, &pool).await;
         let (mut second_file, _) = scratch(&cx, &pool).await;
@@ -166,7 +239,8 @@ fn future_pins_at_open_and_completed_spool_retains_neither_snapshot_nor_template
         change.delete_vertex(VId(2));
         change.create_vertex(VId(1000), vec![LabelId(1)], vec![]);
         db.write(&contexts.commit(), change).await.unwrap();
-        let second = prepared.spool_in_view(&view, &cx, &params, policy(), &mut second_file, 113, 4096);
+        let second =
+            prepared.spool_in_view(&view, &cx, &params, policy(), &mut second_file, 113, 4096);
         drop(db);
         drop(view);
         drop(params);
@@ -174,7 +248,10 @@ fn future_pins_at_open_and_completed_spool_retains_neither_snapshot_nor_template
         assert!(weak.upgrade().is_some());
         let first = first.await.unwrap();
         let second = second.await.unwrap();
-        assert!(weak.upgrade().is_none(), "completed result accidentally retains graph source");
+        assert!(
+            weak.upgrade().is_none(),
+            "completed result accidentally retains graph source"
+        );
         assert_eq!(first.snapshot_seq(), at);
         assert_eq!(second.snapshot_seq(), at);
         assert_eq!(contents(&first, &mut first_file, &cx).await, expected);
@@ -196,12 +273,20 @@ fn unpolled_and_unsupported_requests_do_not_reserve_scratch_and_empty_results_ke
         drop(plan(NODE).spool(&db, &cx, &params, policy(), &mut scratch, 512, 4096));
         assert_eq!(scratch.stats(), SpillStats::default());
         let aggregate = plan("MATCH (n:L) RETURN count(*) AS count");
-        let error = aggregate.spool(&db, &cx, &params, policy(), &mut scratch, 512, 4096).await.unwrap_err();
-        assert!(matches!(error.prepare_error(), Some(QueryError::StreamingUnsupported { .. })));
+        let error = aggregate
+            .spool(&db, &cx, &params, policy(), &mut scratch, 512, 4096)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.prepare_error(),
+            Some(QueryError::StreamingUnsupported { .. })
+        ));
         assert_eq!(scratch.stats(), SpillStats::default());
         assert_eq!(file.0.lock().unwrap().writes, 0);
         let empty = plan("MATCH (n:L) RETURN n AS id LIMIT 0")
-            .spool(&db, &cx, &params, policy(), &mut scratch, 512, 4096).await.unwrap();
+            .spool(&db, &cx, &params, policy(), &mut scratch, 512, 4096)
+            .await
+            .unwrap();
         assert_eq!(empty.columns(), &["id".to_owned()]);
         assert_eq!(empty.row_count(), 0);
         assert_eq!(empty.encoded_len(), 0);
@@ -226,11 +311,25 @@ fn late_native_budget_failure_never_exposes_a_completed_prefix() {
         let params = GqlParameters::new();
         let limit = GqlQueryPolicy::new(100, 3, 1_000_000, 100_000);
         let (_, mut control) = prepared.stream(&db, &cx, &params, limit).unwrap();
-        for _ in 0..3 { control.next().unwrap().unwrap(); }
-        assert!(matches!(control.next().unwrap(), Err(GqlQueryError::Rows(_))));
-        let error = prepared.spool(&db, &cx, &params, limit, &mut scratch, 128, 4096).await.unwrap_err();
-        assert!(matches!(error.execution_error(), Some(GqlQueryError::Rows(_))));
-        assert!(file.0.lock().unwrap().writes > 0, "fixture must have written a private prefix");
+        for _ in 0..3 {
+            control.next().unwrap().unwrap();
+        }
+        assert!(matches!(
+            control.next().unwrap(),
+            Err(GqlQueryError::Rows(_))
+        ));
+        let error = prepared
+            .spool(&db, &cx, &params, limit, &mut scratch, 128, 4096)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.execution_error(),
+            Some(GqlQueryError::Rows(_))
+        ));
+        assert!(
+            file.0.lock().unwrap().writes > 0,
+            "fixture must have written a private prefix"
+        );
         assert_eq!(scratch.stats().published_runs, 0);
         assert!(scratch.is_poisoned());
         assert_eq!(pool.used(), 0);
@@ -249,15 +348,39 @@ fn row_ceiling_file_quota_and_actual_io_failures_refund_without_acceptance() {
             let file = File::default();
             file.0.lock().unwrap().write_limit = (case == 2).then_some(31);
             file.0.lock().unwrap().fail_flush = case == 3;
-            let mut scratch = SpillFile::new(&cx, file, pool.clone(), SpillLimits {
-                max_file_bytes: if case == 1 { 600 } else { 4_000_000 },
-                max_runs: 10, max_run_bytes: 1_000_000,
-            }).await.unwrap();
-            let error = plan(NODE).spool(&db, &cx, &GqlParameters::new(), policy(),
-                &mut scratch, 128, if case == 0 { 5 } else { 4096 }).await.unwrap_err();
+            let mut scratch = SpillFile::new(
+                &cx,
+                file,
+                pool.clone(),
+                SpillLimits {
+                    max_file_bytes: if case == 1 { 600 } else { 4_000_000 },
+                    max_runs: 10,
+                    max_run_bytes: 1_000_000,
+                },
+            )
+            .await
+            .unwrap();
+            let error = plan(NODE)
+                .spool(
+                    &db,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut scratch,
+                    128,
+                    if case == 0 { 5 } else { 4096 },
+                )
+                .await
+                .unwrap_err();
             match case {
-                0 => assert!(matches!(error, NativeSpoolError::RowTooLarge { limit: 5, .. })),
-                1 => assert!(matches!(error.spill_error(), Some(SpillError::FileLimit { .. }))),
+                0 => assert!(matches!(
+                    error,
+                    NativeSpoolError::RowTooLarge { limit: 5, .. }
+                )),
+                1 => assert!(matches!(
+                    error.spill_error(),
+                    Some(SpillError::FileLimit { .. })
+                )),
                 _ => assert!(matches!(error.spill_error(), Some(SpillError::Io(_)))),
             }
             assert_eq!(scratch.stats().published_runs, 0);
@@ -276,7 +399,18 @@ fn consumption_close_drop_foreign_file_and_memory_pressure_are_fused_and_retryab
         let db = seed(&contexts.commit(), 6).await;
         let pool = MemoryPool::new(16_384, 0).unwrap();
         let (mut scratch, file) = scratch(&cx, &pool).await;
-        let spool = plan(NODE).spool(&db, &cx, &GqlParameters::new(), policy(), &mut scratch, 257, 4096).await.unwrap();
+        let spool = plan(NODE)
+            .spool(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                257,
+                4096,
+            )
+            .await
+            .unwrap();
         let mut reader = spool.reader(&mut scratch);
         let row = reader.next_row(&cx).await.unwrap().unwrap();
         assert!(pool.used() > row.charged_bytes());
@@ -289,18 +423,33 @@ fn consumption_close_drop_foreign_file_and_memory_pressure_are_fused_and_retryab
         drop(reader);
         assert_eq!(pool.used(), 0);
         let other_file = File::default();
-        let mut foreign = SpillFile::new(&cx, other_file.clone(), pool.clone(), SpillLimits {
-            max_file_bytes: 1000, max_runs: 10, max_run_bytes: 1000,
-        }).await.unwrap();
+        let mut foreign = SpillFile::new(
+            &cx,
+            other_file.clone(),
+            pool.clone(),
+            SpillLimits {
+                max_file_bytes: 1000,
+                max_runs: 10,
+                max_run_bytes: 1000,
+            },
+        )
+        .await
+        .unwrap();
         let mut reader = spool.reader(&mut foreign);
-        assert!(matches!(reader.next_row(&cx).await, Err(SpillError::ForeignRun)));
+        assert!(matches!(
+            reader.next_row(&cx).await,
+            Err(SpillError::ForeignRun)
+        ));
         assert_eq!(reader.state(), ScanState::Failed);
         assert!(reader.next_row(&cx).await.unwrap().is_none());
         assert_eq!(other_file.0.lock().unwrap().reads, 0);
         drop(reader);
         let blocker = pool.allocate_zeroed(&cx, pool.available()).unwrap();
         let mut reader = spool.reader(&mut scratch);
-        assert!(matches!(reader.next_row(&cx).await, Err(SpillError::Memory(_))));
+        assert!(matches!(
+            reader.next_row(&cx).await,
+            Err(SpillError::Memory(_))
+        ));
         assert_eq!(reader.state(), ScanState::Failed);
         drop(reader);
         drop(blocker);
@@ -319,14 +468,30 @@ fn later_corruption_reports_one_error_without_retracting_an_already_delivered_ro
         let db = seed(&contexts.commit(), 6).await;
         let pool = MemoryPool::new(16_384, 0).unwrap();
         let (mut scratch, file) = scratch(&cx, &pool).await;
-        let spool = plan(NODE).spool(&db, &cx, &GqlParameters::new(), policy(), &mut scratch, 64, 4096).await.unwrap();
+        let spool = plan(NODE)
+            .spool(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                64,
+                4096,
+            )
+            .await
+            .unwrap();
         let mut reader = spool.reader(&mut scratch);
         let delivered = reader.next_row(&cx).await.unwrap().unwrap();
         let original = delivered.as_ref().to_vec();
         // External corruption is injected only by this test backend. The
         // production file owner does not expose mutable access to its bytes.
-        for byte in file.0.lock().unwrap().bytes.get_mut() { *byte ^= 1; }
-        assert!(matches!(reader.next_row(&cx).await, Err(SpillError::ChecksumMismatch)));
+        for byte in file.0.lock().unwrap().bytes.get_mut() {
+            *byte ^= 1;
+        }
+        assert!(matches!(
+            reader.next_row(&cx).await,
+            Err(SpillError::ChecksumMismatch)
+        ));
         assert_eq!(reader.state(), ScanState::Failed);
         assert_eq!(delivered.as_ref(), original);
         assert!(reader.next_row(&cx).await.unwrap().is_none());
@@ -349,19 +514,41 @@ fn dropped_pending_production_and_consumption_release_buffers_and_fence_ambiguou
         {
             let prepared = plan(NODE);
             let params = GqlParameters::new();
-            let mut future = std::pin::pin!(prepared.spool(&db, &cx, &params, policy(), &mut blocked, 32, 4096));
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            let mut future =
+                std::pin::pin!(prepared.spool(&db, &cx, &params, policy(), &mut blocked, 32, 4096));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
         assert!(blocked.is_poisoned());
         assert_eq!(blocked.stats().published_runs, 0);
         assert_eq!(pool.used(), 0);
         let (mut scratch, file) = scratch(&cx, &pool).await;
-        let spool = plan(NODE).spool(&db, &cx, &GqlParameters::new(), policy(), &mut scratch, 32, 4096).await.unwrap();
+        let spool = plan(NODE)
+            .spool(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                32,
+                4096,
+            )
+            .await
+            .unwrap();
         file.0.lock().unwrap().pending_read = true;
         let mut reader = spool.reader(&mut scratch);
         {
             let mut future = std::pin::pin!(reader.next_row(&cx));
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
         assert_eq!(reader.state(), ScanState::Failed);
         assert!(reader.next_row(&cx).await.unwrap().is_none());

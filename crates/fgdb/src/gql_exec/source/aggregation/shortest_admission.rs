@@ -49,17 +49,14 @@ pub(super) fn collect<E>(
         let next_depth = depth + 1;
         let mut neighbors = BTreeSet::new();
         let mut after = None;
-        while let Some(eid) = index.next_incident_edge(
-            vertex,
-            scope.direction,
-            after,
-            &mut |event| {
+        while let Some(eid) =
+            index.next_incident_edge(vertex, scope.direction, after, &mut |event| {
                 control(match event {
                     GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
                     GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => SourceEvent::Work,
                 })
-            },
-        )? {
+            })?
+        {
             control(SourceEvent::Work)?;
             // Strict successors advance even past retired, future or unrelated
             // candidates. Never add one to the cursor just because it is indexed.

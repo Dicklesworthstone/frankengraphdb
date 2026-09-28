@@ -5,13 +5,11 @@
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::{
-    GqlQueryError, GqlQueryExecution, GraphInsertQueryError, PreparedGraphInsertQuery,
-};
 use fgdb_gql::insertion::{
     GraphInsertBatch, GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats,
     PreparedGraphInsert,
 };
+use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphInsertQueryError, PreparedGraphInsertQuery};
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
@@ -156,7 +154,9 @@ impl<V: Vfs + Clone> Database<V> {
         mut clock: impl FnMut() -> u64,
     ) -> Result<QueryReceipt, QueryFault> {
         if authority.namespace() != self.keys.namespace {
-            return Err(query_source(WriteTxnError::Authorization(Error::WrongAuthority)));
+            return Err(query_source(WriteTxnError::Authorization(
+                Error::WrongAuthority,
+            )));
         }
         let now = clock();
         let verified = authority
@@ -166,7 +166,9 @@ impl<V: Vfs + Clone> Database<V> {
             .begin_write_at(branch, now)
             .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
         if !verified.predicates().rights().can_read() {
-            return Err(query_source(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(query_source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
         commit_cx
             .with_restriction_async(async {

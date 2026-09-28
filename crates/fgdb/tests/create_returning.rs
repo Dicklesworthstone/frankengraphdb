@@ -88,14 +88,23 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
         );
         let (stats, rows, completion) = db
             .execute_graph_insert_query_autocommit_engine_governed(
-                &txcx, &cx, &commit, &definition, policy(3, 6, 3),
+                &txcx,
+                &cx,
+                &commit,
+                &definition,
+                policy(3, 6, 3),
             )
             .await
             .unwrap();
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
-            if commit_seq.0 == before.0 + 1));
+        assert!(
+            matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+            if commit_seq.0 == before.0 + 1)
+        );
         assert_eq!((stats.created_vertices, stats.created_edges), (6, 3));
-        assert_eq!(rows.rows.snapshot_records, 0, "RETURN must not rescan creations");
+        assert_eq!(
+            rows.rows.snapshot_records, 0,
+            "RETURN must not rescan creations"
+        );
         assert_eq!(rows.rows.result_rows, 3);
         let expected = [(3, 2, 4, 1), (1, 1, 2, 3), (5, 3, 6, 3)]
             .into_iter()
@@ -104,23 +113,34 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
                     GraphValue::Vertex(VId(source)),
                     GraphValue::Edge(EId(edge)),
                     GraphValue::Vertex(VId(destination)),
-                    int(value), int(value + 10), int(value * 2),
+                    int(value),
+                    int(value + 10),
+                    int(value * 2),
                 ])
             })
             .collect::<Vec<_>>();
         assert_eq!(rows.value, expected);
         for (source, edge, destination, value) in [(1, 1, 2, 3), (3, 2, 4, 1), (5, 3, 6, 3)] {
-            assert_eq!(db.vertex(VId(source)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(value))]);
-            assert_eq!(db.vertex(VId(destination)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(value * 2))]);
+            assert_eq!(
+                db.vertex(VId(source)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(value))]
+            );
+            assert_eq!(
+                db.vertex(VId(destination)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(value * 2))]
+            );
             let created = db.edge(EId(edge)).unwrap().unwrap();
-            assert_eq!((created.entry.src, created.entry.dst), (VId(source), VId(destination)));
+            assert_eq!(
+                (created.entry.src, created.entry.dst),
+                (VId(source), VId(destination))
+            );
             assert_eq!(created.props, vec![(P, CanonicalScalar::Int(value + 10))]);
         }
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(db.vertices().unwrap().len(), 6);
         assert_eq!(db.edges().unwrap().len(), 3);
@@ -128,8 +148,10 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
             let source = row.values()[0].as_vertex().unwrap();
             let edge = row.values()[1].as_edge().unwrap();
             let destination = row.values()[2].as_vertex().unwrap();
-            assert_eq!(db.vertex(source).unwrap().unwrap().props[0].1,
-                row.values()[3].as_scalar().unwrap().clone());
+            assert_eq!(
+                db.vertex(source).unwrap().unwrap().props[0].1,
+                row.values()[3].as_scalar().unwrap().clone()
+            );
             assert_eq!(db.edge(edge).unwrap().unwrap().entry.dst, destination);
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -148,41 +170,60 @@ fn distinct_and_zero_result_pages_bound_returned_rows_without_suppressing_writes
         let before = db.frontier().unwrap();
         let (stats, rows, completion) = db
             .execute_graph_insert_query_autocommit_engine_governed(
-                &txcx, &cx, &commit,
+                &txcx,
+                &cx,
+                &commit,
                 &query("UNWIND [7,7,7] AS x CREATE (n:Copy {p:x}) RETURN DISTINCT n.p AS p"),
                 policy(1, 3, 0),
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(stats.created_vertices, 3);
-        assert_eq!(rows.value, vec![GraphValueRow::from_owned_values(vec![int(7)])]);
+        assert_eq!(
+            rows.value,
+            vec![GraphValueRow::from_owned_values(vec![int(7)])]
+        );
         assert_eq!(rows.rows.result_rows, 1);
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
-            if commit_seq.0 == before.0 + 1));
+        assert!(
+            matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+            if commit_seq.0 == before.0 + 1)
+        );
 
         let (stats, rows, completion) = db
             .execute_graph_insert_query_autocommit_engine_governed(
-                &txcx, &cx, &commit,
+                &txcx,
+                &cx,
+                &commit,
                 &query("UNWIND [4,5] AS x CREATE (n:Copy {p:x}) RETURN n LIMIT 0"),
                 policy(0, 2, 0),
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(stats.created_vertices, 2);
         assert!(rows.value.is_empty());
         assert_eq!(rows.rows.result_rows, 0);
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
-            if commit_seq.0 == before.0 + 2));
+        assert!(
+            matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+            if commit_seq.0 == before.0 + 2)
+        );
         assert_eq!(db.vertices().unwrap().len(), 5);
 
         let (stats, rows, completion) = db
             .execute_graph_insert_query_autocommit_engine_governed(
-                &txcx, &cx, &commit,
+                &txcx,
+                &cx,
+                &commit,
                 &query("UNWIND [] AS x CREATE (n:Copy {p:x}) RETURN n"),
                 policy(0, 0, 0),
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(stats.created_vertices, 0);
         assert!(rows.value.is_empty());
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
         assert_eq!(db.frontier().unwrap().0, before.0 + 2);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -204,25 +245,43 @@ fn return_expression_and_final_row_budget_failures_preserve_the_outer_prefix() {
         transaction.write(&mut db, prefix).unwrap();
         let digest = transaction.staged_effect_digest().unwrap();
         for (text, rows, arithmetic) in [
-            ("UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q", 2, true),
-            ("UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q LIMIT 0", 0, true),
+            (
+                "UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q",
+                2,
+                true,
+            ),
+            (
+                "UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q LIMIT 0",
+                0,
+                true,
+            ),
             ("UNWIND [2,1] AS x CREATE (n:Copy {p:x}) RETURN n", 1, false),
         ] {
             let result = transaction.execute_graph_insert_query_governed(
-                &mut db, &cx, &query(text), policy(rows, 2, 0), allocate,
+                &mut db,
+                &cx,
+                &query(text),
+                policy(rows, 2, 0),
+                allocate,
             );
             if arithmetic {
-                assert!(matches!(result,
-                    Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))),
-                    "{result:?}");
+                assert!(
+                    matches!(
+                        result,
+                        Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
+                    ),
+                    "{result:?}"
+                );
             } else {
                 assert!(matches!(result, Err(GqlQueryError::Rows(_))), "{result:?}");
             }
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert!(transaction.vertex(&db, VId(100)).unwrap().is_none());
             assert!(transaction.vertex(&db, VId(110)).unwrap().is_none());
-            assert_eq!(transaction.vertex(&db, VId(99)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(99))]);
+            assert_eq!(
+                transaction.vertex(&db, VId(99)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(99))]
+            );
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
         }
@@ -245,34 +304,62 @@ fn autocommit_refusals_publish_no_writes_or_rows_and_release_the_snapshot_obliga
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let before = db.frontier().unwrap();
         let failing = query("UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q");
-        let result = db.execute_graph_insert_query_autocommit_engine_governed(
-            &txcx, &cx, &commit, &failing, policy(2, 2, 0),
-        ).await;
-        assert!(matches!(result,
-            Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))),
-            "{result:?}");
+        let result = db
+            .execute_graph_insert_query_autocommit_engine_governed(
+                &txcx,
+                &cx,
+                &commit,
+                &failing,
+                policy(2, 2, 0),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
+            ),
+            "{result:?}"
+        );
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
         assert_eq!(txcx.outstanding_obligations(), 0);
 
         let simple = query("CREATE (n:Copy {p:9}) RETURN n,n.p");
-        let result = db.execute_graph_insert_query_autocommit_governed(
-            &txcx, &cx, &commit, &simple, policy(1, 1, 0),
-            |_| Err::<ElementId, _>("allocator unavailable"),
-        ).await;
-        assert!(matches!(result,
+        let result = db
+            .execute_graph_insert_query_autocommit_governed(
+                &txcx,
+                &cx,
+                &commit,
+                &simple,
+                policy(1, 1, 0),
+                |_| Err::<ElementId, _>("allocator unavailable"),
+            )
+            .await;
+        assert!(matches!(
+            result,
             Err(GqlQueryError::Source(GraphInsertQueryError::Insertion(
-                GraphInsertError::IdentitySource("allocator unavailable"))))));
+                GraphInsertError::IdentitySource("allocator unavailable")
+            )))
+        ));
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
         assert_eq!(txcx.outstanding_obligations(), 0);
 
         let cancelled = cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
-        let result = db.execute_graph_insert_query_autocommit_governed(
-            &txcx, &cancelled, &commit, &simple, policy(1, 1, 0),
-            |_| -> Result<ElementId, ()> { panic!("cancelled query cannot allocate") },
-        ).await;
-        assert!(matches!(result, Err(GqlQueryError::Interrupted(_))), "{result:?}");
+        let result = db
+            .execute_graph_insert_query_autocommit_governed(
+                &txcx,
+                &cancelled,
+                &commit,
+                &simple,
+                policy(1, 1, 0),
+                |_| -> Result<ElementId, ()> { panic!("cancelled query cannot allocate") },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(GqlQueryError::Interrupted(_))),
+            "{result:?}"
+        );
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -291,22 +378,34 @@ fn ownership_and_advanced_snapshot_refusals_precede_identity_allocation() {
         let mut transaction = owner.begin(&txcx).unwrap();
         let definition = query("CREATE (n:Copy {p:1}) RETURN n");
         let result = transaction.execute_graph_insert_query_governed(
-            &mut other, &cx, &definition, policy(1, 1, 0),
+            &mut other,
+            &cx,
+            &definition,
+            policy(1, 1, 0),
             |_| -> Result<ElementId, ()> { panic!("wrong owner cannot allocate") },
         );
-        assert!(matches!(result,
+        assert!(matches!(
+            result,
             Err(GqlQueryError::Source(GraphInsertQueryError::Insertion(
-                GraphInsertError::Source(WriteTxnError::WrongDatabase))))));
+                GraphInsertError::Source(WriteTxnError::WrongDatabase)
+            )))
+        ));
         let mut winner = WriteBatch::new(R);
         winner.create_vertex(VId(10), vec![], vec![]);
         owner.write(&commit, winner).await.unwrap();
         let result = transaction.execute_graph_insert_query_governed(
-            &mut owner, &cx, &definition, policy(1, 1, 0),
+            &mut owner,
+            &cx,
+            &definition,
+            policy(1, 1, 0),
             |_| -> Result<ElementId, ()> { panic!("stale snapshot cannot allocate") },
         );
-        assert!(matches!(result,
+        assert!(matches!(
+            result,
             Err(GqlQueryError::Source(GraphInsertQueryError::Insertion(
-                GraphInsertError::Source(WriteTxnError::SnapshotAdvanced { .. }))))));
+                GraphInsertError::Source(WriteTxnError::SnapshotAdvanced { .. })
+            )))
+        ));
         transaction.abort();
         assert!(other.vertices().unwrap().is_empty());
         assert_eq!(owner.vertices().unwrap().len(), 1);
@@ -324,9 +423,8 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
         let txcx = contexts.txn();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let before = db.frontier().unwrap();
-        let definition = query(
-            "UNWIND [2,1] AS x CREATE (n:Copy {p:x}) RETURN n.p AS p,n ORDER BY p",
-        );
+        let definition =
+            query("UNWIND [2,1] AS x CREATE (n:Copy {p:x}) RETURN n.p AS p,n ORDER BY p");
         let prefix = || {
             let mut batch = WriteBatch::new(R);
             batch.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(99))]);
@@ -335,12 +433,20 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
         let mut baseline = db.begin(&txcx).unwrap();
         baseline.write(&mut db, prefix()).unwrap();
         let probe = Arc::new(SimulationCheckpointProbe::new(None));
-        let (_, expected) = baseline.execute_graph_insert_query_governed(
-            &mut db, &cx.with_checkpoint_probe(probe.clone()),
-            &definition, policy(2, 2, 0), allocate,
-        ).unwrap();
+        let (_, expected) = baseline
+            .execute_graph_insert_query_governed(
+                &mut db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &definition,
+                policy(2, 2, 0),
+                allocate,
+            )
+            .unwrap();
         let calls = probe.calls();
-        assert!(calls > 10, "the complete query must cross observable checkpoints");
+        assert!(
+            calls > 10,
+            "the complete query must cross observable checkpoints"
+        );
         baseline.abort();
         for cut in 1..=calls {
             let mut transaction = db.begin(&txcx).unwrap();
@@ -348,11 +454,16 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
             let digest = transaction.staged_effect_digest().unwrap();
             let probe = Arc::new(SimulationCheckpointProbe::new(Some(cut)));
             let result = transaction.execute_graph_insert_query_governed(
-                &mut db, &cx.with_checkpoint_probe(probe.clone()),
-                &definition, policy(2, 2, 0), allocate,
+                &mut db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &definition,
+                policy(2, 2, 0),
+                allocate,
             );
-            assert!(matches!(result, Err(GqlQueryError::Interrupted(_))),
-                "checkpoint {cut}: {result:?}");
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(_))),
+                "checkpoint {cut}: {result:?}"
+            );
             assert_eq!(probe.calls(), cut);
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
@@ -363,9 +474,15 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
         }
         let mut transaction = db.begin(&txcx).unwrap();
         transaction.write(&mut db, prefix()).unwrap();
-        let (_, actual) = transaction.execute_graph_insert_query_governed(
-            &mut db, &cx, &definition, policy(2, 2, 0), allocate,
-        ).unwrap();
+        let (_, actual) = transaction
+            .execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                policy(2, 2, 0),
+                allocate,
+            )
+            .unwrap();
         assert_eq!(actual.value, expected.value);
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.vertices().unwrap().len(), 3);

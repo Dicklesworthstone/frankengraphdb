@@ -39,11 +39,21 @@ impl PageNode {
         };
         let mut digest = [0; 32];
         digest.copy_from_slice(&bytes[32..NODE_BYTES]);
-        Self { offset: word(0), first: word(1), pages: word(2), len: word(3), digest }
+        Self {
+            offset: word(0),
+            first: word(1),
+            pages: word(2),
+            len: word(3),
+            digest,
+        }
     }
 
     fn stored_len(self) -> u64 {
-        if self.pages == 1 { self.len } else { BRANCH_BYTES as u64 }
+        if self.pages == 1 {
+            self.len
+        } else {
+            BRANCH_BYTES as u64
+        }
     }
 }
 
@@ -55,7 +65,15 @@ fn page_hash(id: u64, start: u64, page_bytes: usize, node: PageNode, bytes: &[u8
         b"fgdb.strata.paged-spill.branch.v1"
     };
     hash.update(domain);
-    for value in [id, start, page_bytes as u64, node.offset, node.first, node.pages, node.len] {
+    for value in [
+        id,
+        start,
+        page_bytes as u64,
+        node.offset,
+        node.first,
+        node.pages,
+        node.len,
+    ] {
         hash.update(&value.to_le_bytes());
     }
     hash.update(bytes);
@@ -76,31 +94,54 @@ pub struct PagedSpillRun {
 }
 
 impl PagedSpillRun {
-    pub fn len(&self) -> usize { self.root.map_or(0, |root| root.len as usize) }
-    pub fn is_empty(&self) -> bool { self.root.is_none() }
-    pub fn page_count(&self) -> u64 { self.root.map_or(0, |root| root.pages) }
-    pub fn page_bytes(&self) -> usize { self.page_bytes }
+    pub fn len(&self) -> usize {
+        self.root.map_or(0, |root| root.len as usize)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+    pub fn page_count(&self) -> u64 {
+        self.root.map_or(0, |root| root.pages)
+    }
+    pub fn page_bytes(&self) -> usize {
+        self.page_bytes
+    }
 
     pub fn page_len(&self, page: u64) -> Option<usize> {
         let root = self.root?;
-        if page >= root.pages { return None; }
+        if page >= root.pages {
+            return None;
+        }
         let offset = page.checked_mul(self.page_bytes as u64)?;
         Some(root.len.checked_sub(offset)?.min(self.page_bytes as u64) as usize)
     }
 
     fn validate_node(&self, node: PageNode) -> Result<(), SpillError> {
-        let last = node.first.checked_add(node.pages).ok_or(SpillError::InvalidRun)?;
-        let end = node.offset.checked_add(node.stored_len()).ok_or(SpillError::InvalidRun)?;
-        if node.pages == 0 || last > self.page_count() || node.offset < self.start || end > self.end {
+        let last = node
+            .first
+            .checked_add(node.pages)
+            .ok_or(SpillError::InvalidRun)?;
+        let end = node
+            .offset
+            .checked_add(node.stored_len())
+            .ok_or(SpillError::InvalidRun)?;
+        if node.pages == 0 || last > self.page_count() || node.offset < self.start || end > self.end
+        {
             return Err(SpillError::InvalidRun);
         }
         let expected = if last == self.page_count() {
-            (self.len() as u64).checked_sub(node.first.checked_mul(self.page_bytes as u64)
-                .ok_or(SpillError::InvalidRun)?)
+            (self.len() as u64).checked_sub(
+                node.first
+                    .checked_mul(self.page_bytes as u64)
+                    .ok_or(SpillError::InvalidRun)?,
+            )
         } else {
             node.pages.checked_mul(self.page_bytes as u64)
-        }.ok_or(SpillError::InvalidRun)?;
-        if node.len != expected { return Err(SpillError::InvalidRun); }
+        }
+        .ok_or(SpillError::InvalidRun)?;
+        if node.len != expected {
+            return Err(SpillError::InvalidRun);
+        }
         Ok(())
     }
 }
@@ -108,8 +149,10 @@ impl PagedSpillRun {
 impl fmt::Debug for PagedSpillRun {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PagedSpillRun")
-            .field("bytes", &self.len()).field("pages", &self.page_count())
-            .field("page_bytes", &self.page_bytes).finish_non_exhaustive()
+            .field("bytes", &self.len())
+            .field("pages", &self.page_count())
+            .field("page_bytes", &self.page_bytes)
+            .finish_non_exhaustive()
     }
 }
 
@@ -139,20 +182,31 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
     /// from unverified disk rereads. At most usize::BITS merge nodes are live.
     /// Successful reads later cost one payload plus O(log pages) branch reads.
     /// Old append/append_from/restore formats and admission remain unchanged.
-    pub fn paged_writer(&mut self, cx: &QueryCx, page_bytes: usize)
-        -> Result<PagedSpillWriter<'_, F>, SpillError>
-    {
+    pub fn paged_writer(
+        &mut self,
+        cx: &QueryCx,
+        page_bytes: usize,
+    ) -> Result<PagedSpillWriter<'_, F>, SpillError> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(SpillError::Interrupted)?;
             self.paged_writer_inner(page_bytes)
         })
     }
 
-    fn paged_writer_inner(&mut self, page_bytes: usize) -> Result<PagedSpillWriter<'_, F>, SpillError> {
-        if self.io_pending { return Err(SpillError::PoisonedFile); }
-        if page_bytes == 0 || page_bytes > IO_CHUNK_BYTES { return Err(SpillError::InvalidLimits); }
+    fn paged_writer_inner(
+        &mut self,
+        page_bytes: usize,
+    ) -> Result<PagedSpillWriter<'_, F>, SpillError> {
+        if self.io_pending {
+            return Err(SpillError::PoisonedFile);
+        }
+        if page_bytes == 0 || page_bytes > IO_CHUNK_BYTES {
+            return Err(SpillError::InvalidLimits);
+        }
         if self.stats.reserved_runs >= self.limits.max_runs {
-            return Err(SpillError::RunLimit { limit: self.limits.max_runs });
+            return Err(SpillError::RunLimit {
+                limit: self.limits.max_runs,
+            });
         }
         let buffer = self.pool.allocate_inner(page_bytes, WRITER_METADATA)?;
         let id = self.stats.reserved_runs + 1;
@@ -160,8 +214,15 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         self.stats.reserved_runs = id;
         self.io_pending = true;
         Ok(PagedSpillWriter {
-            scratch: self, buffer, frontier: [None; LEVELS], id, start,
-            len: 0, filled: 0, pages: 0, failed: false,
+            scratch: self,
+            buffer,
+            frontier: [None; LEVELS],
+            id,
+            start,
+            len: 0,
+            filled: 0,
+            pages: 0,
+            failed: false,
         })
     }
 
@@ -175,24 +236,41 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
     /// I/O/cancellation/drop fences the file; complete authentication failure
     /// refunds output without poisoning otherwise quiescent I/O. Each accepted
     /// page increments restored_runs, like one accepted restore_window call.
-    pub async fn restore_page(&mut self, cx: &QueryCx, run: &PagedSpillRun, page: u64)
-        -> Result<TrackedBytes, SpillError>
-    {
+    pub async fn restore_page(
+        &mut self,
+        cx: &QueryCx,
+        run: &PagedSpillRun,
+        page: u64,
+    ) -> Result<TrackedBytes, SpillError> {
         cx.with_restriction_async(self.restore_page_inner(run, page, || {
             cx.checkpoint().map_err(SpillError::Interrupted)
-        })).await
+        }))
+        .await
     }
 
-    async fn restore_page_inner(&mut self, run: &PagedSpillRun, page: u64,
-        mut checkpoint: impl FnMut() -> Result<(), SpillError>) -> Result<TrackedBytes, SpillError>
-    {
+    async fn restore_page_inner(
+        &mut self,
+        run: &PagedSpillRun,
+        page: u64,
+        mut checkpoint: impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<TrackedBytes, SpillError> {
         checkpoint()?;
-        if self.io_pending { return Err(SpillError::PoisonedFile); }
-        if !Arc::ptr_eq(&self.owner, &run.owner) { return Err(SpillError::ForeignRun); }
-        if run.id == 0 || run.id > self.stats.reserved_runs || run.end > self.stats.reserved_bytes
-            || run.start > run.end || run.page_bytes == 0 || run.page_bytes > IO_CHUNK_BYTES
+        if self.io_pending {
+            return Err(SpillError::PoisonedFile);
+        }
+        if !Arc::ptr_eq(&self.owner, &run.owner) {
+            return Err(SpillError::ForeignRun);
+        }
+        if run.id == 0
+            || run.id > self.stats.reserved_runs
+            || run.end > self.stats.reserved_bytes
+            || run.start > run.end
+            || run.page_bytes == 0
+            || run.page_bytes > IO_CHUNK_BYTES
             || run.len() > self.limits.max_run_bytes
-        { return Err(SpillError::InvalidRun); }
+        {
+            return Err(SpillError::InvalidRun);
+        }
         let len = run.page_len(page).ok_or(SpillError::InvalidRun)?;
         let mut node = run.root.ok_or(SpillError::InvalidRun)?;
         run.validate_node(node)?;
@@ -203,7 +281,10 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
             checkpoint()?;
             let actual = self.file.seek(SeekFrom::Start(node.offset)).await?;
             if actual != node.offset {
-                return Err(SpillError::UnexpectedPosition { expected: node.offset, actual });
+                return Err(SpillError::UnexpectedPosition {
+                    expected: node.offset,
+                    actual,
+                });
             }
             checkpoint()?;
             if node.pages == 1 {
@@ -213,7 +294,9 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
                 }
                 self.file.read_exact(output.as_mut()).await?;
                 self.io_pending = false;
-                if page_hash(run.id, run.start, run.page_bytes, node, output.as_ref()) != node.digest {
+                if page_hash(run.id, run.start, run.page_bytes, node, output.as_ref())
+                    != node.digest
+                {
                     return Err(SpillError::ChecksumMismatch);
                 }
                 checkpoint()?;
@@ -235,12 +318,23 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
                     || left.pages.checked_add(right.pages) != Some(node.pages)
                     || left.len.checked_add(right.len) != Some(node.len)
                     || left.offset >= right.offset
-                    || left.offset.checked_add(left.stored_len()).is_none_or(|end| end > right.offset)
-                    || right.offset.checked_add(right.stored_len()).is_none_or(|end| end > node.offset)
-                { return Err(SpillError::InvalidRun); }
+                    || left
+                        .offset
+                        .checked_add(left.stored_len())
+                        .is_none_or(|end| end > right.offset)
+                    || right
+                        .offset
+                        .checked_add(right.stored_len())
+                        .is_none_or(|end| end > node.offset)
+                {
+                    return Err(SpillError::InvalidRun);
+                }
                 Ok(())
             })();
-            if let Err(error) = valid { self.io_pending = false; return Err(error); }
+            if let Err(error) = valid {
+                self.io_pending = false;
+                return Err(error);
+            }
             node = if page < right.first { left } else { right };
         }
         self.io_pending = false;
@@ -249,8 +343,12 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
 }
 
 impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
-    pub fn len(&self) -> usize { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
     /// Append an arbitrary fragment. Fragment boundaries do not change page
     /// contents or tree shape. No hidden source/EOF probe or input copy beyond
@@ -258,18 +356,29 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
     pub async fn write(&mut self, cx: &QueryCx, bytes: &[u8]) -> Result<(), SpillError> {
         cx.with_restriction_async(self.write_inner(bytes, &mut || {
             cx.checkpoint().map_err(SpillError::Interrupted)
-        })).await
+        }))
+        .await
     }
 
-    async fn write_inner(&mut self, mut bytes: &[u8], checkpoint: &mut impl FnMut() -> Result<(), SpillError>)
-        -> Result<(), SpillError>
-    {
-        if self.failed { return Err(SpillError::PoisonedFile); }
+    async fn write_inner(
+        &mut self,
+        mut bytes: &[u8],
+        checkpoint: &mut impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<(), SpillError> {
+        if self.failed {
+            return Err(SpillError::PoisonedFile);
+        }
         self.failed = true;
         checkpoint()?;
-        let total = self.len.checked_add(bytes.len()).ok_or(SpillError::SizeOverflow)?;
+        let total = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or(SpillError::SizeOverflow)?;
         if total > self.scratch.limits.max_run_bytes {
-            return Err(SpillError::RunTooLarge { bytes: total, limit: self.scratch.limits.max_run_bytes });
+            return Err(SpillError::RunTooLarge {
+                bytes: total,
+                limit: self.scratch.limits.max_run_bytes,
+            });
         }
         while !bytes.is_empty() {
             checkpoint()?;
@@ -278,7 +387,9 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
             self.filled += count;
             self.len += count;
             bytes = &bytes[count..];
-            if self.filled == self.buffer.len() { self.flush_leaf(checkpoint).await?; }
+            if self.filled == self.buffer.len() {
+                self.flush_leaf(checkpoint).await?;
+            }
         }
         checkpoint()?;
         self.failed = false;
@@ -288,7 +399,12 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
     fn reserve_extent(&mut self, bytes: usize) -> Result<u64, SpillError> {
         let bytes = u64::try_from(bytes).map_err(|_| SpillError::SizeOverflow)?;
         let available = self.scratch.limits.max_file_bytes - self.scratch.stats.reserved_bytes;
-        if bytes > available { return Err(SpillError::FileLimit { requested: bytes, available }); }
+        if bytes > available {
+            return Err(SpillError::FileLimit {
+                requested: bytes,
+                available,
+            });
+        }
         let offset = self.scratch.stats.reserved_bytes;
         self.scratch.stats.reserved_bytes += bytes;
         Ok(offset)
@@ -296,21 +412,37 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
 
     async fn seek(&mut self, offset: u64) -> Result<(), SpillError> {
         let actual = self.scratch.file.seek(SeekFrom::Start(offset)).await?;
-        if actual != offset { return Err(SpillError::UnexpectedPosition { expected: offset, actual }); }
+        if actual != offset {
+            return Err(SpillError::UnexpectedPosition {
+                expected: offset,
+                actual,
+            });
+        }
         Ok(())
     }
 
-    async fn combine(&mut self, left: PageNode, right: PageNode,
-        checkpoint: &mut impl FnMut() -> Result<(), SpillError>) -> Result<PageNode, SpillError>
-    {
+    async fn combine(
+        &mut self,
+        left: PageNode,
+        right: PageNode,
+        checkpoint: &mut impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<PageNode, SpillError> {
         checkpoint()?;
         let mut bytes = [0; BRANCH_BYTES];
         left.encode(&mut bytes[..NODE_BYTES]);
         right.encode(&mut bytes[NODE_BYTES..]);
         let mut node = PageNode {
-            offset: self.reserve_extent(BRANCH_BYTES)?, first: left.first,
-            pages: left.pages.checked_add(right.pages).ok_or(SpillError::SizeOverflow)?,
-            len: left.len.checked_add(right.len).ok_or(SpillError::SizeOverflow)?, digest: [0; 32],
+            offset: self.reserve_extent(BRANCH_BYTES)?,
+            first: left.first,
+            pages: left
+                .pages
+                .checked_add(right.pages)
+                .ok_or(SpillError::SizeOverflow)?,
+            len: left
+                .len
+                .checked_add(right.len)
+                .ok_or(SpillError::SizeOverflow)?,
+            digest: [0; 32],
         };
         node.digest = page_hash(self.id, self.start, self.buffer.len(), node, &bytes);
         self.seek(node.offset).await?;
@@ -319,16 +451,31 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
         Ok(node)
     }
 
-    async fn flush_leaf(&mut self, checkpoint: &mut impl FnMut() -> Result<(), SpillError>)
-        -> Result<(), SpillError>
-    {
+    async fn flush_leaf(
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<(), SpillError> {
         checkpoint()?;
-        let mut node = PageNode { offset: self.reserve_extent(self.filled)?, first: self.pages,
-            pages: 1, len: self.filled as u64, digest: [0; 32] };
-        node.digest = page_hash(self.id, self.start, self.buffer.len(), node, &self.buffer.as_ref()[..self.filled]);
+        let mut node = PageNode {
+            offset: self.reserve_extent(self.filled)?,
+            first: self.pages,
+            pages: 1,
+            len: self.filled as u64,
+            digest: [0; 32],
+        };
+        node.digest = page_hash(
+            self.id,
+            self.start,
+            self.buffer.len(),
+            node,
+            &self.buffer.as_ref()[..self.filled],
+        );
         self.seek(node.offset).await?;
         checkpoint()?;
-        self.scratch.file.write_all(&self.buffer.as_ref()[..self.filled]).await?;
+        self.scratch
+            .file
+            .write_all(&self.buffer.as_ref()[..self.filled])
+            .await?;
         self.filled = 0;
         self.pages = self.pages.checked_add(1).ok_or(SpillError::SizeOverflow)?;
         for level in 0..LEVELS {
@@ -345,17 +492,23 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
     /// Accept the complete run only after all pages, branch records, flush and
     /// final control succeed. No durable barrier or persistent catalog is made.
     pub async fn finish(self, cx: &QueryCx) -> Result<PagedSpillRun, SpillError> {
-        cx.with_restriction_async(self.finish_inner(&mut || {
-            cx.checkpoint().map_err(SpillError::Interrupted)
-        })).await
+        cx.with_restriction_async(
+            self.finish_inner(&mut || cx.checkpoint().map_err(SpillError::Interrupted)),
+        )
+        .await
     }
 
-    async fn finish_inner(mut self, checkpoint: &mut impl FnMut() -> Result<(), SpillError>)
-        -> Result<PagedSpillRun, SpillError>
-    {
-        if self.failed { return Err(SpillError::PoisonedFile); }
+    async fn finish_inner(
+        mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), SpillError>,
+    ) -> Result<PagedSpillRun, SpillError> {
+        if self.failed {
+            return Err(SpillError::PoisonedFile);
+        }
         checkpoint()?;
-        if self.filled != 0 { self.flush_leaf(checkpoint).await?; }
+        if self.filled != 0 {
+            self.flush_leaf(checkpoint).await?;
+        }
         let mut root = None;
         for level in 0..LEVELS {
             if let Some(left) = self.frontier[level].take() {
@@ -371,8 +524,12 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
         checkpoint()?;
         self.scratch.stats.published_runs += 1;
         Ok(PagedSpillRun {
-            owner: Arc::clone(&self.scratch.owner), id: self.id, start: self.start,
-            end: self.scratch.stats.reserved_bytes, page_bytes: self.buffer.len(), root,
+            owner: Arc::clone(&self.scratch.owner),
+            id: self.id,
+            start: self.start,
+            end: self.scratch.stats.reserved_bytes,
+            page_bytes: self.buffer.len(),
+            root,
         })
     }
 }

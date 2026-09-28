@@ -7,7 +7,8 @@
 //! await occurs.
 
 use crate::{
-    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteTxn, WriteTxnError,
+    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteTxn,
+    WriteTxnError,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::DeltaRow;
@@ -33,8 +34,13 @@ impl<V: Vfs> Drop for PreparationBasis<'_, V> {
 }
 
 impl<V: Vfs + Clone> PreparationBasis<'_, V> {
-    pub(crate) fn prepare_write(&mut self, batch: WriteBatch) -> Result<PreparedWrite, WriteTxnError> {
-        self.database.prepare_write_checked(batch).map_err(Into::into)
+    pub(crate) fn prepare_write(
+        &mut self,
+        batch: WriteBatch,
+    ) -> Result<PreparedWrite, WriteTxnError> {
+        self.database
+            .prepare_write_checked(batch)
+            .map_err(Into::into)
     }
 
     pub(crate) fn prepare_atomic_writes(
@@ -193,7 +199,8 @@ impl<V: Vfs + Clone> Database<V> {
         basis: CommitSeq,
         batches: Vec<WriteBatch>,
     ) -> Result<PreparedWrite, WriteTxnError> {
-        self.preparation_basis(basis)?.prepare_atomic_writes(batches)
+        self.preparation_basis(basis)?
+            .prepare_atomic_writes(batches)
     }
 
     /// Prepare dependent, source-ordered relation groups at an unchanged basis.
@@ -203,7 +210,8 @@ impl<V: Vfs + Clone> Database<V> {
         basis: CommitSeq,
         batches: Vec<WriteBatch>,
     ) -> Result<PreparedWrite, WriteTxnError> {
-        self.preparation_basis(basis)?.prepare_ordered_writes(batches)
+        self.preparation_basis(basis)?
+            .prepare_ordered_writes(batches)
     }
 }
 

@@ -29,6 +29,16 @@ pub(crate) type TxnGqlError<E> = fgdb_gql::GqlQueryError<E, Box<asupersync::erro
 /// identities it affected, in the statement's canonical order.
 pub(crate) type WithAffectedIds<S> = (S, Vec<VId>, Vec<EId>);
 
+/// A staged CREATE/INSERT RETURN: its creation statistics and governed RETURN
+/// rows, or the insertion query's error with allocator error `A`.
+pub(crate) type InsertQueryResult<A> = Result<
+    (
+        fgdb_gql::insertion::GraphInsertStats,
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
+>;
+
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {
@@ -126,7 +136,10 @@ impl core::fmt::Display for WriteTxnError {
                 "write transaction pinned {pinned:?}, but the live snapshot advanced to {live:?}"
             ),
             Self::BasisRebuild(source) => {
-                write!(formatter, "could not reconstruct the preparation basis: {source}")
+                write!(
+                    formatter,
+                    "could not reconstruct the preparation basis: {source}"
+                )
             }
             Self::AtomicRelationConflict {
                 first,

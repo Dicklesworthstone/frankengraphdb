@@ -23,13 +23,7 @@ impl WriteTxn {
         query: &fgdb_gql::PreparedGraphInsertQuery,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
-    ) -> Result<
-        (
-            fgdb_gql::insertion::GraphInsertStats,
-            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        ),
-        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
-    > {
+    ) -> InsertQueryResult<A> {
         use fgdb_gql::insertion::GraphInsertError;
         use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
         let source = |error| {
@@ -87,13 +81,7 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         query: &fgdb_gql::PreparedGraphInsertQuery,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
-    ) -> Result<
-        (
-            fgdb_gql::insertion::GraphInsertStats,
-            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        ),
-        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, WriteTxnError>>,
-    > {
+    ) -> InsertQueryResult<WriteTxnError> {
         use fgdb_gql::insertion::GraphInsertError;
         use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
         let source = |error| {

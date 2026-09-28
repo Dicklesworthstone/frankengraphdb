@@ -203,7 +203,9 @@ fn historical_atomic_and_ordered_composition_keep_their_original_contracts() {
         let atomic = vec![left, right];
         let expected_atomic = db.prepare_atomic_writes(atomic.clone()).unwrap();
         let live = db.write(&cx, change_vertex(3, 99)).await.unwrap();
-        let prepared = db.prepare_ordered_writes_at(basis, ordered.clone()).unwrap();
+        let prepared = db
+            .prepare_ordered_writes_at(basis, ordered.clone())
+            .unwrap();
         assert_eq!(prepared.template, expected.template);
         assert_eq!(prepared.basis(), basis);
         assert!(db.prepare_atomic_writes_at(basis, ordered).is_err());

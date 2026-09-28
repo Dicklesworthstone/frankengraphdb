@@ -6,8 +6,8 @@ use super::*;
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_gql::scan_stream::{ScanError, ScanKind, ScanState};
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats};
-use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use fgdb_strata::tiered::memory::spill::PagedSpillRun;
+use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -26,9 +26,13 @@ impl core::fmt::Display for NativeSpoolError {
             Self::Execute(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
-            Self::RowTooLarge { bytes, limit } => write!(f,
-                "result spool row has {bytes} encoded bytes, limit {limit}"),
-            Self::IncompleteCursor => f.write_str("result spool source did not exhaust successfully"),
+            Self::RowTooLarge { bytes, limit } => write!(
+                f,
+                "result spool row has {bytes} encoded bytes, limit {limit}"
+            ),
+            Self::IncompleteCursor => {
+                f.write_str("result spool source did not exhaust successfully")
+            }
         }
     }
 }
@@ -44,17 +48,28 @@ impl core::error::Error for NativeSpoolError {
     }
 }
 impl From<SpillError> for NativeSpoolError {
-    fn from(error: SpillError) -> Self { Self::Spill(error) }
+    fn from(error: SpillError) -> Self {
+        Self::Spill(error)
+    }
 }
 impl NativeSpoolError {
     pub fn prepare_error(&self) -> Option<&QueryError> {
-        match self { Self::Prepare(e) => Some(e), _ => None }
+        match self {
+            Self::Prepare(e) => Some(e),
+            _ => None,
+        }
     }
     pub fn execution_error(&self) -> Option<&GqlQueryError<ScanError<ReadError>, Cancel>> {
-        match self { Self::Execute(e) => Some(e), _ => None }
+        match self {
+            Self::Execute(e) => Some(e),
+            _ => None,
+        }
     }
     pub fn spill_error(&self) -> Option<&SpillError> {
-        match self { Self::Spill(e) => Some(e), _ => None }
+        match self {
+            Self::Spill(e) => Some(e),
+            _ => None,
+        }
     }
 }
 
@@ -84,18 +99,35 @@ impl core::fmt::Debug for NativeResultSpool {
             .field("snapshot", &self.snapshot)
             .field("rows", &self.rows.result_rows)
             .field("encoded_bytes", &self.run.len())
-            .field("schema_and_data", &"[REDACTED]").finish()
+            .field("schema_and_data", &"[REDACTED]")
+            .finish()
     }
 }
 impl NativeResultSpool {
-    pub fn columns(&self) -> &[String] { &self.columns }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.snapshot }
-    pub fn kind(&self) -> ScanKind { self.kind }
-    pub fn row_count(&self) -> u64 { self.rows.result_rows }
-    pub fn row_stats(&self) -> GqlExecutionStats { self.rows }
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.evaluator }
-    pub fn encoded_len(&self) -> usize { self.run.len() }
-    pub fn page_count(&self) -> u64 { self.run.page_count() }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.snapshot
+    }
+    pub fn kind(&self) -> ScanKind {
+        self.kind
+    }
+    pub fn row_count(&self) -> u64 {
+        self.rows.result_rows
+    }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.rows
+    }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.evaluator
+    }
+    pub fn encoded_len(&self) -> usize {
+        self.run.len()
+    }
+    pub fn page_count(&self) -> u64 {
+        self.run.page_count()
+    }
 
     /// Create an independent consumption position without reading anything.
     /// The exclusive file borrow prevents changing the scratch owner while
@@ -103,9 +135,17 @@ impl NativeResultSpool {
     /// Close/drop does not drain unread rows and does not retire the spool.
     pub fn reader<'a, F>(&self, scratch: &'a mut SpillFile<F>) -> NativeSpoolCursor<'a, F> {
         NativeSpoolCursor {
-            scratch, run: self.run.clone(), remaining: self.row_count(),
-            max_row_bytes: self.max_row_bytes, offset: 0, page: None,
-            state: if self.row_count() == 0 { ScanState::Exhausted } else { ScanState::Open },
+            scratch,
+            run: self.run.clone(),
+            remaining: self.row_count(),
+            max_row_bytes: self.max_row_bytes,
+            offset: 0,
+            page: None,
+            state: if self.row_count() == 0 {
+                ScanState::Exhausted
+            } else {
+                ScanState::Open
+            },
         }
     }
 }
@@ -134,9 +174,14 @@ impl PreparedNativeRead {
     /// Privileged embedded API, never a Warden-scoped cache or authorization.
     #[allow(clippy::too_many_arguments)]
     pub fn spool<'q, V, F>(
-        &self, database: &Database<V>, cx: &'q QueryCx, params: &GqlParameters,
-        policy: GqlQueryPolicy, scratch: &'q mut SpillFile<F>,
-        page_bytes: usize, max_row_bytes: usize,
+        &self,
+        database: &Database<V>,
+        cx: &'q QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<F>,
+        page_bytes: usize,
+        max_row_bytes: usize,
     ) -> impl Future<Output = Result<NativeResultSpool, NativeSpoolError>> + 'q + use<'q, V, F>
     where
         V: Vfs + Clone,
@@ -154,11 +199,17 @@ impl PreparedNativeRead {
     /// frontier. The completed spool owns no view; the caller's pin is unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn spool_in_view<'q, F>(
-        &self, view: &EmbeddedReadView, cx: &'q QueryCx, params: &GqlParameters,
-        policy: GqlQueryPolicy, scratch: &'q mut SpillFile<F>,
-        page_bytes: usize, max_row_bytes: usize,
+        &self,
+        view: &EmbeddedReadView,
+        cx: &'q QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<F>,
+        page_bytes: usize,
+        max_row_bytes: usize,
     ) -> impl Future<Output = Result<NativeResultSpool, NativeSpoolError>> + 'q + use<'q, F>
-    where F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+    where
+        F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
     {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
@@ -169,8 +220,12 @@ impl PreparedNativeRead {
 }
 
 async fn drain<VS, VF, ES, EF, F>(
-    cx: &QueryCx, columns: Vec<String>, mut cursor: ScanCursor<VS, VF, ES, EF>,
-    scratch: &mut SpillFile<F>, page_bytes: usize, max_row_bytes: usize,
+    cx: &QueryCx,
+    columns: Vec<String>,
+    mut cursor: ScanCursor<VS, VF, ES, EF>,
+    scratch: &mut SpillFile<F>,
+    page_bytes: usize,
+    max_row_bytes: usize,
 ) -> Result<NativeResultSpool, NativeSpoolError>
 where
     VS: VertexScanSource<Error = ReadError>,
@@ -187,10 +242,14 @@ where
     let mut largest = 0;
     for row in cursor.by_ref() {
         let row = row.map_err(|e| NativeSpoolError::Execute(Box::new(e)))?;
-        cx.with_restriction(|| cx.checkpoint()).map_err(SpillError::Interrupted)?;
+        cx.with_restriction(|| cx.checkpoint())
+            .map_err(SpillError::Interrupted)?;
         let bytes = row.canonical_bytes().map_err(NativeSpoolError::Encode)?;
         if bytes.len() > max_row_bytes {
-            return Err(NativeSpoolError::RowTooLarge { bytes: bytes.len(), limit: max_row_bytes });
+            return Err(NativeSpoolError::RowTooLarge {
+                bytes: bytes.len(),
+                limit: max_row_bytes,
+            });
         }
         let len = u64::try_from(bytes.len()).map_err(|_| SpillError::SizeOverflow)?;
         writer.write(cx, &len.to_be_bytes()).await?;
@@ -206,7 +265,13 @@ where
     drop(cursor); // release the native source BEFORE accepting detached results
     let run = writer.finish(cx).await?;
     Ok(NativeResultSpool {
-        columns, snapshot, kind, rows, evaluator, max_row_bytes: largest, run,
+        columns,
+        snapshot,
+        kind,
+        rows,
+        evaluator,
+        max_row_bytes: largest,
+        run,
     })
 }
 
@@ -225,21 +290,29 @@ pub struct NativeSpoolCursor<'a, F> {
     state: ScanState,
 }
 impl<F> NativeSpoolCursor<'_, F> {
-    pub fn state(&self) -> ScanState { self.state }
+    pub fn state(&self) -> ScanState {
+        self.state
+    }
     pub fn close(&mut self) {
-        if self.state == ScanState::Open { self.state = ScanState::Closed; }
+        if self.state == ScanState::Open {
+            self.state = ScanState::Closed;
+        }
         self.page = None;
     }
 }
 struct ReadAttempt<'a, 'file, F>(&'a mut NativeSpoolCursor<'file, F>);
 impl<F> Drop for ReadAttempt<'_, '_, F> {
     fn drop(&mut self) {
-        if self.0.state == ScanState::Failed { self.0.page = None; }
+        if self.0.state == ScanState::Failed {
+            self.0.page = None;
+        }
     }
 }
 impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> NativeSpoolCursor<'_, F> {
     pub async fn next_row(&mut self, cx: &QueryCx) -> Result<Option<TrackedBytes>, SpillError> {
-        if self.state != ScanState::Open { return Ok(None); }
+        if self.state != ScanState::Open {
+            return Ok(None);
+        }
         self.state = ScanState::Failed;
         let attempt = ReadAttempt(self);
         let output = attempt.0.read_row(cx).await?;
@@ -247,27 +320,40 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> NativeSpoolCursor<'_, F> {
         attempt.0.state = if attempt.0.remaining == 0 {
             attempt.0.page = None;
             ScanState::Exhausted
-        } else { ScanState::Open };
+        } else {
+            ScanState::Open
+        };
         Ok(Some(output))
     }
 
     async fn read_row(&mut self, cx: &QueryCx) -> Result<TrackedBytes, SpillError> {
         let mut length = [0; 8];
         self.fill(cx, &mut length).await?;
-        let len = usize::try_from(u64::from_be_bytes(length)).map_err(|_| SpillError::InvalidRun)?;
-        if len == 0 || len > self.max_row_bytes
-            || self.offset.checked_add(len).is_none_or(|end| end > self.run.len())
-        { return Err(SpillError::InvalidRun); }
+        let len =
+            usize::try_from(u64::from_be_bytes(length)).map_err(|_| SpillError::InvalidRun)?;
+        if len == 0
+            || len > self.max_row_bytes
+            || self
+                .offset
+                .checked_add(len)
+                .is_none_or(|end| end > self.run.len())
+        {
+            return Err(SpillError::InvalidRun);
+        }
         let mut output = self.scratch.memory_pool().allocate_zeroed(cx, len)?;
         self.fill(cx, output.as_mut()).await?;
-        if self.remaining == 1 && self.offset != self.run.len() { return Err(SpillError::InvalidRun); }
-        cx.with_restriction(|| cx.checkpoint()).map_err(SpillError::Interrupted)?;
+        if self.remaining == 1 && self.offset != self.run.len() {
+            return Err(SpillError::InvalidRun);
+        }
+        cx.with_restriction(|| cx.checkpoint())
+            .map_err(SpillError::Interrupted)?;
         Ok(output)
     }
 
     async fn fill(&mut self, cx: &QueryCx, mut output: &mut [u8]) -> Result<(), SpillError> {
         while !output.is_empty() {
-            cx.with_restriction(|| cx.checkpoint()).map_err(SpillError::Interrupted)?;
+            cx.with_restriction(|| cx.checkpoint())
+                .map_err(SpillError::Interrupted)?;
             let page = (self.offset / self.run.page_bytes()) as u64;
             if self.page.as_ref().is_none_or(|(stored, _)| *stored != page) {
                 self.page = None; // refund predecessor BEFORE admitting successor
@@ -278,9 +364,14 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> NativeSpoolCursor<'_, F> {
             let at = self.offset % self.run.page_bytes();
             let available = bytes.len().checked_sub(at).ok_or(SpillError::InvalidRun)?;
             let count = output.len().min(available);
-            if count == 0 { return Err(SpillError::InvalidRun); }
+            if count == 0 {
+                return Err(SpillError::InvalidRun);
+            }
             output[..count].copy_from_slice(&bytes.as_ref()[at..at + count]);
-            self.offset = self.offset.checked_add(count).ok_or(SpillError::SizeOverflow)?;
+            self.offset = self
+                .offset
+                .checked_add(count)
+                .ok_or(SpillError::SizeOverflow)?;
             output = &mut output[count..];
         }
         Ok(())
