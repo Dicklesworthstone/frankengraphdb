@@ -17,6 +17,8 @@ use fgdb_types::{CommitSeq, QueryCx};
 
 #[path = "query_branch.rs"]
 mod branch;
+#[path = "query_spool.rs"]
+mod spool;
 
 impl EmbeddedReadView {
     /// Execute a native read at this view's immutable frontier. The same native
