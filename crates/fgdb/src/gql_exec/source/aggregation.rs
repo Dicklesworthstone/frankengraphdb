@@ -2,6 +2,7 @@
 
 mod cheapest_path;
 mod edge_stream;
+mod shortest_admission;
 mod vertex_stream;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
@@ -265,6 +266,16 @@ impl<V: Vfs + Clone> Database<V> {
     /// source/end partition are pruned. Results are sorted by endpoint identity.
     /// This endpoint API is the execution primitive for ALL SHORTEST; it does
     /// not claim path-value capture or intermediate/path-expression predicates.
+    ///
+    /// Source admission follows the exact-cut incidence index only from vertices
+    /// reachable before the maximum hop count. Each distinct live matching edge
+    /// costs one snapshot-record unit, even if both undirected faces are used.
+    /// Disconnected edges and other relations are not retained or record-charged;
+    /// historical candidates still consume work. The lower hop bound is applied
+    /// only by the native shortest-walk cursor, never by source pruning.
+    /// Source scratch and enumeration share one policy. This bounds logical
+    /// entries, not allocator bytes; resident indexes and synchronous lookups
+    /// remain, and the reachable closure is not a spill-backed representation.
     pub fn execute_all_shortest_walk_governed(
         &self,
         cx: &QueryCx,
@@ -433,54 +444,21 @@ fn execute_shortest_at<C>(
         );
     }
 
-    let edges = super::scan_edges(
+    let adjacency = shortest_admission::collect(
+        &snapshot.adjacency_index,
         &snapshot.blocks,
-        &snapshot.block_props,
-        as_of,
+        shortest_admission::Scope {
+            source,
+            relation,
+            direction,
+            as_of,
+            maximum: bounds.maximum(),
+        },
         &mut |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
             usage.observe::<GqlError, C>(policy, event)
         },
     )?;
-    let mut pairs = BTreeMap::<(VId, VId), u64>::new();
-    for ((_, left, actual_relation, right), _) in edges {
-        checkpoint().map_err(GqlQueryError::Interrupted)?;
-        usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
-        if actual_relation != relation {
-            continue;
-        }
-        let directions = match direction {
-            GlaDirection::Forward => [(left, right), (left, right)],
-            GlaDirection::Reverse => [(right, left), (right, left)],
-            GlaDirection::Undirected => [(left, right), (right, left)],
-        };
-        let count = if direction == GlaDirection::Undirected && left != right {
-            2
-        } else {
-            1
-        };
-        for &(from, to) in directions.iter().take(count) {
-            usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
-            if !pairs.contains_key(&(from, to)) {
-                usage.observe::<GqlError, C>(policy, super::SourceEvent::ScratchEntry)?;
-            }
-            let multiplicity = pairs.entry((from, to)).or_default();
-            *multiplicity = multiplicity
-                .checked_add(1)
-                .expect("visible edge count fits u64");
-        }
-    }
-    let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    for ((from, to), multiplicity) in pairs {
-        if !adjacency.contains_key(&from) {
-            usage.observe::<GqlError, C>(policy, super::SourceEvent::ScratchEntry)?;
-        }
-        let neighbors = adjacency.entry(from).or_default();
-        for _ in 0..multiplicity {
-            usage.observe::<GqlError, C>(policy, super::SourceEvent::ScratchEntry)?;
-            neighbors.push(to);
-        }
-    }
 
     let remaining = usage.remaining(policy);
     let result = (|| {
