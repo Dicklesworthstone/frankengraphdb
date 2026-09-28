@@ -459,7 +459,17 @@ impl PreparedGraphInsertQueryText {
                         && (word.eq_ignore_ascii_case("CREATE")
                             || word.eq_ignore_ascii_case("INSERT"))
                     {
-                        created = true;
+                        // MATCH (CREATE) WHERE CREATE.p = 1 RETURN CREATE is
+                        // a read. A clause, unlike that bound name, must start
+                        // a node pattern. Peek without consuming the original
+                        // stream or changing its token-budget accounting.
+                        let mut lookahead = lexer.clone();
+                        if matches!(
+                            script::next_script_token(&mut lookahead)?.kind,
+                            TokenKind::Punct(b'(')
+                        ) {
+                            created = true;
+                        }
                     }
                     if created && !alias && word.eq_ignore_ascii_case("RETURN") {
                         return Ok(true);
@@ -522,5 +532,46 @@ impl PreparedGraphInsertQueryText {
         };
         let insertion = self.insertion.instantiate(selection, Some(&values))?;
         self.returning.bind(insertion, &values)
+    }
+}
+
+#[cfg(test)]
+mod write_clause_framing_tests {
+    use super::PreparedGraphInsertQueryText;
+
+    #[test]
+    fn matched_keyword_names_and_property_uses_do_not_turn_reads_into_writes() {
+        for text in [
+            "MATCH (CREATE) WHERE CREATE.p = 1 RETURN CREATE",
+            "MATCH (INSERT) WHERE INSERT.p = 1 RETURN INSERT",
+            "MATCH (create) WHERE create.p > 0 RETURN create.p AS p,create",
+            "MATCH (insert) WITH insert AS source RETURN source",
+            "MATCH (n) WHERE n.CREATE = 1 RETURN n",
+            "MATCH (n) WHERE n.INSERT = 1 RETURN n",
+            "UNWIND [1] AS CREATE RETURN CREATE",
+            "CREATE (n); MATCH (CREATE) WHERE CREATE.p = 1 RETURN CREATE",
+        ] {
+            assert!(
+                !PreparedGraphInsertQueryText::has_return_clause(text).unwrap(),
+                "misclassified a bound keyword as a write clause: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_creation_after_a_keyword_binding_keeps_the_return_route() {
+        for text in [
+            "MATCH (CREATE) WHERE CREATE.p = 1 CREATE (copy) RETURN CREATE,copy",
+            "MATCH (INSERT) INSERT (copy) RETURN INSERT,copy",
+            "UNWIND [1] AS CREATE CREATE (n {p:CREATE}) RETURN n",
+            "CREATE (n) RETURN n",
+            "INSERT (n) RETURN n",
+            "CREATE (n); MATCH (CREATE) CREATE (copy) RETURN copy",
+        ] {
+            assert!(
+                PreparedGraphInsertQueryText::has_return_clause(text).unwrap(),
+                "lost a real CREATE/INSERT RETURN clause: {text}"
+            );
+        }
     }
 }
