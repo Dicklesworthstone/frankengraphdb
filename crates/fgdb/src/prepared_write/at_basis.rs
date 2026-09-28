@@ -91,6 +91,36 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
     ) -> Result<(), WriteTxnError> {
         txn.write_ordered_bounded(self.database, batches, max_expanded_rows)
     }
+
+    pub(crate) fn stage_graph_write_program<A>(
+        &mut self,
+        txn: &mut WriteTxn,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<crate::ElementId, A>,
+    ) -> Result<
+        fgdb_gql::GraphWriteProgramStats,
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+    > {
+        txn.execute_graph_write_program_governed(self.database, cx, program, policy, allocate)
+    }
+
+    pub(crate) fn stage_graph_write_program_returning<A>(
+        &mut self,
+        txn: &mut WriteTxn,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<crate::ElementId, A>,
+    ) -> Result<
+        fgdb_gql::GraphWriteProgramReceipt,
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+    > {
+        txn.execute_graph_write_program_returning_governed(
+            self.database, cx, program, policy, allocate,
+        )
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -101,8 +131,22 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         basis: CommitSeq,
     ) -> Result<PreparationBasis<'_, V>, WriteTxnError> {
+        self.preparation_basis_controlled(basis, || Ok(()))
+    }
+
+    /// Checkpoints surround native replay operations and the snapshot copy.
+    /// A single row application, cascade, seal or clone remains indivisible;
+    /// this is cooperative cancellation, not a memory or CPU-work bound.
+    /// No checkpoint follows selection: all failure paths leave live state
+    /// untouched, and the returned scope restores it on return or unwind.
+    pub(crate) fn preparation_basis_controlled(
+        &mut self,
+        basis: CommitSeq,
+        mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<PreparationBasis<'_, V>, WriteTxnError> {
         self.ensure_writable()?;
         self.snapshot.check_frontier(basis)?;
+        checkpoint()?;
         let original = if basis == self.snapshot.frontier {
             None
         } else {
@@ -118,12 +162,15 @@ impl<V: Vfs + Clone> Database<V> {
             let mut touched = BTreeSet::new();
             let mut births = 0_u64;
             for batch in history.take_while(|batch| batch.commit_seq().0 <= basis.0) {
+                checkpoint()?;
                 let at = batch.commit_seq();
                 for coordinate in batch.coordinate_entries() {
+                    checkpoint()?;
                     if (coordinate.graph, coordinate.branch) != (crate::GRAPH, crate::BRANCH) {
                         continue;
                     }
                     for row in &coordinate.rows {
+                        checkpoint()?;
                         writer
                             .apply(self.keys.block_keys(), at, row)
                             .map_err(|error| basis_rebuild(at, error))?;
@@ -136,6 +183,7 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                     }
                 }
+                checkpoint()?;
                 crate::fold_statement_versions(&mut versions, &touched, &writer).map_err(
                     |error| {
                         WriteTxnError::BasisRebuild(Box::new(RebuildError::Version {
@@ -145,12 +193,14 @@ impl<V: Vfs + Clone> Database<V> {
                     },
                 )?;
                 touched.clear();
+                checkpoint()?;
                 // Match the native per-commit seal law. The writer's live and
                 // permanently-spent identity state is the production fold's,
                 // including creations subsequently deleted before this basis.
                 let _ = writer
                     .seal(self.keys.block_keys())
                     .map_err(|error| basis_rebuild(at, error))?;
+                checkpoint()?;
                 let _ = writer
                     .seal_vertices(self.keys.block_keys())
                     .map_err(|error| basis_rebuild(at, error))?;
@@ -158,11 +208,13 @@ impl<V: Vfs + Clone> Database<V> {
             // Historical lookup in these authenticated blocks/patches already
             // selects by frontier. Versions and spent identities, unlike read
             // lookup, must be reconstructed without any post-basis statements.
+            checkpoint()?;
             let mut snapshot = (*self.snapshot).clone();
             snapshot.frontier = basis;
             snapshot.versions = versions;
             snapshot.next_birth_ordinal = births;
             let snapshot = Arc::new(snapshot);
+            checkpoint()?;
             Some((
                 std::mem::replace(&mut self.writer, writer),
                 std::mem::replace(&mut self.snapshot, snapshot),
