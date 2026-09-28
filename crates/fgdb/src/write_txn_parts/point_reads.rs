@@ -22,6 +22,8 @@ struct PointReads(
     // A refused governed projection may expose a data-dependent failure before
     // its precise domain fits. This allocation-free superset survives rollback.
     Option<ElementId>,
+    // Each accepted scan retains its predicate, including an empty result.
+    Vec<VertexScanRead>,
 );
 
 impl PointReads {
@@ -76,12 +78,13 @@ impl PointReads {
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty() && self.1.is_none()
+        self.0.is_empty() && self.1.is_none() && self.2.is_empty()
     }
 
     fn clear(&mut self) {
         self.0.clear();
         self.1 = None;
+        self.2.clear();
     }
 
     fn contains(&self, element: ElementId, field: PointReadField) -> bool {
@@ -171,6 +174,7 @@ impl PointReads {
     }
 }
 
+include!("vertex_scan_reads.rs");
 include!("point_projection.rs");
 include!("governed_point_reads.rs");
 

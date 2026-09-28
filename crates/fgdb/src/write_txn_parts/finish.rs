@@ -490,6 +490,11 @@ impl WriteTxn {
                     if let Some(element) = point_reads.conflict(row, checkpoint)? {
                         return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
                     }
+                    if let Some(element) =
+                        point_reads.vertex_scan_conflict(database, row, seq, checkpoint)?
+                    {
+                        return Ok(Some(("FG-LAW-FCW-READ-01", element, seq)));
+                    }
                     crate::adjacency_endpoints(row, &mut endpoints);
                     validation_touches(row, &mut touched, checkpoint)?;
                 }

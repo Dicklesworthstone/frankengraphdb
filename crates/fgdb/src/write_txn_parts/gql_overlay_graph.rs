@@ -86,8 +86,16 @@ mod query_source {
         vertices: Vec<(VId, VertexView<'a>)>,
         edges: Vec<(IdentifiedEdge, EdgeView<'a>)>,
         pub(super) snapshot_records: usize,
+        // Incomplete until THIS execution and its final allowance check pass.
+        scan_observation: Option<(&'a WriteTxn, usize)>,
     }
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
+        fn accept_observations(&self) {
+            if let Some((transaction, index)) = self.scan_observation {
+                transaction.point_reads.borrow_mut().complete_vertex_scan(index);
+            }
+        }
+
         pub(super) fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ {
             self.vertices.iter().map(|(vid, _)| *vid)
         }
@@ -130,10 +138,13 @@ mod query_source {
         where
             Row: GlaIdentityOutput,
         {
-            self.logical
-                .execute(self.vertex_ids(), self.edge_triples(), |vid, predicates| {
-                    Ok(self.matches(vid, predicates))
-                })
+            let result = self.logical.execute(
+                self.vertex_ids(),
+                self.edge_triples(),
+                |vid, predicates| Ok::<_, WriteTxnError>(self.matches(vid, predicates)),
+            )?;
+            self.accept_observations();
+            Ok(result)
         }
     }
     fn is_vertex_effect(row: &DeltaRow) -> bool {
@@ -210,12 +221,18 @@ mod query_source {
             plan: &BoundPlan,
         ) -> Result<OverlayQuerySource<'a>, WriteTxnError> {
             let snapshot = self.query_snapshot(database)?;
-            self.query_source_over(snapshot, plan, &mut |_| Ok(()))
+            self.query_source_with_witnesses(
+                snapshot, GlaPlan::lower(plan), plan.src_label, true, &mut |_| Ok(()),
+            )
         }
 
         /// Run one scalar or correlated binding projection over the original
         /// basis plus canonical staged effects. All shapes retain the same
         /// source, witnesses and one shared source/evaluator allowance.
+        /// Single-vertex conjunctions retain exact insertion/membership witnesses
+        /// plus full reads of matching and staged vertices. Other logical shapes
+        /// retain conservative scans. Refusals keep a broad vertex-domain witness;
+        /// no prior getter, failed scan or savepoint observation is narrowed.
         pub fn execute_graph_pattern_governed<V: Vfs + Clone, Row: GlaOutput>(
             &self,
             database: &Database<V>,
@@ -233,10 +250,11 @@ mod query_source {
                 cx.checkpoint()
                     .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
                 let mut usage = crate::gql_exec::AdmissionUsage::default();
-                let source = self.query_source_over_logical(
+                let source = self.query_source_with_witnesses(
                     snapshot,
                     pattern.plan().clone(),
                     pattern.required_vertex_label(),
+                    true,
                     &mut |event| {
                         cx.checkpoint()
                             .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
@@ -253,7 +271,9 @@ mod query_source {
                     usage.remaining(policy),
                     || cx.checkpoint(),
                 );
-                usage.finish(policy, result)
+                let result = usage.finish(policy, result)?;
+                source.accept_observations();
+                Ok(result)
             })
         }
 
@@ -290,13 +310,43 @@ mod query_source {
             required_vertex_label: Option<LabelId>,
             control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
         ) -> Result<OverlayQuerySource<'a, Row>, E> {
+            // Callers that own a different acceptance boundary keep the old
+            // broad witnesses until they explicitly opt into this protocol.
+            self.query_source_with_witnesses(
+                snapshot, logical, required_vertex_label, false, control,
+            )
+        }
+
+        fn query_source_with_witnesses<'a, E, Row: GlaOutput>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: GlaPlan<Row>,
+            required_vertex_label: Option<LabelId>,
+            precise: bool,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<OverlayQuerySource<'a, Row>, E> {
+            let predicates = precise
+                .then(|| super::VertexScanRead::predicates(&logical))
+                .flatten();
+            let scan_observation = if let Some(predicates) = predicates {
+                // Charge the bounded definition copy before allocation or graph
+                // reads. A failure here has learned nothing from the database.
+                control(SourceEvent::ScratchEntry)?;
+                for _ in predicates {
+                    control(SourceEvent::ScratchEntry)?;
+                }
+                let index = self.point_reads.borrow_mut().begin_vertex_scan(predicates);
+                Some((self, index))
+            } else {
+                None
+            };
             let edge_scan = logical.scans_edges();
             let reads_edges = logical.reads_edges();
             control(SourceEvent::Work)?;
             if reads_edges {
                 self.scanned_edges.set(true);
             }
-            if !edge_scan {
+            if !edge_scan && scan_observation.is_none() {
                 if let Some(label) = required_vertex_label {
                     control(SourceEvent::ScratchEntry)?;
                     self.scanned_vertex_labels.borrow_mut().insert(label);
@@ -357,9 +407,24 @@ mod query_source {
             }
             if !edge_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
-                    self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
+                    let view = VertexView::new(&row.labels, &row.props);
+                    let mut selected = true;
+                    if let Some(predicates) = predicates {
+                        for predicate in predicates {
+                            control(SourceEvent::Work)?;
+                            if !view.matches(predicate) {
+                                selected = false;
+                                break;
+                            }
+                        }
+                    }
+                    if selected {
+                        self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
+                    }
+                    // Keep the same complete source and row-admission semantics.
+                    // Only dependency recording changes, never the query result.
                     control(SourceEvent::ScratchEntry)?;
-                    vertices.insert(row.vid, VertexView::new(&row.labels, &row.props));
+                    vertices.insert(row.vid, view);
                     Ok(())
                 })?;
             }
@@ -370,6 +435,15 @@ mod query_source {
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
                         if !edge_scan {
+                            if scan_observation.is_some()
+                                && let Some(vid) = super::VertexScanRead::target(effect)
+                            {
+                                // Staged overrides are transaction-local, not
+                                // historical images. Observe every affected ID
+                                // broadly, even if it leaves the predicate or
+                                // its statement is subsequently rolled back.
+                                self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
+                            }
                             apply_vertex(&mut vertices, effect, None, control)?;
                         }
                         if reads_edges {
@@ -488,6 +562,7 @@ mod query_source {
                 vertices: vertex_rows,
                 edges: edge_rows,
                 snapshot_records,
+                scan_observation,
             })
         }
     }
