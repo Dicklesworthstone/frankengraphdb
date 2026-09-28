@@ -57,6 +57,9 @@ pub enum WriteTxnError {
         pinned: CommitSeq,
         live: CommitSeq,
     },
+    /// Reconstructing native writer/version state at a historical preparation
+    /// basis failed. No publication occurred and the live handle is unchanged.
+    BasisRebuild(Box<crate::RebuildError>),
     /// Independent relation groups cannot silently consume each other's writes.
     AtomicRelationConflict {
         first: RelationId,
@@ -122,6 +125,9 @@ impl core::fmt::Display for WriteTxnError {
                 formatter,
                 "write transaction pinned {pinned:?}, but the live snapshot advanced to {live:?}"
             ),
+            Self::BasisRebuild(source) => {
+                write!(formatter, "could not reconstruct the preparation basis: {source}")
+            }
             Self::AtomicRelationConflict {
                 first,
                 second,
@@ -166,6 +172,7 @@ impl core::error::Error for WriteTxnError {
         match self {
             Self::Authorization(source) => Some(source),
             Self::Interrupted(source) => Some(source.as_ref()),
+            Self::BasisRebuild(source) => Some(source.as_ref()),
             Self::Read(source) => Some(source),
             Self::Gql(source) => Some(source),
             Self::Write(source) => Some(source),

@@ -1,5 +1,6 @@
 //! Prepared writes retain their observations, not a resettable validator epoch.
 
+mod at_basis;
 mod atomic;
 mod ordered;
 
