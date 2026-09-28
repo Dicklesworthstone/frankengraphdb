@@ -218,6 +218,7 @@ impl<'a> Parser<'a> {
                 visible,
                 width: head.outputs.len(),
                 reads,
+                grouped: Vec::new(),
             });
         }
         Ok(())

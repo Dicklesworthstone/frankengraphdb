@@ -123,6 +123,70 @@ fn native_grouping_outputs_feed_correlated_match_and_repeated_aggregation() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-ezgeq: `WITH n, count(m) AS c` keeps the vertex, so the grouping's
+/// WHERE, pages and RETURN (plain or aggregate) read its properties. Vertices
+/// 1 and 2 share p = 10: the groups stay per vertex until a RETURN regroups.
+#[test]
+fn a_kept_vertex_reads_its_properties_after_the_grouping_in_both_return_classes() {
+    let ((), report) = run_async_under_lab(0x5d_6704, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let params = GqlParameters::new();
+        for (text, class, expected) in [
+            (
+                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c RETURN n.p, n.secret, c",
+                NativeReadClass::Set,
+                rows(
+                    &["p", "secret", "c"],
+                    vec![
+                        vec![value(10), value(100), value(2)],
+                        vec![value(10), value(200), value(1)],
+                    ],
+                ),
+            ),
+            (
+                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c WHERE n.secret > 100 \
+                 RETURN n.secret AS s, c",
+                NativeReadClass::Set,
+                rows(&["s", "c"], vec![vec![value(200), value(1)]]),
+            ),
+            (
+                "MATCH (n:L)-[:R]->(m:L) WITH n AS k, count(m) AS c ORDER BY k.secret DESC \
+                 LIMIT 1 RETURN k.secret AS s, c",
+                NativeReadClass::Set,
+                rows(&["s", "c"], vec![vec![value(200), value(1)]]),
+            ),
+            (
+                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c RETURN n.p AS p, sum(c) AS total",
+                NativeReadClass::PipelineAggregate,
+                rows(
+                    &["p", "total"],
+                    vec![vec![value(10), QueryValue::Integer(3)]],
+                ),
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            assert_eq!(prepared.facade_class(), class, "{text}");
+            assert_eq!(
+                db.query(&c.query(), text, &params, symbols, policy())
+                    .unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        // A read in a later stage sees only the grouped row, never the graph.
+        assert!(
+            PreparedNativeRead::prepare(
+                "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c WITH n, c RETURN n.p",
+                &params,
+                symbols
+            )
+            .is_err()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn authorized_group_keys_arguments_and_continuations_see_only_the_scoped_source() {
     let ((), report) = run_async_under_lab(0x5d_6703, |root| async move {
@@ -159,6 +223,25 @@ fn authorized_group_keys_arguments_and_continuations_see_only_the_scoped_source(
                 "MATCH (n) WITH collect(n) AS xs UNWIND xs AS n MATCH (n)-[:R]->(m) \
               WITH count(*) AS c RETURN c",
                 rows(&["c"], vec![vec![value(3)]]),
+            ),
+            // fgdb-ezgeq: a read after the grouping is the same masked source
+            // read as one inside it. Vertex group order is not part of the
+            // result without ORDER BY, so the law orders by the count.
+            (
+                "MATCH (n)-[:R]->(m) WITH n, count(m) AS c RETURN n.secret AS s, c ORDER BY c",
+                rows(
+                    &["s", "c"],
+                    vec![
+                        vec![
+                            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                            value(1),
+                        ],
+                        vec![
+                            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                            value(2),
+                        ],
+                    ],
+                ),
             ),
         ] {
             let actual = db

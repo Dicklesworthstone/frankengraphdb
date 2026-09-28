@@ -462,10 +462,18 @@ struct Parser<'a> {
 /// row's width, visible plus hidden; an expression over any other row (a
 /// nested scope) sees none of this. Each read is the carried alias, the
 /// property name (with its first offset) and the column.
+///
+/// `grouped` belongs to a grouping WITH's graph head only (fgdb-ezgeq): reads
+/// the scope AFTER the grouping makes through a vertex or edge the WITH keeps
+/// as a bare key (`WITH p, count(*) AS c RETURN p.name`). Each is the output
+/// alias, the binding, the property and its hidden head column. The grouping
+/// stage turns each into a hidden key, and those keys become the grouped row's
+/// own `reads`.
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
     reads: Vec<(&'a str, Name<'a>, usize)>,
+    grouped: Vec<(&'a str, &'a str, Name<'a>, usize)>,
 }
 
 impl<'a> Parser<'a> {

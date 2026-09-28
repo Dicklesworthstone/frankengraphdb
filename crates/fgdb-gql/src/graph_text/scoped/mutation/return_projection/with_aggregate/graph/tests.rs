@@ -172,6 +172,90 @@ fn hidden_property_columns_and_ungrouped_bindings_never_escape_the_boundary() {
     assert_eq!(query.columns(), &["c"]);
 }
 
+fn refused_before_catalog(text: &str) {
+    let mut calls = 0;
+    assert!(
+        PreparedGraphSetText::prepare(text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .is_err(),
+        "{text}"
+    );
+    assert_eq!(calls, 0, "{text}");
+}
+
+/// fgdb-ezgeq: after `WITH a, count(e) AS c`, the grouping's own scope reads
+/// the kept vertex's properties. Vertices 1 and 2 share p = 1, so a law that
+/// merged groups by the property value would answer one row, not two.
+#[test]
+fn a_kept_binding_reads_its_properties_after_the_grouping() {
+    let per_vertex = vec![
+        row(vec![scalar(1), scalar(10), scalar(2)]),
+        row(vec![scalar(1), scalar(20), scalar(1)]),
+    ];
+    let (rows, calls) = execute("MATCH (a)-[e:R]->(b) WITH a, count(e) AS c RETURN a.p, a.q, c");
+    assert_eq!(calls, 1);
+    assert_eq!(rows, per_vertex);
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (a)-[e:R]->(b) WITH a, count(e) AS c RETURN a.p, a.q, c",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(query.columns(), &["p", "q", "c"]);
+    // The same answer as re-matching the kept vertex by identity.
+    assert_eq!(
+        execute("MATCH (a)-[e:R]->(b) WITH a, count(e) AS c MATCH (a) RETURN a.p, a.q, c").0,
+        per_vertex
+    );
+    // Kept last, under an alias, or DISTINCT: the same groups.
+    for text in [
+        "MATCH (a)-[e:R]->(b) WITH count(e) AS c, a RETURN a.p, a.q, c",
+        "MATCH (a)-[e:R]->(b) WITH a AS x, count(e) AS c RETURN x.p, x.q, c",
+        "MATCH (a)-[e:R]->(b) WITH DISTINCT a, count(e) AS c RETURN a.p, a.q, c",
+    ] {
+        assert_eq!(execute(text).0, per_vertex, "{text}");
+    }
+}
+
+/// The aggregate-RETURN regrouping belongs to the pipeline-aggregate parser;
+/// crates/fgdb/tests/with_grouping.rs covers it through the facade.
+#[test]
+fn grouped_property_reads_serve_the_grouping_where_and_pages() {
+    assert_eq!(
+        execute("MATCH (a)-[e:R]->(b) WITH a, count(e) AS c WHERE a.q > 10 RETURN a.q, c").0,
+        vec![row(vec![scalar(20), scalar(1)])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (a)-[e:R]->(b) WITH a AS x, count(e) AS c ORDER BY x.q DESC LIMIT 1 RETURN x.q, c"
+        )
+        .0,
+        vec![row(vec![scalar(20), scalar(1)])]
+    );
+}
+
+#[test]
+fn only_a_kept_binding_in_the_grouping_scope_reads_through_the_grouped_row() {
+    for text in [
+        // Aggregated, or only a computed value that reuses the binding's name.
+        "MATCH (n) WITH count(n) AS c RETURN n.q",
+        "MATCH (n) WITH n.p AS n, count(*) AS c RETURN n.q",
+        // A later stage sees the grouped row, not the graph.
+        "MATCH (n) WITH n, count(*) AS c WITH n, c RETURN n.q",
+        // The hidden key never resolves by its private name.
+        "MATCH (n) WITH n, count(*) AS c WHERE n.q > 0 RETURN __fg_group_0",
+    ] {
+        refused_before_catalog(text);
+    }
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (n) WITH n, count(*) AS c WHERE n.q > 0 RETURN *",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(query.columns(), &["n", "c"]);
+}
+
 #[test]
 fn direct_grouping_failure_is_not_suppressed_by_limit_zero() {
     let query =

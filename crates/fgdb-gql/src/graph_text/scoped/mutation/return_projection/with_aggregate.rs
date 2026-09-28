@@ -202,15 +202,23 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::ProjectionBuild(kind),
             }
         })?;
-        // Equal input expressions share a slot, but parameter values never
-        // participate in that decision. Repeated key aliases group only once.
+        Ok((self.input_slot(inputs, value)?, kind, name))
+    }
+
+    /// Equal input expressions share a slot, but parameter values never
+    /// participate in that decision. Repeated key aliases group only once.
+    fn input_slot(
+        &self,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        value: ReadValueTemplate,
+    ) -> Result<usize, GraphSetTextError> {
         let mut bytes = Vec::new();
         value.append_template_transcript(&mut bytes);
         for (column, input) in inputs.iter().enumerate() {
             let mut prior = Vec::new();
             input.value.append_template_transcript(&mut prior);
             if prior == bytes {
-                return Ok((column, kind, name));
+                return Ok(column);
             }
         }
         self.capacity(
@@ -223,7 +231,62 @@ impl<'a> Parser<'a> {
             name: format!("__with_input_{column}"),
             value,
         });
-        Ok((column, kind, name))
+        Ok(column)
+    }
+
+    /// fgdb-ezgeq: `WITH p, count(f) AS c RETURN p.name, c`. Each property the
+    /// scope after this grouping reads through a kept binding (`grouped`, found
+    /// by the graph head) becomes one more hidden key. The graph head keeps
+    /// only items that are exactly `binding` or `binding AS alias`, so the
+    /// binding is already a key, and a property is a function of its element:
+    /// the groups, their multiplicity and DISTINCT are unchanged. The hidden
+    /// keys follow the visible outputs, and the returned reads resolve
+    /// `alias.property` to them until the next stage drops them.
+    fn grouped_keys(
+        &self,
+        schema: &pipeline::RowSchema<'a>,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        keys: &mut Vec<usize>,
+        returned: &mut Vec<(Name<'a>, Output, GraphSetColumnType)>,
+    ) -> Result<Vec<(&'a str, Name<'a>, usize)>, GraphSetTextError> {
+        let Some(boundary) = self
+            .boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == schema.len())
+        else {
+            return Ok(Vec::new());
+        };
+        let mut reads = Vec::new();
+        for &(alias, _, property, column) in &boundary.grouped {
+            self.capacity(
+                returned.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let input = self.input_slot(inputs, ReadValueTemplate::Column(column))?;
+            let key = match keys.iter().position(|&key| key == input) {
+                Some(key) => key,
+                None => {
+                    keys.push(input);
+                    keys.len() - 1
+                }
+            };
+            let name = graph::HIDDEN_NAMES
+                .iter()
+                .copied()
+                .find(|name| returned.iter().all(|(output, _, _)| output.text != *name))
+                .ok_or_else(|| expected(property.at, "bounded grouping property reads"))?;
+            returned.push((
+                Name {
+                    text: name,
+                    at: property.at,
+                },
+                Output::Key(key),
+                schema[column].1,
+            ));
+            reads.push((alias, property, returned.len() - 1));
+        }
+        Ok(reads)
     }
 
     pub(super) fn with_aggregate_stage(
@@ -335,6 +398,8 @@ impl<'a> Parser<'a> {
                 crate::GraphAggregateBuildError::EmptyAggregates,
             ));
         }
+        let visible = returned.len();
+        let reads = self.grouped_keys(schema, &mut inputs, &mut keys, &mut returned)?;
         if inputs.is_empty() {
             // COUNT(*) needs occurrences, not an invented graph source or a
             // guessed cardinality. A constant projection preserves those rows.
@@ -345,7 +410,7 @@ impl<'a> Parser<'a> {
                 ),
             });
         }
-        let output_schema = returned
+        let output_schema: pipeline::RowSchema<'a> = returned
             .iter()
             .map(|(name, _, kind)| (*name, *kind))
             .collect();
@@ -359,7 +424,12 @@ impl<'a> Parser<'a> {
                 (name.text.to_owned(), column, kind)
             })
             .collect();
-        self.boundary_reads = None;
+        self.boundary_reads = (!reads.is_empty()).then(|| BoundaryReads {
+            visible,
+            width: output_schema.len(),
+            reads,
+            grouped: Vec::new(),
+        });
         Ok((
             ReadStageTemplate::Aggregate {
                 at,
