@@ -118,7 +118,11 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
         fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         txn.execute_graph_write_program_returning_governed(
-            self.database, cx, program, policy, allocate,
+            self.database,
+            cx,
+            program,
+            policy,
+            allocate,
         )
     }
 }

@@ -372,7 +372,12 @@ impl<V: Vfs + Clone> Database<V> {
                     commit_cx,
                     &query,
                     budget.insertion_policy(),
-                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
                 )
                 .await
                 .map_err(QueryWriteError::Insert)?;
@@ -433,7 +438,12 @@ impl WriteTxn {
                     cx,
                     &query,
                     budget.insertion_policy(),
-                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
                 )
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
@@ -469,8 +479,9 @@ mod write_return_tests {
     use fgdb_gql::insertion::GraphInsertRequest;
     use fgdb_types::context::SimulationCheckpointProbe;
     use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
-    use std::cell::Cell;
     use std::sync::Arc;
+    // Atomics, not Cell: the counters live inside lab futures, which must be Send.
+    use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
     const R: RelationId = RelationId(1);
     const P: PropertyKeyId = PropertyKeyId(1);
@@ -511,7 +522,10 @@ mod write_return_tests {
         };
         assert_eq!(
             columns,
-            expected_columns.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>()
+            expected_columns
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
         );
         rows.into_iter()
             .map(|row| {
@@ -631,12 +645,11 @@ mod write_return_tests {
             prefix.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(0))]);
             transaction.write(&mut db, prefix).unwrap();
             let digest = transaction.staged_effect_digest().unwrap();
-            let next = Cell::new(100_u128);
+            let next = AtomicU64::new(100);
             let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
                 assert_eq!(request.statement, 0);
                 assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
-                let vertex = next.get();
-                next.set(vertex + 1);
+                let vertex = u128::from(next.fetch_add(1, Ordering::Relaxed));
                 Ok(ElementId::Vertex(VId(vertex)))
             };
             let result = transaction.query_write(
@@ -655,7 +668,11 @@ mod write_return_tests {
                     GraphInsertQueryError::Returning(_)
                 )))
             ));
-            assert_eq!(next.get(), 102, "issued identities are not rolled back");
+            assert_eq!(
+                next.load(Ordering::Relaxed),
+                102,
+                "issued identities are not rolled back"
+            );
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert_eq!(transaction.vertices(&db).unwrap().len(), 2);
             assert!(transaction.vertex(&db, VId(100)).unwrap().is_none());
@@ -718,7 +735,7 @@ mod write_return_tests {
                 "CREATE (n:Copy); CREATE (m) RETURN m",
                 "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
             ] {
-                let calls = Cell::new(0);
+                let calls = AtomicI32::new(0);
                 let result = db
                     .query_write(
                         &txcx,
@@ -727,7 +744,7 @@ mod write_return_tests {
                         text,
                         &GqlParameters::new(),
                         |kind, name| {
-                            calls.set(calls.get() + 1);
+                            calls.fetch_add(1, Ordering::Relaxed);
                             symbols(kind, name)
                         },
                         R,
@@ -736,7 +753,11 @@ mod write_return_tests {
                     )
                     .await;
                 assert!(matches!(result, Err(QueryWriteError::InsertText(_))));
-                assert_eq!(calls.get(), 0, "refusal precedes catalog calls: {text}");
+                assert_eq!(
+                    calls.load(Ordering::Relaxed),
+                    0,
+                    "refusal precedes catalog calls: {text}"
+                );
                 assert_eq!(db.frontier().unwrap(), before);
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
@@ -753,11 +774,15 @@ mod write_return_tests {
                     allocate,
                 )
                 .await;
-            assert!(matches!(result, Err(QueryWriteError::Insert(GqlQueryError::Rows(_)))));
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Insert(GqlQueryError::Rows(_)))
+            ));
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(txcx.outstanding_obligations(), 0);
-            let cancelled = cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
+            let cancelled =
+                cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
             let result = db
                 .query_write(
                     &txcx,
@@ -771,7 +796,10 @@ mod write_return_tests {
                     |_| -> Result<ElementId, ()> { panic!("cancelled query cannot allocate") },
                 )
                 .await;
-            assert!(matches!(result, Err(QueryWriteError::Insert(GqlQueryError::Interrupted(_)))));
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Insert(GqlQueryError::Interrupted(_)))
+            ));
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(txcx.outstanding_obligations(), 0);

@@ -181,13 +181,18 @@ fn matched_and_created_endpoints_preserve_duplicate_source_occurrences() {
     assert_eq!(batch.insertion().stats().created_vertices, 2);
     assert_eq!(batch.insertion().stats().created_edges, 2);
     for (row, target) in [VId(100), VId(116)].into_iter().enumerate() {
-        assert!(batch.insertion().intents().contains(&GraphInsertIntent::Edge {
-            edge: EId(1_000 + row as u128 * 16),
-            relation: R,
-            source: VId(2),
-            destination: target,
-            properties: vec![],
-        }));
+        assert!(
+            batch
+                .insertion()
+                .intents()
+                .contains(&GraphInsertIntent::Edge {
+                    edge: EId(1_000 + row as u128 * 16),
+                    relation: R,
+                    source: VId(2),
+                    destination: target,
+                    properties: vec![],
+                })
+        );
     }
 }
 
@@ -197,12 +202,7 @@ fn matched_incoming_endpoints_keep_the_shared_match_direction_law() {
         "MATCH (left)<-[old:R]-(right) CREATE (n) \
         RETURN startNode(old) AS source,endNode(old) AS target",
     );
-    let batch = run_matched(
-        &query,
-        &[VId(1), VId(2)],
-        &[(EId(10), VId(2), R, VId(1))],
-    )
-    .unwrap();
+    let batch = run_matched(&query, &[VId(1), VId(2)], &[(EId(10), VId(2), R, VId(1))]).unwrap();
     assert_eq!(
         values(&batch),
         vec![vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(1))]]

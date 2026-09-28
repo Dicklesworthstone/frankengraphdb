@@ -308,7 +308,11 @@ mod tests {
                     reads.push(vid);
                     Ok::<_, Failure<&str>>(Some(&values[vid.0 as usize]))
                 },
-                &mut |_, _| Err(Failure::Source("vertex comparison accessed a captured edge")),
+                &mut |_, _| {
+                    Err(Failure::Source(
+                        "vertex comparison accessed a captured edge",
+                    ))
+                },
                 &mut |_| Ok(()),
             );
             assert_eq!(result, Ok(expected));
@@ -357,8 +361,8 @@ mod tests {
     #[test]
     fn explicitly_typed_edge_operands_still_read_their_own_domain() {
         use crate::algebra::{
-            GlaDirection, GraphBooleanExpression, GraphBooleanOp, GraphBooleanOperand,
-            GraphColumn, GraphPath, GraphPatternBuilder,
+            GlaDirection, GraphBooleanExpression, GraphBooleanOp, GraphBooleanOperand, GraphColumn,
+            GraphPath, GraphPatternBuilder,
         };
         use fgdb_types::EId;
         let expression = GraphBooleanExpression::prepare(&[GraphBooleanOp::Compare {
@@ -376,7 +380,12 @@ mod tests {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("a").unwrap().vertex("b").unwrap();
         builder
-            .edge("a", fgdb_delta_types::RelationId(1), GlaDirection::Forward, "b")
+            .edge(
+                "a",
+                fgdb_delta_types::RelationId(1),
+                GlaDirection::Forward,
+                "b",
+            )
             .unwrap();
         builder
             .capture_edge("r", 0)

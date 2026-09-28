@@ -107,7 +107,12 @@ mod historical_program_tests {
     }
 
     fn policy() -> GraphWriteProgramPolicy {
-        GraphWriteProgramPolicy::new(GqlQueryPolicy::new(10_000, 1_000, 100_000, 100_000), 100, 100, 100)
+        GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(10_000, 1_000, 100_000, 100_000),
+            100,
+            100,
+            100,
+        )
     }
 
     async fn seeded(cx: &CommitCx) -> Database<MemVfs> {
@@ -150,33 +155,61 @@ mod historical_program_tests {
                 let never = |_| -> Result<ElementId, &'static str> { panic!("mutation allocated") };
                 // The explicit API does not silently change old callers.
                 assert!(matches!(
-                    txn.execute_graph_write_program_governed(&mut db, &qcx, &program, policy(), never),
+                    txn.execute_graph_write_program_governed(
+                        &mut db,
+                        &qcx,
+                        &program,
+                        policy(),
+                        never
+                    ),
                     Err(fgdb_gql::GraphWriteProgramError::Program(
-                        fgdb_gql::GraphMutationProgramError::Preflight(WriteTxnError::SnapshotAdvanced { .. })
+                        fgdb_gql::GraphMutationProgramError::Preflight(
+                            WriteTxnError::SnapshotAdvanced { .. }
+                        )
                     ))
                 ));
                 if returning {
                     txn.execute_graph_write_program_returning_at_basis_governed(
-                        &mut db, &qcx, &program, policy(), never,
-                    ).unwrap();
+                        &mut db,
+                        &qcx,
+                        &program,
+                        policy(),
+                        never,
+                    )
+                    .unwrap();
                 } else {
                     txn.execute_graph_write_program_at_basis_governed(
-                        &mut db, &qcx, &program, policy(), never,
-                    ).unwrap();
+                        &mut db,
+                        &qcx,
+                        &program,
+                        policy(),
+                        never,
+                    )
+                    .unwrap();
                 }
                 assert_eq!(txn.basis(), basis);
-                assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]);
+                assert_eq!(
+                    txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]
+                );
                 assert_eq!(db.frontier().unwrap(), head);
                 assert_eq!(db.manifest().unwrap(), manifest);
-                assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(0))]);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0))]
+                );
                 assert!(db.vertex(VId(99)).unwrap().is_some());
                 let seq = txn.commit(&mut db, &cx).await.unwrap();
                 assert_eq!(seq, CommitSeq(head.0 + 1));
                 assert_eq!(db.delta_since(head).unwrap().count(), 1);
-                assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]);
-                assert_eq!(read.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(0))]);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]
+                );
+                assert_eq!(
+                    read.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0))]
+                );
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
         });
@@ -197,14 +230,26 @@ mod historical_program_tests {
             db.write(&cx, winner).await.unwrap();
             let head = db.frontier().unwrap();
             txn.execute_graph_write_program_at_basis_governed(
-                &mut db, &qcx, &program("MATCH (n:L) SET n.p = n.p + 1"), policy(),
+                &mut db,
+                &qcx,
+                &program("MATCH (n:L) SET n.p = n.p + 1"),
+                policy(),
                 |_| -> Result<ElementId, &'static str> { panic!("mutation allocated") },
-            ).unwrap();
-            assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(1))]);
-            assert!(matches!(txn.commit(&mut db, &cx).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+            )
+            .unwrap();
+            assert_eq!(
+                txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(1))]
+            );
+            assert!(matches!(
+                txn.commit(&mut db, &cx).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+            ));
             assert_eq!(db.frontier().unwrap(), head);
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(7))]
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -228,10 +273,16 @@ mod historical_program_tests {
             let read = db.read_session().unwrap();
             // Step one succeeds; plain DELETE must refuse the incident edge.
             let error = txn.execute_graph_write_program_returning_at_basis_governed(
-                &mut db, &qcx, &program("MATCH (n:L) SET n.p = n.p + 1; MATCH (n:L) DELETE n"), policy(),
+                &mut db,
+                &qcx,
+                &program("MATCH (n:L) SET n.p = n.p + 1; MATCH (n:L) DELETE n"),
+                policy(),
                 |_| -> Result<ElementId, &'static str> { panic!("mutation allocated") },
             );
-            assert!(matches!(error, Err(fgdb_gql::GraphWriteProgramError::Delete { statement: 1, .. })));
+            assert!(matches!(
+                error,
+                Err(fgdb_gql::GraphWriteProgramError::Delete { statement: 1, .. })
+            ));
             assert_eq!(txn.prepared.as_ref().unwrap().template, saved);
             assert_eq!(txn.savepoints.len(), 1);
             assert_eq!(txn.staged.len(), 1);
@@ -240,8 +291,13 @@ mod historical_program_tests {
             let mut winner = WriteBatch::new(RelationId(1));
             winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(9)));
             db.write(&cx, winner).await.unwrap();
-            assert!(matches!(txn.commit(&mut db, &cx).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }))));
+            assert!(matches!(
+                txn.commit(&mut db, &cx).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
             assert!(db.vertex(VId(5)).unwrap().is_none());
             assert!(db.edge(EId(10)).unwrap().is_some());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -261,7 +317,13 @@ mod historical_program_tests {
             disjoint_winner(&mut db, &cx).await;
             let read = db.read_session().unwrap();
             let mut count = 0;
-            drop(db.preparation_basis_controlled(basis, || { count += 1; Ok(()) }).unwrap());
+            drop(
+                db.preparation_basis_controlled(basis, || {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap(),
+            );
             assert!(count > 5, "must traverse the replay, not only its entry");
             for stop in 1..=count {
                 for unwind in [false, true] {
@@ -274,10 +336,17 @@ mod historical_program_tests {
                                 return Err(WriteTxnError::NoPreparedWrite);
                             }
                             Ok(())
-                        }).map(drop)
+                        })
+                        .map(drop)
                     }));
-                    if unwind { assert!(result.is_err()); }
-                    else { assert!(matches!(result.unwrap(), Err(WriteTxnError::NoPreparedWrite))); }
+                    if unwind {
+                        assert!(result.is_err());
+                    } else {
+                        assert!(matches!(
+                            result.unwrap(),
+                            Err(WriteTxnError::NoPreparedWrite)
+                        ));
+                    }
                     assert!(read.shares_decoded_state_with(&db.read_session().unwrap()));
                     assert_eq!(db.frontier().unwrap(), read.frontier());
                     assert_eq!(db.vertices().unwrap(), read.vertices().unwrap());

@@ -450,19 +450,31 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
         values(&batch),
         vec![
             vec![
-                GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
-                GraphValue::Vertex(VId(100)), GraphValue::Edge(EId(1_000)),
-                int(10), int(11), int(7),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(100)),
+                GraphValue::Edge(EId(1_000)),
+                int(10),
+                int(11),
+                int(7),
             ],
             vec![
-                GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
-                GraphValue::Vertex(VId(116)), GraphValue::Edge(EId(1_016)),
-                int(10), int(11), int(7),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(116)),
+                GraphValue::Edge(EId(1_016)),
+                int(10),
+                int(11),
+                int(7),
             ],
             vec![
-                GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3)),
-                GraphValue::Vertex(VId(132)), GraphValue::Edge(EId(1_032)),
-                int(20), int(21), int(8),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(3)),
+                GraphValue::Vertex(VId(132)),
+                GraphValue::Edge(EId(1_032)),
+                int(20),
+                int(21),
+                int(8),
             ],
         ]
     );
@@ -477,7 +489,10 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
     }
     assert_eq!(
         query.canonical_bytes(),
-        template.bind_parameters(&arguments).unwrap().canonical_bytes()
+        template
+            .bind_parameters(&arguments)
+            .unwrap()
+            .canonical_bytes()
     );
 }
 
@@ -494,10 +509,15 @@ fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
     assert_eq!(
         values(&batch),
         vec![
-            vec![int(11), GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(100))],
+            vec![
+                int(11),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(100))
+            ],
             vec![
                 GraphValue::Scalar(CanonicalScalar::Null),
-                GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(116)),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(116)),
             ],
         ]
     );
@@ -513,8 +533,10 @@ fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
     assert_eq!(
         values(&batch),
         vec![vec![
-            GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
-            GraphValue::Vertex(VId(100)), GraphValue::Edge(EId(1_000)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(2)),
+            GraphValue::Vertex(VId(100)),
+            GraphValue::Edge(EId(1_000)),
         ]]
     );
     let edge_query = prepare(
@@ -523,7 +545,11 @@ fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
     );
     assert_eq!(
         edge_query.column_types(),
-        &[GraphSetColumnType::Edge, GraphSetColumnType::Scalar, GraphSetColumnType::Scalar]
+        &[
+            GraphSetColumnType::Edge,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Scalar
+        ]
     );
 }
 
@@ -573,5 +599,8 @@ fn empty_match_is_a_no_op_and_return_errors_expose_no_partial_proposal() {
         &[],
         &Props::new(),
     );
-    assert!(result.is_err(), "a failing RETURN cannot publish a CREATE prefix");
+    assert!(
+        result.is_err(),
+        "a failing RETURN cannot publish a CREATE prefix"
+    );
 }

@@ -59,8 +59,20 @@ impl PreparedNativeRead {
         let opened = self.stream(database, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain_sorted(cx, columns, cursor, source, destination, order, run_rows,
-                max_runs, page_bytes, max_row_bytes, max_work_units).await
+            drain_sorted(
+                cx,
+                columns,
+                cursor,
+                source,
+                destination,
+                order,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_work_units,
+            )
+            .await
         }
     }
 
@@ -91,8 +103,20 @@ impl PreparedNativeRead {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain_sorted(cx, columns, cursor, source, destination, order, run_rows,
-                max_runs, page_bytes, max_row_bytes, max_work_units).await
+            drain_sorted(
+                cx,
+                columns,
+                cursor,
+                source,
+                destination,
+                order,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_work_units,
+            )
+            .await
         }
     }
 }
@@ -119,18 +143,35 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
-    cx.with_restriction(|| cx.checkpoint()).map_err(SpillError::Interrupted)?;
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(SpillError::Interrupted)?;
     validate_order(order, columns.len())?;
     if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
         return Err(SpillError::InvalidLimits.into());
     }
     if max_runs == 0 {
-        return Err(NativeSpoolError::SortRunLimit { required: 1, limit: 0 });
+        return Err(NativeSpoolError::SortRunLimit {
+            required: 1,
+            limit: 0,
+        });
     }
     if max_work_units == 0 {
-        return Err(NativeSpoolError::SortWorkLimit { attempted: 1, limit: 0 });
+        return Err(NativeSpoolError::SortWorkLimit {
+            attempted: 1,
+            limit: 0,
+        });
     }
     let spool = drain(cx, columns, cursor, source, page_bytes, max_row_bytes).await?;
-    spool.sort_into(cx, source, destination, order, run_rows, max_runs,
-        page_bytes, max_work_units).await
+    spool
+        .sort_into(
+            cx,
+            source,
+            destination,
+            order,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_work_units,
+        )
+        .await
 }

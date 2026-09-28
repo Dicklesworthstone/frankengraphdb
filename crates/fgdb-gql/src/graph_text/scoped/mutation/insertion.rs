@@ -303,8 +303,9 @@ impl<'a> Parser<'a> {
                 let name = if returning && matches!(self.current.kind, TokenKind::Word(_)) {
                     let name = self.name()?;
                     if self.insertion_match_kind(name.text).is_some()
-                        || row_schema
-                            .is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
+                        || row_schema.is_some_and(|schema| {
+                            schema.iter().any(|(old, _)| old.text == name.text)
+                        })
                         || parsed
                             .vertices
                             .iter()

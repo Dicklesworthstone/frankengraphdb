@@ -1,7 +1,9 @@
 //! Exercise the public text/builder boundary and the incumbent GLA evaluator.
 use super::*;
 use crate::algebra::GraphValue;
-use crate::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+use crate::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, EId};
 use std::collections::BTreeMap;
@@ -16,7 +18,10 @@ fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
-    }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
 }
 
 fn policy() -> GqlQueryPolicy {
@@ -48,16 +53,23 @@ fn run(text: &str) -> Vec<Vec<GraphValue>> {
     let pattern = prepare(text);
     let properties = properties();
     let threshold = CanonicalScalar::Int(5);
-    pattern.plan().execute_governed_with_element_properties(
-        11,
-        (1..=5).map(VId),
-        edges(),
-        |_, predicates| Ok::<_, &'static str>(predicates.iter().all(|p| p.matches(&[], &[]))),
-        |_, key| Ok((key == P).then_some(&threshold)),
-        |eid, key| Ok(properties.get(&eid).filter(|_| key == P)),
-        policy(),
-        || Ok::<_, ()>(()),
-    ).unwrap().value.into_iter().map(|row| row.values().to_vec()).collect()
+    pattern
+        .plan()
+        .execute_governed_with_element_properties(
+            11,
+            (1..=5).map(VId),
+            edges(),
+            |_, predicates| Ok::<_, &'static str>(predicates.iter().all(|p| p.matches(&[], &[]))),
+            |_, key| Ok((key == P).then_some(&threshold)),
+            |eid, key| Ok(properties.get(&eid).filter(|_| key == P)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value
+        .into_iter()
+        .map(|row| row.values().to_vec())
+        .collect()
 }
 
 #[test]
@@ -67,7 +79,12 @@ fn relationship_predicates_preserve_parallel_occurrences_and_unknown_truth() {
             let text = format!(
                 "MATCH (a) WHERE {prefix}EXISTS {{ MATCH (a)-[edge:R]->(b) WHERE {condition} }} RETURN a"
             );
-            assert_eq!(run(&text), ids.iter().map(|id| vec![GraphValue::Vertex(VId(*id))]).collect::<Vec<_>>());
+            assert_eq!(
+                run(&text),
+                ids.iter()
+                    .map(|id| vec![GraphValue::Vertex(VId(*id))])
+                    .collect::<Vec<_>>()
+            );
         }
     }
 }
@@ -84,16 +101,36 @@ fn reanchoring_a_later_reversed_edge_preserves_both_capture_identities() {
 #[test]
 fn sibling_probe_captures_restore_outer_payloads_and_never_escape() {
     let text = "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (a)-[s:R]->(x) WHERE s.p = 10 } AND NOT EXISTS { MATCH (b)-[s:R]->(y) WHERE s.p = 10 } RETURN r, a, r.p";
-    assert_eq!(run(text), vec![
-        vec![GraphValue::Edge(EId(11)), GraphValue::Vertex(VId(1)), GraphValue::Scalar(CanonicalScalar::Int(0))],
-        vec![GraphValue::Edge(EId(12)), GraphValue::Vertex(VId(1)), GraphValue::Scalar(CanonicalScalar::Int(10))],
-    ]);
+    assert_eq!(
+        run(text),
+        vec![
+            vec![
+                GraphValue::Edge(EId(11)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(0))
+            ],
+            vec![
+                GraphValue::Edge(EId(12)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(10))
+            ],
+        ]
+    );
     let prepared = prepare(text);
-    let captures = prepared.plan().operators().iter().filter_map(|op| match op {
-        GlaOperator::CapturePath { capture, .. } => Some(*capture),
-        _ => None,
-    }).collect::<Vec<_>>();
-    assert_eq!(captures, vec![0, 1, 1], "private slots may be reused, never outer slot zero");
+    let captures = prepared
+        .plan()
+        .operators()
+        .iter()
+        .filter_map(|op| match op {
+            GlaOperator::CapturePath { capture, .. } => Some(*capture),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captures,
+        vec![0, 1, 1],
+        "private slots may be reused, never outer slot zero"
+    );
 }
 
 #[test]
@@ -103,13 +140,19 @@ fn existential_failures_are_not_absence_and_capture_limits_precede_execution() {
             "MATCH (a) WHERE {prefix}EXISTS {{ MATCH (a)-[r:R]->(b) WHERE r.p = 10 }} RETURN a"
         ));
         let result = pattern.plan().execute_governed_with_element_properties(
-            11, (1..=5).map(VId), edges(),
+            11,
+            (1..=5).map(VId),
+            edges(),
             |_, _| Ok::<_, &'static str>(true),
             |_, _| Ok(None),
             |_, _| Err("edge payload unavailable"),
-            policy(), || Ok::<_, ()>(()),
+            policy(),
+            || Ok::<_, ()>(()),
         );
-        assert!(matches!(result, Err(GqlQueryError::Source("edge payload unavailable"))));
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source("edge payload unavailable"))
+        ));
     }
     let mut outer = GraphPatternBuilder::new();
     outer.vertex("a").unwrap().vertex("b").unwrap();
@@ -121,9 +164,17 @@ fn existential_failures_are_not_absence_and_capture_limits_precede_execution() {
     inner.vertex("a").unwrap().vertex("x").unwrap();
     inner.edge("a", R, GlaDirection::Forward, "x").unwrap();
     inner.capture_edge("local", 0).unwrap();
-    assert!(matches!(outer.prepare_values_with_existence(
-        &[GraphExistence::exists(&inner)], &[GraphColumn::vertex("a", "a")], 0, Some(0)),
-        Err(PatternBuildError::LimitExceeded { dimension: PatternLimitDimension::PathCaptures, .. })
+    assert!(matches!(
+        outer.prepare_values_with_existence(
+            &[GraphExistence::exists(&inner)],
+            &[GraphColumn::vertex("a", "a")],
+            0,
+            Some(0)
+        ),
+        Err(PatternBuildError::LimitExceeded {
+            dimension: PatternLimitDimension::PathCaptures,
+            ..
+        })
     ));
 }
 
@@ -139,18 +190,36 @@ fn local_edges_do_not_silently_rebind_outer_names_or_export_from_probes() {
         inner.edge("x", R, GlaDirection::Forward, "y").unwrap();
         inner.capture_edge(name, 0).unwrap();
         let clauses = [GraphMatchClause::exists(&inner)];
-        let result = outer.prepare_values_with_clauses(&clauses, &[GraphColumn::vertex("a", "a")], 0, None);
+        let result =
+            outer.prepare_values_with_clauses(&clauses, &[GraphColumn::vertex("a", "a")], 0, None);
         if name == "private_edge" {
             assert!(result.is_ok());
-            assert!(outer.prepare_values_with_clauses(&clauses,
-                &[GraphColumn::edge_property("p", name, P)], 0, None).is_err());
+            assert!(
+                outer
+                    .prepare_values_with_clauses(
+                        &clauses,
+                        &[GraphColumn::edge_property("p", name, P)],
+                        0,
+                        None
+                    )
+                    .is_err()
+            );
         } else {
             assert!(matches!(result, Err(PatternBuildError::DuplicateVariable)));
         }
-        for clause in [GraphMatchClause::optional(&inner), GraphMatchClause::required(&inner)] {
-            assert!(matches!(outer.prepare_values_with_clauses(&[clause],
-                &[GraphColumn::vertex("a", "a")], 0, Some(0)),
-                Err(PatternBuildError::InvalidPathCapture)));
+        for clause in [
+            GraphMatchClause::optional(&inner),
+            GraphMatchClause::required(&inner),
+        ] {
+            assert!(matches!(
+                outer.prepare_values_with_clauses(
+                    &[clause],
+                    &[GraphColumn::vertex("a", "a")],
+                    0,
+                    Some(0)
+                ),
+                Err(PatternBuildError::InvalidPathCapture)
+            ));
         }
     }
 }

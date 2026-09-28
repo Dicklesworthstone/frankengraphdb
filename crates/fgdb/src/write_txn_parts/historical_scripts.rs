@@ -81,7 +81,11 @@ impl WriteTxn {
         fgdb_gql::GraphWriteScriptExecutionError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
         self.execute_graph_write_program_returning_at_basis_governed(
-            database, cx, batch.program(), policy, allocate,
+            database,
+            cx,
+            batch.program(),
+            policy,
+            allocate,
         )
         .map_err(|source| batch.execution_error(source))
     }
@@ -116,7 +120,10 @@ impl WriteTxn {
             .filter(|(_, kind)| matches!(kind, fgdb_gql::GqlParameterType::Scalar(_)))
             .collect();
         let script = fgdb_gql::PreparedGraphWriteScript::prepare_with_parameter_types(
-            text, relation, &declarations, resolver,
+            text,
+            relation,
+            &declarations,
+            resolver,
         )
         .map_err(crate::QueryWriteError::Prepare)?;
         let receipt = self
@@ -199,24 +206,42 @@ mod historical_script_tests {
             winner(&mut db, &cx).await;
             let head = db.frontier().unwrap();
             for expected in [1, 2] {
-                let result = txn.query_write_at_basis(
-                    &mut db, &qcx, "MATCH (n:L) SET n.p = n.p + $step",
-                    &GqlParameters::new().with_int64("step", 1).unwrap(),
-                    symbols, RelationId(1), policy(),
-                    |_| -> Result<ElementId, &'static str> { panic!("mutation allocated") },
-                ).unwrap();
-                assert!(matches!(result, crate::QueryResult::Write { completion: None, .. }));
+                let result = txn
+                    .query_write_at_basis(
+                        &mut db,
+                        &qcx,
+                        "MATCH (n:L) SET n.p = n.p + $step",
+                        &GqlParameters::new().with_int64("step", 1).unwrap(),
+                        symbols,
+                        RelationId(1),
+                        policy(),
+                        |_| -> Result<ElementId, &'static str> { panic!("mutation allocated") },
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    result,
+                    crate::QueryResult::Write {
+                        completion: None,
+                        ..
+                    }
+                ));
                 assert_eq!(txn.basis(), basis);
-                assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(expected))]);
+                assert_eq!(
+                    txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(expected))]
+                );
                 assert_eq!(db.frontier().unwrap(), head);
-                assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(0))]);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0))]
+                );
             }
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]);
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(2))]
+            );
             assert!(db.vertex(VId(99)).unwrap().is_some());
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -238,29 +263,39 @@ mod historical_script_tests {
             let mut small = policy();
             small.max_created_vertices = 1;
             let two = script("CREATE (n {p: 5}); CREATE (n {p: 6})")
-                .bind_parameters(&GqlParameters::new()).unwrap();
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
             assert!(matches!(
                 txn.execute_graph_write_program_at_basis_engine_governed(
                     &mut db, &qcx, &two, small,
                 ),
                 Err(fgdb_gql::GraphWriteProgramError::CreationBudget {
-                    statement: 1, limit: 1, observed: 2, ..
+                    statement: 1,
+                    limit: 1,
+                    observed: 2,
+                    ..
                 })
             ));
             assert!(txn.prepared.is_none());
             assert!(read.shares_decoded_state_with(&db.read_session().unwrap()));
             let one = script("CREATE (n {p: 5})")
-                .bind_parameters(&GqlParameters::new()).unwrap();
-            let receipt = txn.execute_graph_write_program_at_basis_engine_governed(
-                &mut db, &qcx, &one, policy(),
-            ).unwrap();
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let receipt = txn
+                .execute_graph_write_program_at_basis_engine_governed(&mut db, &qcx, &one, policy())
+                .unwrap();
             let created = receipt.steps()[0].created_vertices().unwrap();
             assert_eq!(created.len(), 1);
             let vid = created[0];
-            assert!(vid.0 > 100, "live V99 and the failed reservation are both spent");
+            assert!(
+                vid.0 > 100,
+                "live V99 and the failed reservation are both spent"
+            );
             assert!(db.vertex(vid).unwrap().is_none());
-            assert_eq!(txn.vertex(&db, vid).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]);
+            assert_eq!(
+                txn.vertex(&db, vid).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(5))]
+            );
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
             let vfs = db.vfs.clone();
@@ -268,8 +303,10 @@ mod historical_script_tests {
             let path = db.path().to_path_buf();
             drop(db);
             let reopened = Database::open_with_vfs(&cx, vfs, path, keys).await.unwrap();
-            assert_eq!(reopened.vertex(vid).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]);
+            assert_eq!(
+                reopened.vertex(vid).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(5))]
+            );
             assert!(reopened.vertex(VId(99)).unwrap().is_some());
             assert_eq!(reopened.vertices().unwrap().len(), 3);
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -288,18 +325,24 @@ mod historical_script_tests {
             let mut txn = db.begin(&txcx).unwrap();
             winner(&mut db, &cx).await;
             let head = db.frontier().unwrap();
-            let batch = script("CREATE (n {p: $value})").bind_parameter_sets_with_limit(
-                &[
-                    GqlParameters::new().with_int64("value", 5).unwrap(),
-                    GqlParameters::new().with_int64("value", 6).unwrap(),
-                ],
-                2,
-            ).unwrap();
+            let batch = script("CREATE (n {p: $value})")
+                .bind_parameter_sets_with_limit(
+                    &[
+                        GqlParameters::new().with_int64("value", 5).unwrap(),
+                        GqlParameters::new().with_int64("value", 6).unwrap(),
+                    ],
+                    2,
+                )
+                .unwrap();
             let mut allowance = policy();
             allowance.max_created_vertices = 1;
             let mut issued = 0;
             let error = txn.execute_bound_graph_write_script_batch_at_basis_governed(
-                &mut db, &qcx, &batch, allowance, |_| {
+                &mut db,
+                &qcx,
+                &batch,
+                allowance,
+                |_| {
                     issued += 1;
                     Ok::<_, &'static str>(ElementId::Vertex(VId(200 + issued)))
                 },
@@ -316,20 +359,30 @@ mod historical_script_tests {
             assert_eq!(issued, 1);
             assert_eq!(db.frontier().unwrap(), head);
             allowance.max_created_vertices = 2;
-            let receipt = txn.execute_bound_graph_write_script_batch_at_basis_governed(
-                &mut db, &qcx, &batch, allowance, |_| {
-                    issued += 1;
-                    Ok::<_, &'static str>(ElementId::Vertex(VId(200 + issued)))
-                },
-            ).unwrap();
+            let receipt = txn
+                .execute_bound_graph_write_script_batch_at_basis_governed(
+                    &mut db,
+                    &qcx,
+                    &batch,
+                    allowance,
+                    |_| {
+                        issued += 1;
+                        Ok::<_, &'static str>(ElementId::Vertex(VId(200 + issued)))
+                    },
+                )
+                .unwrap();
             assert_eq!(receipt.steps().len(), 2);
             assert_eq!(receipt.stats().created_vertices, 2);
             txn.commit(&mut db, &cx).await.unwrap();
             assert!(db.vertex(VId(201)).unwrap().is_none());
-            assert_eq!(db.vertex(VId(202)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]);
-            assert_eq!(db.vertex(VId(203)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(6))]);
+            assert_eq!(
+                db.vertex(VId(202)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(5))]
+            );
+            assert_eq!(
+                db.vertex(VId(203)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(6))]
+            );
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

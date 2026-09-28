@@ -12,15 +12,33 @@ fn sorted_future_keeps_the_opening_generation_without_borrowing_the_writer() {
         let prepared = plan();
         let (columns, cursor) = prepared.stream(&db, &cx, &params, policy()).unwrap();
         let mut expected: Vec<_> = cursor.map(|row| row.unwrap()).collect();
-        let order = [GraphValueOrder::descending(1), GraphValueOrder::descending(0)];
+        let order = [
+            GraphValueOrder::descending(1),
+            GraphValueOrder::descending(0),
+        ];
         expected.sort_by(|a, b| typed_cmp(a, b, &order));
-        let expected: Vec<_> = expected.iter().map(|row| row.canonical_bytes().unwrap()).collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|row| row.canonical_bytes().unwrap())
+            .collect();
         let pool = MemoryPool::new(24_000, 0).unwrap();
         let (mut source, _) = scratch(&cx, &pool).await;
         let (mut destination, _) = scratch(&cx, &pool).await;
 
-        let future = prepared.spool_sorted(&db, &cx, &params, policy(), &mut source,
-            &mut destination, &order, 2, 32, 101, 4096, u64::MAX);
+        let future = prepared.spool_sorted(
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut source,
+            &mut destination,
+            &order,
+            2,
+            32,
+            101,
+            4096,
+            u64::MAX,
+        );
         // These operations are a compile-time check of the precise capture set.
         drop(prepared);
         drop(params);
@@ -50,15 +68,25 @@ fn view_sorted_execution_preserves_the_native_page_before_reordering() {
         let at = db.frontier().unwrap();
         let view = db.read_session().unwrap();
         let params = GqlParameters::new();
-        let prepared = PreparedNativeRead::prepare(
-            &format!("{QUERY} SKIP 3 LIMIT 4"), &params, resolve,
-        ).unwrap();
-        let (_, cursor) = prepared.stream_in_view(&view, &cx, &params, policy()).unwrap();
+        let prepared =
+            PreparedNativeRead::prepare(&format!("{QUERY} SKIP 3 LIMIT 4"), &params, resolve)
+                .unwrap();
+        let (_, cursor) = prepared
+            .stream_in_view(&view, &cx, &params, policy())
+            .unwrap();
         let mut expected: Vec<_> = cursor.map(|row| row.unwrap()).collect();
-        assert_eq!(expected.iter().map(|row| row.values()[0].as_vertex().unwrap()).collect::<Vec<_>>(),
-            vec![VId(3), VId(4), VId(5), VId(6)]);
+        assert_eq!(
+            expected
+                .iter()
+                .map(|row| row.values()[0].as_vertex().unwrap())
+                .collect::<Vec<_>>(),
+            vec![VId(3), VId(4), VId(5), VId(6)]
+        );
         expected.reverse();
-        let expected: Vec<_> = expected.iter().map(|row| row.canonical_bytes().unwrap()).collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|row| row.canonical_bytes().unwrap())
+            .collect();
         let mut change = crate::WriteBatch::new(RelationId(1));
         change.delete_vertex(VId(3));
         db.write(&c.commit(), change).await.unwrap();
@@ -66,8 +94,20 @@ fn view_sorted_execution_preserves_the_native_page_before_reordering() {
         let (mut source, _) = scratch(&cx, &pool).await;
         let (mut destination, _) = scratch(&cx, &pool).await;
         let order = [GraphValueOrder::descending(0)];
-        let future = prepared.spool_sorted_in_view(&view, &cx, &params, policy(),
-            &mut source, &mut destination, &order, 2, 8, 101, 4096, u64::MAX);
+        let future = prepared.spool_sorted_in_view(
+            &view,
+            &cx,
+            &params,
+            policy(),
+            &mut source,
+            &mut destination,
+            &order,
+            2,
+            8,
+            101,
+            4096,
+            u64::MAX,
+        );
         drop(view);
         drop(prepared);
         drop(params);
@@ -102,11 +142,40 @@ fn preflight_and_unpolled_sorted_execution_reserve_no_scratch() {
             (valid.to_vec(), 2, 8, 65537, 100),
             (valid.to_vec(), 2, 8, 101, 0),
         ] {
-            assert!(prepared.spool_sorted(&db, &cx, &params, policy(), &mut source,
-                &mut destination, &order, run_rows, max_runs, page, 4096, units).await.is_err());
+            assert!(
+                prepared
+                    .spool_sorted(
+                        &db,
+                        &cx,
+                        &params,
+                        policy(),
+                        &mut source,
+                        &mut destination,
+                        &order,
+                        run_rows,
+                        max_runs,
+                        page,
+                        4096,
+                        units
+                    )
+                    .await
+                    .is_err()
+            );
         }
-        drop(prepared.spool_sorted(&db, &cx, &params, policy(), &mut source,
-            &mut destination, &valid, 2, 8, 101, 4096, u64::MAX));
+        drop(prepared.spool_sorted(
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut source,
+            &mut destination,
+            &valid,
+            2,
+            8,
+            101,
+            4096,
+            u64::MAX,
+        ));
         assert_eq!(source.stats().reserved_runs, 0);
         assert_eq!(destination.stats().reserved_runs, 0);
         for file in [a, b] {
@@ -127,20 +196,49 @@ fn native_preparation_and_late_query_refusals_are_not_retried_as_sorting() {
         let pool = MemoryPool::new(24_000, 0).unwrap();
         let params = GqlParameters::new();
         let order = [GraphValueOrder::ascending(0)];
-        let aggregate = PreparedNativeRead::prepare(
-            "MATCH (n:L) RETURN COUNT(*) AS count", &params, resolve,
-        ).unwrap();
+        let aggregate =
+            PreparedNativeRead::prepare("MATCH (n:L) RETURN COUNT(*) AS count", &params, resolve)
+                .unwrap();
         let (mut source, _) = scratch(&cx, &pool).await;
         let (mut destination, _) = scratch(&cx, &pool).await;
-        let error = aggregate.spool_sorted(&db, &cx, &params, policy(), &mut source,
-            &mut destination, &order, 2, 8, 101, 4096, u64::MAX).await.unwrap_err();
+        let error = aggregate
+            .spool_sorted(
+                &db,
+                &cx,
+                &params,
+                policy(),
+                &mut source,
+                &mut destination,
+                &order,
+                2,
+                8,
+                101,
+                4096,
+                u64::MAX,
+            )
+            .await
+            .unwrap_err();
         assert!(error.prepare_error().is_some());
         assert_eq!(source.stats().reserved_runs, 0);
         assert_eq!(destination.stats().reserved_runs, 0);
 
-        let error = plan().spool_sorted(&db, &cx, &params,
-            GqlQueryPolicy::new(10_000, 1, 100_000_000, 1_000_000),
-            &mut source, &mut destination, &order, 2, 8, 101, 4096, u64::MAX).await.unwrap_err();
+        let error = plan()
+            .spool_sorted(
+                &db,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(10_000, 1, 100_000_000, 1_000_000),
+                &mut source,
+                &mut destination,
+                &order,
+                2,
+                8,
+                101,
+                4096,
+                u64::MAX,
+            )
+            .await
+            .unwrap_err();
         assert!(error.execution_error().is_some());
         assert!(source.is_poisoned());
         assert_eq!(source.stats().published_runs, 0);
@@ -164,12 +262,29 @@ fn sorting_releases_the_native_pin_before_a_pending_merge_read() {
         // after drain's explicit source-cursor drop and root publication.
         observer.0.lock().unwrap().pending_read = true;
         let order = [GraphValueOrder::ascending(1)];
-        let future = plan().spool_sorted(&db, &cx, &GqlParameters::new(), policy(),
-            &mut source, &mut destination, &order, 2, 8, 101, 4096, u64::MAX);
+        let future = plan().spool_sorted(
+            &db,
+            &cx,
+            &GqlParameters::new(),
+            policy(),
+            &mut source,
+            &mut destination,
+            &order,
+            2,
+            8,
+            101,
+            4096,
+            u64::MAX,
+        );
         drop(db);
         assert!(weak.upgrade().is_some());
         let mut future = Box::pin(future);
-        assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
         assert!(weak.upgrade().is_none());
         drop(future);
         assert!(source.is_poisoned());
@@ -190,16 +305,51 @@ fn integrated_and_explicit_spool_sort_share_results_and_logical_allowance() {
         let (mut source, _) = scratch(&cx, &pool).await;
         let (mut destination, _) = scratch(&cx, &pool).await;
         let order = [GraphValueOrder::ascending(1).with_nulls_first(true)];
-        let spool = plan().spool(&db, &cx, &GqlParameters::new(), policy(), &mut source, 101, 4096)
-            .await.unwrap();
-        let (sorted, used) = spool.sort_into(&cx, &mut source, &mut destination, &order,
-            3, 8, 101, u64::MAX).await.unwrap();
+        let spool = plan()
+            .spool(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut source,
+                101,
+                4096,
+            )
+            .await
+            .unwrap();
+        let (sorted, used) = spool
+            .sort_into(
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                3,
+                8,
+                101,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
         let expected = contents(&sorted, &mut destination, &cx).await;
         let (mut source, _) = scratch(&cx, &pool).await;
         let (mut destination, _) = scratch(&cx, &pool).await;
-        let (actual, actual_used) = plan().spool_sorted(&db, &cx, &GqlParameters::new(),
-            policy(), &mut source, &mut destination, &order, 3, 8, 101, 4096, used)
-            .await.unwrap();
+        let (actual, actual_used) = plan()
+            .spool_sorted(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut source,
+                &mut destination,
+                &order,
+                3,
+                8,
+                101,
+                4096,
+                used,
+            )
+            .await
+            .unwrap();
         assert_eq!(actual_used, used);
         assert_eq!(actual.row_stats(), sorted.row_stats());
         assert_eq!(actual.evaluator_stats(), sorted.evaluator_stats());

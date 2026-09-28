@@ -311,7 +311,11 @@ fn buffer_insert_rows(
         let mut cells = Vec::with_capacity(row.values().len());
         for value in row.values() {
             cx.checkpoint().map_err(Failure::query)?;
-            cells.push(if robot { value_cell(value)? } else { human_value(value)? });
+            cells.push(if robot {
+                value_cell(value)?
+            } else {
+                human_value(value)?
+            });
         }
         buffer_row(output, &cells, index, robot)?;
     }
@@ -406,7 +410,13 @@ async fn run_with_limits<V: Vfs + Clone>(
                             )
                             .map_err(execution_failure)?;
                         let added = buffer_insert_rows(
-                            &mut output, query.columns(), rows.value, index + 1, basis, robot, &cx,
+                            &mut output,
+                            query.columns(),
+                            rows.value,
+                            index + 1,
+                            basis,
+                            robot,
+                            &cx,
                         )?;
                         count = count
                             .checked_add(added)
@@ -497,6 +507,6 @@ async fn run_with_limits<V: Vfs + Clone>(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod returning_tests;
+#[cfg(test)]
+mod tests;

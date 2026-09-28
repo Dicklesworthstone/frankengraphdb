@@ -334,7 +334,10 @@ impl<'a> Parser<'a> {
                 }
             }
             if output.is_empty() {
-                return Err(expected(at, "named MATCH, CREATE or UNWIND bindings for RETURN *"));
+                return Err(expected(
+                    at,
+                    "named MATCH, CREATE or UNWIND bindings for RETURN *",
+                ));
             }
         } else {
             loop {
