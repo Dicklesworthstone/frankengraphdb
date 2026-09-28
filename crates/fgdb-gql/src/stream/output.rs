@@ -34,9 +34,9 @@ impl super::VertexScanPlan<GraphValueRow> {
     ) -> Result<(Self, crate::scan_stream::ScanSortTail), super::VertexScanBuildError> {
         let tail = crate::scan_stream::ScanSortTail::compile(plan)
             .map_err(|operator| super::VertexScanBuildError { operator })?;
-        if tail.distinct() {
-            return Err(super::VertexScanBuildError { operator: plan.operators().len() - 3 });
-        }
+        // DISTINCT is intentionally deferred along with ordering. The row
+        // collector emits every source occurrence; only the blocking consumer
+        // may deduplicate complete rows before applying the retained window.
         let mut input = Self::compile_with_projection(plan, |projection, order| {
             let GlaOperator::ProjectValues { columns } = projection else {
                 return false;

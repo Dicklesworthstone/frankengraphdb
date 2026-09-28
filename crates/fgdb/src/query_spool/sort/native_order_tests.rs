@@ -282,7 +282,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
         let db = seed(&c.commit(), 3).await;
         let pool = MemoryPool::new(32_768, 0).unwrap();
         for text in [
-            "MATCH (n:L) RETURN DISTINCT n.p AS p LIMIT 0",
+            "MATCH (n:L) RETURN count(*) AS count LIMIT 0",
             "MATCH (a)-[e:R]->(b) RETURN e AS edge, a AS source LIMIT 0",
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
@@ -346,4 +346,205 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_and_all_keep_native_row_classes_across_many_spill_runs() {
+    let ((), report) = run_async_under_lab(0x50ed_0010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 60).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        for text in [
+            "MATCH (n:L) RETURN DISTINCT n.p AS p, n.q AS payload",
+            "MATCH (n:L) RETURN DISTINCT n.p AS p, n.q AS payload ORDER BY p DESC NULLS FIRST SKIP 1 LIMIT 4",
+            "MATCH (n:L) RETURN DISTINCT n.p AS p, n.q AS payload ORDER BY p ASC NULLS LAST SKIP 2 LIMIT 5",
+            "MATCH (n:L) RETURN n.p AS p, n.q AS payload ORDER BY p DESC NULLS FIRST SKIP 1 LIMIT 4",
+        ] {
+            let expected = expected(&view, &cx, text);
+            for run_rows in [1, 3, 7] {
+                let (mut scratch, _) = file(&cx, &pool).await;
+                let (mut destination, backing) = file(&cx, &pool).await;
+                let mut allowance = policy();
+                allowance.rows = GqlExecutionBudget::new(60, expected.len() as u64);
+                let (spool, _) = plan(text).spool_ordered(&db, &cx, &GqlParameters::new(), allowance,
+                    &mut scratch, &mut destination, run_rows, 60, 127, 4096, 60, 100_000_000)
+                    .await.unwrap();
+                assert_eq!(spool.row_count(), expected.len() as u64);
+                assert_eq!(spool.row_stats().snapshot_records, 60);
+                assert!(backing.0.lock().unwrap().bytes.get_ref().len() > pool.limit());
+                assert_eq!(pool.used(), 0);
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn duplicate_classes_not_occurrences_are_paginated_and_counted() {
+    let ((), report) = run_async_under_lab(0x50ed_0011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = seed(&c.commit(), 10).await;
+        let mut changes = WriteBatch::new(RelationId(1));
+        for (id, value) in [Some(2), Some(1), Some(2), Some(0), Some(1), Some(3),
+            Some(0), Some(3), None, None].into_iter().enumerate()
+        {
+            changes.set_vertex_property(VId(id as u128), PropertyKeyId(1), value.map(CanonicalScalar::Int));
+        }
+        db.write(&c.commit(), changes).await.unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        for (distinct, suffix, wanted) in [
+            (true, "SKIP 1 LIMIT 2", vec![Some(3), Some(2)]),
+            (false, "SKIP 1 LIMIT 2", vec![None, Some(3)]),
+            (true, "SKIP 3", vec![Some(1), Some(0)]),
+            (true, "SKIP 5", vec![]),
+            (true, "LIMIT 0", vec![]),
+            (true, "", vec![None, Some(3), Some(2), Some(1), Some(0)]),
+        ] {
+            let text = format!("MATCH (n:L) RETURN {}n.p AS p ORDER BY p DESC NULLS FIRST {suffix}",
+                if distinct { "DISTINCT " } else { "" });
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, _) = file(&cx, &pool).await;
+            let mut allowance = policy();
+            allowance.rows = GqlExecutionBudget::new(10, wanted.len() as u64);
+            let (spool, _) = plan(&text).spool_ordered(&db, &cx, &GqlParameters::new(), allowance,
+                &mut scratch, &mut destination, 1, 10, 31, 4096, 10, 1_000_000).await.unwrap();
+            let expected: Vec<_> = wanted.into_iter().map(|value| {
+                GraphValueRow::from_owned_values(vec![fgdb_gql::algebra::GraphValue::Scalar(
+                    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                )]).canonical_bytes().unwrap()
+            }).collect();
+            assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+            assert_eq!(spool.row_count(), expected.len() as u64);
+            assert_eq!(spool.row_stats().snapshot_records, 10);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_uses_the_whole_typed_row_not_just_order_keys_or_scalar_spellings() {
+    let ((), report) = run_async_under_lab(0x50ed_0012, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = seed(&c.commit(), 9).await;
+        let values = [
+            (None, 0),
+            (Some(CanonicalScalar::Null), 0),
+            (Some(CanonicalScalar::Int(1)), 0),
+            (Some(CanonicalScalar::Int(1)), 1),
+            (Some(CanonicalScalar::Int(1)), 0),
+            (Some(CanonicalScalar::Bool(true)), 0),
+            (Some(CanonicalScalar::ucs_basic_text("1").unwrap()), 0),
+            (Some(CanonicalScalar::Int(1)), 1),
+            (Some(CanonicalScalar::Bool(true)), 0),
+        ];
+        let mut changes = WriteBatch::new(RelationId(1));
+        for (id, (p, q)) in values.into_iter().enumerate() {
+            changes.set_vertex_property(VId(id as u128), PropertyKeyId(1), p);
+            changes.set_vertex_property(VId(id as u128), PropertyKeyId(2), Some(CanonicalScalar::Int(q)));
+        }
+        db.write(&c.commit(), changes).await.unwrap();
+        let text = "MATCH (n:L) RETURN DISTINCT n.p AS p, n.q AS q ORDER BY p ASC NULLS FIRST";
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (mut scratch, _) = file(&cx, &pool).await;
+        let (mut destination, _) = file(&cx, &pool).await;
+        let (spool, _) = plan(text).spool_ordered(&db, &cx, &GqlParameters::new(), policy(),
+            &mut scratch, &mut destination, 1, 9, 31, 4096, 9, 1_000_000).await.unwrap();
+        use fgdb_gql::algebra::GraphValue;
+        let expected: Vec<_> = [
+            (CanonicalScalar::Null, 0),
+            (CanonicalScalar::Bool(true), 0),
+            (CanonicalScalar::Int(1), 0),
+            (CanonicalScalar::Int(1), 1),
+            (CanonicalScalar::ucs_basic_text("1").unwrap(), 0),
+        ].into_iter().map(|(p, q)| GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(p), GraphValue::Scalar(CanonicalScalar::Int(q)),
+        ]).canonical_bytes().unwrap()).collect();
+        assert_eq!(spool.row_count(), 5);
+        assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_never_refunds_input_admission_or_resets_final_comparison_work() {
+    let ((), report) = run_async_under_lab(0x50ed_0013, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 10).await;
+        let prepared = plan("MATCH (n:L) RETURN DISTINCT n.q AS value LIMIT 1");
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let mut allowance = policy();
+        allowance.rows = GqlExecutionBudget::new(10, 1);
+        let (mut scratch, _) = file(&cx, &pool).await;
+        let (mut destination, _) = file(&cx, &pool).await;
+        let (spool, work) = prepared.spool_ordered(&db, &cx, &GqlParameters::new(), allowance,
+            &mut scratch, &mut destination, 2, 5, 127, 4096, 10, 1_000_000).await.unwrap();
+        assert_eq!(spool.row_count(), 1);
+        assert!(work > 1);
+        for (input, output, limit) in [(9, 1, 1_000_000), (10, 0, 1_000_000), (10, 1, work - 1), (10, 1, work)] {
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, _) = file(&cx, &pool).await;
+            allowance.rows = GqlExecutionBudget::new(10, output);
+            let result = prepared.spool_ordered(&db, &cx, &GqlParameters::new(), allowance,
+                &mut scratch, &mut destination, 2, 5, 127, 4096, input, limit).await;
+            if input == 9 || output == 0 {
+                let error = result.unwrap_err();
+                assert!(matches!(error.execution_error(), Some(GqlQueryError::Rows(e))
+                    if e.dimension == GqlBudgetDimension::ResultRows
+                    && e.limit == if input == 9 { 9 } else { 0 }));
+            } else if limit < work {
+                assert!(matches!(result, Err(NativeSpoolError::SortWorkLimit { limit: actual, .. }) if actual == limit));
+            } else {
+                let (spool, used) = result.unwrap();
+                assert_eq!(spool.row_count(), 1);
+                assert_eq!(used, work);
+            }
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn duplicate_frame_equality_checks_every_byte_and_propagates_every_control_cut() {
+    let left: Vec<_> = (0..12_295).map(|index| (index % 251) as u8).collect();
+    let mut units = Vec::new();
+    assert!(equal_frame(&left, &left, &mut |unit| { units.push(unit); Ok(()) }).unwrap());
+    assert_eq!(units, vec![1, 4096, 4096, 4096, 7]);
+    for at in [0, 4095, 4096, 8191, left.len() - 1] {
+        let mut right = left.clone();
+        right[at] ^= 1;
+        assert!(!equal_frame(&left, &right, &mut |_| Ok(())).unwrap());
+    }
+    assert!(!equal_frame(&left, &left[..left.len() - 1], &mut |_| Ok(())).unwrap());
+    for cut in 1..=units.len() {
+        let mut seen = 0;
+        let result = equal_frame(&left, &left, &mut |_| {
+            seen += 1;
+            if seen == cut {
+                Err(NativeSpoolError::SortWorkLimit { attempted: seen as u64, limit: (cut - 1) as u64 })
+            } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(NativeSpoolError::SortWorkLimit { .. })));
+        assert_eq!(seen, cut);
+        let mut seen = 0;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            equal_frame(&left, &left, &mut |_| {
+                seen += 1;
+                assert_ne!(seen, cut, "injected equality unwind");
+                Ok(())
+            })
+        }));
+        assert!(panic.is_err());
+        assert_eq!(seen, cut);
+    }
+    assert!(equal_frame(&left, &left, &mut |_| Ok(())).unwrap());
 }

@@ -62,8 +62,11 @@ impl PreparedNativeRead {
     /// property-first projections, explicit direction/null placement, implicit
     /// canonical whole-row ordering, predicates and supported EXISTS probes use
     /// the ordinary vertex collector and source. No synthetic identity column
-    /// changes DISTINCT, ties or the public schema. The current profile refuses
-    /// DISTINCT, edge-rooted/relational/aggregate plans, hidden sort columns and
+    /// changes DISTINCT, ties or the public schema. DISTINCT compares complete
+    /// canonical rows after sorting and BEFORE pagination; it retains only the
+    /// previous unique frame, not an input-sized seen-set. Equal ORDER BY keys
+    /// alone never collapse rows. The current profile refuses
+    /// edge-rooted/relational/aggregate plans, hidden sort columns and
     /// every operator the vertex compiler cannot execute. There is no fallback.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
@@ -88,6 +91,8 @@ impl PreparedNativeRead {
     /// then the final page is appended to destination. Only its complete result
     /// handle escapes. Failures/drop keep the existing poisoning/cleanup laws.
     /// sort_into documents run_rows/max_runs/page_bytes and minimum headroom.
+    /// DISTINCT additionally retains one pool-charged maximum-row frame; its
+    /// byte comparisons checkpoint in at most 4 KiB chunks under max_sort_work.
     /// One native row plus its canonical encoding and the decoded source remain
     /// outside the spill pool. This is not a Warden grant, durable result, or a
     /// claim that every GQL operator or the underlying database is out-of-core.
@@ -205,27 +210,37 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
-    debug_assert!(!tail.distinct());
     let mut reader = sorted.reader(scratch);
     let mut writer = destination.paged_writer(work.cx, page_bytes)?;
     let mut skip = tail.offset();
     let mut selected = 0_u64;
     let mut largest = 0;
+    let mut previous: Option<TrackedBytes> = None;
     while let Some(row) = reader.next_row(work.cx).await? {
         work.charge(1)?;
+        // The sort's complete-row tie-break makes all equal frames adjacent,
+        // even when ORDER BY names only some columns and merges many runs.
+        // Compare actual canonical bytes, never an order key or a hash.
+        if let Some(last) = &previous
+            && equal_frame(last.as_ref(), row.as_ref(), &mut |units| work.charge(units))?
+        {
+            continue;
+        }
         if skip != 0 {
             skip -= 1;
-            continue;
+        } else if tail.count().is_none_or(|count| selected < count) {
+            let next = selected.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            budget.check(GqlBudgetDimension::ResultRows, next)
+                .map_err(|e| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(e))))?;
+            write_row(&mut writer, row.as_ref(), work).await?;
+            largest = largest.max(row.len());
+            selected = next;
         }
-        if tail.count().is_some_and(|count| selected >= count) {
-            continue;
+        if tail.distinct() {
+            // Move the admitted frame, including skipped classes, rather than
+            // cloning payloads. ALL retains no predecessor and keeps every row.
+            previous = Some(row);
         }
-        let next = selected.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-        budget.check(GqlBudgetDimension::ResultRows, next)
-            .map_err(|e| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(e))))?;
-        write_row(&mut writer, row.as_ref(), work).await?;
-        largest = largest.max(row.len());
-        selected = next;
     }
     // Read and authenticate the complete sorted population even after LIMIT.
     // No source/transfer failure is converted into a successful page prefix.
@@ -233,6 +248,7 @@ where
         return Err(NativeSpoolError::IncompleteCursor);
     }
     drop(reader);
+    drop(previous);
     work.charge(1)?;
     let run = writer.finish(work.cx).await?;
     Ok(NativeResultSpool {
@@ -244,6 +260,28 @@ where
         max_row_bytes: largest,
         run,
     })
+}
+
+// Inputs have authenticated and passed the native structural frame validator.
+// Length inequality is decisive; equal lengths still require exact bytes.
+// A bounded chunk is the largest indivisible payload comparison. Controls
+// precede work even for empty frames or a mismatch at the very first byte.
+fn equal_frame(
+    left: &[u8],
+    right: &[u8],
+    charge: &mut impl FnMut(usize) -> Result<()>,
+) -> Result<bool> {
+    charge(1)?;
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (a, b) in left.chunks(4096).zip(right.chunks(4096)) {
+        charge(a.len())?;
+        if a != b {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
