@@ -124,9 +124,10 @@ refusal, length/tag/flags/version checks, truncated EOF, debug redaction,
 handshake ordering, refresh fencing, generation-safe drain, duplicate/foreign
 send completion, credit replay, and uncertain-write accounting.
 
-The Rust tests were added but not executed in the implementation environment:
-no Rust toolchain was available. No runtime, performance or full-protocol
-conformance claim is made by this change.
+The tests were written without a Rust toolchain. They have since run:
+`cargo test -p fgdb-protocol` passed 16 of 16 on 2026-09-28 at `61aeeb0f`
+(pinned toolchain). No runtime, performance or full-protocol conformance claim
+is made beyond that suite.
 
 ## Remaining integration
 
