@@ -187,6 +187,36 @@ fn a_kept_vertex_reads_its_properties_after_the_grouping_in_both_return_classes(
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-ezgeq: `WITH max(n.p) AS m MATCH (q) WHERE q.p = m`, the bead's
+/// aggregate-then-match form, answers through the facade exactly as the
+/// property-map spelling `(q {p: m})` does.
+#[test]
+fn an_aggregate_feeds_a_later_match_where_equality() {
+    let ((), report) = run_async_under_lab(0x5d_6705, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let params = GqlParameters::new();
+        let expected = rows(
+            &["q"],
+            vec![vec![QueryValue::Value(GraphValue::Vertex(VId(3)))]],
+        );
+        for text in [
+            "MATCH (n:L) WITH max(n.p) AS m MATCH (q:L) WHERE q.p = m RETURN q",
+            "MATCH (n:L) WITH max(n.p) AS m MATCH (q:L {p: m}) RETURN q",
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            assert_eq!(prepared.facade_class(), NativeReadClass::Set, "{text}");
+            assert_eq!(
+                db.query(&c.query(), text, &params, symbols, policy())
+                    .unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn authorized_group_keys_arguments_and_continuations_see_only_the_scoped_source() {
     let ((), report) = run_async_under_lab(0x5d_6703, |root| async move {

@@ -31,6 +31,10 @@ pub(super) enum SyntaxItem<'a> {
 struct Parsed<'a> {
     program: Vec<SyntaxItem<'a>>,
     extended: bool,
+    /// `q.v = m` against an imported row column (fgdb-ezgeq): variable,
+    /// property, row column and offset. Valid only as a top-level AND
+    /// conjunct, where it is the join key `(q {v: m})` already makes.
+    correlations: Vec<(Name<'a>, Name<'a>, usize, usize)>,
 }
 impl<'a> Parsed<'a> {
     fn push(&mut self, item: SyntaxItem<'a>, at: usize) -> Result<(), GraphPatternTextError> {
@@ -48,8 +52,24 @@ impl<'a> Parser<'a> {
         let mut parsed = Parsed {
             program: Vec::new(),
             extended: false,
+            correlations: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
+        if let Some(&(_, _, _, at)) = parsed.correlations.first() {
+            // Under OR, NOT or parentheses the equality is no longer a join
+            // key, and a row value is not a filter operand in this profile.
+            if parsed.extended {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected(
+                        "an imported row value compared with = only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            self.read_correlations.extend(
+                (parsed.correlations.iter()).map(|&(variable, key, row, _)| (variable, key, row)),
+            );
+        }
         if !parsed.extended {
             // This is the old AND-only profile, not a migration to a different
             // predicate order, cache or transcript merely because syntax grew.
@@ -225,6 +245,12 @@ impl<'a> Parser<'a> {
         if self.compound_property_predicate(parsed)? {
             return Ok(());
         }
+        if let Some(correlation) = self.row_correlation()? {
+            // No program item: the flat profile ignores its AND, and any
+            // other profile refuses the correlation (boolean_predicates).
+            parsed.correlations.push(correlation);
+            return Ok(());
+        }
         self.positive_predicate()?;
         let filter = self
             .syntax
@@ -233,6 +259,78 @@ impl<'a> Parser<'a> {
             .expect("one positive predicate was just parsed");
         parsed.extended |= matches!(filter, Filter::VertexNull { .. });
         parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    /// `q.v = m` or `m = q.v`, where `m` is a bare imported row column after
+    /// WITH, UNWIND or CALL (fgdb-ezgeq). openCypher defines `(q {v: m})` as
+    /// this same equality, and the engine already lowers that map to an
+    /// equi-join key. Its semantics are the WHERE comparison's: NULL never
+    /// matches and kinds never coerce. Inside an OPTIONAL or EXISTS scope the
+    /// row columns are hidden, so nothing here matches. Any other shape (an
+    /// operator after `m`, `<`, `<>`) consumes nothing and parses as before.
+    #[allow(clippy::type_complexity)]
+    fn row_correlation(
+        &mut self,
+    ) -> Result<Option<(Name<'a>, Name<'a>, usize, usize)>, GraphPatternTextError> {
+        if self.read_row_bindings.is_empty() {
+            return Ok(None);
+        }
+        let at = self.current.at;
+        let mut lexer = self.lexer.clone();
+        let tokens = [
+            self.current.kind,
+            lexer.next()?.kind,
+            lexer.next()?.kind,
+            lexer.next()?.kind,
+            lexer.next()?.kind,
+        ];
+        // The atom must end at its fifth token.
+        if !matches!(
+            lexer.next()?.kind,
+            TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')')
+        ) {
+            return Ok(None);
+        }
+        let row =
+            |word: &str| (self.read_row_bindings.iter()).position(|binding| binding.text == word);
+        let (row, property_first) = match tokens {
+            [
+                TokenKind::Word(_),
+                TokenKind::Punct(b'.'),
+                TokenKind::Word(_),
+                TokenKind::Punct(b'='),
+                TokenKind::Word(name),
+            ] => (row(name), true),
+            [
+                TokenKind::Word(name),
+                TokenKind::Punct(b'='),
+                TokenKind::Word(_),
+                TokenKind::Punct(b'.'),
+                TokenKind::Word(_),
+            ] => (row(name), false),
+            _ => (None, false),
+        };
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.capacity(
+            self.predicates,
+            MAX_PATTERN_PREDICATES,
+            crate::algebra::PatternLimitDimension::Predicates,
+        )?;
+        if !property_first {
+            self.advance()?;
+            self.punct(b'=', "=")?;
+        }
+        let variable = self.property_variable()?;
+        self.punct(b'.', ".")?;
+        let key = self.name()?;
+        if property_first {
+            self.punct(b'=', "=")?;
+            self.advance()?;
+        }
+        self.predicates += 1;
+        Ok(Some((variable, key, row, at)))
     }
 
     fn literal_starts_in_list(&self) -> Result<bool, GraphPatternTextError> {

@@ -372,3 +372,64 @@ fn set_arms_and_literal_routing_keep_their_original_boundaries() {
     assert_eq!(template.columns(), &["text"]);
     assert_eq!(execute("MATCH (n) WITH n MATCH (n) RETURN *").len(), 4);
 }
+
+/// fgdb-ezgeq: after WITH, `MATCH (q) WHERE q.p = m` is the equi-join that
+/// openCypher's `MATCH (q {p: m})` spells, not a parameter slot. The two
+/// definitions are byte-identical, so they share one semantics: NULL never
+/// matches and kinds never coerce.
+#[test]
+fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join() {
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    for (map, spelled) in [
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q {p: m}) RETURN q",
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m RETURN q",
+        ),
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q {p: m}) RETURN q",
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE m = q.p RETURN q",
+        ),
+        (
+            "MATCH (n) WITH n.p AS v MATCH (q {p: v})-[:R]->(r) WHERE r.p > 1 RETURN v, r",
+            "MATCH (n) WITH n.p AS v MATCH (q)-[:R]->(r) WHERE q.p = v AND r.p > 1 RETURN v, r",
+        ),
+    ] {
+        assert_eq!(template(map), template(spelled), "{spelled}");
+    }
+    // p = [1, 2, 2, 3]: only vertex 4 holds the maximum.
+    assert_eq!(
+        execute("MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m RETURN q"),
+        vec![vertices(&[4])]
+    );
+    // Each imported v joins every vertex holding it: v = 2 arrives twice and
+    // joins vertices 2 and 3 each time.
+    assert_eq!(
+        execute("MATCH (n) WITH n.p AS v MATCH (q) WHERE q.p = v RETURN v, q ORDER BY v, q"),
+        [(1, 1), (2, 2), (2, 2), (2, 3), (2, 3), (3, 4)]
+            .map(|(value, vid)| scalar_vertex(value, vid))
+            .to_vec()
+    );
+    // Not a top-level AND conjunct, not equality, or inside a scope that hides
+    // the imported columns: refused before any catalog call, as before.
+    for text in [
+        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m OR q.p = 1 RETURN q",
+        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE NOT q.p = m RETURN q",
+        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q",
+        "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+}
