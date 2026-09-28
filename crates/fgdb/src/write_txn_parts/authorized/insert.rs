@@ -4,9 +4,13 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
-use fgdb_gql::GqlQueryError;
+use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::{
+    GqlQueryError, GqlQueryExecution, GraphInsertQueryError, PreparedGraphInsertQuery,
+};
 use fgdb_gql::insertion::{
-    GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
+    GraphInsertBatch, GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats,
+    PreparedGraphInsert,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
@@ -16,9 +20,19 @@ use std::cell::RefCell;
 // also transports live authorization refusals from the one shared allowance.
 type Fault = GqlQueryError<GraphInsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type Receipt = (GraphInsertStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion);
+type QueryFault = GqlQueryError<GraphInsertQueryError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+type QueryReceipt = (
+    GraphInsertStats,
+    GqlQueryExecution<GraphValueRow>,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphInsertError::Source(error))
+}
+
+fn query_source(error: WriteTxnError) -> QueryFault {
+    source(error).map_source(GraphInsertQueryError::Insertion)
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -100,6 +114,127 @@ impl<V: Vfs + Clone> Database<V> {
             txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock, true,
         )
         .await
+    }
+
+    /// Create graph structures and return their projected occurrence bindings
+    /// under one ReadWrite capability and one native transaction completion.
+    ///
+    /// RETURN uses the native insertion query collector's original input rows
+    /// and newly allocated identities. Existing graph inputs are masked before
+    /// selection; the result never rescans storage or independently rematches a
+    /// created structure. Every original creation still passes the same native
+    /// before/after image admission as ordinary authorized insertion.
+    ///
+    /// ReadWrite rights are required before graph access or identity allocation,
+    /// including source-free queries and LIMIT 0. One live permit covers source
+    /// selection, creation, projection, result admission and completion. Only
+    /// final projected rows consume the signed result allowance: intermediate
+    /// occurrences and created identity receipts are not additional results.
+    /// DISTINCT, ordering and pagination change returned rows, never creations.
+    /// An empty RETURN result therefore still commits nonempty creation effects.
+    ///
+    /// Projection, ordering, native query limits and final signed row admission
+    /// finish before the sole commit. A value error, quota refusal, expiry or
+    /// cancellation discards the private effects and results. No fallible query
+    /// or authorization work follows publication; native completion failures
+    /// retain their committed/unknown/recovery meaning in the Insertion arm.
+    /// Returned query statistics describe cumulative insertion plus projection
+    /// usage, so do not add the insertion prefix statistics to them again.
+    /// The identity-allocation and durable-security boundaries of authorized
+    /// insertion still apply; this API does not introduce a result-stream lease.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_insert_query_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphInsertQuery,
+        policy: GraphInsertPolicy,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        if authority.namespace() != self.keys.namespace {
+            return Err(query_source(WriteTxnError::Authorization(Error::WrongAuthority)));
+        }
+        let now = clock();
+        let verified = authority
+            .verify_at(token, branch, now)
+            .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+        let permit = verified
+            .begin_write_at(branch, now)
+            .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+        if !verified.predicates().rights().can_read() {
+            return Err(query_source(WriteTxnError::Authorization(Error::PermissionDenied)));
+        }
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(query_source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| query_source(WriteTxnError::Write(error)))?,
+                ));
+                let proposal = query_cx.with_restriction(|| {
+                    // Sequential callbacks share the one live permit. All
+                    // borrows end before intent staging or awaiting completion.
+                    let controls = RefCell::new(&mut execution);
+                    let database = RefCell::new(&mut *self);
+                    query.execute_governed(
+                        policy,
+                        |pattern, allowance| {
+                            selection::select_overlay(
+                                workspace.transaction(),
+                                &database.borrow(),
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
+                                &controls,
+                            )
+                        },
+                        |request| database.borrow_mut().allocate_identity(query_cx, request),
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                    )
+                })?;
+                let (creation, result) = proposal.into_parts();
+                let rows = u64::try_from(result.value.len())
+                    .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
+                // Even an empty result rechecks expiry. No identity-row charge
+                // is made by stage_proposal on this projected-result path.
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+                let (stats, _, _) = stage_proposal(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.insertion(),
+                    creation,
+                    &mut execution,
+                    false,
+                )
+                .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(query_source)?;
+                Ok((stats, result, completion))
+            })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -208,6 +343,29 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             },
         )
     })?;
+    stage_proposal(
+        transaction,
+        database,
+        query_cx,
+        insertion,
+        proposal,
+        execution,
+        returning,
+    )
+}
+
+// Both insertion result surfaces stage identical original intents. Only the
+// identity-receipt API requests per-identity output charging and ID vectors.
+#[allow(clippy::too_many_arguments)]
+fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    insertion: &PreparedGraphInsert,
+    proposal: GraphInsertBatch,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphInsertStats, Vec<VId>, Vec<EId>), Fault> {
     let stats = proposal.stats();
     let mut vertices = Vec::new();
     let mut edges = Vec::new();

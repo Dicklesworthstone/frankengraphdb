@@ -10,6 +10,7 @@ mod scrub;
 mod search;
 mod stream;
 mod transaction;
+mod write_returning;
 
 use asupersync::Budget;
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
@@ -129,6 +130,10 @@ Query rows describe each transaction-local workspace, not a durable historical s
 Output is buffered until completion: at most 64 native statements, 100000 query rows,
 and 16 MiB encoded output. Execution budgets remain per statement/program, not byte-memory bounds.
 --write-relation u32 selects the native mutation coordinate (default 1).
+write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN. It buffers
+the complete result before committing, then emits typed columns and rows followed
+by result kind=written at the committed sequence. DISTINCT and LIMIT affect only
+returned rows, not the number of creations. Encoded output is bounded to 16 MiB.
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
 On Unix the key file must be a regular file with mode 0600 (no group/other bits).
@@ -758,6 +763,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
                 // And a search's lanes, symbols and corpus.
                 let retrieval = if command == "search" { Some(search::prepare(&options)?) } else { None };
+                let returning = if command == "write" { write_returning::prepare(&options)? } else { None };
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
@@ -784,6 +790,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return diff::run(&db, &contexts.query(), &options, robot, out);
                 }
                 if command == "write" {
+                    if let Some(prepared) = returning {
+                        return write_returning::run(&mut db, &contexts, prepared, robot, out).await;
+                    }
                     let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
                     let script = PreparedGraphWriteScript::prepare_with_parameter_types(&options.text, options.coordinate, &declarations, |kind, name| options.resolve(kind, name)).map_err(Failure::query)?;
                     let program = script.bind_parameters(&options.params).map_err(Failure::query)?;
@@ -1042,6 +1051,28 @@ fn render_rows(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
+    render_row_body(columns, &rendered, robot, out)?;
+    if robot {
+        emit(
+            out,
+            &format!(
+                r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{}}}"#,
+                rendered.len()
+            ),
+        )
+    } else {
+        emit(out, &format!("{} row(s)", rendered.len()))
+    }
+}
+
+/// The complete row body without a success/completion frame. Write-returning
+/// uses this same encoding in a bounded private buffer before native commit.
+fn render_row_body(
+    columns: &[String],
+    rendered: &[Vec<String>],
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
     if robot {
         emit(
             out,
@@ -1054,22 +1085,16 @@ fn render_rows(
                     .join(",")
             ),
         )?;
-        for row in &rendered {
+        for row in rendered {
             emit(
                 out,
                 &format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, row.join(",")),
             )?;
         }
-        emit(
-            out,
-            &format!(
-                r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{}}}"#,
-                rendered.len()
-            ),
-        )
+        Ok(())
     } else {
         let mut widths: Vec<_> = columns.iter().map(|c| c.chars().count()).collect();
-        for row in &rendered {
+        for row in rendered {
             for (width, value) in widths.iter_mut().zip(row) {
                 *width = (*width).max(value.chars().count());
             }
@@ -1083,9 +1108,9 @@ fn render_rows(
         };
         emit(out, &line(columns))?;
         emit(out, &"-".repeat(line(columns).chars().count()))?;
-        for row in &rendered {
+        for row in rendered {
             emit(out, &line(row))?;
         }
-        emit(out, &format!("{} row(s)", rendered.len()))
+        Ok(())
     }
 }

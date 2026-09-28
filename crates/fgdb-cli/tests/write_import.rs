@@ -267,6 +267,194 @@ fn empty_and_failed_unwind_writes_publish_nothing_and_late_script_failure_is_ato
     assert_eq!(success(fixture.run("query", &[query])), before);
 }
 
+fn row_frames(output: &str) -> Vec<&str> {
+    output
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect()
+}
+
+#[test]
+fn create_return_reports_exact_occurrence_identities_at_one_durable_frontier() {
+    let fixture = Fixture::new();
+    let written = success(fixture.run(
+        "write",
+        &[
+            "--relation",
+            "LINK=1",
+            "UNWIND [3,1,3] AS x
+             CREATE (a:Person {id:x})-[e:LINK {score:x+10}]->(b:Person {id:x*2})
+             RETURN a AS source,e AS edge,b AS destination,a.id AS id,e.score AS score
+             ORDER BY source",
+        ],
+    ));
+    assert_eq!(seq(&written, "written"), fixture.created + 1);
+    assert_eq!(written.matches("\"event\":\"result\"").count(), 1);
+    assert!(written.contains("\"count\":3,\"statements\":1"), "{written}");
+    let rows = row_frames(&written);
+    assert_eq!(rows.len(), 3, "{written}");
+    for (row, (source, edge, destination, value)) in
+        rows.iter().zip([(1, 1, 2, 3), (3, 2, 4, 1), (5, 3, 6, 3)])
+    {
+        let cells = format!(
+            "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{source}\"}},\
+             {{\"type\":\"edge\",\"value\":\"{edge}\"}},\
+             {{\"type\":\"vertex\",\"value\":\"{destination}\"}},\
+             {{\"type\":\"int\",\"value\":\"{value}\"}},\
+             {{\"type\":\"int\",\"value\":\"{}\"}}]",
+            value + 10
+        );
+        assert!(row.contains(&cells), "{row}");
+    }
+    fixture.count(6);
+    let query = "MATCH (a:Person)-[e:LINK]->(b:Person)
+                 RETURN a AS source,e AS edge,b AS destination,a.id AS id,e.score AS score
+                 ORDER BY source";
+    let read = success(fixture.run("query", &["--relation", "LINK=1", query]));
+    assert_eq!(row_frames(&read), rows);
+    assert_eq!(seq(&read, "rows"), fixture.created + 1);
+    success(fixture.run("compact", &[]));
+    let reopened = success(fixture.run("query", &["--relation", "LINK=1", query]));
+    assert_eq!(row_frames(&reopened), rows);
+}
+
+#[test]
+fn create_return_distinct_and_paging_only_limit_the_returned_rows() {
+    let fixture = Fixture::new();
+    let distinct = success(fixture.run(
+        "write",
+        &["UNWIND [7,7,2] AS x CREATE (n:Person {id:x})
+           RETURN DISTINCT n.id AS id ORDER BY id DESC SKIP 1 LIMIT 1"],
+    ));
+    assert_eq!(seq(&distinct, "written"), fixture.created + 1);
+    assert_eq!(row_frames(&distinct).len(), 1);
+    assert!(
+        distinct.contains("\"type\":\"int\",\"value\":\"2\""),
+        "{distinct}"
+    );
+    fixture.count(3);
+    let page_zero = success(fixture.run(
+        "write",
+        &["UNWIND [8,9] AS x CREATE (n:Person {id:x}) RETURN n LIMIT 0"],
+    ));
+    assert_eq!(seq(&page_zero, "written"), fixture.created + 2);
+    assert!(page_zero.contains("\"event\":\"columns\""), "{page_zero}");
+    assert!(row_frames(&page_zero).is_empty());
+    fixture.count(5);
+    let empty = success(fixture.run(
+        "write",
+        &["UNWIND [] AS x CREATE (n:Person {id:x}) RETURN n"],
+    ));
+    assert_eq!(seq(&empty, "written"), fixture.created + 2);
+    assert!(row_frames(&empty).is_empty());
+    fixture.count(5);
+}
+
+#[test]
+fn late_create_return_failure_exposes_no_rows_and_commits_no_creations() {
+    let fixture = Fixture::new();
+    for suffix in ["", " LIMIT 0"] {
+        let statement = format!(
+            "UNWIND [4,2,0] AS x CREATE (n:Person {{id:x}}) RETURN n,100/x AS ratio{suffix}"
+        );
+        let failed = fixture.run("write", &[&statement]);
+        refusal(&failed, 3, "query");
+        let out = String::from_utf8_lossy(&failed.stdout);
+        assert!(!out.contains("\"event\":\"columns\""), "{out}");
+        assert!(row_frames(&out).is_empty());
+        fixture.count(0);
+        let unchanged = success(fixture.run("query", &["MATCH (n:Person) RETURN n"]));
+        assert_eq!(seq(&unchanged, "rows"), fixture.created);
+    }
+    let valid = success(fixture.run(
+        "write",
+        &["CREATE (n:Person {id:11}) RETURN n.id AS id"],
+    ));
+    assert_eq!(seq(&valid, "written"), fixture.created + 1);
+    assert_eq!(row_frames(&valid).len(), 1);
+    fixture.count(1);
+}
+
+#[test]
+fn return_dispatch_respects_quoted_tokens_and_typed_parameter_values() {
+    let fixture = Fixture::new();
+    let ordinary = success(fixture.run(
+        "write",
+        &["CREATE (n:Person {id:1,name:'RETURN n; MATCH (n) DELETE n'})"],
+    ));
+    assert!(!ordinary.contains("\"event\":\"columns\""), "{ordinary}");
+    assert!(row_frames(&ordinary).is_empty());
+    let returning = success(fixture.run(
+        "write",
+        &[
+            "--param",
+            "name=text:'; RETURN n; MATCH (n) DELETE n; --\n雪",
+            "INSERT (n:Person {id:2,name:$name}) RETURN n.name AS name,n.score AS missing",
+        ],
+    ));
+    let rows = row_frames(&returning);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].contains("'; RETURN n; MATCH (n) DELETE n; --\\n雪"),
+        "{returning}"
+    );
+    assert!(rows[0].contains("\"type\":\"null\""), "{returning}");
+    fixture.count(2);
+    refusal(
+        &fixture.run("query", &["CREATE (n:Person) RETURN n"]),
+        3,
+        "query",
+    );
+    fixture.count(2);
+}
+
+#[test]
+fn oversized_create_return_output_refuses_before_commit_or_row_publication() {
+    let fixture = Fixture::new();
+    // JSON expands this control scalar sixfold: about 3 MiB of native text
+    // becomes 18 MiB of encoded payload, beyond the private output allowance.
+    // The native row/work allowances can therefore admit the result first.
+    let occurrences = vec!["1"; 1024].join(",");
+    let statement =
+        format!("UNWIND [{occurrences}] AS x CREATE (n:Person) RETURN $payload AS payload");
+    let payload = format!("payload=text:{}", "\u{1}".repeat(3072));
+    let failed = fixture.run("write", &["--param", &payload, &statement]);
+    refusal(&failed, 3, "query");
+    let out = String::from_utf8_lossy(&failed.stdout);
+    assert!(out.contains("16 MiB"), "{out}");
+    assert!(!out.contains("\"event\":\"columns\""), "{out}");
+    assert!(row_frames(&out).is_empty());
+    fixture.count(0);
+    let unchanged = success(fixture.run("query", &["MATCH (n:Person) RETURN n"]));
+    assert_eq!(seq(&unchanged, "rows"), fixture.created);
+    success(fixture.run("write", &["CREATE (n:Person) RETURN n"]));
+    fixture.count(1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn create_return_transport_failure_reports_io_after_the_durable_write() {
+    let fixture = Fixture::new();
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let output = fixture
+        .command(false, "write")
+        .arg("CREATE (n:Person {id:17}) RETURN n,n.id AS id")
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("rolled"), "{stderr}");
+    fixture.count(1);
+    let stored = success(fixture.run(
+        "query",
+        &["MATCH (n:Person) RETURN n.id AS id"],
+    ));
+    assert_eq!(seq(&stored, "rows"), fixture.created + 1);
+    assert!(stored.contains("\"type\":\"int\",\"value\":\"17\""), "{stored}");
+}
+
 #[test]
 fn a_late_execution_failure_rolls_back_every_earlier_csv_record() {
     let fixture = Fixture::new();

@@ -6,7 +6,8 @@ use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
+    GqlParameters, GqlQueryPolicy, GraphInsertBinding, GraphSetProjection, GraphSetQuantifier,
+    GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
@@ -75,6 +76,27 @@ fn authorization(error: Fault) -> Error {
         }
         other => panic!("expected a typed authorization failure, got {other:?}"),
     }
+}
+fn query_authorization(error: &QueryFault) -> Option<Error> {
+    let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(error);
+    while let Some(error) = cause {
+        if let Some(WriteTxnError::Authorization(error)) = error.downcast_ref::<WriteTxnError>() {
+            return Some(*error);
+        }
+        cause = error.source();
+    }
+    None
+}
+
+fn projected_insert(
+    insertion: PreparedGraphInsert,
+    bindings: Vec<GraphInsertBinding>,
+    quantifier: GraphSetQuantifier,
+) -> PreparedGraphInsertQuery {
+    let projections = (0..bindings.len())
+        .map(|column| GraphSetProjection::new(format!("c{column}"), GraphSetValue::Column(column)))
+        .collect();
+    PreparedGraphInsertQuery::prepare(insertion, bindings, projections, quantifier).unwrap()
 }
 fn lab<T, F>(seed: u64, body: impl FnOnce(PurposeContexts) -> F + Send + 'static) -> T
 where
@@ -977,4 +999,430 @@ fn expiry_during_match_collection_or_final_admission_never_publishes_a_prefix() 
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });
+}
+
+#[test]
+fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
+    lab(0xa951, |contexts| async move {
+        use fgdb_gql::algebra::{GraphValue, GraphValueOrder};
+
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        for output_rows in [0, 1] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let before = db.frontier().unwrap();
+            let query = projected_insert(
+                insert(
+                    "UNWIND [3,1,3] AS p CREATE (a:Visible {p:p}), \
+                     (b:Visible), (a)-[:R]->(b)",
+                ),
+                vec![GraphInsertBinding::VertexProperty { vertex: 0, key: P }],
+                GraphSetQuantifier::Distinct,
+            )
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap()
+            .with_page(1, Some(output_rows));
+            let token = authority
+                .issue_at(&read_write_grant(), NOW)
+                .unwrap()
+                .attenuate(Restriction::MaxRows(output_rows))
+                .unwrap();
+            let mut bounded = policy();
+            bounded.query = GqlQueryPolicy::new(0, output_rows, 1_000_000, 100_000);
+            let (stats, result, completion) = db
+                .execute_graph_insert_query_authorized(
+                    &txn,
+                    &query_cx,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    bounded,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (6, 3));
+            assert_eq!(stats.selection.result_rows, 3);
+            assert_eq!(result.rows.snapshot_records, 0);
+            assert_eq!(result.rows.result_rows, output_rows);
+            assert!(result.evaluator.work_units >= stats.evaluator.work_units);
+            let expected = if output_rows == 0 {
+                vec![]
+            } else {
+                vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                    CanonicalScalar::Int(3),
+                )])]
+            };
+            assert_eq!(result.value, expected);
+            let seq = db.frontier().unwrap();
+            assert_eq!(seq.0, before.0 + 1);
+            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq });
+            let vertices = db.vertices().unwrap();
+            let edges = db.edges().unwrap();
+            assert_eq!((vertices.len(), edges.len()), (6, 3));
+            let properties: Vec<_> = vertices.iter().filter_map(|v| v.props.first()).collect();
+            assert_eq!(
+                properties,
+                vec![
+                    &(P, CanonicalScalar::Int(3)),
+                    &(P, CanonicalScalar::Int(1)),
+                    &(P, CanonicalScalar::Int(3)),
+                ]
+            );
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+            assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), (vertices, edges));
+            assert_eq!(db.frontier().unwrap(), seq);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn insertion_query_requires_readwrite_before_identity_allocation_even_with_limit_zero() {
+    lab(0xa952, |contexts| async move {
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let query = projected_insert(
+            insert("CREATE (n:Visible {p:7})"),
+            vec![GraphInsertBinding::CreatedVertex(0)],
+            GraphSetQuantifier::All,
+        )
+        .with_page(0, Some(0));
+        for rights in [Rights::Read, Rights::Write] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut denied = grant();
+            denied.rights = rights;
+            denied.limits.max_work = 0;
+            let token = authority.issue_at(&denied, NOW).unwrap();
+            let error = db
+                .execute_graph_insert_query_authorized(
+                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(query_authorization(&error), Some(Error::PermissionDenied));
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(
+                db.allocate_identity(&query_cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(VId(1))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn insertion_query_projection_quota_and_creation_scope_failures_publish_nothing() {
+    lab(0xa953, |contexts| async move {
+        use fgdb_gql::{
+            GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp,
+            GraphSetExecutionError,
+        };
+
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+        for mode in 0..4 {
+            let mut db = matched_fixture(&commit, true).await;
+            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let insertion = if mode == 3 {
+                insert("CREATE (a:Visible {p:2}), (b:Visible {secret:1})")
+            } else {
+                insert("UNWIND [2,1] AS p CREATE (a:Visible {p:p})")
+            };
+            let bindings = vec![GraphInsertBinding::VertexProperty { vertex: 0, key: P }];
+            let query = if mode == 0 {
+                PreparedGraphInsertQuery::prepare(
+                    insertion,
+                    bindings,
+                    vec![GraphSetProjection::new(
+                        "value",
+                        GraphSetValue::Integer(
+                            GraphIntegerExpression::prepare(&[
+                                GraphIntegerOp::Column(0),
+                                GraphIntegerOp::Column(0),
+                                GraphIntegerOp::Literal(Some(1)),
+                                GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
+                                GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+                            ])
+                            .unwrap(),
+                        ),
+                    )],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap()
+            } else {
+                projected_insert(insertion, bindings, GraphSetQuantifier::All)
+            };
+            let query = if mode == 3 {
+                // An empty result must never conceal a forbidden creation.
+                query.with_page(0, Some(0))
+            } else {
+                query
+            };
+            let token = if mode == 1 {
+                token.attenuate(Restriction::MaxRows(1)).unwrap()
+            } else {
+                token.clone()
+            };
+            let mut bounded = policy();
+            if mode == 2 {
+                bounded.query = GqlQueryPolicy::new(0, 1, 1_000_000, 100_000);
+            }
+            let error = db
+                .execute_graph_insert_query_authorized(
+                    &txn, &query_cx, &commit, &authority, &token, "main", &query, bounded, || NOW,
+                )
+                .await
+                .unwrap_err();
+            match mode {
+                0 => assert!(matches!(
+                    &error,
+                    GqlQueryError::Source(GraphInsertQueryError::Returning(
+                        GraphSetExecutionError::Projection {
+                            row: 1,
+                            column: 0,
+                            error: fgdb_gql::GraphIntegerError {
+                                kind: GraphIntegerErrorKind::DivisionByZero,
+                                ..
+                            },
+                        }
+                    ))
+                ), "{error:?}"),
+                1 => assert_eq!(query_authorization(&error), Some(Error::LimitExceeded(LimitDimension::Rows))),
+                2 => assert!(matches!(&error, GqlQueryError::Rows(_)), "{error:?}"),
+                3 => assert_eq!(query_authorization(&error), Some(Error::ScopeDenied)),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                before,
+                "mode={mode}"
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
+    lab(0xa954, |contexts| async move {
+        use fgdb_gql::algebra::GraphValue;
+        use fgdb_gql::insertion::GraphInsertVertex;
+        use fgdb_gql::{GraphMutationValue, PreparedGraphSetText};
+
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+        let source = PreparedGraphSetText::prepare(
+            "MATCH (a:Visible)-[:R]->(b:Visible) RETURN a.p AS p, a.secret AS hidden",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let query = projected_insert(
+            PreparedGraphInsert::prepare_relation(
+                source,
+                R,
+                vec![GraphInsertVertex {
+                    labels: vec![L],
+                    properties: vec![(P, GraphMutationValue::Column(0))],
+                }],
+                vec![],
+            )
+            .unwrap(),
+            vec![
+                GraphInsertBinding::Input(0),
+                GraphInsertBinding::Input(1),
+                GraphInsertBinding::VertexProperty { vertex: 0, key: P },
+            ],
+            GraphSetQuantifier::All,
+        );
+        let mut results = Vec::new();
+        for hidden in [false, true] {
+            let mut db = matched_fixture(&commit, hidden).await;
+            let before = db.frontier().unwrap();
+            let (stats, result, completion) = db
+                .execute_graph_insert_query_authorized(
+                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(stats.created_vertices, 2);
+            assert_eq!(
+                result.value,
+                vec![
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(10)),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                        GraphValue::Scalar(CanonicalScalar::Int(10)),
+                    ]);
+                    2
+                ]
+            );
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+            results.push((stats, result));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(results[0], results[1], "hidden records changed public values or usage");
+    });
+}
+
+#[test]
+fn insertion_query_expiry_through_final_admission_aborts_all_effects() {
+    lab(0xa955, |contexts| async move {
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+        let query = projected_insert(
+            insert("UNWIND [2,1] AS p CREATE (a:Visible {p:p}), (b:Visible), (a)-[:S]->(b)"),
+            vec![
+                GraphInsertBinding::CreatedVertex(0),
+                GraphInsertBinding::CreatedEdge(0),
+            ],
+            GraphSetQuantifier::All,
+        );
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut total = 0;
+        db.execute_graph_insert_query_authorized(
+            &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || {
+                total += 1;
+                NOW
+            },
+        )
+        .await
+        .unwrap();
+        assert!(total > 3);
+        for cutoff in [1, total / 3, 2 * total / 3, total] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut calls = 0;
+            let error = db
+                .execute_graph_insert_query_authorized(
+                    &txn, &query_cx, &commit, &authority, &token, "main", &query, policy(), || {
+                        calls += 1;
+                        if calls >= cutoff { 10_000 } else { NOW }
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(query_authorization(&error), Some(Error::Expired), "cutoff={cutoff}");
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn insertion_query_cancellation_discards_private_results_and_releases_workspace() {
+    let ((), report) = run_async_under_lab(0xa956, |root| async move {
+        let query = || {
+            projected_insert(
+                insert("UNWIND [2,1] AS p CREATE (a:Visible {p:p}), (b:Visible), (a)-[:R]->(b)"),
+                vec![GraphInsertBinding::CreatedVertex(0)],
+                GraphSetQuantifier::All,
+            )
+        };
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&read_write_grant(), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut total = 0;
+        db.execute_graph_insert_query_authorized(
+            &txn,
+            &query_cx,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            &query(),
+            policy(),
+            || {
+                total += 1;
+                NOW
+            },
+        )
+        .await
+        .unwrap();
+        assert!(total > 3);
+        for cutoff in [1, total / 2] {
+            let mut handle = root
+                .spawn(move |child| async move {
+                    let contexts = PurposeContexts::narrow_runtime_root(&child);
+                    let commit = contexts.commit();
+                    let query_cx = contexts.query();
+                    let txn = contexts.txn();
+                    let authority = authority();
+                    let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let before = db.frontier().unwrap();
+                    let mut calls = 0;
+                    let error = db
+                        .execute_graph_insert_query_authorized(
+                            &txn,
+                            &query_cx,
+                            &commit,
+                            &authority,
+                            &token,
+                            "main",
+                            &query(),
+                            policy(),
+                            || {
+                                calls += 1;
+                                if calls == cutoff {
+                                    child.cancel_with(
+                                        asupersync::CancelKind::User,
+                                        Some("insertion RETURN cancellation"),
+                                    );
+                                }
+                                NOW
+                            },
+                        )
+                        .await
+                        .unwrap_err();
+                    assert!(matches!(
+                        error,
+                        GqlQueryError::Interrupted(WriteTxnError::Interrupted(_))
+                            | GqlQueryError::Source(GraphInsertQueryError::Insertion(
+                                GraphInsertError::Source(WriteTxnError::Interrupted(_))
+                            ))
+                    ));
+                    assert_eq!(db.frontier().unwrap(), before);
+                    assert!(db.vertices().unwrap().is_empty());
+                    assert!(db.edges().unwrap().is_empty());
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                })
+                .expect("insertion RETURN cancellation child starts");
+            assert_eq!(handle.join(&root).await, Ok(()));
+        }
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

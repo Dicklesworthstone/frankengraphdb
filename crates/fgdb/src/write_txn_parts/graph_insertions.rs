@@ -2,6 +2,110 @@
 // computed payloads are frozen before allocation; commit remains explicit.
 
 impl WriteTxn {
+    /// Stage CREATE/INSERT and its native RETURN rows as one atomic operation.
+    /// The prepared query evaluates its complete selection, creation payloads,
+    /// identity bindings, projection, DISTINCT, ordering and page before any
+    /// proposal reaches storage. Result expressions read the frozen creation
+    /// bindings; they never rescan the graph or observe another occurrence.
+    ///
+    /// RETURN row limits govern the final rows independently of vertex/edge
+    /// creation limits. In particular LIMIT 0 does not suppress the writes or
+    /// hide a failing result expression. The returned execution counters already
+    /// include the creation phase; do not add the insertion counters to them.
+    ///
+    /// Failure, cancellation and unwinding preserve the transaction's earlier
+    /// staged effects and retain observed read dependencies. Issued identities
+    /// are not reclaimed. Success is transaction-local until finish/commit.
+    pub fn execute_graph_insert_query_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphInsertQuery,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        ),
+        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        let source = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        self.ensure_database(database).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
+        if live != self.basis {
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
+        }
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            let proposal = query.execute_governed(
+                policy,
+                |pattern, allowance| {
+                    workspace
+                        .txn
+                        .execute_graph_pattern_governed(database, cx, pattern, allowance)
+                },
+                allocate,
+                || cx.checkpoint(),
+            )?;
+            let (insertion, returning) = proposal.into_parts();
+            let (stats, _, _) = workspace
+                .txn
+                .stage_graph_insert_batch(
+                    database,
+                    cx,
+                    query.insertion().relation(),
+                    insertion,
+                    false,
+                )
+                .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+            // Every result admission and cancellation check precedes the sole
+            // atomic staging boundary; nothing fallible follows acceptance.
+            workspace.accept();
+            Ok((stats, returning))
+        })
+    }
+
+    /// CREATE/INSERT RETURN with identities reserved by the owning database.
+    /// The result has the same transaction-local lifetime and row allowances as
+    /// `execute_graph_insert_query_governed`; no caller allocator is accepted.
+    pub fn execute_graph_insert_query_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphInsertQuery,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        ),
+        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, WriteTxnError>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        let source = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        self.ensure_database(database).map_err(source)?;
+        let allocate = database.engine_allocator(cx).map_err(source)?;
+        self.execute_graph_insert_query_governed(database, cx, query, policy, allocate)
+    }
+
     /// INSERT/CREATE with identities reserved by the owning database.
     pub fn execute_graph_insert_engine_governed<V: Vfs + Clone>(
         &mut self,
@@ -108,7 +212,7 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::GqlQueryError;
-        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
+        use fgdb_gql::insertion::GraphInsertError;
         let source = |error| GqlQueryError::Source(GraphInsertError::Source(error));
         // Never allocate even one ID before ownership, health, basis and
         // relation-coordinate checks, including for empty or zero-budget input.
@@ -132,70 +236,96 @@ impl WriteTxn {
                 allocate,
                 || cx.checkpoint(),
             )?;
-            let stats = proposal.stats();
-            // Preserve the preexisting stats-only physical path: identity result
-            // vectors exist only for the explicit returning API.
-            let mut vertices = retain_identities.then(Vec::new);
-            let mut edges = retain_identities.then(Vec::new);
-            // Vertex declarations must lead the shared initializer prefix.
-            // Edge groups retain declaration order within each relation.
-            let mut batch = WriteBatch::new(insertion.relation());
-            let mut groups = std::collections::BTreeMap::new();
-            for intent in proposal.into_intents() {
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                match intent {
-                    GraphInsertIntent::Vertex {
-                        vertex,
-                        labels,
-                        properties,
-                    } => {
-                        if let Some(vertices) = &mut vertices {
-                            vertices.push(vertex);
-                        }
-                        batch.create_vertex(vertex, labels, properties);
-                    }
-                    GraphInsertIntent::Edge {
-                        edge,
-                        relation,
-                        source,
-                        destination,
-                        properties,
-                    } => {
-                        if let Some(edges) = &mut edges {
-                            edges.push(edge);
-                        }
-                        groups
-                            .entry(relation)
-                            .or_insert_with(|| WriteBatch::new(relation))
-                            .add_edge(edge, source, destination, properties);
-                    }
-                }
-            }
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
-            if !batch.is_empty() {
-                batches.push(batch);
-            }
-            batches.extend(groups.into_values());
-            if let Some(first) = batches.first() {
-                let relation = first.relation;
-                if batches.iter().all(|batch| batch.relation == relation)
-                    && self.staged.iter().all(|batch| batch.relation == relation)
-                {
-                    let mut combined = batches.remove(0);
-                    for batch in batches {
-                        combined.rows.extend(batch.rows);
-                    }
-                    self.write(database, combined).map_err(source)?;
-                } else {
-                    self.write_atomic(database, batches).map_err(source)?;
-                }
-            }
-            Ok((
-                stats,
-                vertices.unwrap_or_default(),
-                edges.unwrap_or_default(),
-            ))
+            self.stage_graph_insert_batch(
+                database,
+                cx,
+                insertion.relation(),
+                proposal,
+                retain_identities,
+            )
         })
+    }
+
+    // Both ordinary insertion and CREATE RETURN submit the same already-frozen
+    // proposal to the existing atomic storage path. RETURN never reconstructs
+    // that proposal from graph reads or from identity receipt vectors.
+    fn stage_graph_insert_batch<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        relation: RelationId,
+        proposal: fgdb_gql::insertion::GraphInsertBatch,
+        retain_identities: bool,
+    ) -> Result<
+        WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::GqlQueryError;
+        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
+        let source = |error| GqlQueryError::Source(GraphInsertError::Source(error));
+        let stats = proposal.stats();
+        // Preserve the preexisting stats-only physical path: identity result
+        // vectors exist only for the explicit returning API.
+        let mut vertices = retain_identities.then(Vec::new);
+        let mut edges = retain_identities.then(Vec::new);
+        // Vertex declarations must lead the shared initializer prefix.
+        // Edge groups retain declaration order within each relation.
+        let mut batch = WriteBatch::new(relation);
+        let mut groups = std::collections::BTreeMap::new();
+        for intent in proposal.into_intents() {
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            match intent {
+                GraphInsertIntent::Vertex {
+                    vertex,
+                    labels,
+                    properties,
+                } => {
+                    if let Some(vertices) = &mut vertices {
+                        vertices.push(vertex);
+                    }
+                    batch.create_vertex(vertex, labels, properties);
+                }
+                GraphInsertIntent::Edge {
+                    edge,
+                    relation,
+                    source,
+                    destination,
+                    properties,
+                } => {
+                    if let Some(edges) = &mut edges {
+                        edges.push(edge);
+                    }
+                    groups
+                        .entry(relation)
+                        .or_insert_with(|| WriteBatch::new(relation))
+                        .add_edge(edge, source, destination, properties);
+                }
+            }
+        }
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+        batches.extend(groups.into_values());
+        if let Some(first) = batches.first() {
+            let relation = first.relation;
+            if batches.iter().all(|batch| batch.relation == relation)
+                && self.staged.iter().all(|batch| batch.relation == relation)
+            {
+                let mut combined = batches.remove(0);
+                for batch in batches {
+                    combined.rows.extend(batch.rows);
+                }
+                self.write(database, combined).map_err(source)?;
+            } else {
+                self.write_atomic(database, batches).map_err(source)?;
+            }
+        }
+        Ok((
+            stats,
+            vertices.unwrap_or_default(),
+            edges.unwrap_or_default(),
+        ))
     }
 }

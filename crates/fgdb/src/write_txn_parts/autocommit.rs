@@ -2,6 +2,97 @@
 // It introduces no writer, commit protocol, rollback mechanism or error domain.
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Execute CREATE/INSERT RETURN and publish its writes through one ordinary
+    /// transaction completion. The complete RETURN result is evaluated and
+    /// admitted before staging or commit, and escapes only after finish succeeds.
+    /// An empty result page can accompany WriteCommitted: RETURN pagination does
+    /// not change the creation effects. Empty creation input closes read-only.
+    pub async fn execute_graph_insert_query_autocommit_governed<A>(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        query: &fgdb_gql::PreparedGraphInsertQuery,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        let infrastructure = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        let mut transaction = self
+            .begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let (stats, returning) = match transaction
+            .execute_graph_insert_query_governed(self, query_cx, query, policy, allocate)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
+        Ok((stats, returning, completion))
+    }
+
+    /// CREATE/INSERT RETURN autocommit using the owning database's identity
+    /// reservations. Returned rows are released only after the ordinary commit
+    /// or read-close completion; a failed RETURN cannot publish any creations.
+    pub async fn execute_graph_insert_query_autocommit_engine_governed(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        query: &fgdb_gql::PreparedGraphInsertQuery,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, WriteTxnError>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        let infrastructure = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        let mut transaction = self
+            .begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let (stats, returning) = match transaction
+            .execute_graph_insert_query_engine_governed(self, query_cx, query, policy)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
+        Ok((stats, returning, completion))
+    }
+
     /// Execute one prepared mutation as an embedded autocommit operation. A
     /// successful staging step is immediately validated and completed through
     /// `WriteTxn::finish`; a zero-match statement closes read-only without
