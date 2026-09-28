@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "native_order.rs"]
+mod native_order;
+
 impl PreparedNativeRead {
     /// Evaluate a native pull query and externally order its selected result.
     ///

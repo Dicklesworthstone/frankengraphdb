@@ -234,28 +234,66 @@ impl PreparedNativeRead {
     }
 }
 
-async fn drain<VS, VF, ES, EF, F>(
-    cx: &QueryCx,
-    columns: Vec<String>,
-    mut cursor: ScanCursor<VS, VF, ES, EF>,
-    scratch: &mut SpillFile<F>,
-    page_bytes: usize,
-    max_row_bytes: usize,
-) -> Result<NativeResultSpool, NativeSpoolError>
+// Type-only adapters for the SAME native cursors. The writer/framing loop is
+// shared by ordered result streams and private blocking-operator input.
+trait SpoolInput {
+    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>>;
+    fn spool_state(&self) -> ScanState;
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats);
+}
+
+impl<VS, VF, ES, EF> SpoolInput for ScanCursor<VS, VF, ES, EF>
 where
     VS: VertexScanSource<Error = ReadError>,
     ES: EdgeScanSource<Error = ReadError>,
     VF: FnMut() -> Result<(), Cancel>,
     EF: FnMut() -> Result<(), Cancel>,
+{
+    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
+        self.next()
+    }
+    fn spool_state(&self) -> ScanState {
+        self.state()
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (self.snapshot_seq(), self.kind(), self.row_stats(), self.evaluator_stats())
+    }
+}
+
+impl<S, C> SpoolInput for fgdb_gql::stream::VertexScanCursor<S, C, GraphValueRow>
+where
+    S: VertexScanSource<Error = ReadError>,
+    C: FnMut() -> Result<(), Cancel>,
+{
+    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
+        self.next().map(|row| row.map_err(|error| error.map_source(ScanError::Vertex)))
+    }
+    fn spool_state(&self) -> ScanState {
+        self.state()
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (self.snapshot_seq(), ScanKind::Vertex, self.row_stats(), self.evaluator_stats())
+    }
+}
+
+async fn drain<I, F>(
+    cx: &QueryCx,
+    columns: Vec<String>,
+    mut cursor: I,
+    scratch: &mut SpillFile<F>,
+    page_bytes: usize,
+    max_row_bytes: usize,
+) -> Result<NativeResultSpool, NativeSpoolError>
+where
+    I: SpoolInput,
     F: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
-    let snapshot = cursor.snapshot_seq();
-    let kind = cursor.kind();
+    let (snapshot, kind, _, _) = cursor.spool_stats();
     let columns: Arc<[String]> = columns.into();
     let mut writer = scratch.paged_writer(cx, page_bytes)?;
     let mut count = 0_u64;
     let mut largest = 0;
-    for row in cursor.by_ref() {
+    while let Some(row) = cursor.pull() {
         let row = row.map_err(|e| NativeSpoolError::Execute(Box::new(e)))?;
         cx.with_restriction(|| cx.checkpoint())
             .map_err(SpillError::Interrupted)?;
@@ -272,11 +310,10 @@ where
         largest = largest.max(bytes.len());
         count = count.checked_add(1).ok_or(SpillError::SizeOverflow)?;
     }
-    if cursor.state() != ScanState::Exhausted || cursor.row_stats().result_rows != count {
+    let (_, _, rows, evaluator) = cursor.spool_stats();
+    if cursor.spool_state() != ScanState::Exhausted || rows.result_rows != count {
         return Err(NativeSpoolError::IncompleteCursor);
     }
-    let rows = cursor.row_stats();
-    let evaluator = cursor.evaluator_stats();
     drop(cursor); // release the native source BEFORE accepting detached results
     let run = writer.finish(cx).await?;
     Ok(NativeResultSpool {

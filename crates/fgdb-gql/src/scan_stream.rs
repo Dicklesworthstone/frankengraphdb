@@ -10,6 +10,84 @@ use crate::stream::{VertexScanCursor, VertexScanError, VertexScanSource};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError};
 use fgdb_types::CommitSeq;
 
+/// Compiler-owned terminal clauses deferred by a blocking scan consumer.
+/// A sort-input cursor is NOT a completed query: the consumer must order all
+/// admitted occurrences, apply DISTINCT when requested, then SKIP/LIMIT.
+/// This contains no source, authority, mutable plan or caller-asserted order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanSortTail {
+    order: Vec<crate::algebra::GraphValueOrder>,
+    distinct: bool,
+    offset: u64,
+    count: Option<u64>,
+}
+
+impl ScanSortTail {
+    pub fn order(&self) -> &[crate::algebra::GraphValueOrder] {
+        &self.order
+    }
+    pub fn distinct(&self) -> bool {
+        self.distinct
+    }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn count(&self) -> Option<u64> {
+        self.count
+    }
+
+    // Only physical compilers call this. They must still audit EVERY source,
+    // predicate and projection instruction, not just recognize the final tail.
+    pub(crate) fn compile(
+        plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    ) -> Result<Self, usize> {
+        use crate::algebra::{GlaOperator, GraphValueOrder, MAX_PATTERN_VERTICES};
+        let ops = plan.operators();
+        let at = ops.len().checked_sub(2).ok_or(0_usize)?;
+        if plan.visible_columns.is_some() {
+            return Err(at);
+        }
+        let Some(GlaOperator::Limit { offset, count }) = ops.last() else {
+            return Err(at + 1);
+        };
+        let preceding = at.checked_sub(1).ok_or(at)?;
+        let distinct = matches!(ops.get(preceding), Some(GlaOperator::Distinct));
+        let projection = if distinct {
+            preceding.checked_sub(1).ok_or(preceding)?
+        } else {
+            preceding
+        };
+        let Some(GlaOperator::ProjectValues { columns }) = ops.get(projection) else {
+            return Err(projection);
+        };
+        if columns.is_empty() || columns.len() > MAX_PATTERN_VERTICES {
+            return Err(projection);
+        }
+        let order = match &ops[at] {
+            // Implicit whole-row order is canonical GraphValue order, whose
+            // Null scalar is least. Explicit ASC's default NULLS LAST differs.
+            GlaOperator::OrderByValues => (0..columns.len())
+                .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
+                .collect(),
+            GlaOperator::OrderByValueColumns { columns: keys } => {
+                if keys.is_empty() || keys.len() > MAX_PATTERN_VERTICES {
+                    return Err(at);
+                }
+                for (index, key) in keys.iter().enumerate() {
+                    if key.column >= columns.len()
+                        || keys[..index].iter().any(|other| other.column == key.column)
+                    {
+                        return Err(at);
+                    }
+                }
+                keys.to_vec()
+            }
+            _ => return Err(at),
+        };
+        Ok(Self { order, distinct, offset: *offset, count: *count })
+    }
+}
+
 // Both physical cursors implement the same lifecycle. Reuse its existing type
 // so consumers of the native vertex stream retain their state comparisons.
 pub use crate::stream::VertexScanState as ScanState;

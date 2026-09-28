@@ -17,6 +17,44 @@ pub trait VertexScanOutput: GlaOutput + sealed::Projection {}
 impl VertexScanOutput for VId {}
 impl VertexScanOutput for GraphValueRow {}
 
+impl super::VertexScanPlan<GraphValueRow> {
+    /// Compile the source of a blocking ORDER BY, without applying its window.
+    /// Returns a complete terminal contract alongside the intermediate plan.
+    /// The ordinary compiler still owns every predicate/probe and the native
+    /// collector owns each value. Only the leading-identity ORDER proof is
+    /// relaxed: any nonempty vertex-local value projection is legal here.
+    ///
+    /// The resulting cursor emits ALL occurrences in source identity order,
+    /// not requested result order. Its ResultRows allowance/counter describes
+    /// intermediate input, never the final query page. A host must explicitly
+    /// budget that input and apply the returned tail before exposing results.
+    /// Ordinary compile(), and its ordered/unique-output proof, are unchanged.
+    pub fn compile_sort_input(
+        plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    ) -> Result<(Self, crate::scan_stream::ScanSortTail), super::VertexScanBuildError> {
+        let tail = crate::scan_stream::ScanSortTail::compile(plan)
+            .map_err(|operator| super::VertexScanBuildError { operator })?;
+        if tail.distinct() {
+            return Err(super::VertexScanBuildError { operator: plan.operators().len() - 3 });
+        }
+        let mut input = Self::compile_with_projection(plan, |projection, order| {
+            let GlaOperator::ProjectValues { columns } = projection else {
+                return false;
+            };
+            matches!(order, GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. })
+                && columns.iter().all(|column| match column {
+                    ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                        slot.ordinal() == 0
+                    }
+                    _ => false,
+                })
+        })?;
+        input.offset = 0;
+        input.count = None;
+        Ok((input, tail))
+    }
+}
+
 mod sealed {
     use super::*;
 
