@@ -3,8 +3,12 @@
 **Latest measurement: 2026-09-27**, at `0f91d016` (red: `fgdb-gql` did not
 compile from 2026-09-26 13:03 −0400), then at this pass's repair `bcf61011`:
 `cargo fmt --check` and workspace `clippy --all-targets -D warnings` exit 0.
-A bounded three-crate census there ran 3,860 passing and 17 failing tests,
-every failure in code compiled for the first time.
+(Correction, 09-28: that fmt verdict was `cargo fmt` only. check.sh's fmt
+gate also runs rustfmt over include!d files, and that half was red, with 315
+hunks at `f7838c17`; `c041e0f9` fixed it.) A bounded three-crate census there
+ran 3,860 passing and 17 failing tests, every failure in code compiled for the
+first time. All 17 are resolved on `main` as of 2026-09-28; see
+[Follow-through — 2026-09-28](#follow-through--2026-09-28).
 
 **Latest verified green: 2026-09-25**, at `0b952cb2`: `scripts/local_proof.sh`
 verdict=pass (49 PASS, tree_stable). It is an ancestor of `main`, the first
@@ -313,6 +317,51 @@ What it did not do:
 - Re-derive other agents' closed beads.
 - Measure on a quiet host. Load ran 30–220; absolute latencies are
   environment-dominated, and same-invocation ratios are not.
+
+### Follow-through — 2026-09-28
+
+Every failure of the 09-27 census is now resolved on `main`, green or
+re-pointed with a cited reason. No assertion was weakened.
+
+| Bead | Landed | Class |
+|---|---|---|
+| `fgdb-4mhe1` (10 ENSURE/field-rebase laws) | `ac05789c` (ENSURE staging no longer records a full-graph read); the field ABA law was re-pointed to content by `a35a1bfc` (another session) | code defect + stale law |
+| `fgdb-g52l6` (2 overlay-scan laws) | `a35a1bfc` re-pointed both: the witness is asserted as `PointReadField::Adjacency`, and the laws compare as-of content. The retirement-stamp leak they exposed is the `d49rt` code fix below. | stale laws + code defect |
+| `fgdb-yi1pi`, `fgdb-293xe`, `fgdb-o5pjt` | `a35a1bfc` (another session) | stale laws |
+| `fgdb-asof-lifetime-leak-d49rt` | `77c19be9`: a transaction's reads at its basis clamp a later retirement stamp; `Database` `*_at` reads keep the full-lifetime contract (fgdb-90jx) | code defect |
+| `fgdb-first-compile-point-laws-3cukf` (8 lib laws) | `6178a4ae` (5 fixtures under the row limit; 2 fences now reach the injected fault), `289488a0` (a pattern projection arrives in canonical value order) | stale fixtures + stale law |
+| `fgdb-fnkw3` (3 laws) | `6463386b`: re-pointed to the stream's intended delete-incidence and ENSURE changes | stale laws |
+| `fgdb-a5y6m` (Send overflow) | `80648924`: removes all 33 `recursion_limit` attributes | build defect |
+
+`fgdb-a5y6m` fixed the Send overflow at the root. It was not another limit:
+- **Cause.** Chronicle and Strata held `&V::File` across awaits, and
+  `VfsFile` is `Send` but not `Sync`. So no generic `Send` proof existed, and
+  every concrete test root re-proved the whole chain.
+- **Change.** Those sites now take `&mut`. Four boundaries (`commit_template`,
+  `WriteTxn::complete`, `bind_with_vfs`, `publish_and_snapshot`) return a
+  boxed `dyn Future + Send`.
+- **Cost.** A same-invocation ABBA A/B found no measurable cost: paired p50
+  ratio medians were 0.99–1.03.
+
+Measured on the tree `6463386b` + `fgdb-a5y6m`, across fgdb-chronicle,
+fgdb-strata, fgdb, fgdb-sim and fgdb-cli:
+- 646 result blocks: 3,308 passed and 2 failed.
+- After rebasing onto `289488a0`, the fgdb lib was 736 passed / 1 failed.
+- The one remaining failure is `fgdb-div-zero-families-iq02p`, owned by
+  another session.
+
+Workspace clippy `-D warnings` and both fmt halves exit 0 at `80648924`'s
+parent.
+
+Rows changed since the 09-27 checklist:
+
+| # | Promise | 09-27 | 09-28 | Evidence |
+|---|---|---|---|---|
+| 9 | Transactions | PARTIAL; opt-in rebase paths failing | PARTIAL | The rebase laws pass (`fgdb-4mhe1` closed). The default is still backward OCC, and there is still no SSI. The four `commit_*_rebased` entry points still have no production caller. |
+| 12 | Prism | PARTIAL | PARTIAL, GQL CALL composes | `CALL fnx.*` runs inside native GQL reads at the read's snapshot. YIELD rows feed WHERE/WITH/RETURN, and aggregates compose (`43db9994`, `7ceb9ba5`; `tests/gql_call_fnx.rs` 10/10 at `289488a0`). The kernels are still the in-house Prism kernels. |
+
+Still not done: `local_proof.sh` has not run since `0b952cb2`, so `main` has
+no verified-green proof after 2026-09-25. The merge train has never run.
 
 ---
 
