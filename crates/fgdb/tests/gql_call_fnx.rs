@@ -245,6 +245,76 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
     });
 }
 
+/// fgdb-luq0b: the README's analytics shape, `YIELD node, score RETURN
+/// node.p, score ORDER BY score DESC LIMIT k`, runs as written. `node` names
+/// the vertex output, and `node.p` reads through the implied identity match.
+/// A scalar output read or matched as a vertex refuses at its YIELD site.
+#[test]
+fn a_readme_shaped_call_reads_vertex_properties_with_no_match() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        let query = |text: &str| db.query(cx, text, &GqlParameters::new(), symbols, policy());
+        // Independent: the standalone call's (vertex, score), with p = 10 * id.
+        let standalone = db
+            .call_fnx(
+                cx,
+                "CALL fnx.pagerank() YIELD vertex, score",
+                &FnxParameters::new(),
+                explicit(false),
+            )
+            .unwrap();
+        let mut expected: Vec<Vec<GraphValue>> = standalone
+            .analytics
+            .rows
+            .into_iter()
+            .map(|row| match row.as_slice() {
+                [FnxValue::Vertex(vertex), score] => vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(vertex.0 as i64 * 10)),
+                    value(*score),
+                ],
+                _ => Vec::new(),
+            })
+            .collect();
+        expected.sort_by(|a, b| compare(&a[0], &b[0]).expect("integer p"));
+        assert_eq!(expected.len(), 6);
+        let (columns, actual) = rows(
+            query("CALL fnx.pagerank() YIELD node, score RETURN node.p AS p, score ORDER BY p")
+                .unwrap(),
+        );
+        assert_eq!(columns, ["p", "score"]);
+        assert_eq!(actual, expected);
+        // The README spelling equals the MATCH it implies.
+        assert_eq!(
+            query("CALL fnx.pagerank() YIELD node, score RETURN node.p, score ORDER BY score DESC LIMIT 3")
+                .unwrap(),
+            query(
+                "CALL fnx.pagerank() YIELD vertex AS node, score MATCH (node) \
+                 RETURN node.p, score ORDER BY score DESC LIMIT 3"
+            )
+            .unwrap()
+        );
+        for (text, site) in [
+            ("CALL fnx.pagerank() YIELD vertex, score RETURN score.p", 1),
+            (
+                "CALL fnx.pagerank() YIELD score AS s, vertex MATCH (s) RETURN s",
+                0,
+            ),
+        ] {
+            let error = procedure_error(query(text).unwrap_err()).unwrap();
+            assert!(
+                matches!(
+                    error,
+                    ProcedureError::Bind(FnxCallError {
+                        site: FnxCallSite::Yield(at),
+                        kind: FnxBindErrorKind::Expected(_),
+                    }) if at == site
+                ),
+                "{text}: {error:?}"
+            );
+        }
+    });
+}
+
 #[test]
 fn a_filter_after_the_call_sees_every_yielded_row() {
     run(async |commit, cx| {

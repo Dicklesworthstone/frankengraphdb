@@ -373,12 +373,15 @@ impl PreparedGraphSet {
     /// zero-column singleton and the call runs exactly once. `outputs` pairs
     /// each procedure output with its column alias; every column is the Any
     /// domain. Arguments are constants: literals or bound parameters.
+    /// `vertices` lists, ascending, the YIELD positions the statement matches
+    /// as vertices; the host must refuse unless each is vertex-valued.
     pub fn procedure_call(
         self,
         namespace: String,
         name: String,
         arguments: Vec<GraphSetValue>,
         outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
         if !matches!(self.node, SetNode::Values)
@@ -391,6 +394,12 @@ impl PreparedGraphSet {
         }
         if outputs.is_empty() {
             return Err(Error::Empty);
+        }
+        for (column, &input) in vertices.iter().enumerate() {
+            let ascending = column == 0 || vertices[column - 1] < input;
+            if input >= outputs.len() || !ascending {
+                return Err(Error::UnknownInput { column, input });
+            }
         }
         if outputs.len() > crate::algebra::MAX_PATTERN_VERTICES {
             return Err(Error::TooManyColumns {
@@ -425,6 +434,7 @@ impl PreparedGraphSet {
                 name,
                 arguments,
                 outputs: names,
+                vertices,
             })),
             columns,
             types,

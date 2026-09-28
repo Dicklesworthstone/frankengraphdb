@@ -20,6 +20,8 @@ pub struct PreparedProcedureCall {
     pub(super) arguments: Vec<GraphSetValue>,
     /// The procedure's own output names, in YIELD order.
     pub(super) outputs: Vec<String>,
+    /// Ascending positions in `outputs` the statement matches as vertices.
+    pub(super) vertices: Vec<usize>,
 }
 
 impl PreparedProcedureCall {
@@ -36,6 +38,15 @@ impl PreparedProcedureCall {
     pub fn outputs(&self) -> &[String] {
         &self.outputs
     }
+    /// Positions in [`Self::outputs`] the statement uses as vertices: an
+    /// identity MATCH on the column, written (`YIELD n MATCH (n)`) or implied
+    /// by a property read (`YIELD n RETURN n.p`). The host must refuse the
+    /// call unless each is a vertex-valued output; a scalar there would
+    /// otherwise match nothing and drop every row silently.
+    #[must_use]
+    pub fn vertex_outputs(&self) -> &[usize] {
+        &self.vertices
+    }
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         for text in [&self.namespace, &self.name] {
             bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
@@ -49,6 +60,10 @@ impl PreparedProcedureCall {
         for output in &self.outputs {
             bytes.extend_from_slice(&(output.len() as u64).to_be_bytes());
             bytes.extend_from_slice(output.as_bytes());
+        }
+        bytes.extend_from_slice(&(self.vertices.len() as u64).to_be_bytes());
+        for &output in &self.vertices {
+            bytes.extend_from_slice(&(output as u64).to_be_bytes());
         }
     }
 }

@@ -60,6 +60,16 @@ impl FnxOutput {
             Self::Core => "core",
         }
     }
+    /// Whether `YIELD <name>` selects this field: its registered name, or
+    /// `node` for the vertex, the openCypher spelling the README's analytics
+    /// statements use (fgdb-luq0b). The column keeps the spelling written, so
+    /// `YIELD node` is a column named `node`, and a call spelled either way
+    /// keeps its own digest.
+    #[must_use]
+    pub fn is_named(self, name: &str) -> bool {
+        // ubs:ignore -- public YIELD field names, not secret material.
+        self.name() == name || (matches!(self, Self::Vertex) && name == "node")
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FnxImplementationClass {
@@ -806,8 +816,7 @@ impl FnxCallSpec {
                     .outputs
                     .iter()
                     .copied()
-                    // ubs:ignore -- public YIELD field names, not secret material.
-                    .find(|field| field.name() == field_name)
+                    .find(|field| field.is_named(field_name))
                     .ok_or_else(|| {
                         error(FnxCallSite::Yield(index), FnxBindErrorKind::UnknownYield)
                     })?;

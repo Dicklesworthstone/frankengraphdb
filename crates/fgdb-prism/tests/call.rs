@@ -85,6 +85,32 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
 }
 
+/// fgdb-luq0b: `node` is the openCypher spelling of the vertex output. The
+/// column keeps the name written, so the two spellings are different calls.
+#[test]
+fn node_selects_the_vertex_output_under_its_own_column_name() {
+    let node = bind("CALL fnx.pagerank() YIELD node, score");
+    assert_eq!(node.outputs()[0].field, FnxOutput::Vertex);
+    assert_eq!(node.outputs()[0].name, "node");
+    assert_ne!(
+        node.digest(),
+        bind("CALL fnx.pagerank() YIELD vertex, score").digest()
+    );
+    let aliased = bind("CALL fnx.pagerank() YIELD node AS v");
+    assert_eq!(aliased.outputs()[0].field, FnxOutput::Vertex);
+    assert_eq!(aliased.outputs()[0].name, "v");
+    // Both spellings name one field, so together they repeat it.
+    let twice = FnxCallSpec::bind(
+        "CALL fnx.pagerank() YIELD vertex, node",
+        &FnxParameters::new(),
+    )
+    .unwrap_err();
+    assert_eq!(twice.kind, FnxBindErrorKind::DuplicateYield);
+    // `node` spells the vertex only.
+    assert!(!FnxOutput::Score.is_named("node"));
+    assert!(!FnxOutput::Component.is_named("node"));
+}
+
 #[test]
 fn literals_parameters_defaults_and_whitespace_bind_identically() {
     let default = bind("CALL fnx.pagerank()");

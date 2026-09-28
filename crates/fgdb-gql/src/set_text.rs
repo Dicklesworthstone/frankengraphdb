@@ -276,6 +276,7 @@ impl ReadStageTemplate {
                 name,
                 arguments,
                 outputs,
+                vertices,
                 ..
             } => {
                 bytes.push(5);
@@ -293,6 +294,10 @@ impl ReadStageTemplate {
                         bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
                         bytes.extend_from_slice(text.as_bytes());
                     }
+                }
+                bytes.extend_from_slice(&(vertices.len() as u64).to_be_bytes());
+                for &output in vertices {
+                    bytes.extend_from_slice(&(output as u64).to_be_bytes());
                 }
             }
             Self::Project {
@@ -469,6 +474,10 @@ pub(crate) enum ReadStageTemplate {
         arguments: Vec<ReadValueTemplate>,
         /// (procedure output, column alias), in YIELD order.
         outputs: Vec<(String, String)>,
+        /// YIELD positions the statement matches as vertices (`MATCH (n)` on
+        /// the column, written or implied by `n.p`), ascending. The host
+        /// refuses unless each is a vertex-valued output (fgdb-luq0b).
+        vertices: Vec<usize>,
     },
     Unwind {
         at: usize,

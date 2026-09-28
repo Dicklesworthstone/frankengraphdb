@@ -13,8 +13,8 @@ use fgdb_gql::{
 };
 use fgdb_prism::{
     Directedness, FnxArgument, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
-    FnxExecutionError, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
-    FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
+    FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError, FnxReadOptions,
+    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
     ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
     SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
     SnapshotGraphView,
@@ -96,6 +96,23 @@ pub(crate) fn fnx_procedure(
         .collect();
     let spec = FnxCallSpec::from_arguments(call.namespace(), call.name(), &supplied, &yields)
         .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    // The statement matches these outputs as vertices (fgdb-luq0b). Vertex
+    // and component cells are vertex identities; anything else refuses here
+    // rather than matching nothing and dropping every row.
+    for &index in call.vertex_outputs() {
+        let vertex = spec
+            .outputs()
+            .get(index)
+            .is_some_and(|column| matches!(column.field, FnxOutput::Vertex | FnxOutput::Component));
+        if !vertex {
+            return Err(refuse(ProcedureError::Bind(FnxCallError {
+                site: FnxCallSite::Yield(index),
+                kind: FnxBindErrorKind::Expected(
+                    "a vertex output where the statement reads a vertex",
+                ),
+            })));
+        }
+    }
     let mut options = FnxReadOptions::whole_graph_for(&spec, Some(as_of));
     if let Some(records) = remaining.rows.max_snapshot_records() {
         options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);

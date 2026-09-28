@@ -571,7 +571,66 @@ impl<'a> Parser<'a> {
             name: name.text.to_owned(),
             arguments,
             outputs,
+            // A following MATCH (written or implied) marks its vertex uses.
+            vertices: Vec::new(),
         })
+    }
+
+    /// `CALL ... YIELD n, score RETURN n.name, score` (fgdb-luq0b): the CALL
+    /// outputs the first scope after the leading stages reads as `n.p`, in
+    /// first-read order. That scope is its WHERE, pages and RETURN, or the
+    /// items of a WITH that directly follows (the graph-to-row boundary, as
+    /// after MATCH). Each is read through the identity `MATCH (n)` the
+    /// statement could have written; the host refuses a non-vertex output.
+    /// UNWIND columns are never implied: no host types their values.
+    pub(in crate::graph_text) fn implied_call_vertices(
+        &self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        leading: &[ReadStageTemplate],
+    ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
+        let Some(ReadStageTemplate::Call { outputs, .. }) = leading.first() else {
+            return Ok(Vec::new());
+        };
+        let yielded = &schema[..outputs.len()];
+        let mut implied: Vec<Name<'a>> = Vec::new();
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut previous = None;
+        if matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("WITH")) {
+            previous = Some(token.kind);
+            token = lexer.next()?;
+        }
+        let mut depth = 0_usize;
+        loop {
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = outer;
+                }
+                TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
+                    if depth == 0 && ends_boundary_scope(word, previous) {
+                        break;
+                    }
+                    if yielded.iter().any(|(name, _)| name.text == word)
+                        && !implied.iter().any(|seen| seen.text == word)
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+                    {
+                        implied.push(Name {
+                            text: word,
+                            at: token.at,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            previous = Some(token.kind);
+            token = lexer.next()?;
+        }
+        Ok(implied)
     }
 
     pub(in crate::graph_text) fn row_page(

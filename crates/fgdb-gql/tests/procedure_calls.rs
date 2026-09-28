@@ -397,3 +397,93 @@ fn a_return_reads_a_correlated_vertex_properties_without_a_with() {
         [1, 3, 2, 4].map(|id| GraphValue::Vertex(VId(id)))
     );
 }
+
+/// fgdb-luq0b: `YIELD n RETURN n.p` reads through the identity `MATCH (n)`
+/// the statement could have written, byte for byte, and the host learns
+/// which outputs it must supply as vertices.
+#[test]
+fn a_property_read_of_a_yielded_output_implies_its_identity_match() {
+    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let seen = RefCell::new(Vec::new());
+    let run = |text: &str| {
+        prepare(text, &GqlParameters::new())
+            .execute_governed_with_procedures(
+                wide(),
+                graph(&values),
+                |call, arguments, _| {
+                    seen.borrow_mut().push(call.vertex_outputs().to_vec());
+                    host(call, arguments)
+                },
+                || Ok(()),
+            )
+            .unwrap()
+            .value
+    };
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    // t.scores() yields (1,1), (2,3), (3,2), (4,5); VId(i) has p = 10 * (i + 1).
+    for (implied, written) in [
+        (
+            "CALL t.scores() YIELD vertex AS n, score RETURN n.p AS p, score ORDER BY score",
+            "CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN n.p AS p, score ORDER BY score",
+        ),
+        (
+            "CALL t.scores() YIELD vertex AS n, score WITH n.p AS p, score RETURN p ORDER BY p",
+            "CALL t.scores() YIELD vertex AS n, score MATCH (n) WITH n.p AS p, score RETURN p ORDER BY p",
+        ),
+    ] {
+        assert_eq!(template(implied), template(written), "{implied}");
+        assert_eq!(run(implied), run(written), "{implied}");
+    }
+    assert_eq!(
+        column(
+            &run("CALL t.scores() YIELD vertex AS n, score RETURN n.p AS p, score ORDER BY score"),
+            0
+        ),
+        [20, 40, 30, 50].map(int)
+    );
+    // A row WHERE right after the CALL reads the same property.
+    seen.borrow_mut().clear();
+    let filtered = run(
+        "CALL t.scores() YIELD score, vertex WHERE vertex.p > 20 RETURN vertex.p, score ORDER BY score",
+    );
+    assert_eq!(column(&filtered, 0), [40, 30, 50].map(int));
+    assert_eq!(*seen.borrow(), [vec![1]]);
+    // A read through a scalar output still implies the match: the host is
+    // told, and refuses (Prism does), instead of silently matching nothing.
+    let query = prepare(
+        "CALL t.scores() YIELD vertex, score RETURN score.p",
+        &GqlParameters::new(),
+    );
+    assert!(
+        query
+            .execute_governed_with_procedures(
+                wide(),
+                graph(&values),
+                |call, _, _| {
+                    assert_eq!(call.vertex_outputs(), [1]);
+                    Err(GqlQueryError::Source("score is not a vertex"))
+                },
+                || Ok(()),
+            )
+            .is_err()
+    );
+    // Unchanged: no read, no implied match; UNWIND columns and later stages
+    // are never implied.
+    seen.borrow_mut().clear();
+    run("CALL t.scores() YIELD vertex, score RETURN vertex, score");
+    assert_eq!(*seen.borrow(), [Vec::<usize>::new()]);
+    for text in [
+        "UNWIND [1, 2] AS x RETURN x.p",
+        "CALL t.echo(1) YIELD a UNWIND [1] AS x RETURN x.p",
+        "CALL t.scores() YIELD vertex AS n, score WITH n, score WITH n RETURN n.p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

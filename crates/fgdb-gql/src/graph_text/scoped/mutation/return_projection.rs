@@ -133,9 +133,29 @@ impl<'a> Parser<'a> {
             self.advance()?;
             leading.push(self.unwind_stage(&mut schema, at)?);
         }
-        if self.is_word("MATCH") {
+        let implied = if self.is_word("MATCH") {
+            Vec::new()
+        } else {
+            self.implied_call_vertices(&schema, &leading)?
+        };
+        if self.is_word("MATCH") || !implied.is_empty() {
             self.read_row_bindings = schema.iter().map(|(name, _)| *name).collect();
-            self.parse_match_prefix()?;
+            if implied.is_empty() {
+                self.parse_match_prefix()?;
+            } else {
+                // The implied `MATCH (n)` for each read CALL output: exactly
+                // the root a written one parses, and nothing else.
+                for name in implied {
+                    self.capacity(
+                        self.syntax.variables.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Vertices,
+                    )?;
+                    self.syntax.variables.push(name);
+                }
+                self.syntax.root_variables = self.syntax.variables.len();
+                self.syntax.return_at = self.current.at;
+            }
             let correlations = core::mem::take(&mut self.read_correlations);
             let width = schema.len();
             let rebound = self
@@ -182,6 +202,21 @@ impl<'a> Parser<'a> {
             for (variable, key, row) in correlations {
                 let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
                 bound_correlations.push((row, index));
+            }
+            // A CALL output matched as a vertex must be one (fgdb-luq0b):
+            // record it, so the host refuses a scalar instead of letting the
+            // identity join drop every row.
+            if let Some(ReadStageTemplate::Call {
+                outputs, vertices, ..
+            }) = leading.first_mut()
+            {
+                let mut rows: Vec<usize> = (identity.iter())
+                    .map(|&(row, _)| row)
+                    .filter(|&row| row < outputs.len())
+                    .collect();
+                rows.sort_unstable();
+                rows.dedup();
+                *vertices = rows;
             }
             // The first WITH is the graph-to-row boundary, exactly as it is
             // for a statement that starts at MATCH: `n.p` there reads a graph
@@ -820,13 +855,20 @@ fn bind_stages(
                 name,
                 arguments,
                 outputs,
+                vertices,
             } => {
                 let mut bound = Vec::with_capacity(arguments.len());
                 for argument in arguments {
                     bound.push(bind_read_value(argument, values)?);
                 }
                 input
-                    .procedure_call(namespace.clone(), name.clone(), bound, outputs.clone())
+                    .procedure_call(
+                        namespace.clone(),
+                        name.clone(),
+                        bound,
+                        outputs.clone(),
+                        vertices.clone(),
+                    )
                     .map_err(|kind| GraphSetTextError {
                         offset: *at,
                         kind: GraphSetTextErrorKind::ProjectionBuild(kind),
