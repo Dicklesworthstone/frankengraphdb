@@ -107,12 +107,23 @@ fn poisoned_lock() -> io::Error {
 }
 
 /// One file's authoritative content: the bytes every read serves from, plus
-/// a write handle to the sparse shadow inode used to keep the shadow's
+/// the sparse shadow inode's writable descriptor used to keep the shadow's
 /// logical length equal to the buffer's (one ftruncate per length change,
 /// never a data write).
 struct FileShared {
     bytes: Mutex<Vec<u8>>,
-    shadow: Mutex<std::fs::File>,
+    shadow: Mutex<Shadow>,
+}
+
+/// The writable shadow descriptor exists only while at least one
+/// [`MemVfsFile`] handle is open, and closes with the last one. Every length
+/// change goes through an open handle, so a closed file needs no descriptor.
+/// Holding one per namespace entry exhausted the process descriptor limit at
+/// about 65k objects, failing a commit after its durable point (fgdb-a5y6m
+/// probe; see `closed_handles_release_their_shadow_descriptors`).
+struct Shadow {
+    file: Option<std::fs::File>,
+    handles: usize,
 }
 
 impl FileShared {
@@ -120,8 +131,26 @@ impl FileShared {
         self.bytes.lock().map_err(|_| poisoned_lock())
     }
 
-    fn lock_shadow(&self) -> io::Result<MutexGuard<'_, std::fs::File>> {
+    fn lock_shadow(&self) -> io::Result<MutexGuard<'_, Shadow>> {
         self.shadow.lock().map_err(|_| poisoned_lock())
+    }
+
+    /// Count one more open handle. The first one opens the writable shadow
+    /// descriptor at `path`, the entry's name at this instant; later handles
+    /// share it, and it follows the inode across renames and unlink. A
+    /// read-only shadow inode still opens for reading, and its length changes
+    /// then fail closed; any other failure (a descriptor limit) fails the open.
+    fn attach_handle(&self, path: &Path) -> io::Result<()> {
+        let mut shadow = self.lock_shadow()?;
+        if shadow.handles == 0 {
+            shadow.file = match std::fs::OpenOptions::new().write(true).open(path) {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => None,
+                Err(error) => return Err(error),
+            };
+        }
+        shadow.handles += 1;
+        Ok(())
     }
 }
 
@@ -247,7 +276,13 @@ impl MemVfs {
     /// `spawn_blocking_io` instead.
     fn sync_shadow_len(shared: &FileShared, len: u64) -> io::Result<()> {
         let shadow = shared.lock_shadow()?;
-        shadow.set_len(len)
+        match &shadow.file {
+            Some(file) => file.set_len(len),
+            None => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "MemVfs shadow inode is not writable",
+            )),
+        }
     }
 }
 
@@ -332,6 +367,23 @@ enum Handle {
         shared: Arc<FileShared>,
         path: PathBuf,
     },
+}
+
+impl Drop for MemVfsFile {
+    fn drop(&mut self) {
+        if let Handle::File { shared, .. } = &self.handle {
+            // A poisoned lock still releases: the count and descriptor are
+            // plain values, and leaking the descriptor is the worse outcome.
+            let mut shadow = shared
+                .shadow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shadow.handles = shadow.handles.saturating_sub(1);
+            if shadow.handles == 0 {
+                shadow.file = None;
+            }
+        }
+    }
 }
 
 impl core::fmt::Debug for MemVfsFile {
@@ -588,11 +640,12 @@ impl Vfs for MemVfs {
                     }
                 }
                 // The caller's descriptor is dropped, never stored: it may
-                // be read-only, and the stored shadow fd must stay writable
-                // for the length syncs (the stored fd came from this file's
-                // creating open, which required write access, and follows
-                // the inode across renames and truncate-opens).
+                // be read-only, and the shadow descriptor must be writable
+                // for the length syncs. attach_handle opens that one for the
+                // first open handle; it follows the inode across renames and
+                // truncate-opens until the last handle closes.
                 drop(std_file);
+                shared.attach_handle(&target)?;
                 Ok(MemVfsFile {
                     handle: Handle::File {
                         shared,
@@ -602,10 +655,15 @@ impl Vfs for MemVfs {
                 })
             }
             None => {
+                // A creating open required write access, so this descriptor
+                // is the writable shadow for the file's first handle.
                 let std_file = opened.into_std()?;
                 let shared = Arc::new(FileShared {
                     bytes: Mutex::new(Vec::new()),
-                    shadow: Mutex::new(std_file),
+                    shadow: Mutex::new(Shadow {
+                        file: Some(std_file),
+                        handles: 1,
+                    }),
                 });
                 self.lock_nodes()?
                     .insert(target.clone(), MemNode::File(shared.clone()));
@@ -781,24 +839,19 @@ impl Vfs for MemVfs {
         let copied = {
             let src_for_io = src.clone();
             let dst_for_io = dst.clone();
-            let dst_for_shadow = dst.clone();
-            spawn_blocking_io(move || {
-                let copied = std::fs::copy(src_for_io, dst_for_io)?;
-                // A write handle to the new shadow inode for future length
-                // syncs, mirroring what open() would have left behind.
-                let shadow = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(dst_for_shadow)?;
-                Ok((copied, shadow))
-            })
-            .await?
+            spawn_blocking_io(move || std::fs::copy(src_for_io, dst_for_io)).await?
         };
+        // No handle is open on the copy, so it holds no shadow descriptor;
+        // the first open() of it attaches one.
         let shared = Arc::new(FileShared {
             bytes: Mutex::new(src_bytes),
-            shadow: Mutex::new(copied.1),
+            shadow: Mutex::new(Shadow {
+                file: None,
+                handles: 0,
+            }),
         });
         self.lock_nodes()?.insert(dst, MemNode::File(shared));
-        Ok(copied.0)
+        Ok(copied)
     }
 
     async fn hard_link(&self, _original: &Path, _link: &Path) -> io::Result<()> {
@@ -1321,6 +1374,78 @@ mod tests {
 
             drop(retained);
             assert!(!root.exists(), "last drop removes the shadow root");
+        });
+    }
+
+    /// Descriptors held by the namespace's files, and the files with an open
+    /// handle. Every entry is a file or a directory.
+    fn shadow_descriptors(vfs: &MemVfs) -> (usize, usize) {
+        let nodes = vfs.lock_nodes().expect("namespace");
+        let mut open = 0;
+        let mut handled = 0;
+        for node in nodes.values() {
+            if let MemNode::File(shared) = node {
+                let shadow = shared.lock_shadow().expect("shadow");
+                open += usize::from(shadow.file.is_some());
+                handled += usize::from(shadow.handles > 0);
+            }
+        }
+        (open, handled)
+    }
+
+    /// A file holds its shadow descriptor only while a handle is open. A
+    /// memory database creates one file per stored object, and a descriptor
+    /// per entry hit the process limit near 65k objects, failing a commit
+    /// after its durable point. Here, 256 written-and-closed files hold none.
+    /// One open handle holds exactly one. That handle still extends its file
+    /// after a rename, because its descriptor follows the inode. Reopening a
+    /// closed file attaches a fresh descriptor, so length changes still land.
+    #[test]
+    fn closed_handles_release_their_shadow_descriptors() {
+        under_lab(0x4D_09, |_cx| async move {
+            let vfs = MemVfs::new().expect("memory filesystem");
+            for n in 0..256 {
+                vfs.write(Path::new(&format!("object-{n}")), b"sealed")
+                    .await
+                    .expect("writes");
+            }
+            assert_eq!(shadow_descriptors(&vfs), (0, 0), "closed files hold none");
+
+            let mut writer = vfs
+                .open(Path::new("object-7"), &OpenOptions::new().write(true))
+                .await
+                .expect("opens");
+            let mut second = vfs
+                .open(Path::new("object-7"), &OpenOptions::new().read(true))
+                .await
+                .expect("opens a second handle");
+            assert_eq!(shadow_descriptors(&vfs), (1, 1), "one file, one descriptor");
+            drop(second);
+            assert_eq!(shadow_descriptors(&vfs), (1, 1), "a live handle keeps it");
+
+            vfs.rename(Path::new("object-7"), Path::new("moved"))
+                .await
+                .expect("renames under the open handle");
+            writer.seek(SeekFrom::End(0)).await.expect("seeks");
+            writer.write_all(b"-grown").await.expect("extends");
+            let metadata = vfs.metadata(Path::new("moved")).await.expect("metadata");
+            assert_eq!(metadata.len(), 12, "the shadow length followed the inode");
+            drop(writer);
+            assert_eq!(shadow_descriptors(&vfs), (0, 0), "the last handle releases");
+
+            second = vfs
+                .open(Path::new("moved"), &OpenOptions::new().write(true))
+                .await
+                .expect("reopens");
+            second
+                .set_len(3)
+                .await
+                .expect("truncates through a fresh descriptor");
+            drop(second);
+            assert_eq!(vfs.read(Path::new("moved")).await.expect("reads"), b"sea");
+            let metadata = vfs.metadata(Path::new("moved")).await.expect("metadata");
+            assert_eq!(metadata.len(), 3);
+            assert_eq!(shadow_descriptors(&vfs), (0, 0));
         });
     }
 }
