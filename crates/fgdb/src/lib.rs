@@ -362,6 +362,99 @@ impl core::fmt::Display for SlotGenerationExhausted {
     }
 }
 
+/// A commit whose derived partition root could exceed the root's reference
+/// ceiling (`MAX_ROOT_BLOCKS` blocks, `MAX_ROOT_PATCHES` vertex patches).
+///
+/// Refused before Chronicle receives the capsule. The same refusal after the
+/// durable point would be permanent: the commit could never be published,
+/// and the authoritative rebuild re-derives the same over-full root, so the
+/// database would never open again. `added_*` are upper bounds: statements
+/// per touched element, one block or patch per statement at most (see
+/// `root_growth_bound`). They bind only within a commit's size of the ceiling. `fgdb compact` shrinks
+/// the live root. The O(changed) root that removes the ceiling is fgdb-d5vo4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootCapacityExceeded {
+    pub blocks: usize,
+    pub added_blocks: usize,
+    pub max_blocks: usize,
+    pub patches: usize,
+    pub added_patches: usize,
+    pub max_patches: usize,
+}
+
+impl core::fmt::Display for RootCapacityExceeded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the partition root holds {} blocks and {} vertex patches; this commit could add up to {} and {}, past the ceiling of {} and {}; compact the database or split the commit",
+            self.blocks,
+            self.patches,
+            self.added_blocks,
+            self.added_patches,
+            self.max_blocks,
+            self.max_patches
+        )
+    }
+}
+
+/// An upper bound on the (blocks, vertex patches) one commit's fold seals.
+/// Every block or patch the fold seals holds at least one statement of this
+/// commit (the per-commit seal law), so statements bound what the commit
+/// adds. Per touched element, a creation begins one statement and a deletion
+/// (a cascade's edges included) retires one. A content change (property or
+/// label) retires one and begins its successor: two. Same-commit folds only
+/// remove statements. `touched_elements` covers exactly the rows the writer
+/// folds into statements.
+fn root_growth_bound(template: &LogicalDeltaTemplate) -> (usize, usize) {
+    let (mut blocks, mut patches) = (0usize, 0usize);
+    let mut touched = std::collections::BTreeSet::new();
+    for coordinate in template.coordinate_entries() {
+        if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
+            continue;
+        }
+        for row in &coordinate.rows {
+            let statements = match row {
+                DeltaRow::LabelMembership { .. } | DeltaRow::Property { .. } => 2,
+                _ => 1,
+            };
+            touched.clear();
+            touched_elements(row, &mut touched);
+            for element in &touched {
+                match element {
+                    ElementId::Vertex(_) => patches = patches.saturating_add(statements),
+                    ElementId::Edge(_) => blocks = blocks.saturating_add(statements),
+                }
+            }
+        }
+    }
+    (blocks, patches)
+}
+
+/// Admit a commit only if its derived root is certain to stay within the
+/// reference ceiling, by [`root_growth_bound`].
+fn admit_root_capacity(
+    blocks: usize,
+    patches: usize,
+    template: &LogicalDeltaTemplate,
+    max_blocks: usize,
+    max_patches: usize,
+) -> Result<(), RootCapacityExceeded> {
+    let (added_blocks, added_patches) = root_growth_bound(template);
+    if blocks.saturating_add(added_blocks) > max_blocks
+        || patches.saturating_add(added_patches) > max_patches
+    {
+        return Err(RootCapacityExceeded {
+            blocks,
+            added_blocks,
+            max_blocks,
+            patches,
+            added_patches,
+            max_patches,
+        });
+    }
+    Ok(())
+}
+
 /// Why a database directory could not be opened or created.
 #[derive(Debug)]
 pub enum OpenError {
@@ -673,6 +766,12 @@ pub enum WriteError {
     /// before Chronicle receives capsule bytes, so no commit sequence is
     /// consumed and no recovery obligation is created.
     SlotGenerationExhausted(SlotGenerationExhausted),
+    /// The derived partition root could exceed its reference ceiling. Like
+    /// slot exhaustion, this is computed before Chronicle receives capsule
+    /// bytes: no sequence is consumed and the handle stays Healthy.
+    /// Boxed like the storage-admission arms: six counters inline would set
+    /// the size of every WriteTxnError result.
+    RootCapacity(Box<RootCapacityExceeded>),
     /// This call committed at D2, then failed while publishing derived state.
     /// The commit is NOT lost; `recovery` names the exact stale/current split.
     CommittedNeedsRecovery {
@@ -942,6 +1041,7 @@ impl core::fmt::Display for WriteError {
                 recovery.published_frontier, recovery.durable_frontier, recovery.failed_stage
             ),
             Self::SlotGenerationExhausted(error) => error.fmt(f),
+            Self::RootCapacity(error) => error.fmt(f),
             Self::CommittedNeedsRecovery { recovery, source } => write!(
                 f,
                 "commit {:?} is durable, but {:?} failed after the handle's published \
@@ -3438,6 +3538,17 @@ impl<V: Vfs + Clone> Database<V> {
         // recovery condition. Refuse before Chronicle receives the capsule so
         // D2 cannot make a commit whose derived root has no selectable name.
         let next_generation = next_slot_generation(self.slot_generation)?;
+        // The same for the root's reference ceiling: a commit whose fold
+        // could not be encoded would be durable but never publishable, and
+        // every rebuild would refuse it again (fgdb-a5y6m probe).
+        admit_root_capacity(
+            self.writer.sealed().len(),
+            self.writer.sealed_patches().len(),
+            &template,
+            fgdb_strata::root::MAX_ROOT_BLOCKS as usize,
+            fgdb_strata::root::MAX_ROOT_PATCHES as usize,
+        )
+        .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
         let published_frontier = self.snapshot.frontier;
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
@@ -5581,6 +5692,243 @@ mod point_read_index_laws {
                 "maintained index drifted from a rebuild"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod root_capacity_laws {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as usize) % bound.max(1)
+        }
+    }
+
+    /// The admission bound must never be below what the fold really seals,
+    /// or a commit could pass admission and still overflow the root after
+    /// its durable point. Random commits of every statement-producing kind:
+    /// vertex and edge creation, vertex and edge property updates, label
+    /// changes, edge deletes, and vertex deletes whose cascade retires edges
+    /// in other sources' families. Also across a compaction.
+    #[test]
+    fn the_growth_bound_covers_every_block_and_patch_a_commit_seals() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for seed in [3_u64, 0xb10c, 0xcafe_f00d] {
+            let keys = DatabaseKeys::new(
+                [0x5a; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+            );
+            let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+            let mut random = Lcg(seed);
+            // Live state, updated only after a commit succeeds.
+            let mut vids: Vec<VId> = Vec::new();
+            let mut edges: Vec<(EId, VId, VId)> = Vec::new();
+            let (mut next_vid, mut next_eid) = (1_u128, 1_u128);
+            let (mut cascades, mut both_kinds) = (0, 0);
+            for commit in 1..=48_i64 {
+                let mut batch = WriteBatch::new(RelationId(1));
+                let mut live_vids = vids.clone();
+                let created: Vec<VId> = (0..4).map(|at| VId(next_vid + at)).collect();
+                for &vid in &created {
+                    batch.create_vertex(
+                        vid,
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(commit))],
+                    );
+                }
+                live_vids.extend(&created);
+                // Chosen first, so updates and edge deletes avoid it. New
+                // edges may still touch it: its cascade then retires them in
+                // their own sources' families, in the same commit.
+                let doomed_vertex =
+                    (commit % 4 == 0 && !vids.is_empty()).then(|| vids[random.below(vids.len())]);
+                let mut new_edges = Vec::new();
+                for at in 0..6 {
+                    let src = live_vids[random.below(live_vids.len())];
+                    let dst = live_vids[random.below(live_vids.len())];
+                    let eid = EId(next_eid + at);
+                    batch.add_edge(
+                        eid,
+                        src,
+                        dst,
+                        vec![(PropertyKeyId(2), CanonicalScalar::Int(commit))],
+                    );
+                    new_edges.push((eid, src, dst));
+                }
+                let spared: Vec<(EId, VId, VId)> = edges
+                    .iter()
+                    .copied()
+                    .filter(|&(_, src, dst)| {
+                        Some(src) != doomed_vertex && Some(dst) != doomed_vertex
+                    })
+                    .collect();
+                let mut doomed_edge = None;
+                if spared.len() >= 2 {
+                    let updated = spared[random.below(spared.len())].0;
+                    batch.set_edge_property(
+                        updated,
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(-commit)),
+                    );
+                    if commit % 3 == 0 {
+                        let candidates: Vec<EId> = spared
+                            .iter()
+                            .map(|&(eid, _, _)| eid)
+                            .filter(|&eid| eid != updated)
+                            .collect();
+                        let eid = candidates[random.below(candidates.len())];
+                        batch.delete_edge(eid);
+                        doomed_edge = Some(eid);
+                    }
+                }
+                let relabel: Vec<VId> = vids
+                    .iter()
+                    .copied()
+                    .filter(|&vid| Some(vid) != doomed_vertex)
+                    .collect();
+                if !relabel.is_empty() {
+                    let vid = relabel[random.below(relabel.len())];
+                    batch.set_vertex_label(vid, LabelId(10 + commit as u64), true);
+                    batch.set_vertex_property(
+                        vid,
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(-commit)),
+                    );
+                }
+                if let Some(vid) = doomed_vertex {
+                    batch.delete_vertex(vid);
+                }
+                let template = db
+                    .build_write_template(batch.clone())
+                    .unwrap_or_else(|error| {
+                        panic!("seed {seed:#x} commit {commit}: generator made {error:?}")
+                    });
+                let (bound_blocks, bound_patches) = root_growth_bound(&template);
+                let before = (db.writer.sealed().len(), db.writer.sealed_patches().len());
+                runtime.block_on(db.write(&cx, batch)).unwrap();
+                let after = (db.writer.sealed().len(), db.writer.sealed_patches().len());
+                let (added_blocks, added_patches) = (after.0 - before.0, after.1 - before.1);
+                assert!(
+                    added_blocks <= bound_blocks && added_patches <= bound_patches,
+                    "seed {seed:#x} commit {commit}: sealed {added_blocks} blocks and \
+                     {added_patches} patches, bound {bound_blocks} and {bound_patches}"
+                );
+                both_kinds += usize::from(added_blocks > 0 && added_patches > 0);
+                vids = live_vids;
+                edges.extend(new_edges);
+                next_vid += 4;
+                next_eid += 6;
+                if let Some(eid) = doomed_edge {
+                    edges.retain(|&(live, _, _)| live != eid);
+                }
+                if let Some(vid) = doomed_vertex {
+                    cascades += 1;
+                    vids.retain(|&live| live != vid);
+                    edges.retain(|&(_, src, dst)| src != vid && dst != vid);
+                }
+                if commit == 24 {
+                    runtime.block_on(db.compact(&cx)).unwrap();
+                }
+            }
+            // The law is only as strong as its coverage: every commit sealed
+            // both kinds, and cascades ran.
+            assert_eq!(both_kinds, 48, "seed {seed:#x}");
+            assert_eq!(cascades, 12, "seed {seed:#x}");
+        }
+    }
+
+    /// A vertex delete's cascade retires each incident edge in its own
+    /// source's family. Deleting a hub with 24 in-edges from 24 sources
+    /// seals 24 edge blocks from one row, so a bound that counted only the
+    /// deleted vertex would fall far short.
+    #[test]
+    fn a_hub_delete_is_bounded_by_its_whole_cascade() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+        let hub = VId(1000);
+        let mut setup = WriteBatch::new(RelationId(1));
+        setup.create_vertex(hub, vec![], vec![]);
+        for source in 1..=24 {
+            setup.create_vertex(VId(source), vec![], vec![]);
+            setup.add_edge(EId(source), VId(source), hub, vec![]);
+        }
+        runtime.block_on(db.write(&cx, setup)).unwrap();
+        let mut delete = WriteBatch::new(RelationId(1));
+        delete.delete_vertex(hub);
+        let template = db.build_write_template(delete.clone()).unwrap();
+        let (bound_blocks, bound_patches) = root_growth_bound(&template);
+        let before = (db.writer.sealed().len(), db.writer.sealed_patches().len());
+        runtime.block_on(db.write(&cx, delete)).unwrap();
+        let added = (
+            db.writer.sealed().len() - before.0,
+            db.writer.sealed_patches().len() - before.1,
+        );
+        assert_eq!(added.0, 24, "one retirement block per source family");
+        assert!(added.0 <= bound_blocks && added.1 <= bound_patches);
+        // A deletion retires one statement per element: the bound is tight.
+        assert_eq!((bound_blocks, bound_patches), (24, 1));
+    }
+
+    /// Admission is exact against its bound: a commit that fits exactly is
+    /// admitted, one reference more is refused with the full accounting, and
+    /// the vertex-patch ceiling binds independently of the block ceiling.
+    #[test]
+    fn admission_refuses_one_reference_past_either_ceiling() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+        let mut vertices = WriteBatch::new(RelationId(1));
+        for vid in 1..=3 {
+            vertices.create_vertex(VId(vid), vec![], vec![]);
+        }
+        runtime.block_on(db.write(&cx, vertices)).unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+        batch.add_edge(EId(2), VId(2), VId(3), vec![]);
+        batch.create_vertex(VId(4), vec![], vec![]);
+        batch.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        let template = db.build_write_template(batch).unwrap();
+        // Two creations of one statement each, plus one vertex creation and
+        // one vertex content change (retirement and successor).
+        assert_eq!(root_growth_bound(&template), (2, 3));
+        assert_eq!(admit_root_capacity(98, 7, &template, 100, 10), Ok(()));
+        assert_eq!(
+            admit_root_capacity(99, 7, &template, 100, 10),
+            Err(RootCapacityExceeded {
+                blocks: 99,
+                added_blocks: 2,
+                max_blocks: 100,
+                patches: 7,
+                added_patches: 3,
+                max_patches: 10,
+            })
+        );
+        assert!(admit_root_capacity(0, 8, &template, 100, 10).is_err());
     }
 }
 
