@@ -10,6 +10,9 @@ use fgdb_strata::tiered::memory::spill::PagedSpillRun;
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::sync::Arc;
 
+#[path = "query_spool/sort.rs"]
+mod sort;
+
 #[derive(Debug)]
 pub enum NativeSpoolError {
     Prepare(Box<QueryError>),
@@ -17,6 +20,9 @@ pub enum NativeSpoolError {
     Spill(SpillError),
     Encode(fgdb_types::ScalarEncodeError),
     RowTooLarge { bytes: usize, limit: usize },
+    SortOrder(fgdb_gql::algebra::GraphOrderError),
+    SortRunLimit { required: u64, limit: usize },
+    SortWorkLimit { attempted: u64, limit: u64 },
     IncompleteCursor,
 }
 impl core::fmt::Display for NativeSpoolError {
@@ -26,6 +32,13 @@ impl core::fmt::Display for NativeSpoolError {
             Self::Execute(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
+            Self::SortOrder(e) => e.fmt(f),
+            Self::SortRunLimit { required, limit } => {
+                write!(f, "result sort needs {required} runs, limit {limit}")
+            }
+            Self::SortWorkLimit { attempted, limit } => {
+                write!(f, "result sort needs {attempted} work units, limit {limit}")
+            }
             Self::RowTooLarge { bytes, limit } => write!(
                 f,
                 "result spool row has {bytes} encoded bytes, limit {limit}"
@@ -43,6 +56,7 @@ impl core::error::Error for NativeSpoolError {
             Self::Execute(e) => Some(e.as_ref()),
             Self::Spill(e) => Some(e),
             Self::Encode(e) => Some(e),
+            Self::SortOrder(e) => Some(e),
             _ => None,
         }
     }
@@ -82,7 +96,8 @@ impl NativeSpoolError {
 /// big-endian u64 byte length. Pages may split frames. The reader reassembles
 /// one authenticated frame at a time, without decoding/reinterpreting values.
 /// This is an ephemeral canonical-result/export substrate, not a new durable
-/// format, typed-row decoder, external-memory sort or capability grant.
+/// format, typed-row decoder or capability grant. `sort_into` orders a completed
+/// spool through bounded runs; it does not change the original query's page.
 #[derive(Clone)]
 pub struct NativeResultSpool {
     columns: Arc<[String]>,
