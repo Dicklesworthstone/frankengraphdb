@@ -222,6 +222,7 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::AggregateStream(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::AggregateStream(GqlQueryError::Data(error)),
     }
 }
 

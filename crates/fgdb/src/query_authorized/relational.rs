@@ -26,6 +26,7 @@ fn set_error(error: GqlQueryError<GraphSetExecutionError<ReadError>, QueryError>
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::Set(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::Set(GqlQueryError::Data(error)),
     }
 }
 
@@ -40,6 +41,7 @@ fn aggregate_error(error: GqlQueryError<GraphAggregateError<ReadError>, QueryErr
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::Aggregate(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::Aggregate(GqlQueryError::Data(error)),
     }
 }
 

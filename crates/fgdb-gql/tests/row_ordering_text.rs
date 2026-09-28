@@ -152,7 +152,7 @@ fn text_pages_match_independent_sort_across_nulls_directions_and_multiplicity() 
                                 .execute_with_properties_control(
                                     input,
                                     [],
-                                    |_, _| Ok::<_, ()>(true),
+                                    |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
                                     |vid, _| Ok(Some(&scalars[vid.0 as usize])),
                                     |_| Ok(()),
                                 )
@@ -265,7 +265,7 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
         .execute_with_properties_control(
             [VId(0), VId(1)],
             [],
-            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
             |vid, key| {
                 Ok(Some(if key == SCORE {
                     &scores[vid.0 as usize]
@@ -324,7 +324,7 @@ fn optional_nulls_and_parallel_rows_are_ranked_after_scope_completion() {
         .execute_with_properties_control(
             [VId(0), VId(1), VId(2)],
             edges,
-            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
             |vid, _| {
                 reads += 1;
                 assert!(vid == VId(10) || vid == VId(11));
@@ -392,14 +392,14 @@ fn ranked_pages_do_not_hide_late_source_errors_or_copy_rejected_payloads() {
             |vid, _| {
                 reads += 1;
                 if vid == VId(2) {
-                    Err("late property failure")
+                    Err(GqlQueryError::<_, ()>::Source("late property failure"))
                 } else {
                     Ok(Some(&scores[vid.0 as usize]))
                 }
             },
             |_| Ok(()),
         );
-        assert_eq!(result, Err("late property failure"));
+        assert_eq!(result, Err(GqlQueryError::Source("late property failure")));
         assert_eq!(reads, 3);
     }
 }
@@ -518,7 +518,7 @@ fn all_65_columns_and_utf8_prefixes_preserve_bounded_preparation() {
         .execute_with_properties_control(
             [VId(0), VId(u128::MAX)],
             [],
-            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
             |_, _| Ok(None),
             |_| Ok(()),
         )

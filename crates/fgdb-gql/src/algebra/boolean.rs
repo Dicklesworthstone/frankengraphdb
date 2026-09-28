@@ -656,7 +656,7 @@ impl BoundBooleanExpression {
         bytes
     }
 
-    pub(crate) fn evaluate<'a, E>(
+    pub(crate) fn evaluate<'a, E: From<crate::GraphIntegerError>>(
         &self,
         bindings: &[Option<VId>],
         property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
@@ -671,7 +671,7 @@ impl BoundBooleanExpression {
         )
     }
 
-    pub(crate) fn evaluate_elements<'a, E>(
+    pub(crate) fn evaluate_elements<'a, E: From<crate::GraphIntegerError>>(
         &self,
         bindings: &[Option<VId>],
         paths: &[Option<super::GraphPath>],
@@ -730,8 +730,17 @@ impl BoundBooleanExpression {
                         };
                         values.push(value);
                     }
+                    // An arithmetic data exception (division by zero,
+                    // overflow) raises, as it does in every other family. A
+                    // value that does not fit its operator (a mixed-type
+                    // property), NULL, or a non-Boolean result is UNKNOWN.
                     match expression.evaluate_scalar_with_control(&values, control) {
                         Ok(CanonicalScalar::Bool(value)) => Truth::from(Some(value)),
+                        Err(GraphIntegerEvaluationError::Value(error))
+                            if error.kind.is_arithmetic_exception() =>
+                        {
+                            return Err(E::from(error));
+                        }
                         Ok(_) | Err(GraphIntegerEvaluationError::Value(_)) => Truth::Unknown,
                         Err(GraphIntegerEvaluationError::Control(error)) => return Err(error),
                     }
@@ -884,7 +893,7 @@ impl BoundBooleanExpression {
     /// Admission and execution are checkpointed. All source/control errors
     /// propagate, including reads after true OR/false AND. The definition and
     /// caller's retained state are never mutated. No source scan is performed.
-    pub fn evaluate_vertex_binding<'a, E>(
+    pub fn evaluate_vertex_binding<'a, E: From<crate::GraphIntegerError>>(
         &self,
         bindings: &[Option<VId>],
         property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
@@ -911,6 +920,19 @@ impl BoundBooleanExpression {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caller's own source or control failure, or a data exception the
+    /// evaluator raised. The evaluator never folds the second into the first.
+    #[derive(Debug, PartialEq)]
+    enum Failure<S> {
+        Source(S),
+        Data(crate::GraphIntegerError),
+    }
+    impl<S> From<crate::GraphIntegerError> for Failure<S> {
+        fn from(error: crate::GraphIntegerError) -> Self {
+            Self::Data(error)
+        }
+    }
     use GraphBooleanOp as Op;
     use GraphBooleanOperand as Arg;
 
@@ -953,7 +975,11 @@ mod tests {
                     let actual = program
                         .evaluate(
                             &[],
-                            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("unexpected source"),
+                            &mut |_, _| {
+                                Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                                    "unexpected source",
+                                ))
+                            },
                             &mut |_| Ok(()),
                         )
                         .unwrap();
@@ -996,7 +1022,7 @@ mod tests {
                 let actual = program
                     .evaluate(
                         &[Some(VId(0))],
-                        &mut |_, _| Ok::<_, ()>(value.as_ref()),
+                        &mut |_, _| Ok::<_, Failure<()>>(value.as_ref()),
                         &mut |_| Ok(()),
                     )
                     .unwrap();
@@ -1017,7 +1043,7 @@ mod tests {
         assert!(
             null.evaluate(
                 &[None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("null read"),
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("null read")),
                 &mut |_| Ok(())
             )
             .unwrap()
@@ -1046,11 +1072,11 @@ mod tests {
                 &mut |vid, _| {
                     assert_eq!(vid, VId(u128::MAX));
                     reads += 1;
-                    Err::<Option<&CanonicalScalar>, _>("unreadable")
+                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unreadable"))
                 },
                 &mut |_| Ok(()),
             );
-            assert_eq!(result, Err("unreadable"));
+            assert_eq!(result, Err(Failure::Source("unreadable")));
             assert_eq!(reads, 1);
         }
     }
@@ -1080,7 +1106,7 @@ mod tests {
         maximal.extend(std::iter::repeat_n(Op::And, MAX_PATTERN_PREDICATES - 1));
         assert!(
             bound(&maximal)
-                .evaluate(&[], &mut |_, _| Ok::<_, ()>(None), &mut |_| Ok(()))
+                .evaluate(&[], &mut |_, _| Ok::<_, Failure<()>>(None), &mut |_| Ok(()))
                 .unwrap()
         );
         maximal.insert(0, Op::Truth(None));
@@ -1176,7 +1202,7 @@ mod tests {
             expression
                 .evaluate(
                     &[Some(VId(0)), None],
-                    &mut |_, _| Ok::<_, usize>(Some(&value)),
+                    &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
                     &mut |_| {
                         calls += 1;
                         Ok(())
@@ -1192,10 +1218,14 @@ mod tests {
                 &mut |_, _| Ok(Some(&value)),
                 &mut |_| {
                     at += 1;
-                    if at == stop { Err(stop) } else { Ok(()) }
+                    if at == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(at, stop);
             assert_eq!(expression, before);
         }
@@ -1348,7 +1378,7 @@ mod tests {
         let mut reads = 0;
         let mut source = |_, _| {
             reads += 1;
-            Err::<Option<&CanonicalScalar>, _>("unexpected source")
+            Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected source"))
         };
         assert_eq!(
             expression
@@ -1414,7 +1444,7 @@ mod tests {
             let expected = expression
                 .evaluate(
                     &[Some(VId(1))],
-                    &mut |_, _| Ok::<_, ()>(actual.as_ref()),
+                    &mut |_, _| Ok::<_, Failure<()>>(actual.as_ref()),
                     &mut |_| Ok(()),
                 )
                 .unwrap();
@@ -1422,7 +1452,7 @@ mod tests {
                 expression
                     .evaluate_vertex_binding(
                         &[Some(VId(1))],
-                        &mut |_, _| Ok::<_, ()>(actual.as_ref()),
+                        &mut |_, _| Ok::<_, Failure<()>>(actual.as_ref()),
                         &mut |_| Ok(())
                     )
                     .unwrap(),
@@ -1443,16 +1473,16 @@ mod tests {
         assert_eq!(
             eager.evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"),
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("source")),
                 &mut |_| Ok(())
             ),
-            Err("source")
+            Err(Failure::Source("source"))
         );
         let mut calls = 0;
         let expected = eager
             .evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Ok::<_, usize>(Some(&value)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
                 &mut |_| {
                     calls += 1;
                     Ok(())
@@ -1467,17 +1497,21 @@ mod tests {
                     &mut |_, _| Ok(Some(&value)),
                     &mut |_| {
                         seen += 1;
-                        if seen == stop { Err(stop) } else { Ok(()) }
+                        if seen == stop {
+                            Err(Failure::Source(stop))
+                        } else {
+                            Ok(())
+                        }
                     }
                 ),
-                Err(stop)
+                Err(Failure::Source(stop))
             );
             assert_eq!(seen, stop);
             assert_eq!(
                 eager
                     .evaluate_vertex_binding(
                         &[Some(VId(1))],
-                        &mut |_, _| Ok::<_, usize>(Some(&value)),
+                        &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
                         &mut |_| Ok(())
                     )
                     .unwrap(),

@@ -135,6 +135,7 @@ impl<Checkpoint> Meter<Checkpoint> {
             }
             GqlQueryError::Interrupted(error) => GqlQueryError::Interrupted(error),
             GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+            GqlQueryError::Data(error) => GqlQueryError::Data(error),
             GqlQueryError::Evaluator(error) => {
                 let (used, limit) = match error.dimension {
                     GlaLimitDimension::WorkUnits => (

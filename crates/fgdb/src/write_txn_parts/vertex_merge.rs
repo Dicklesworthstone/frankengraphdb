@@ -204,6 +204,7 @@ fn collect_vertex_merge<E, A, C>(
         Err(GqlQueryError::IdentifiedEdgesRequired) => {
             return Err(GqlQueryError::IdentifiedEdgesRequired);
         }
+        Err(GqlQueryError::Data(error)) => return Err(GqlQueryError::Data(error)),
     };
     let [GraphInsertIntent::Vertex { vertex, .. }] = creation.intents() else {
         unreachable!("validated MERGE creation produces exactly one vertex")

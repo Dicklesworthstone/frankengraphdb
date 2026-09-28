@@ -110,6 +110,7 @@ fn query_error(error: GqlQueryError<ReadError, QueryError>) -> QueryError {
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::Pattern(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::Pattern(GqlQueryError::Data(error)),
     }
 }
 

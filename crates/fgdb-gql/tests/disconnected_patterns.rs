@@ -94,7 +94,7 @@ fn run(
         .execute_with_properties_control(
             vertices.keys().copied(),
             edges.iter().copied(),
-            |vid, predicates| Ok::<_, ()>(matches(vertices, vid, predicates)),
+            |vid, predicates| Ok::<_, GqlQueryError<(), ()>>(matches(vertices, vid, predicates)),
             |vid, key| Ok(property(vertices, vid, key)),
             |_| Ok(()),
         )
@@ -167,7 +167,9 @@ fn independent_sources_are_consumed_once_and_failures_are_not_partial_rows() {
         .execute_with_properties_control(
             vertices.keys().copied().inspect(|_| admitted += 1),
             [],
-            |vid, predicates| Ok::<_, &'static str>(matches(&vertices, vid, predicates)),
+            |vid, predicates| {
+                Ok::<_, GqlQueryError<&'static str, ()>>(matches(&vertices, vid, predicates))
+            },
             |vid, key| Ok(property(&vertices, vid, key)),
             |_| Ok(()),
         )
@@ -180,14 +182,19 @@ fn independent_sources_are_consumed_once_and_failures_are_not_partial_rows() {
         |vid, predicates| Ok(matches(&vertices, vid, predicates)),
         |vid, key| {
             if vid == VId(12) {
-                Err("unreadable independent vertex")
+                Err(GqlQueryError::<_, ()>::Source(
+                    "unreadable independent vertex",
+                ))
             } else {
                 Ok(property(&vertices, vid, key))
             }
         },
         |_| Ok(()),
     );
-    assert_eq!(failed, Err("unreadable independent vertex"));
+    assert_eq!(
+        failed,
+        Err(GqlQueryError::Source("unreadable independent vertex"))
+    );
 }
 
 #[test]
@@ -473,7 +480,7 @@ fn independent_existence_stops_at_first_witness_and_never_converts_failure_to_ab
                 if filing_tests == 1 {
                     Ok(true)
                 } else {
-                    Err("examined after witness")
+                    Err(GqlQueryError::<_, ()>::Source("examined after witness"))
                 }
             },
             |_, _| Ok(None),
@@ -493,13 +500,13 @@ fn independent_existence_stops_at_first_witness_and_never_converts_failure_to_ab
             if predicates == [VertexPredicate::HasLabel(LabelId(1))] {
                 Ok(true)
             } else {
-                Err("source failed")
+                Err(GqlQueryError::<_, ()>::Source("source failed"))
             }
         },
         |_, _| Ok(None),
         |_| Ok(()),
     );
-    assert_eq!(failed, Err("source failed"));
+    assert_eq!(failed, Err(GqlQueryError::Source("source failed")));
     let mut events = 0;
     let stopped = anti.plan().execute_with_properties_control(
         [VId(1)],
@@ -509,13 +516,13 @@ fn independent_existence_stops_at_first_witness_and_never_converts_failure_to_ab
         |event| {
             events += 1;
             if event == GlaExecutionEvent::ScratchEntry {
-                Err("scratch refused")
+                Err(GqlQueryError::<&str, ()>::Source("scratch refused"))
             } else {
                 Ok(())
             }
         },
     );
-    assert_eq!(stopped, Err("scratch refused"));
+    assert_eq!(stopped, Err(GqlQueryError::Source("scratch refused")));
     assert!(events > 0);
 }
 

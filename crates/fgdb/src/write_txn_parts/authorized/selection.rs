@@ -30,6 +30,7 @@ fn selection_error(
         GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
         GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
         GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Data(error) => GqlQueryError::Data(error),
         GqlQueryError::Interrupted(QueryError::Authorization(error)) => {
             GqlQueryError::Interrupted(WriteTxnError::Authorization(error))
         }

@@ -275,7 +275,7 @@ mod tests {
             .execute_with_properties_control(
                 (0..5).map(VId),
                 [],
-                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok::<_, crate::GqlQueryError<(), ()>>(true),
                 |id, _| Ok(Some(&scores[id.0 as usize])),
                 |_| Ok(()),
             )

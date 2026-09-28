@@ -244,6 +244,17 @@ pub enum GraphIntegerErrorKind {
     InvalidSubstring,
     TextConstruction,
 }
+impl GraphIntegerErrorKind {
+    /// An arithmetic data exception (GQL class 22: division by zero, numeric
+    /// overflow) that every statement family raises, a WHERE predicate
+    /// included. The other kinds are a value that does not fit its operator.
+    /// A Boolean predicate reads those as UNKNOWN, so a property holding
+    /// mixed types never escapes as a query error.
+    #[must_use]
+    pub const fn is_arithmetic_exception(self) -> bool {
+        matches!(self, Self::DivisionByZero | Self::Overflow)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphIntegerError {
     pub instruction: usize,

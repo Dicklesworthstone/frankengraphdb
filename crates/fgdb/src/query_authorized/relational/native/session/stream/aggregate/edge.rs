@@ -321,6 +321,7 @@ fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::EdgeAggregateStream(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::EdgeAggregateStream(GqlQueryError::Data(error)),
     }
 }
 
@@ -333,6 +334,7 @@ fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> Que
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::EdgeStream(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::EdgeStream(GqlQueryError::Data(error)),
     }
 }
 

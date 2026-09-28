@@ -389,10 +389,10 @@ fn endpoint_filters_do_not_remove_transit_vertices_and_late_errors_are_not_hidde
         let actual = query.plan().execute_with_properties_control(
             vertices,
             edges,
-            |_, _| Ok::<_, &str>(true),
+            |_, _| Ok::<_, GqlQueryError<&str, ()>>(true),
             |vid, _| {
                 if vid == VId(3) {
-                    Err("late walk property failure")
+                    Err(GqlQueryError::Source("late walk property failure"))
                 } else {
                     Ok(Some(&value))
                 }
@@ -404,7 +404,10 @@ fn endpoint_filters_do_not_remove_transit_vertices_and_late_errors_are_not_hidde
                 Ok(())
             },
         );
-        assert_eq!(actual, Err("late walk property failure"));
+        assert_eq!(
+            actual,
+            Err(GqlQueryError::Source("late walk property failure"))
+        );
         assert_eq!(released, 0);
     }
 }

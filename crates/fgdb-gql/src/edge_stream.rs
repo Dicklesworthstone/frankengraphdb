@@ -715,7 +715,7 @@ impl<'a> Binding<'a> {
     }
 }
 impl EdgeScanPlan {
-    fn test<E>(
+    fn test<E: From<crate::GraphIntegerError>>(
         &self,
         row: &Binding<'_>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,

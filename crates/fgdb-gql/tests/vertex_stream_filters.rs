@@ -10,7 +10,8 @@ use fgdb_gql::stream::{
     VertexScanSource, VertexScanSourceError, VertexScanState,
 };
 use fgdb_gql::{
-    GqlQueryError, GqlQueryPolicy, GraphIntegerBinary, GraphIntegerExpression, GraphIntegerOp as I,
+    GqlQueryError, GqlQueryPolicy, GraphIntegerBinary, GraphIntegerError, GraphIntegerErrorKind,
+    GraphIntegerExpression, GraphIntegerOp as I,
 };
 use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 use std::cell::Cell;
@@ -126,7 +127,9 @@ fn eager(pattern: &PreparedGraphPattern<GraphValueRow>, rows: &[Record]) -> Vec<
             [],
             |vid, predicates| {
                 let row = rows.iter().find(|row| row.vid == vid).unwrap();
-                Ok::<_, ()>(predicates.iter().all(|p| p.matches(&[], &row.properties)))
+                Ok::<_, GqlQueryError<(), ()>>(
+                    predicates.iter().all(|p| p.matches(&[], &row.properties)),
+                )
             },
             |vid, key| {
                 Ok(property(
@@ -427,7 +430,7 @@ fn boolean_identity_led_value_projection_preserves_the_property_payload() {
         .execute_with_properties_control(
             rows.iter().filter(|row| row.visible).map(|row| row.vid),
             [],
-            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
             |vid, key| {
                 Ok(property(
                     rows.iter().find(|row| row.vid == vid).unwrap(),
@@ -600,7 +603,9 @@ fn property_pair_payload_work_is_charged_before_delivery_and_limit_drops_the_sou
 
 fn guarded_scalar() -> GraphIntegerExpression {
     // CASE WHEN p > 0 THEN true ELSE 1 / 0 = 0 END. Positive values must
-    // never evaluate the invalid arm; other values yield UNKNOWN in WHERE.
+    // never evaluate the invalid arm; any other value evaluates it, and the
+    // division by zero raises a data exception, as in every other family
+    // (fgdb-div-zero-families-iq02p). It never reads as UNKNOWN in WHERE.
     GraphIntegerExpression::prepare_scalar(&[
         I::Column(0),
         I::Literal(Some(0)),
@@ -616,9 +621,39 @@ fn guarded_scalar() -> GraphIntegerExpression {
     .unwrap()
 }
 
+/// The rows whose guard holds (visible with p > 0), plus every invisible
+/// row. Only these can pass the guarded scalar without its data exception.
+fn guarded_rows() -> Vec<Record> {
+    rows()
+        .into_iter()
+        .filter(|row| {
+            !row.visible
+                || matches!(property(row, P), Some(CanonicalScalar::Int(value)) if *value > 0)
+        })
+        .collect()
+}
+
+/// The whole fixture reaches the invalid arm through a visible row whose p
+/// is absent, NULL or not positive: the scan raises instead of filtering.
+fn assert_invalid_arm_raises(query: &PreparedGraphPattern<GraphValueRow>) {
+    let scan = VertexScanPlan::compile(query.plan()).unwrap();
+    let result = VertexScanCursor::new(Source::new(&rows()), scan, wide(), || Ok::<_, ()>(()))
+        .map(|row| row.map(identity))
+        .collect::<Result<Vec<_>, _>>();
+    assert!(
+        matches!(
+            result,
+            Err(GqlQueryError::Data(GraphIntegerError {
+                kind: GraphIntegerErrorKind::DivisionByZero,
+                ..
+            }))
+        ),
+        "{result:?}"
+    );
+}
+
 #[test]
 fn scalar_filters_preserve_lazy_case_and_exact_cumulative_scratch_limits() {
-    let rows = rows();
     let scalar = guarded_scalar();
     let columns = [Arg::Property {
         variable: "n",
@@ -630,6 +665,10 @@ fn scalar_filters_preserve_lazy_case_and_exact_cumulative_scratch_limits() {
     }])
     .unwrap();
     let query = prepare(&condition, 0, None);
+    assert_invalid_arm_raises(&query);
+    // Lazy CASE: over rows whose guard holds the scan succeeds, so the
+    // dividing arm was never evaluated for them.
+    let rows = guarded_rows();
     let expected: Vec<_> = rows
         .iter()
         .filter(|row| {
@@ -683,7 +722,6 @@ fn scalar_filters_preserve_lazy_case_and_exact_cumulative_scratch_limits() {
 
 #[test]
 fn a_true_or_operand_does_not_bypass_scalar_work_or_cancellation() {
-    let rows = rows();
     let scalar = guarded_scalar();
     let columns = [Arg::Property {
         variable: "n",
@@ -699,6 +737,10 @@ fn a_true_or_operand_does_not_bypass_scalar_work_or_cancellation() {
     ])
     .unwrap();
     let query = prepare(&condition, 0, Some(1));
+    // TRUE OR does not skip the scalar: the invalid arm is still evaluated,
+    // and its data exception raises through the true left operand.
+    assert_invalid_arm_raises(&query);
+    let rows = guarded_rows();
     let scan = VertexScanPlan::compile(query.plan()).unwrap();
     let calls = Cell::new(0);
     let baseline = VertexScanCursor::new(Source::new(&rows), scan.clone(), wide(), || {

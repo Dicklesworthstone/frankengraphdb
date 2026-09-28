@@ -418,11 +418,14 @@ fn closures_do_not_elide_observable_projections_or_aggregate_visitors() {
     let result = properties.plan().execute_with_properties_control(
         [],
         filtered_edges(directions, 2, 2),
-        |vid, predicates| Ok::<_, &str>(visible(vid, predicates)),
-        |_, _| Err("projection failed"),
+        |vid, predicates| Ok::<_, crate::GqlQueryError<&str, ()>>(visible(vid, predicates)),
+        |_, _| Err(crate::GqlQueryError::Source("projection failed")),
         |_| Ok(()),
     );
-    assert_eq!(result, Err("projection failed"));
+    assert_eq!(
+        result,
+        Err(crate::GqlQueryError::Source("projection failed"))
+    );
 
     let unbounded = builder
         .prepare_bindings(&["c"], 0, None)
@@ -457,9 +460,11 @@ fn closures_do_not_elide_observable_projections_or_aggregate_visitors() {
         .visit_value_bindings(
             [],
             edges,
-            |vid, predicates| Ok::<_, Infallible>(visible(vid, predicates)),
+            |vid, predicates| {
+                Ok::<_, crate::GqlQueryError<Infallible, ()>>(visible(vid, predicates))
+            },
             |_, _| Ok(None),
-            allow,
+            |_| Ok(()),
             |_, _, _, _| {
                 count += 1;
                 Ok(())

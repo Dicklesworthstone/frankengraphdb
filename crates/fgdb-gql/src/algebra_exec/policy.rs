@@ -59,6 +59,17 @@ pub enum GqlQueryError<E, C> {
     Evaluator(GlaLimitExceeded),
     Interrupted(C),
     IdentifiedEdgesRequired,
+    /// A predicate's scalar expression raised an arithmetic data exception
+    /// (GQL class 22: division by zero, numeric overflow; see
+    /// `GraphIntegerErrorKind::is_arithmetic_exception`). It never reads as
+    /// UNKNOWN or a filtered row.
+    Data(crate::GraphIntegerError),
+}
+
+impl<E, C> From<crate::GraphIntegerError> for GqlQueryError<E, C> {
+    fn from(error: crate::GraphIntegerError) -> Self {
+        Self::Data(error)
+    }
 }
 
 impl<E, C> GqlQueryError<E, C> {
@@ -69,6 +80,7 @@ impl<E, C> GqlQueryError<E, C> {
             Self::Evaluator(error) => GqlQueryError::Evaluator(error),
             Self::Interrupted(error) => GqlQueryError::Interrupted(error),
             Self::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+            Self::Data(error) => GqlQueryError::Data(error),
         }
     }
 }
@@ -80,6 +92,7 @@ impl<E: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for GqlQue
             Self::Evaluator(error) => core::fmt::Display::fmt(error, f),
             Self::Interrupted(error) => write!(f, "query interrupted: {error}"),
             Self::IdentifiedEdgesRequired => f.write_str("captured paths require identified edges"),
+            Self::Data(error) => write!(f, "data exception: {error}"),
         }
     }
 }
@@ -93,6 +106,7 @@ impl<E: core::error::Error + 'static, C: core::error::Error + 'static> core::err
             Self::Evaluator(error) => Some(error),
             Self::Interrupted(error) => Some(error),
             Self::IdentifiedEdgesRequired => None,
+            Self::Data(error) => Some(error),
         }
     }
 }

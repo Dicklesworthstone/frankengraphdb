@@ -47,6 +47,7 @@ impl WriteTxn {
             Err(GqlQueryError::IdentifiedEdgesRequired) => {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
+            Err(GqlQueryError::Data(error)) => return Err(GqlQueryError::Data(error)),
         };
 
         let (stats, batch) = vertex_upsert_actions::<WriteTxnError, A, _>(

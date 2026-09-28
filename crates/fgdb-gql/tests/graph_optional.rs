@@ -849,7 +849,7 @@ fn seeded_optional_chains_preserve_bags_and_governed_events() {
             .execute_with_properties_control(
                 [VId(0)],
                 edges.iter().copied(),
-                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
                 |_, _| Ok(None),
                 |event| {
                     events.push(event);

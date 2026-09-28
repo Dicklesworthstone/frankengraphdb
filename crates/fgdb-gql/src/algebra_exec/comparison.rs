@@ -10,7 +10,7 @@ use fgdb_types::{CanonicalScalar, VId};
 /// Mixed vertex/captured-edge scalar comparisons execute through the same
 /// three-valued engine once bound; each read names its disjoint identity
 /// domain and an unreadable source always propagates.
-pub(crate) fn compare_element_properties<'a, E>(
+pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     paths: &[Option<crate::algebra::GraphPath>],
@@ -73,7 +73,7 @@ pub(crate) fn compare_element_properties<'a, E>(
     control(GlaExecutionEvent::Work)?;
     Ok(comparison.accepts_scalar_pair(left, right))
 }
-pub(crate) fn compare_properties<'a, E>(
+pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
@@ -138,6 +138,19 @@ pub(crate) fn charge_payload<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caller's own source or control failure, or a data exception the
+    /// evaluator raised. The evaluator never folds the second into the first.
+    #[derive(Debug, PartialEq)]
+    enum Failure<S> {
+        Source(S),
+        Data(crate::GraphIntegerError),
+    }
+    impl<S> From<crate::GraphIntegerError> for Failure<S> {
+        fn from(error: crate::GraphIntegerError) -> Self {
+            Self::Data(error)
+        }
+    }
     use crate::algebra::{BindingSlot, IntegerComparison};
 
     fn comparison() -> GlaOperator {
@@ -161,18 +174,20 @@ mod tests {
                 if vid == VId(1) {
                     Ok(None)
                 } else {
-                    Err("right source failed")
+                    Err(Failure::Source("right source failed"))
                 }
             },
             &mut |_| Ok(()),
         );
-        assert_eq!(result, Err("right source failed"));
+        assert_eq!(result, Err(Failure::Source("right source failed")));
         assert_eq!(reads, 2);
         assert!(
             !compare_properties(
                 &comparison(),
                 &[Some(VId(1)), None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("must not read null bindings"),
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                    "must not read null bindings"
+                )),
                 &mut |_| Ok(())
             )
             .unwrap()
@@ -188,7 +203,7 @@ mod tests {
         let complete = compare_properties(
             &comparison(),
             &[Some(VId(0)), Some(VId(1))],
-            &mut |vid, _| Ok::<_, usize>(Some(values[vid.0 as usize])),
+            &mut |vid, _| Ok::<_, Failure<usize>>(Some(values[vid.0 as usize])),
             &mut |event| {
                 assert_eq!(event, GlaExecutionEvent::Work);
                 events += 1;
@@ -207,13 +222,17 @@ mod tests {
             let result = compare_properties(
                 &comparison(),
                 &[Some(VId(0)), Some(VId(1))],
-                &mut |vid, _| Ok::<_, usize>(Some(values[vid.0 as usize])),
+                &mut |vid, _| Ok::<_, Failure<usize>>(Some(values[vid.0 as usize])),
                 &mut |_| {
                     at += 1;
-                    if at == stop { Err(stop) } else { Ok(()) }
+                    if at == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(at, stop);
         }
     }
@@ -225,9 +244,13 @@ mod tests {
                 &comparison(),
                 &bindings,
                 &[],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("unexpected vertex read"),
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("unexpected edge read"),
-                &mut |_| Err("unexpected work for null bindings"),
+                &mut |_, _| {
+                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected vertex read"))
+                },
+                &mut |_, _| {
+                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected edge read"))
+                },
+                &mut |_| Err(Failure::Source("unexpected work for null bindings")),
             );
             assert_eq!(result, Ok(false));
         }
@@ -245,13 +268,13 @@ mod tests {
                 if vid == VId(1) {
                     Ok(None)
                 } else {
-                    Err("right source failed")
+                    Err(Failure::Source("right source failed"))
                 }
             },
-            &mut |_, _| Err("unexpected edge read"),
+            &mut |_, _| Err(Failure::Source("unexpected edge read")),
             &mut |_| Ok(()),
         );
-        assert_eq!(result, Err("right source failed"));
+        assert_eq!(result, Err(Failure::Source("right source failed")));
         assert_eq!(reads, vec![VId(1), VId(2)]);
     }
 
@@ -273,10 +296,14 @@ mod tests {
                 &mut |event| {
                     assert_eq!(event, GlaExecutionEvent::Work);
                     events += 1;
-                    if events == stop { Err(stop) } else { Ok(()) }
+                    if events == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(events, stop);
             assert_eq!(reads, stop - 1);
         }

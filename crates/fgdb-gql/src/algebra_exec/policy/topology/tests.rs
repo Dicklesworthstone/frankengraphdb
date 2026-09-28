@@ -159,8 +159,8 @@ fn all_public_governed_value_adapters_select_the_same_topology_plan() {
         .execute_with_properties_control(
             [],
             input.clone(),
-            |_, _| Ok::<_, &str>(true),
-            |_, _| Err("property read"),
+            |_, _| Ok::<_, crate::GqlQueryError<&str, ()>>(true),
+            |_, _| Err(crate::GqlQueryError::Source("property read")),
             |_| Ok(()),
         )
         .unwrap();

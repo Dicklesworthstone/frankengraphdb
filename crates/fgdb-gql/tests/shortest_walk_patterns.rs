@@ -304,7 +304,7 @@ fn optional_and_existence_scopes_keep_shortest_mode_and_real_null_absence() {
         .execute_with_properties_control(
             vertices,
             edges,
-            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
             |_, _| Ok(None),
             |_| Ok(()),
         )
@@ -351,7 +351,7 @@ fn optional_and_existence_scopes_keep_shortest_mode_and_real_null_absence() {
             .execute_with_properties_control(
                 vertices,
                 edges,
-                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
                 |_, _| Ok(None),
                 |_| Ok(()),
             )

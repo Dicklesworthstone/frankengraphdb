@@ -592,6 +592,7 @@ fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> 
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::Stream(GqlQueryError::IdentifiedEdgesRequired)
         }
+        GqlQueryError::Data(error) => QueryError::Stream(GqlQueryError::Data(error)),
     }
 }
 

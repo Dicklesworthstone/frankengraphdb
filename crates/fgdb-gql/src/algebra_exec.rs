@@ -1043,7 +1043,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     /// Project borrowed canonical properties from the same immutable source as
     /// predicate reads. A property failure propagates unchanged, never as null.
     /// Execute captured values against admitted, real edge identities.
-    pub fn execute_with_identified_properties_control<'a, E>(
+    pub fn execute_with_identified_properties_control<'a, E: From<crate::GraphIntegerError>>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
@@ -1096,7 +1096,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
 
     /// Execute scalar properties in their disjoint vertex and edge identity domains.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_with_element_properties_control<'a, E>(
+    pub fn execute_with_element_properties_control<'a, E: From<crate::GraphIntegerError>>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
@@ -1162,7 +1162,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
 
     /// None means an absent property, not an unreadable source. The resolver's
     /// returned references must remain stable throughout this execution.
-    pub fn execute_with_properties_control<'a, E>(
+    pub fn execute_with_properties_control<'a, E: From<crate::GraphIntegerError>>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,

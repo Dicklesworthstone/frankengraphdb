@@ -217,7 +217,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
 /// language. Both its property callback and its instruction/payload controls
 /// borrow the SAME meter, briefly and sequentially. No RefCell borrow survives
 /// a callback, so a property lookup cannot re-enter a borrowed control.
-fn accepts_binding<E>(
+fn accepts_binding<E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     vid: VId,
     row: VertexScanRow<'_>,

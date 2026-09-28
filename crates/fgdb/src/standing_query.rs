@@ -85,7 +85,17 @@ pub enum StandingQueryFailure {
         column: usize,
         error: fgdb_gql::GraphIntegerError,
     },
+    /// A WHERE scalar raised a data exception (division by zero, overflow).
+    /// A one-shot read of the same definition raises it too, so maintenance
+    /// never filters the binding instead.
+    PredicateExpression(fgdb_gql::GraphIntegerError),
     InvalidDelta,
+}
+
+impl From<fgdb_gql::GraphIntegerError> for StandingQueryFailure {
+    fn from(error: fgdb_gql::GraphIntegerError) -> Self {
+        Self::PredicateExpression(error)
+    }
 }
 
 #[derive(Debug)]

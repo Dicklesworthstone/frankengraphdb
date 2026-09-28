@@ -244,7 +244,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
     /// scans, expansion, predicates, caches and cancellation remain the SAME
     /// evaluator, and no public callback can replace query semantics.
     /// Binding selections and aggregate arguments share one property resolver.
-    pub(crate) fn visit_value_bindings<'a, E, F, C, P, R>(
+    pub(crate) fn visit_value_bindings<'a, E: From<crate::GraphIntegerError>, F, C, P, R>(
         &self,
         vertices: impl IntoIterator<Item = fgdb_types::VId>,
         edges: impl IntoIterator<
