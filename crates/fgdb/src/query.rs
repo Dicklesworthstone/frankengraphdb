@@ -27,6 +27,8 @@ mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
+pub use prism::ProcedureError;
+pub(crate) use prism::fnx_procedure;
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.

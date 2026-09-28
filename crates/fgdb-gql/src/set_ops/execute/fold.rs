@@ -45,10 +45,7 @@ impl PreparedGraphSet {
     pub(crate) fn fold_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        mut source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut source: impl GraphSetSource<E, C>,
         checkpoint: impl FnMut() -> Result<(), C>,
         mut consume: impl FnMut(
             GraphValueRow,

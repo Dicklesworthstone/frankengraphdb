@@ -412,7 +412,8 @@ fn graph_sources_execute_once_and_share_snapshot_admission() {
         let scalar = CanonicalScalar::Int(3);
         let result = q.execute_relational_with_source(
             GqlQueryPolicy::new(max_snapshot, 1, 100_000, 10_000),
-            |pattern, remaining| {
+            |pattern: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+             remaining: crate::GqlQueryPolicy| {
                 calls += 1;
                 pattern.plan().execute_governed_with_properties(
                     2,
@@ -462,7 +463,8 @@ fn later_right_source_failure_precedes_an_invalid_left_sum_even_at_limit_zero() 
     let mut calls = 0;
     let result = q.execute_relational_with_source(
         wide(),
-        |_, _| {
+        |_: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+         _: crate::GqlQueryPolicy| {
             calls += 1;
             Err(GqlQueryError::Source("right failed"))
         },

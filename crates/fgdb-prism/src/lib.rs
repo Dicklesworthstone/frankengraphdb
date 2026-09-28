@@ -38,9 +38,10 @@ mod traversal;
 
 pub use call::{
     FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
-    FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxGraphKind, FnxImplementationClass,
-    FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType, FnxParameters, FnxSignature,
-    FnxSignatureRegistry, MAX_FNX_CALL_BYTES, PageRankOptions,
+    FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
+    FnxGraphKind, FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec,
+    FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, MAX_FNX_CALL_BYTES,
+    PageRankOptions,
 };
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{

@@ -248,7 +248,8 @@ fn upstream_failure_precedes_a_discarded_constant_error_and_sources_are_not_retr
     let mut calls = 0;
     let result = q.execute_relational_with_source(
         wide(),
-        |_, _| {
+        |_: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+         _: crate::GqlQueryPolicy| {
             calls += 1;
             Err(GqlQueryError::Source("upstream"))
         },

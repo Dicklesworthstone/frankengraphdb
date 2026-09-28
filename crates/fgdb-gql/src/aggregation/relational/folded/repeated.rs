@@ -159,10 +159,7 @@ impl PreparedGraphAggregate {
         &self,
         columns: &[usize],
         policy: GqlQueryPolicy,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         let mut groups = Groups::new();

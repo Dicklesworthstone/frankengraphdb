@@ -45,11 +45,21 @@ mod set_aggregate_queries {
                 .map_err(|error| {
                     GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
                 })?;
+            // A CALL input runs in Prism at this same sequence.
             cx.with_restriction(|| {
-                query.execute_governed(
+                query.execute_governed_with_procedures(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    |call, arguments, remaining| {
+                        crate::query::fnx_procedure(
+                            call,
+                            arguments,
+                            as_of,
+                            remaining,
+                            |spec, options| self.execute_fnx(cx, spec, options),
+                        )
                     },
                     || cx.checkpoint(),
                 )
@@ -83,10 +93,19 @@ mod set_aggregate_queries {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
             cx.with_restriction(|| {
-                query.execute_governed(
+                query.execute_governed_with_procedures(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    |call, arguments, remaining| {
+                        crate::query::fnx_procedure(
+                            call,
+                            arguments,
+                            as_of,
+                            remaining,
+                            |spec, options| self.execute_fnx(cx, spec, options),
+                        )
                     },
                     || cx.checkpoint(),
                 )

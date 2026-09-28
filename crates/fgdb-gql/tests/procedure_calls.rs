@@ -297,3 +297,68 @@ fn the_call_is_part_of_the_relation_identity() {
         );
     }
 }
+
+/// Graph VId(i) has p = values[i]; any property read of `p` sees it.
+fn graph(
+    values: &[CanonicalScalar],
+) -> impl FnMut(&fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy) -> Rows + '_
+{
+    move |pattern, remaining| {
+        pattern.plan().execute_governed_with_properties(
+            values.len() as u64,
+            (0..values.len()).map(|at| VId(at as u128)),
+            [],
+            |vid, predicates| {
+                Ok::<_, &'static str>(
+                    predicates
+                        .iter()
+                        .all(|test| test.matches(&[], &[(P, values[vid.0 as usize].clone())])),
+                )
+            },
+            |vid, _| Ok(Some(&values[vid.0 as usize])),
+            remaining,
+            || Ok::<_, usize>(()),
+        )
+    }
+}
+
+#[test]
+fn a_match_vertex_reusing_a_yielded_name_is_that_vertex_not_a_cross_product() {
+    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let run = |text: &str| {
+        prepare(text, &GqlParameters::new())
+            .execute_governed_with_procedures(
+                wide(),
+                graph(&values),
+                |call, arguments, _| host(call, arguments),
+                || Ok(()),
+            )
+            .unwrap()
+            .value
+    };
+    let vertex = |id| GraphValue::Vertex(VId(id));
+    // t.scores() yields (1,1), (2,3), (3,2), (4,5); all four vertices exist.
+    let joined =
+        run("CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN n, score ORDER BY score");
+    assert_eq!(column(&joined, 0), [1, 3, 2, 4].map(vertex));
+    let properties = run("CALL t.scores() YIELD vertex AS n, score MATCH (n) \
+         WITH n.p AS p, score RETURN p, score ORDER BY score");
+    assert_eq!(column(&properties, 0), [20, 40, 30, 50].map(int));
+    let star = run("CALL t.scores() YIELD vertex AS n MATCH (n) WITH * RETURN n");
+    assert_eq!(star.len(), 4);
+    assert_eq!(star[0].len(), 1);
+    // Control: a fresh MATCH name is the full product, 4 x 5 rows.
+    assert_eq!(
+        run("CALL t.scores() YIELD vertex MATCH (n) RETURN vertex, n").len(),
+        20
+    );
+    for text in [
+        "CALL t.scores() YIELD vertex AS r MATCH ()-[r]->() RETURN r",
+        "CALL t.scores() YIELD vertex AS q MATCH q = (a)-[]->(b) RETURN q",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "an edge or path rebound a yielded name: {text}"
+        );
+    }
+}

@@ -2797,3 +2797,51 @@ fn search_lanes_equal_the_library_and_pin_history() {
     )
     .failure(3, "query");
 }
+
+#[test]
+fn a_composed_prism_call_is_an_ordinary_query_over_the_whole_graph() {
+    let db = TestDb::new("prism-composed");
+    db.create();
+    // A->B, B->C, C->A, A->C: PageRank ranks C above A above B.
+    db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(a),(a)-[:KNOWS]->(c)",
+    ]);
+    // The composed form's rows equal the standalone call's, cell for cell.
+    let (_, standalone) = analytics(&db, &["CALL fnx.pagerank() YIELD vertex, score"]);
+    let (columns, composed) = analytics(
+        &db,
+        &["CALL fnx.pagerank() YIELD vertex, score RETURN vertex, score ORDER BY vertex"],
+    );
+    assert_eq!(columns, ["vertex", "score"]);
+    assert_eq!(composed.len(), 3);
+    assert_eq!(composed, standalone);
+    // A yielded vertex joins its own properties.
+    let (columns, ranked) = analytics(
+        &db,
+        &[
+            "CALL fnx.pagerank() YIELD vertex AS n, score MATCH (n:Person) \
+           WITH n.name AS name, score RETURN name, score ORDER BY score DESC",
+        ],
+    );
+    assert_eq!(columns, ["name", "score"]);
+    let names: Vec<_> = ranked.iter().map(|row| row[0].1.as_str()).collect();
+    assert_eq!(names, ["C", "A", "B"]);
+    // Aggregates compose too: one weak component.
+    let (_, count) = analytics(
+        &db,
+        &["CALL fnx.weakly_connected_components() YIELD component \
+           RETURN COUNT(DISTINCT component) AS c"],
+    );
+    assert_eq!(count, [vec![("count".to_owned(), "1".to_owned())]]);
+    // The composed form reads the whole graph: projection flags are refused.
+    db.command(
+        "query",
+        &[
+            "--graph-relation",
+            "KNOWS",
+            "CALL fnx.pagerank() YIELD vertex, score RETURN vertex",
+        ],
+    )
+    .failure(2, "usage");
+}

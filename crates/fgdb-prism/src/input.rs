@@ -2,8 +2,9 @@
 //! recipes, not secure-view constructors or capabilities.
 
 use crate::{
-    FnxBindError, FnxExecutionError, FnxExecutionLimits, FnxResult, ProjectionError,
-    ProjectionLimits, ProjectionSpec,
+    Directedness, FnxBindError, FnxCallSpec, FnxExecutionError, FnxExecutionLimits, FnxGraphKind,
+    FnxResult, ParallelEdgePolicy, ProjectionError, ProjectionLimits, ProjectionSpec,
+    SelfLoopPolicy,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -137,6 +138,64 @@ pub struct FnxReadOptions {
     pub source_limits: FnxSourceLimits,
     pub projection_limits: ProjectionLimits,
     pub execution_limits: FnxExecutionLimits,
+}
+impl FnxReadOptions {
+    /// Finite default admission for one call. These bound logical work and
+    /// staging, not allocator bytes.
+    pub const DEFAULT_SOURCE_LIMITS: FnxSourceLimits = FnxSourceLimits {
+        max_work_units: 100_000_000,
+        max_scratch_entries: 10_000_000,
+        max_staging_bytes: 1 << 30,
+    };
+    pub const DEFAULT_PROJECTION_LIMITS: ProjectionLimits = ProjectionLimits {
+        max_vertices: 10_000_000,
+        max_input_edges: 100_000_000,
+        max_adjacency_entries: 200_000_000,
+        max_workspace_bytes: 4 << 30,
+    };
+    pub const DEFAULT_EXECUTION_LIMITS: FnxExecutionLimits = FnxExecutionLimits {
+        max_iterations: 100_000,
+        max_result_rows: 10_000_000,
+        max_estimated_work: 1 << 40,
+    };
+
+    /// The canonical whole graph: every vertex and relation, unit weights,
+    /// directed, parallel edges refused (no implicit multigraph collapse),
+    /// self-loops kept, default admission. The CLI's projection flags start
+    /// from it; a GQL `CALL` reads [`Self::whole_graph_for`] its signature.
+    #[must_use]
+    pub const fn whole_graph(as_of: Option<CommitSeq>) -> Self {
+        Self {
+            as_of,
+            selection: FnxSelection {
+                vertex_label: None,
+                relation: None,
+                weight: FnxWeightSpec::Unit,
+            },
+            projection: ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Reject,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            source_limits: Self::DEFAULT_SOURCE_LIMITS,
+            projection_limits: Self::DEFAULT_PROJECTION_LIMITS,
+            execution_limits: Self::DEFAULT_EXECUTION_LIMITS,
+        }
+    }
+
+    /// [`Self::whole_graph`] read in the direction `call`'s signature law
+    /// requires: an undirected-law procedure (connected components,
+    /// triangles, clustering) reads every edge undirected, every other one
+    /// reads it directed. A reciprocal pair then projects to a parallel
+    /// edge, which is refused, not collapsed.
+    #[must_use]
+    pub fn whole_graph_for(call: &FnxCallSpec, as_of: Option<CommitSeq>) -> Self {
+        let mut options = Self::whole_graph(as_of);
+        if call.signature().graph_kind == FnxGraphKind::Undirected {
+            options.projection.directedness = Directedness::Undirected;
+        }
+        options
+    }
 }
 
 #[derive(Debug)]

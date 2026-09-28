@@ -98,10 +98,7 @@ impl PreparedGraphSet {
     pub(crate) fn count_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        mut source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut source: impl GraphSetSource<E, C>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<(Option<u64>, GqlExecutionStats, GlaExecutionStats), E, C> {
         let mut meter = Meter {

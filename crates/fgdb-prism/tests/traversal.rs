@@ -529,3 +529,36 @@ fn strong_components_handle_a_deep_chain_and_large_cycle_without_recursion() {
     let cycle = execute(&call, &graph(&vertices, &edges, Directedness::Directed));
     assert!(labels(cycle).values().all(|&component| component == VId(0)));
 }
+
+#[test]
+fn only_a_tail_after_the_yield_list_makes_a_call_a_read_pipeline() {
+    for text in [
+        "CALL fnx.pagerank() YIELD vertex RETURN vertex",
+        "CALL fnx.pagerank() YIELD vertex AS n MATCH (n) RETURN n",
+        "CALL fnx.single_source_shortest_path_length($s) YIELD vertex, distance \
+         WHERE distance > 1 RETURN vertex",
+        "CALL fnx.pagerank() RETURN 1 AS x",
+    ] {
+        assert!(FnxCallSpec::continues_past_call(text), "{text}");
+    }
+    for text in [
+        "CALL fnx.pagerank()",
+        "CALL fnx.pagerank() YIELD vertex, score AS rank;",
+        "CALL fnx.single_source_shortest_path_length($s) YIELD *",
+        // Malformed or unknown: the standalone binder owns the refusal.
+        "CALL fnx.no_such_procedure() YIELD vertex RETURN vertex",
+        "CALL fnx.pagerank(",
+    ] {
+        assert!(!FnxCallSpec::continues_past_call(text), "{text}");
+    }
+    // Structure only: an unbound parameter still binds as missing.
+    assert_eq!(
+        FnxCallSpec::bind(
+            "CALL fnx.single_source_shortest_path_length($s) YIELD vertex",
+            &FnxParameters::new()
+        )
+        .unwrap_err()
+        .kind,
+        FnxBindErrorKind::MissingParameter
+    );
+}

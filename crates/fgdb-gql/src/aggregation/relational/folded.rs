@@ -156,10 +156,7 @@ impl PreparedGraphAggregate {
     pub(super) fn execute_relational_folded<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         let relation = self

@@ -283,6 +283,41 @@ impl core::fmt::Display for FnxBindError {
 }
 impl core::error::Error for FnxBindError {}
 
+/// Where a typed binding failed. The text binder maps a site to its byte
+/// offset; a GQL `CALL` maps it to its argument or YIELD item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FnxCallSite {
+    /// The call as a whole (a jointly invalid option set).
+    Call,
+    Procedure,
+    /// After the last supplied argument: a required parameter was omitted.
+    Arguments,
+    Argument(usize),
+    Yield(usize),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnxCallError {
+    pub site: FnxCallSite,
+    pub kind: FnxBindErrorKind,
+}
+impl core::fmt::Display for FnxCallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "Prism CALL bind error at {:?}: {:?}",
+            self.site, self.kind
+        )
+    }
+}
+impl core::error::Error for FnxCallError {}
+
+fn registered(namespace: &str, name: &str) -> Option<&'static FnxSignature> {
+    SIGNATURES.iter().find(|signature| {
+        // ubs:ignore -- public procedure-signature names, not secret material.
+        namespace == "fnx" && signature.name.strip_prefix("fnx.") == Some(name)
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageRankOptions {
     alpha: f64,
@@ -434,7 +469,30 @@ impl FnxCallSpec {
         self.digest
     }
 
+    /// Parse `CALL fnx.<name>(args) [YIELD field [AS alias], ... | YIELD *]`
+    /// and bind it through [`Self::from_arguments`], the one typed resolution
+    /// every CALL surface shares.
     pub fn bind(text: &str, parameters: &FnxParameters) -> Result<Self, FnxBindError> {
+        Self::bind_text(text, Some(parameters))
+    }
+
+    /// Whether `text` is a CALL that continues past its YIELD list (WHERE,
+    /// WITH, MATCH, RETURN, ...): a read pipeline for the GQL engine, not a
+    /// standalone call for [`Self::bind`]. Only structure is read; a `$name`
+    /// argument needs no value, and the tail is found before any resolution.
+    #[must_use]
+    pub fn continues_past_call(text: &str) -> bool {
+        matches!(
+            Self::bind_text(text, None),
+            Err(FnxBindError {
+                kind: FnxBindErrorKind::TrailingInput,
+                ..
+            })
+        )
+    }
+
+    /// `parameters: None` reads every `$name` as NULL: structure only.
+    fn bind_text(text: &str, parameters: Option<&FnxParameters>) -> Result<Self, FnxBindError> {
         if text.len() > MAX_FNX_CALL_BYTES {
             return Err(FnxBindError {
                 at: MAX_FNX_CALL_BYTES,
@@ -446,43 +504,112 @@ impl FnxCallSpec {
         let namespace = parser.word()?;
         parser.expect(b'.', ".")?;
         let procedure = parser.word()?;
-        let signature = SIGNATURES
-            .iter()
-            .find(|signature| {
-                // ubs:ignore -- public procedure-signature names, not secret material.
-                namespace == "fnx" && signature.name.strip_prefix("fnx.") == Some(procedure)
-            })
+        let procedure_at = parser.pos;
+        let signature = registered(namespace, procedure)
             .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownProcedure))?;
         parser.expect(b'(', "(")?;
-        let mut arguments = [FnxArgument::Null; 4];
-        let mut positions = [parser.pos; 4];
-        let mut count = 0;
+        let mut arguments = Vec::with_capacity(signature.parameters.len());
+        let mut positions = Vec::with_capacity(signature.parameters.len());
         if !parser.take(b')') {
             loop {
-                if count == signature.parameters.len() {
+                if arguments.len() == signature.parameters.len() {
                     return Err(parser.error(FnxBindErrorKind::TooManyArguments));
                 }
                 parser.space();
-                positions[count] = parser.pos;
-                arguments[count] = parser.argument(parameters)?;
-                count += 1;
+                positions.push(parser.pos);
+                arguments.push(parser.argument(parameters)?);
                 if parser.take(b')') {
                     break;
                 }
                 parser.expect(b',', ", or )")?;
             }
         }
-        for index in count..signature.parameters.len() {
-            arguments[index] = signature.parameters[index].default.ok_or_else(|| {
-                parser.error(FnxBindErrorKind::MissingArgument(
-                    signature.parameters[index].name,
-                ))
-            })?;
+        let arguments_end = parser.pos;
+        let mut yields = Vec::new();
+        let mut yield_at = Vec::new();
+        if parser.keyword("YIELD") && !parser.take(b'*') {
+            loop {
+                let name = parser.word()?;
+                let name_end = parser.pos;
+                let alias = if parser.keyword("AS") {
+                    parser.word()?
+                } else {
+                    name
+                };
+                yields.push((name, alias));
+                yield_at.push((name_end, parser.pos));
+                if !parser.take(b',') {
+                    break;
+                }
+            }
         }
-        let invalid = |index, message| FnxBindError {
-            at: positions[index],
-            kind: FnxBindErrorKind::InvalidArgument(message),
+        parser.take(b';');
+        parser.space();
+        if parser.pos != text.len() {
+            return Err(parser.error(FnxBindErrorKind::TrailingInput));
+        }
+        Self::from_arguments(namespace, procedure, &arguments, &yields).map_err(|error| {
+            let at = match error.site {
+                FnxCallSite::Call => 0,
+                FnxCallSite::Procedure => procedure_at,
+                FnxCallSite::Arguments => arguments_end,
+                FnxCallSite::Argument(index) => {
+                    positions.get(index).copied().unwrap_or(arguments_end)
+                }
+                FnxCallSite::Yield(index) => match yield_at.get(index) {
+                    Some(&(name_end, _)) if error.kind == FnxBindErrorKind::UnknownYield => {
+                        name_end
+                    }
+                    Some(&(_, item_end)) => item_end,
+                    None => arguments_end,
+                },
+            };
+            FnxBindError {
+                at,
+                kind: error.kind,
+            }
+        })
+    }
+
+    /// Bind a registered procedure from typed positional arguments. Omitted
+    /// trailing parameters take their declared defaults and a required one
+    /// refuses. `yields` names distinct outputs as `(field, alias)` in result
+    /// order; empty means every output in declared order.
+    pub fn from_arguments(
+        namespace: &str,
+        name: &str,
+        supplied: &[FnxArgument],
+        yields: &[(&str, &str)],
+    ) -> Result<Self, FnxCallError> {
+        let error = |site, kind| FnxCallError { site, kind };
+        let signature = registered(namespace, name)
+            .ok_or_else(|| error(FnxCallSite::Procedure, FnxBindErrorKind::UnknownProcedure))?;
+        if supplied.len() > signature.parameters.len() {
+            return Err(error(
+                FnxCallSite::Argument(signature.parameters.len()),
+                FnxBindErrorKind::TooManyArguments,
+            ));
+        }
+        let mut arguments = [FnxArgument::Null; 4];
+        for (index, parameter) in signature.parameters.iter().enumerate() {
+            arguments[index] = match supplied.get(index) {
+                Some(&argument) => argument,
+                None => parameter.default.ok_or_else(|| {
+                    error(
+                        FnxCallSite::Arguments,
+                        FnxBindErrorKind::MissingArgument(parameter.name),
+                    )
+                })?,
+            };
+        }
+        let invalid = |index, message| {
+            error(
+                FnxCallSite::Argument(index),
+                FnxBindErrorKind::InvalidArgument(message),
+            )
         };
+        // Option validators judge the call as a whole, not one argument.
+        let whole = |failure: FnxBindError| error(FnxCallSite::Call, failure.kind);
         let algorithm = match signature.name {
             "fnx.pagerank" => {
                 let alpha = float_argument(arguments[0])
@@ -497,7 +624,9 @@ impl FnxCallSpec {
                 let FnxArgument::Boolean(weighted) = arguments[3] else {
                     return Err(invalid(3, "boolean weighted required"));
                 };
-                FnxAlgorithm::PageRank(PageRankOptions::new(alpha, max_iter, tol, weighted)?)
+                FnxAlgorithm::PageRank(
+                    PageRankOptions::new(alpha, max_iter, tol, weighted).map_err(whole)?,
+                )
             }
             "fnx.single_source_shortest_path_length" => {
                 let source = match arguments[0] {
@@ -541,7 +670,9 @@ impl FnxCallSpec {
                     DijkstraComparison::FnxEpsilon
                 };
                 FnxAlgorithm::SingleSourceDijkstraPathLength(
-                    DijkstraOptions::new(source, cutoff)?.with_comparison(comparison),
+                    DijkstraOptions::new(source, cutoff)
+                        .map_err(whole)?
+                        .with_comparison(comparison),
                 )
             }
             "fnx.connected_components" => FnxAlgorithm::ConnectedComponents,
@@ -549,45 +680,41 @@ impl FnxCallSpec {
             "fnx.strongly_connected_components" => FnxAlgorithm::StronglyConnectedComponents,
             "fnx.triangles" => FnxAlgorithm::Triangles,
             "fnx.clustering_coefficient" => FnxAlgorithm::ClusteringCoefficient,
-            _ => return Err(parser.error(FnxBindErrorKind::UnknownProcedure)),
+            _ => {
+                return Err(error(
+                    FnxCallSite::Procedure,
+                    FnxBindErrorKind::UnknownProcedure,
+                ));
+            }
         };
         let mut outputs = default_outputs(signature);
-        if parser.keyword("YIELD") && !parser.take(b'*') {
+        if !yields.is_empty() {
             outputs.clear();
-            loop {
-                let name = parser.word()?;
+            for (index, &(field_name, alias)) in yields.iter().enumerate() {
                 let field = signature
                     .outputs
                     .iter()
                     .copied()
                     // ubs:ignore -- public YIELD field names, not secret material.
-                    .find(|field| field.name() == name)
-                    .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownYield))?;
-                let alias = if parser.keyword("AS") {
-                    parser.word()?
-                } else {
-                    name
-                };
+                    .find(|field| field.name() == field_name)
+                    .ok_or_else(|| {
+                        error(FnxCallSite::Yield(index), FnxBindErrorKind::UnknownYield)
+                    })?;
                 if outputs
                     .iter()
                     // ubs:ignore -- public YIELD field names and aliases, not secret material.
                     .any(|column| column.field == field || column.name == alias)
                 {
-                    return Err(parser.error(FnxBindErrorKind::DuplicateYield));
+                    return Err(error(
+                        FnxCallSite::Yield(index),
+                        FnxBindErrorKind::DuplicateYield,
+                    ));
                 }
                 outputs.push(FnxOutputColumn {
                     field,
                     name: alias.to_owned(),
                 });
-                if !parser.take(b',') {
-                    break;
-                }
             }
-        }
-        parser.take(b';');
-        parser.space();
-        if parser.pos != text.len() {
-            return Err(parser.error(FnxBindErrorKind::TrailingInput));
         }
         Ok(Self::compiled(algorithm, outputs))
     }
@@ -742,9 +869,15 @@ impl<'a> Parser<'a> {
             Err(self.error(FnxBindErrorKind::Expected(expected)))
         }
     }
-    fn argument(&mut self, parameters: &FnxParameters) -> Result<FnxArgument, FnxBindError> {
+    fn argument(
+        &mut self,
+        parameters: Option<&FnxParameters>,
+    ) -> Result<FnxArgument, FnxBindError> {
         if self.take(b'$') {
             let name = self.word()?;
+            let Some(parameters) = parameters else {
+                return Ok(FnxArgument::Null);
+            };
             return parameters
                 .get(name)
                 .copied()

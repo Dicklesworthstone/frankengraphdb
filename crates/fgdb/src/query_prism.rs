@@ -4,17 +4,23 @@
 
 use super::Cancel;
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::{Database, EmbeddedReadView, ReadError};
+use crate::{Database, EmbeddedReadView, GqlError, ReadError};
 use asupersync::fs::Vfs;
+use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::{
+    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    PreparedProcedureCall,
+};
 use fgdb_prism::{
-    Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, ParallelEdgePolicy,
+    Directedness, FnxArgument, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
+    FnxExecutionError, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
+    FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
     ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
     SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
     SnapshotGraphView,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
-use fgdb_types::{CommitSeq, QueryCx, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 
@@ -22,6 +28,121 @@ use fgdb_prism::FnxSealedExecutionError;
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
+
+/// Why a native read's `CALL fnx.*` stage was refused.
+#[derive(Debug)]
+pub enum ProcedureError {
+    /// No registered signature accepts this name, argument or YIELD item.
+    /// Arguments keep their exact domain: text, decimal, list, path and edge
+    /// values have no Prism argument type and are never coerced.
+    Bind(FnxCallError),
+    /// Projection, source admission or kernel execution refused.
+    Read(Box<Error>),
+    /// A count beyond the GQL Int64 domain.
+    ResultDomain,
+}
+impl core::fmt::Display for ProcedureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Bind(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
+            Self::ResultDomain => f.write_str("Prism count exceeds the Int64 domain"),
+        }
+    }
+}
+impl core::error::Error for ProcedureError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Bind(error) => Some(error),
+            Self::Read(_) | Self::ResultDomain => None,
+        }
+    }
+}
+
+/// Prism as the procedure host of a native set read: bind the call through
+/// the same typed resolution as `call_fnx`, then run it over the canonical
+/// whole-graph projection at the read's own snapshot, so a later MATCH and
+/// the analytics see one generation. Admission is capped by what the read
+/// has left; the rows' cost is charged to that same policy.
+pub(crate) fn fnx_procedure(
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    as_of: CommitSeq,
+    remaining: GqlQueryPolicy,
+    execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxReadResult, Error>,
+) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
+    let refuse = |error| GqlQueryError::Source(GqlError::Procedure(error));
+    let mut supplied = Vec::with_capacity(arguments.len());
+    for (index, value) in arguments.iter().enumerate() {
+        let argument = match value {
+            GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
+            GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
+            GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
+            GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
+            GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
+            _ => {
+                return Err(refuse(ProcedureError::Bind(FnxCallError {
+                    site: FnxCallSite::Argument(index),
+                    kind: FnxBindErrorKind::InvalidArgument("no Prism argument domain"),
+                })));
+            }
+        };
+        supplied.push(argument);
+    }
+    let yields: Vec<(&str, &str)> = call
+        .outputs()
+        .iter()
+        .map(|name| (name.as_str(), name.as_str()))
+        .collect();
+    let spec = FnxCallSpec::from_arguments(call.namespace(), call.name(), &supplied, &yields)
+        .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    let mut options = FnxReadOptions::whole_graph_for(&spec, Some(as_of));
+    if let Some(records) = remaining.rows.max_snapshot_records() {
+        options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);
+    }
+    options.execution_limits.max_estimated_work = options
+        .execution_limits
+        .max_estimated_work
+        .min(usize::try_from(remaining.evaluator.max_work_units).unwrap_or(usize::MAX));
+    let analytics = execute(&spec, options)
+        .map_err(|error| match error {
+            FnxReadError::Cancelled(cancel)
+            | FnxReadError::Execution(FnxExecutionError::Cancelled(cancel)) => {
+                GqlQueryError::Interrupted(cancel)
+            }
+            error => refuse(ProcedureError::Read(Box::new(error))),
+        })?
+        .analytics;
+    let mut rows = Vec::with_capacity(analytics.rows.len());
+    for row in analytics.rows {
+        let mut values = Vec::with_capacity(row.len());
+        for value in row {
+            values.push(match value {
+                FnxValue::Vertex(vertex) => GraphValue::Vertex(vertex),
+                FnxValue::Integer(count) => GraphValue::Scalar(CanonicalScalar::Int(
+                    i64::try_from(count).map_err(|_| refuse(ProcedureError::ResultDomain))?,
+                )),
+                FnxValue::Score(value) | FnxValue::Float(value) => {
+                    GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)))
+                }
+            });
+        }
+        rows.push(GraphValueRow::from_owned_values(values));
+    }
+    let certificate = &analytics.certificate;
+    let records = certificate.vertices.saturating_add(certificate.input_edges);
+    Ok(GqlQueryExecution {
+        rows: GqlExecutionStats {
+            snapshot_records: u64::try_from(records).unwrap_or(u64::MAX),
+            result_rows: rows.len() as u64,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: u64::try_from(certificate.estimated_work).unwrap_or(u64::MAX),
+            scratch_entries: rows.len() as u64,
+        },
+        value: rows,
+    })
+}
 
 #[cfg(test)]
 #[path = "query_prism_sealed_tests.rs"]

@@ -159,7 +159,8 @@ fn late_source_errors_survive_empty_and_oversized_left_factors_and_limit_zero() 
         let mut calls = 0;
         let result = query.count_governed(
             wide(),
-            |_, _| {
+            |_: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+             _: crate::GqlQueryPolicy| {
                 calls += 1;
                 Err(GqlQueryError::Source("right failed"))
             },

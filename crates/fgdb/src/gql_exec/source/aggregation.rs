@@ -167,13 +167,24 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| {
                 GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(error))
             })?;
+        // A CALL stage runs in Prism at this same snapshot, so its rows and
+        // every pattern leaf read one generation.
         cx.with_restriction(|| {
-            query.execute_governed(
+            query.execute_governed_with_procedures(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
                         cx.checkpoint()
                     })
+                },
+                |call, arguments, remaining| {
+                    crate::query::fnx_procedure(
+                        call,
+                        arguments,
+                        as_of,
+                        remaining,
+                        |spec, options| self.execute_fnx(cx, spec, options),
+                    )
                 },
                 || cx.checkpoint(),
             )
@@ -213,12 +224,21 @@ impl EmbeddedReadView {
             )))
         })?;
         cx.with_restriction(|| {
-            query.execute_governed(
+            query.execute_governed_with_procedures(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
                         cx.checkpoint()
                     })
+                },
+                |call, arguments, remaining| {
+                    crate::query::fnx_procedure(
+                        call,
+                        arguments,
+                        as_of,
+                        remaining,
+                        |spec, options| self.execute_fnx(cx, spec, options),
+                    )
                 },
                 || cx.checkpoint(),
             )

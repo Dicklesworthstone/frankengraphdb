@@ -396,7 +396,8 @@ fn compound_sources_are_not_reexecuted_and_all_are_read_before_an_empty_product(
     let mut calls = 0;
     let result = query.execute_relational_with_source(
         wide(),
-        |_, _| {
+        |_: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+         _: crate::GqlQueryPolicy| {
             calls += 1;
             if calls == 2 {
                 return Err(GqlQueryError::Source("later graph failed"));

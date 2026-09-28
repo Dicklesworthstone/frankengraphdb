@@ -759,6 +759,17 @@ impl PreparedGraphSet {
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
+    /// The executor over any trusted source, for relational consumers (a
+    /// grouped aggregate) that forward their caller's procedure host.
+    pub(crate) fn execute_with_source<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        source: &mut impl GraphSetSource<E, C>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        execute::execute(self, policy, source, checkpoint)
+    }
+
     /// Whether any source of this relation is a procedure call.
     #[must_use]
     pub fn calls_procedure(&self) -> bool {

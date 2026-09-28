@@ -56,15 +56,39 @@ pub(super) fn prefix<'a>(
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         return Ok((Head::Single(Some(head)), stages, schema, depth));
     }
-    if !parser.is_word("WITH") && !parser.is_word("UNWIND") && !parser.is_word("RETURN") {
-        return Err(expected(parser.current.at, "MATCH, WITH, UNWIND or RETURN"));
+    // A procedure is a source, so it can only start the pipeline, exactly as
+    // in a non-aggregate read: `CALL ... YIELD c RETURN COUNT(DISTINCT c)`.
+    let mut schema = Vec::new();
+    let call = if parser.is_word("CALL") {
+        let at = parser.current.at;
+        parser.advance()?;
+        Some(parser.call_stage(&mut schema, at)?)
+    } else {
+        None
+    };
+    if call.is_none()
+        && !parser.is_word("WITH")
+        && !parser.is_word("UNWIND")
+        && !parser.is_word("RETURN")
+    {
+        return Err(expected(
+            parser.current.at,
+            "MATCH, CALL, WITH, UNWIND or RETURN",
+        ));
     }
-    let (stages, schema, depth) = parser.row_pipeline_prefix(Vec::new())?;
+    let (stages, schema, depth) = parser.row_pipeline_prefix(schema)?;
     parser.syntax.return_at = parser.current.at;
     // The shared prefix starts at depth two (graph leaf + first projection).
     // This input starts with only Singleton. Its Aggregate parent uses the
     // freed level, so the prefix's existing early depth refusal stays sound.
-    Ok((Head::Single(None), stages, schema, depth - 1))
+    // A CALL source is one more level above that Singleton.
+    let depth = depth - 1 + usize::from(call.is_some());
+    Ok((
+        Head::Single(None),
+        call.into_iter().chain(stages).collect(),
+        schema,
+        depth,
+    ))
 }
 
 pub(super) fn finish<'a>(

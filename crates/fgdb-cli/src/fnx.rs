@@ -21,40 +21,23 @@ use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
-    Directedness, FnxArgument, FnxExecutionLimits, FnxParameters, FnxReadOptions, FnxSelection,
-    FnxSourceLimits, FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
-    ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
+    Directedness, FnxArgument, FnxParameters, FnxReadOptions, FnxSelection, FnxValue,
+    FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::io::Write;
 
-/// Admission for one analytics call. Finite, explicit, and documented in
-/// `fgdb help`; these bound logical work and staging, not allocator bytes.
-const SOURCE_LIMITS: FnxSourceLimits = FnxSourceLimits {
-    max_work_units: 100_000_000,
-    max_scratch_entries: 10_000_000,
-    max_staging_bytes: 1 << 30,
-};
-const PROJECTION_LIMITS: ProjectionLimits = ProjectionLimits {
-    max_vertices: 10_000_000,
-    max_input_edges: 100_000_000,
-    max_adjacency_entries: 200_000_000,
-    max_workspace_bytes: 4 << 30,
-};
-const EXECUTION_LIMITS: FnxExecutionLimits = FnxExecutionLimits {
-    max_iterations: 100_000,
-    max_result_rows: 10_000_000,
-    max_estimated_work: 1 << 40,
-};
-
-/// Is this `query` text a Prism call? `CALL` is a keyword (any case); the
-/// procedure namespace `fnx.` is case-sensitive, like the registry.
+/// Is this `query` text a standalone Prism call? `CALL` is a keyword (any
+/// case); the procedure namespace `fnx.` is case-sensitive, like the
+/// registry. A call that continues past its YIELD list (WHERE, WITH, MATCH,
+/// RETURN, ...) is an ordinary native read over the whole graph instead.
 pub(super) fn is_call(text: &str) -> bool {
     let text = text.trim_start();
     text.get(..4)
         .is_some_and(|word| word.eq_ignore_ascii_case("CALL"))
         && text[4..].starts_with(char::is_whitespace)
         && text[4..].trim_start().starts_with("fnx.")
+        && !fgdb_prism::FnxCallSpec::continues_past_call(text)
 }
 
 /// Projection flags as given; symbol names resolve against the bindings once
@@ -174,23 +157,21 @@ impl ProjectionFlags {
             }
             None => FnxWeightSpec::Unit,
         };
+        // Unset flags keep the canonical whole graph, including its refusal
+        // of an implicit multigraph collapse, and its default admission.
+        let base = FnxReadOptions::whole_graph(self.as_of);
         Ok(FnxReadOptions {
-            as_of: self.as_of,
             selection: FnxSelection {
                 vertex_label: lookup(&self.label, &bindings.labels, "label")?.map(LabelId),
                 relation: lookup(&self.relation, &bindings.relations, "relation")?.map(RelationId),
                 weight,
             },
             projection: ProjectionSpec {
-                directedness: self.direction.unwrap_or(Directedness::Directed),
-                // No implicit multigraph collapse: a simple graph projects
-                // unchanged and a multigraph is refused until a law is chosen.
-                parallel_edges: self.parallel.unwrap_or(ParallelEdgePolicy::Reject),
-                self_loops: self.self_loops.unwrap_or(SelfLoopPolicy::Keep),
+                directedness: self.direction.unwrap_or(base.projection.directedness),
+                parallel_edges: self.parallel.unwrap_or(base.projection.parallel_edges),
+                self_loops: self.self_loops.unwrap_or(base.projection.self_loops),
             },
-            source_limits: SOURCE_LIMITS,
-            projection_limits: PROJECTION_LIMITS,
-            execution_limits: EXECUTION_LIMITS,
+            ..base
         })
     }
 }

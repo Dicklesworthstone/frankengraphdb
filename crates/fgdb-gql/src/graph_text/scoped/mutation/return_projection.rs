@@ -121,13 +121,42 @@ impl<'a> Parser<'a> {
             self.parse_match_prefix()?;
             let correlations = core::mem::take(&mut self.read_correlations);
             let width = schema.len();
+            let rebound = self
+                .syntax
+                .path
+                .into_iter()
+                .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+                .find(|name| {
+                    self.read_row_bindings
+                        .iter()
+                        .any(|row| row.text == name.text)
+                });
+            if let Some(name) = rebound {
+                return Err(GraphSetTextError {
+                    offset: name.at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "a new name for a path or edge after a leading stage",
+                    ),
+                });
+            }
             let mut inputs = Vec::new();
+            let mut bound_correlations = Vec::new();
+            // The graph vertices a WITH-less projection exposes after the
+            // leading columns, as (name, combined-row column).
+            let mut exposed = Vec::new();
             for &variable in &self.syntax.variables {
                 let index = self.mutation_projection(&mut inputs, variable, None)?;
-                schema.push((variable, GraphSetColumnType::Vertex));
-                debug_assert_eq!(index + width, schema.len() - 1);
+                // A MATCH vertex reusing a leading column's name IS that
+                // value: an identity correlation, never a second binding that
+                // shadows the first and silently crosses every row.
+                match (self.read_row_bindings.iter()).position(|row| row.text == variable.text) {
+                    Some(row) => bound_correlations.push((row, index)),
+                    None => {
+                        schema.push((variable, GraphSetColumnType::Vertex));
+                        exposed.push((variable, width + index));
+                    }
+                }
             }
-            let mut bound_correlations = Vec::new();
             for (variable, key, row) in correlations {
                 let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
                 bound_correlations.push((row, index));
@@ -187,14 +216,12 @@ impl<'a> Parser<'a> {
                     .collect();
                 (projection, pipeline)
             } else {
-                let projection = (0..width + self.syntax.variables.len())
-                    .map(|index| ReadProjectionTemplate {
-                        name: if index < width {
-                            self.read_row_bindings[index].text.to_owned()
-                        } else {
-                            self.syntax.variables[index - width].text.to_owned()
-                        },
-                        value: ReadValueTemplate::Column(index),
+                let projection = (self.read_row_bindings.iter().copied())
+                    .zip(0..width)
+                    .chain(exposed)
+                    .map(|(name, column)| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(column),
                     })
                     .collect();
                 (projection, self.row_pipeline(schema)?)
@@ -283,6 +310,10 @@ impl<'a> Parser<'a> {
             }
             let visible: Vec<_> = self.visible_graph_bindings().collect();
             for variable in visible {
+                // A vertex reusing a leading name is that leading column.
+                if leading.iter().any(|name| name.text == variable.text) {
+                    continue;
+                }
                 let index = self.mutation_projection(inputs, variable, None)?;
                 outputs.push((variable, ReadValueTemplate::Column(width + index)));
             }

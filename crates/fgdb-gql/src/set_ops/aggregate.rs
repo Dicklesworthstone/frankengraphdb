@@ -170,6 +170,31 @@ impl PreparedGraphSetAggregate {
         self.summary
             .execute_relational_with_source(policy, source, checkpoint)
     }
+
+    /// `execute_governed` plus the procedure host for CALL sources, with the
+    /// same contract as [`PreparedGraphSet::execute_governed_with_procedures`].
+    pub fn execute_governed_with_procedures<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let source = WithProcedures {
+            patterns,
+            procedures,
+        };
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
 }
 
 impl PreparedGraphSet {

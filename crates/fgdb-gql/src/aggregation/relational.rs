@@ -123,7 +123,7 @@ impl PreparedGraphAggregate {
         let mut admitted = Some((vertices, edges));
         self.execute_relational_with_source(
             policy,
-            |pattern, remaining| {
+            |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
                 let (vertices, edges) = admitted
                     .take()
                     .expect("preparation admitted exactly one immutable graph leaf");
@@ -147,10 +147,7 @@ impl PreparedGraphAggregate {
     pub(crate) fn execute_relational_with_source<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl crate::GraphSetSource<E, C>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
@@ -165,10 +162,7 @@ impl PreparedGraphAggregate {
     fn execute_relational_materialized<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
@@ -186,7 +180,7 @@ impl PreparedGraphAggregate {
             evaluator: policy.evaluator,
         };
         let source = relation
-            .execute_governed(source_policy, source, &mut checkpoint)
+            .execute_with_source(source_policy, &mut source, &mut checkpoint)
             .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
         let mut evaluator = source.evaluator;
         let mut rows = GqlExecutionStats {

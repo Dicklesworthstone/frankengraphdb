@@ -152,7 +152,7 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
 pub use query::{
     NativeAggregateCursor, NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead,
-    QueryError, QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
+    ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
 };
 pub use write_txn::{WriteTxn, WriteTxnError};
 
@@ -1004,6 +1004,8 @@ pub enum GqlError {
     Bind(fgdb_gql::BindError),
     /// The bound plan was executable but the handle refused the read.
     Read(ReadError),
+    /// A `CALL` stage's procedure refused its arguments, graph or result.
+    Procedure(ProcedureError),
 }
 
 impl core::fmt::Display for GqlError {
@@ -1012,6 +1014,7 @@ impl core::fmt::Display for GqlError {
             Self::Parse(error) => write!(f, "gql parse: {error}"),
             Self::Bind(error) => write!(f, "gql bind: {error}"),
             Self::Read(error) => write!(f, "gql read: {error}"),
+            Self::Procedure(error) => write!(f, "gql procedure: {error}"),
         }
     }
 }
@@ -1022,6 +1025,7 @@ impl core::error::Error for GqlError {
             Self::Parse(error) => Some(error),
             Self::Bind(error) => Some(error),
             Self::Read(error) => Some(error),
+            Self::Procedure(error) => Some(error),
         }
     }
 }

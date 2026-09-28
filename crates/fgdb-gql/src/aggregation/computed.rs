@@ -179,7 +179,7 @@ impl PreparedGraphAggregate {
             let mut admitted = Some((vertices, edges));
             return self.execute_relational_with_source(
                 policy,
-                |pattern, remaining| {
+                |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
                     let (vertices, edges) = admitted
                         .take()
                         .expect("single-source aggregate preparation admits exactly one leaf");

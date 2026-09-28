@@ -361,7 +361,8 @@ fn all_graph_children_are_observed_once_even_with_an_empty_left_relation() {
     let mut calls = 0;
     let result = query.fold_governed(
         wide(),
-        |_, _| {
+        |_: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,
+         _: crate::GqlQueryPolicy| {
             calls += 1;
             if calls == 2 {
                 return Err(GqlQueryError::Source("right failed"));
