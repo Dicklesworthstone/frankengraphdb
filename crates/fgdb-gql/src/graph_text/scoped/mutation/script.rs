@@ -198,19 +198,23 @@ fn classify(
 ) -> Result<Kind, GraphPatternTextError> {
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;
     if parser.is_word("UNWIND") {
-        parser.insertion_unwind_prefix().map_err(|source| {
+        let (_, imports) = parser.insertion_unwind_prefix().map_err(|source| {
             let kind = match source.kind {
                 crate::GraphSetTextErrorKind::Pattern(kind) => kind,
                 _ => GraphPatternTextErrorKind::Expected("a bounded native UNWIND source"),
             };
             error(source.offset, kind)
         })?;
+        // Use the insertion compiler's exact imported scope and correlation
+        // rules during whole-script preflight, before any catalog callbacks.
+        // Do not route UNWIND MATCH SET/MERGE through an unrelated compiler.
+        parser.insertion_match_prefix(&imports)?;
         return if parser.is_word("CREATE") || parser.is_word("INSERT") {
             Ok(Kind::Insert)
         } else {
             Err(error(
                 parser.current.at,
-                GraphPatternTextErrorKind::Expected("CREATE or INSERT after UNWIND"),
+                GraphPatternTextErrorKind::Expected("CREATE or INSERT after UNWIND/MATCH"),
             ))
         };
     }
