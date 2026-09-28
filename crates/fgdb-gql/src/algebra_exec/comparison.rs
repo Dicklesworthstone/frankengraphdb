@@ -1,7 +1,7 @@
 //! Borrowed, binding-dependent property selection in the shared GLA visitor.
 
 use crate::GlaExecutionEvent;
-use crate::algebra::{BindingSlot, GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
+use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
 
@@ -24,54 +24,11 @@ pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
     if let GlaOperator::SelectBoolean { expression } = operator {
         return expression.evaluate_elements(bindings, paths, property, edge_property, control);
     }
-    let GlaOperator::CompareProperties {
-        left,
-        left_key,
-        right,
-        right_key,
-        comparison,
-    } = operator
-    else {
-        unreachable!("the compiler dispatches only a binding property comparison")
-    };
-    let vertex = |slot: &BindingSlot| -> Option<VId> {
-        bindings.get(slot.ordinal() as usize).copied().flatten()
-    };
-    let edge = |slot: &BindingSlot| -> Option<fgdb_types::EId> {
-        paths
-            .get(slot.ordinal() as usize)
-            .and_then(Option::as_ref)
-            .and_then(|path| match path.steps() {
-                [(edge, _)] => Some(*edge),
-                _ => None,
-            })
-    };
-    // Resolve BOTH identities before invoking either fallible source. OPTIONAL
-    // null extension must not depend on which operand was written first.
-    // Missing properties on bound identities are different: both source reads
-    // still execute, and a failure must not be disguised as a missing value.
-    let left_binding = (vertex(left), edge(left));
-    let right_binding = (vertex(right), edge(right));
-    if left_binding == (None, None) || right_binding == (None, None) {
-        return Ok(false);
-    }
-    control(GlaExecutionEvent::Work)?;
-    let left = match left_binding {
-        (_, Some(captured)) => edge_property(captured, *left_key)?,
-        (Some(identity), None) => property(identity, *left_key)?,
-        (None, None) => unreachable!("null bindings were rejected before source access"),
-    };
-    control(GlaExecutionEvent::Work)?;
-    let right = match right_binding {
-        (_, Some(captured)) => edge_property(captured, *right_key)?,
-        (Some(identity), None) => property(identity, *right_key)?,
-        (None, None) => unreachable!("null bindings were rejected before source access"),
-    };
-    for value in [left, right].into_iter().flatten() {
-        charge_payload(value, control)?;
-    }
-    control(GlaExecutionEvent::Work)?;
-    Ok(comparison.accepts_scalar_pair(left, right))
+    // CompareProperties carries VERTEX binding slots. Capture ordinals occupy
+    // a separate namespace and may have exactly the same numeric values. Only
+    // SelectBoolean's typed EdgeProperty operands authorize an edge read.
+    // In particular a populated capture cannot turn a NULL vertex into a row.
+    compare_properties(operator, bindings, property, control)
 }
 pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
@@ -307,5 +264,157 @@ mod tests {
             assert_eq!(events, stop);
             assert_eq!(reads, stop - 1);
         }
+    }
+
+    fn overlapping_captures() -> [Option<crate::algebra::GraphPath>; 2] {
+        use crate::algebra::GraphPath;
+        use fgdb_types::EId;
+        [
+            Some(GraphPath::new(
+                VId(77),
+                vec![(EId(1), VId(78))].into_boxed_slice(),
+            )),
+            Some(GraphPath::new(
+                VId(88),
+                vec![(EId(u128::MAX), VId(89))].into_boxed_slice(),
+            )),
+        ]
+    }
+
+    #[test]
+    fn captured_edges_never_replace_vertex_property_operands() {
+        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        for (comparison, expected) in [
+            (IntegerComparison::Equal, false),
+            (IntegerComparison::NotEqual, true),
+            (IntegerComparison::Less, true),
+            (IntegerComparison::LessOrEqual, true),
+            (IntegerComparison::Greater, false),
+            (IntegerComparison::GreaterOrEqual, false),
+        ] {
+            let operator = GlaOperator::CompareProperties {
+                left: BindingSlot(0),
+                left_key: PropertyKeyId(1),
+                right: BindingSlot(1),
+                right_key: PropertyKeyId(2),
+                comparison,
+            };
+            let mut reads = Vec::new();
+            let result = compare_element_properties(
+                &operator,
+                &[Some(VId(0)), Some(VId(1))],
+                &overlapping_captures(),
+                &mut |vid, _| {
+                    reads.push(vid);
+                    Ok::<_, Failure<&str>>(Some(&values[vid.0 as usize]))
+                },
+                &mut |_, _| Err(Failure::Source("vertex comparison accessed a captured edge")),
+                &mut |_| Ok(()),
+            );
+            assert_eq!(result, Ok(expected));
+            assert_eq!(reads, vec![VId(0), VId(1)]);
+        }
+    }
+
+    #[test]
+    fn captures_cannot_resurrect_null_vertices_or_hide_vertex_read_failures() {
+        let paths = overlapping_captures();
+        for ids in [[None, Some(VId(2))], [Some(VId(1)), None], [None, None]] {
+            assert_eq!(
+                compare_element_properties(
+                    &comparison(),
+                    &ids,
+                    &paths,
+                    &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("vertex read")),
+                    &mut |_, _| Err(Failure::Source("edge read")),
+                    &mut |_| Err(Failure::Source("work after a NULL binding")),
+                ),
+                Ok(false)
+            );
+        }
+        let mut reads = Vec::new();
+        assert_eq!(
+            compare_element_properties(
+                &comparison(),
+                &[Some(VId(1)), Some(VId(2))],
+                &paths,
+                &mut |vid, _| {
+                    reads.push(vid);
+                    if vid == VId(1) {
+                        Ok(None)
+                    } else {
+                        Err(Failure::Source("second vertex refused"))
+                    }
+                },
+                &mut |_, _| Err(Failure::Source("unexpected captured-edge read")),
+                &mut |_| Ok(()),
+            ),
+            Err(Failure::Source("second vertex refused"))
+        );
+        assert_eq!(reads, vec![VId(1), VId(2)]);
+    }
+
+    #[test]
+    fn explicitly_typed_edge_operands_still_read_their_own_domain() {
+        use crate::algebra::{
+            GlaDirection, GraphBooleanExpression, GraphBooleanOp, GraphBooleanOperand,
+            GraphColumn, GraphPath, GraphPatternBuilder,
+        };
+        use fgdb_types::EId;
+        let expression = GraphBooleanExpression::prepare(&[GraphBooleanOp::Compare {
+            left: GraphBooleanOperand::EdgeProperty {
+                variable: "r",
+                key: PropertyKeyId(1),
+            },
+            comparison: IntegerComparison::Greater,
+            right: GraphBooleanOperand::Property {
+                variable: "a",
+                key: PropertyKeyId(1),
+            },
+        }])
+        .unwrap();
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("a").unwrap().vertex("b").unwrap();
+        builder
+            .edge("a", fgdb_delta_types::RelationId(1), GlaDirection::Forward, "b")
+            .unwrap();
+        builder
+            .capture_edge("r", 0)
+            .unwrap()
+            .filter_boolean(&expression)
+            .unwrap();
+        let plan = builder
+            .prepare_values(&[GraphColumn::vertex("a", "a")], 0, None)
+            .unwrap();
+        let predicate = plan
+            .plan()
+            .operators()
+            .iter()
+            .find(|op| matches!(op, GlaOperator::SelectBoolean { .. }))
+            .unwrap();
+        let vertex_value = CanonicalScalar::Int(5);
+        let edge_value = CanonicalScalar::Int(10);
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        let result = compare_element_properties(
+            predicate,
+            &[Some(VId(1)), Some(VId(2))],
+            &[Some(GraphPath::new(
+                VId(1),
+                vec![(EId(1), VId(2))].into_boxed_slice(),
+            ))],
+            &mut |id, _| {
+                vertices.push(id);
+                Ok::<_, Failure<&str>>(Some(&vertex_value))
+            },
+            &mut |id, _| {
+                edges.push(id);
+                Ok(Some(&edge_value))
+            },
+            &mut |_| Ok(()),
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(vertices, vec![VId(1)]);
+        assert_eq!(edges, vec![EId(1)]);
     }
 }
