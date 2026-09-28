@@ -59,6 +59,39 @@ pub(in crate::graph_text) fn text_scalar(
 }
 
 impl<'a> Parser<'a> {
+    /// `0.5`: a non-negative decimal literal, `digits . digits`, as a Float
+    /// scalar (fgdb-qnqrj), so a Float value (a Prism score, a float
+    /// property) compares with a Float of the same kind. `None` consumes
+    /// nothing. The text is parsed once, to the nearest f64, and must be
+    /// finite. A sign is the ordinary unary operator, and an exponent is not
+    /// accepted here.
+    pub(in crate::graph_text) fn float_literal(
+        &mut self,
+    ) -> Result<Option<CanonicalScalar>, GraphPatternTextError> {
+        let TokenKind::Digits(whole) = self.current.kind else {
+            return Ok(None);
+        };
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.')) {
+            return Ok(None);
+        }
+        let TokenKind::Digits(fraction) = lexer.next()?.kind else {
+            return Ok(None);
+        };
+        let at = self.current.at;
+        let value = format!("{whole}.{fraction}")
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+        for _ in 0..3 {
+            self.advance()?;
+        }
+        Ok(Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+            value,
+        ))))
+    }
+
     /// One predicate operand path used by the root and every positive child.
     /// IS NULL is not encoded as equality with NULL. Missing/stored null and
     /// scalar-kind mismatch continue to fail ordinary comparisons.
@@ -105,6 +138,15 @@ impl<'a> Parser<'a> {
                 right,
                 right_key,
                 comparison,
+            });
+        }
+        if let Some(value) = self.float_literal()? {
+            let predicate = ScalarPredicate::new(value, comparison)
+                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+            return Ok(Filter::Scalar {
+                variable,
+                key,
+                predicate,
             });
         }
         let literal = match self.current.kind {

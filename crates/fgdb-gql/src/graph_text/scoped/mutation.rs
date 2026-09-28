@@ -191,6 +191,11 @@ impl<'a> Parser<'a> {
                 )
                 .map(Operand::Column);
         }
+        if let Some(value) = self.float_literal()? {
+            return GqlScalarParameter::new(value)
+                .map(Operand::Literal)
+                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
+        }
         let literal = match self.current.kind {
             TokenKind::Quoted(raw) => Some(super::super::literal::text_scalar(raw, at)?),
             TokenKind::Word(word) if word.eq_ignore_ascii_case("TRUE") => {

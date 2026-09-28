@@ -712,3 +712,40 @@ fn aggregate_analytics_run_at_the_read_snapshot() {
         assert_eq!(pinned(reach), [int(4), QueryValue::Count(5)]);
     });
 }
+
+/// fgdb-qnqrj: a Prism score thresholds with a decimal literal. Degree
+/// centrality here is deg / 5, and only vertex 3 (degree 3) exceeds 0.5.
+#[test]
+fn a_procedure_score_filters_against_a_decimal_literal() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        let standalone = db
+            .call_fnx(
+                cx,
+                "CALL fnx.degree_centrality() YIELD vertex, score",
+                &FnxParameters::new(),
+                explicit(true),
+            )
+            .unwrap();
+        let expected: Vec<Vec<GraphValue>> = standalone
+            .analytics
+            .rows
+            .into_iter()
+            .filter(|row| matches!(row[1], FnxValue::Score(score) if score > 0.5))
+            .map(|row| vec![value(row[0])])
+            .collect();
+        assert_eq!(expected, [vec![GraphValue::Vertex(VId(3))]]);
+        let (_, actual) = rows(
+            db.query(
+                cx,
+                "CALL fnx.degree_centrality() YIELD vertex, score WHERE score > 0.5 \
+                 RETURN vertex ORDER BY vertex",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(actual, expected);
+    });
+}

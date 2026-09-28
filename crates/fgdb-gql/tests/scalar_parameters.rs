@@ -517,3 +517,61 @@ fn scalar_bindings_keep_exact_limits_and_every_interruption_boundary() {
         assert_eq!(at, stop);
     }
 }
+
+/// fgdb-qnqrj: a decimal literal is a Float operand. It selects exactly the
+/// rows a Float-typed parameter of the same value selects, for every
+/// comparison, and it never matches another kind.
+#[test]
+fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
+    let float = |value: f64| Some(CanonicalScalar::Float(CanonicalF64::new(value)));
+    let values = [
+        float(0.25),
+        float(0.5),
+        float(0.75),
+        float(1.0),
+        Some(CanonicalScalar::Int(1)),
+        None,
+    ];
+    let literal = |operator: &str| {
+        PreparedGraphText::prepare(
+            &format!("MATCH (n) WHERE n.p {operator} 0.5 RETURN n"),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    for operator in ["=", "<", ">", "<>", "<=", ">="] {
+        let parameter = PreparedGraphText::prepare_with_parameter_types(
+            &format!("MATCH (n) WHERE n.p {operator} $v RETURN n"),
+            &[("v", GqlParameterType::Scalar(CanonicalScalarKind::Float))],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_scalar("v", CanonicalScalar::Float(CanonicalF64::new(0.5)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&literal(operator), &values),
+            run(&parameter, &values),
+            "{operator}"
+        );
+    }
+    // Independent: only 0.75 and 1.0 exceed 0.5; the Int 1 is another kind.
+    assert_eq!(run(&literal(">"), &values), [VId(2), VId(3)]);
+    // Not decimals: a trailing or leading point, and a magnitude with no
+    // finite f64, refuse.
+    for text in [
+        "MATCH (n) WHERE n.p > 1. RETURN n".to_owned(),
+        "MATCH (n) WHERE n.p > .5 RETURN n".to_owned(),
+        format!("MATCH (n) WHERE n.p > {}.0 RETURN n", "9".repeat(400)),
+    ] {
+        assert!(
+            PreparedGraphText::prepare(&text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

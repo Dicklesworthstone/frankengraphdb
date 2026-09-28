@@ -2125,7 +2125,9 @@ mod tests {
             "MATCH (a) RETURN a ORDER BY missing",
             "MATCH (a) WHERE a.n = 1 OR OR a.n = 2 RETURN a",
             "MATCH (a) WHERE a > a RETURN a",
-            "MATCH (a) WHERE a.n = 1.5 RETURN a",
+            // `1.5` is a Float literal (fgdb-qnqrj); these are not decimals.
+            "MATCH (a) WHERE a.n = 1. RETURN a",
+            "MATCH (a) WHERE a.n = .5 RETURN a",
             "MATCH (a) WHERE a.n = $ x RETURN a",
             "MATCH (a) RETURN a SKIP -1",
             "MATCH (a) RETURN a LIMIT 18446744073709551616",
