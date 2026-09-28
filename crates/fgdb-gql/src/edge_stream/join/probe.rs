@@ -63,8 +63,9 @@ pub(crate) struct Probe {
 impl Probe {
     /// Fixed and finite variable-length atoms may start from a correlation or
     /// an independent vertex scan. Captures only copy values; a nullable capture
-    /// is not an anchor. Probe-local paths cannot be captured or projected:
-    /// only endpoint support matters. Nested/optional scopes still refuse,
+    /// is not an anchor. Fixed relationship captures can feed local property
+    /// predicates; neither paths nor relationship aliases escape the probe.
+    /// Captured variable-length paths and nested/optional scopes still refuse,
     /// including at LIMIT zero. Local scans keep their own ordered positions.
     pub(crate) fn compile(
         ops: &[GlaOperator],
@@ -95,8 +96,13 @@ impl Probe {
         let mut steps: Vec<Step> = Vec::new();
         let mut width = outer_width;
         let mut expansions = 0;
+        // Canonical capture ordinals include the containing pattern's captures.
+        // Translate only declarations inside THIS scope to compact local slots.
+        // A reference to an outer or undeclared capture must never become NULL.
+        let mut capture_slots = BTreeMap::<u32, u32>::new();
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             let bad = || EdgeScanBuildError { operator: at };
+            let mut predicate = None;
             let binding = match op {
                 GlaOperator::ScanVertices => Some(Binding::Scan),
                 GlaOperator::BindVertex { source } | GlaOperator::BindOuterVertex { source }
@@ -144,28 +150,66 @@ impl Probe {
                 {
                     None
                 }
+                GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } => {
+                    let [segment] = segments.as_slice() else {
+                        return Err(bad());
+                    };
+                    let local = (segment.ordinal() as usize).checked_sub(outer_width);
+                    let expansion = local
+                        .and_then(|at| steps.get(at))
+                        .and_then(|step| match step.binding {
+                            Binding::Expand(expansion) => Some(expansion),
+                            _ => None,
+                        });
+                    if expansion
+                        .is_none_or(|expansion| expansion.source != start.ordinal() as usize)
+                        || *capture as usize >= crate::algebra::MAX_PATTERN_IDENTITIES
+                        || capture_slots.contains_key(capture)
+                    {
+                        return Err(bad());
+                    }
+                    let local = capture_slots.len() as u32;
+                    capture_slots.insert(*capture, local);
+                    predicate = Some(GlaOperator::CapturePath {
+                        capture: local,
+                        start: *start,
+                        segments: segments.clone(),
+                    });
+                    None
+                }
                 GlaOperator::SelectBoolean { expression } => {
                     let mut vertices_valid = true;
                     let mut captures_valid = true;
-                    let _ = expression.remap_elements(
+                    let expression = expression.remap_elements(
                         |slot| {
                             vertices_valid &= (slot.ordinal() as usize) < width;
                             slot
                         },
-                        |capture| {
-                            captures_valid = false;
-                            capture
+                        |capture| match capture_slots.get(&capture) {
+                            Some(local) => *local,
+                            None => {
+                                captures_valid = false;
+                                capture
+                            }
                         },
                     );
                     if !vertices_valid || !captures_valid {
                         return Err(bad());
                     }
+                    predicate = Some(GlaOperator::SelectBoolean { expression });
                     None
                 }
                 _ => return Err(bad()),
             };
             if let Some(binding) = binding {
-                if width >= MAX_PATTERN_BINDINGS {
+                // The positive compiler emits captures after all bindings.
+                // A local capture frame can therefore be rebuilt per complete
+                // candidate; it never becomes stale across another expansion.
+                if width >= MAX_PATTERN_BINDINGS || !capture_slots.is_empty() {
                     return Err(bad());
                 }
                 width += 1;
@@ -178,7 +222,7 @@ impl Probe {
                     .last_mut()
                     .ok_or_else(bad)?
                     .predicates
-                    .push(op.clone());
+                    .push(predicate.unwrap_or_else(|| op.clone()));
             }
         }
         Ok((
@@ -361,9 +405,44 @@ impl Probe {
             };
             ids.push(candidate);
             let mut passed = true;
+            let mut paths = Vec::new();
             for predicate in &step.predicates {
                 control(GlaExecutionEvent::Work)?;
-                if !super::accepts(predicate, &ids, &[], source, control)? {
+                if let GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } = predicate
+                {
+                    // Fixed expansions already retain their chosen EId in the
+                    // backtracking frame. Never reconstruct an edge by endpoints:
+                    // parallel relationships can have different property values.
+                    let frame = segments.first().and_then(|slot| {
+                        (slot.ordinal() as usize)
+                            .checked_sub(self.outer_width)
+                            .and_then(|at| frames.get(at))
+                    });
+                    let target = segments
+                        .first()
+                        .and_then(|slot| ids.get(slot.ordinal() as usize));
+                    let (Some(Position::Edge(Some(eid))), Some(Some(target)), Some(Some(start))) =
+                        (frame, target, ids.get(start.ordinal() as usize))
+                    else {
+                        return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                    };
+                    debug_assert_eq!(*capture as usize, paths.len());
+                    // Same path-slot and step charges as the outer capture
+                    // stage, before either the vector or boxed step is allocated.
+                    for _ in 0..3 {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    paths.push(Some(GraphPath::new(
+                        *start,
+                        vec![(*eid, *target)].into_boxed_slice(),
+                    )));
+                    continue;
+                }
+                if !super::accepts(predicate, &ids, &paths, source, control)? {
                     passed = false;
                     break;
                 }
@@ -409,3 +488,6 @@ fn resolve_target<S: EdgeScanSource, C>(
     }
     Ok(Some(to))
 }
+
+#[cfg(test)]
+mod captured_tests;

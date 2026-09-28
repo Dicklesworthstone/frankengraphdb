@@ -38,6 +38,9 @@ impl GraphPatternBuilder {
     /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
     /// Later positive patterns cannot rebind a null. Explicit outer_vertex
     /// operands instead capture the original nullable value for predicates.
+    /// EXISTS may bind fixed relationship identities for local edge-property
+    /// predicates. Such identities are neither exported nor correlated with
+    /// an outer relationship alias. Full scoped path values remain unsupported.
     /// EXISTS locals stay private. A complete optional witness remains a witness
     /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
@@ -68,8 +71,20 @@ impl GraphPatternBuilder {
         let mut edges = self.edges.len();
         let mut predicates = self.predicate_count;
         let mut identities = self.identities.len();
+        let mut path_captures = self.path_captures.len();
         for clause in clauses {
-            if !clause.pattern.path_captures.is_empty()
+            // Existential relationship bindings are private predicate operands,
+            // not exported path values. Required/optional captures and full
+            // path predicates still need their own scoped output contract.
+            let existential = matches!(
+                clause.kind,
+                GraphMatchKind::Exists | GraphMatchKind::NotExists
+            );
+            if clause
+                .pattern
+                .path_captures
+                .iter()
+                .any(|capture| !existential || !capture.edge_identity)
                 || !clause.pattern.path_predicates.is_empty()
             {
                 return Err(PatternBuildError::InvalidPathCapture);
@@ -84,6 +99,12 @@ impl GraphPatternBuilder {
             edges = edges.saturating_add(clause.pattern.edges.len());
             predicates = predicates.saturating_add(clause.pattern.predicate_count);
             identities = identities.saturating_add(clause.pattern.identities.len());
+            path_captures = path_captures.saturating_add(clause.pattern.path_captures.len());
+            check_total(
+                path_captures,
+                MAX_PATTERN_IDENTITIES,
+                PatternLimitDimension::PathCaptures,
+            )?;
             check_total(edges, MAX_PATTERN_EDGES, PatternLimitDimension::Edges)?;
             check_total(
                 predicates,
@@ -106,6 +127,21 @@ impl GraphPatternBuilder {
             let mut inner = (*clause.pattern).clone();
             if inner.variables.is_empty() {
                 return Err(PatternBuildError::EmptyPattern);
+            }
+            // A shared edge name would mean an edge correlation, not a fresh
+            // local binding. Refuse that unsupported contract rather than
+            // silently shadowing a visible vertex or relationship.
+            if inner.path_captures.iter().any(|capture| {
+                scope
+                    .variables
+                    .iter()
+                    .any(|variable| variable.name == capture.name)
+                    || scope
+                        .path_captures
+                        .iter()
+                        .any(|outer| outer.name == capture.name)
+            }) {
+                return Err(PatternBuildError::DuplicateVariable);
             }
             let mut captures = Vec::new();
             for (at, variable) in inner.variables.iter().enumerate() {
@@ -131,6 +167,16 @@ impl GraphPatternBuilder {
             // capture can be null and must not suppress independent witnesses.
             let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
+                // Captures address declared edges, not positions chosen by a
+                // correlated traversal. Preserve that identity when a later
+                // edge is moved to the root; both swapped positions matter.
+                for capture in &mut inner.path_captures {
+                    if capture.first_edge == 0 {
+                        capture.first_edge = edge_at;
+                    } else if capture.first_edge == edge_at {
+                        capture.first_edge = 0;
+                    }
+                }
                 if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
                     let edge = &mut inner.edges[0];
                     core::mem::swap(&mut edge.source, &mut edge.destination);
@@ -191,6 +237,11 @@ impl GraphPatternBuilder {
             // a preceding OPTIONAL would change which rows are null-extended.
             let base = width;
             let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
+            // A probe's captures cannot replace a visible outer relationship.
+            // Sequential probes reuse these private slots: the native capture
+            // continuation restores them on success, absence and refusal.
+            let capture_base = self.path_captures.len() as u32;
+            let map_capture = |capture| capture_base + capture;
             let mut available = 0_u32;
             if let Some(outer_at) = outer_at {
                 // Copy only an actual correlation. An unrelated nullable outer
@@ -305,13 +356,24 @@ impl GraphPatternBuilder {
                             comparison,
                         });
                     }
+                    GlaOperator::CapturePath {
+                        capture,
+                        start,
+                        segments,
+                    } => {
+                        operators.push(GlaOperator::CapturePath {
+                            capture: map_capture(capture),
+                            start: map(start),
+                            segments: segments.into_iter().map(map).collect(),
+                        });
+                    }
                     GlaOperator::SelectBoolean { expression } => {
                         operators.push(GlaOperator::SelectBoolean {
-                            expression: expression.remap_elements(map, |capture| capture),
+                            expression: expression.remap_elements(map, map_capture),
                         });
                     }
                     _ => unreachable!(
-                        "the positive compiler emits only scan/select/expand/identity/compare"
+                        "the positive compiler emits only admitted pattern instructions"
                     ),
                 }
             }
@@ -506,3 +568,6 @@ fn emit_correlations(
         }
     }
 }
+
+#[cfg(test)]
+mod edge_capture_tests;
