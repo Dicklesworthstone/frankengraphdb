@@ -2845,3 +2845,52 @@ fn a_composed_prism_call_is_an_ordinary_query_over_the_whole_graph() {
     )
     .failure(2, "usage");
 }
+
+#[test]
+fn a_composed_prism_call_certifies_and_replays_across_processes() {
+    let db = TestDb::new("prism-certified");
+    db.create();
+    // A->B, B->C, C->A, A->C: PageRank ranks C above A above B.
+    let certified_seq = db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(a),(a)-[:KNOWS]->(c)",
+    ]);
+    let certificate = PathBuf::from(&db.key).with_file_name("call.certificate");
+    let certificate_path = certificate.to_str().unwrap();
+    // The README's shape: properties read straight off the yielded vertex.
+    let query = "CALL fnx.pagerank() YIELD vertex AS node, score MATCH (node:Person) \
+                 RETURN node.name, score ORDER BY score DESC LIMIT 2";
+    let certified = db.command("query", &["--certify-to", certificate_path, query]);
+    assert_eq!(certified.sequence("rows"), certified_seq);
+    let names: Vec<_> = certified
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            event.get("cells").array()[0]
+                .get("value")
+                .string()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(names, ["C", "A"]);
+    // B gains two in-edges and overtakes A at the head.
+    let later_seq = db.write(&[
+        "MATCH (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}) \
+         INSERT (c)-[:KNOWS]->(b),(b)-[:KNOWS]->(a)",
+    ]);
+    assert!(later_seq > certified_seq);
+    let current = db.command("query", &[query]);
+    assert_ne!(
+        &current.events[1..current.events.len() - 1],
+        &certified.events[1..certified.events.len() - 1],
+        "control: the live ranking moved"
+    );
+    let replayed = db.command("replay", &["--certificate", certificate_path]);
+    assert_eq!(replayed.sequence("replayed"), certified_seq);
+    assert_eq!(
+        &replayed.events[..replayed.events.len() - 1],
+        &certified.events[..certified.events.len() - 1],
+        "replay reruns the analytics at the certified sequence"
+    );
+}

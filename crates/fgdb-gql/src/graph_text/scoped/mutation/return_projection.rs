@@ -36,6 +36,23 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     }
 }
 
+/// The column domain of one graph input: a property is a scalar, a bare
+/// variable its element, a path function its own result.
+fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
+    if input.property.is_some() {
+        return GraphSetColumnType::Scalar;
+    }
+    match input.path {
+        None => GraphSetColumnType::Vertex,
+        Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
+        Some(GraphPathFunction::Length | GraphPathFunction::Type) => GraphSetColumnType::Scalar,
+        Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
+        Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
+        Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
+        Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+    }
+}
+
 struct GraphProjectionHead<'a> {
     with: bool,
     inputs: Vec<Projection<'a>>,
@@ -144,13 +161,18 @@ impl<'a> Parser<'a> {
             // The graph vertices a WITH-less projection exposes after the
             // leading columns, as (name, combined-row column).
             let mut exposed = Vec::new();
+            // (leading column, graph vertex input) pairs equal by the join.
+            let mut identity = Vec::new();
             for &variable in &self.syntax.variables {
                 let index = self.mutation_projection(&mut inputs, variable, None)?;
                 // A MATCH vertex reusing a leading column's name IS that
                 // value: an identity correlation, never a second binding that
                 // shadows the first and silently crosses every row.
                 match (self.read_row_bindings.iter()).position(|row| row.text == variable.text) {
-                    Some(row) => bound_correlations.push((row, index)),
+                    Some(row) => {
+                        bound_correlations.push((row, index));
+                        identity.push((row, index));
+                    }
                     None => {
                         schema.push((variable, GraphSetColumnType::Vertex));
                         exposed.push((variable, width + index));
@@ -168,22 +190,7 @@ impl<'a> Parser<'a> {
                 let (outputs, distinct, at) =
                     self.leading_with_head(&schema, width, &mut inputs)?;
                 let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
-                types.extend(inputs.iter().map(|input| {
-                    if input.property.is_some() {
-                        return GraphSetColumnType::Scalar;
-                    }
-                    match input.path {
-                        None => GraphSetColumnType::Vertex,
-                        Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
-                        Some(GraphPathFunction::Length | GraphPathFunction::Type) => {
-                            GraphSetColumnType::Scalar
-                        }
-                        Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
-                        Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
-                        Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
-                        Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
-                    }
-                }));
+                types.extend(inputs.iter().map(projection_type));
                 let next: pipeline::RowSchema<'a> = outputs
                     .iter()
                     .map(|(name, value)| {
@@ -216,15 +223,45 @@ impl<'a> Parser<'a> {
                     .collect();
                 (projection, pipeline)
             } else {
-                let projection = (self.read_row_bindings.iter().copied())
-                    .zip(0..width)
-                    .chain(exposed)
-                    .map(|(name, column)| ReadProjectionTemplate {
-                        name: name.text.to_owned(),
-                        value: ReadValueTemplate::Column(column),
+                // Without a WITH the row is the leading columns, then the new
+                // MATCH vertices. A leading column a MATCH vertex correlates
+                // with is carried as that vertex's graph column (equal by the
+                // join, and typed Vertex), so a later `n.p` reads its
+                // properties through hidden boundary reads.
+                let outputs = (self.read_row_bindings.iter().copied().enumerate())
+                    .map(|(row, name)| {
+                        let column = identity
+                            .iter()
+                            .find(|&&(at, _)| at == row)
+                            .map_or(row, |&(_, input)| width + input);
+                        (name, ReadValueTemplate::Column(column))
+                    })
+                    .chain(
+                        (exposed.into_iter())
+                            .map(|(name, column)| (name, ReadValueTemplate::Column(column))),
+                    )
+                    .collect();
+                let mut head = GraphProjectionHead {
+                    with: true,
+                    inputs: core::mem::take(&mut inputs),
+                    outputs,
+                };
+                self.hoist_boundary_reads(&mut head, width)?;
+                inputs = head.inputs;
+                let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
+                types.extend(inputs.iter().map(projection_type));
+                let next: pipeline::RowSchema<'a> = (head.outputs.iter())
+                    .map(|(name, value)| {
+                        (*name, value.column_type(&types, &self.syntax.parameters))
                     })
                     .collect();
-                (projection, self.row_pipeline(schema)?)
+                let projection = (head.outputs.into_iter())
+                    .map(|(name, value)| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value,
+                    })
+                    .collect();
+                (projection, self.row_pipeline(next)?)
             };
             self.end()?;
             self.syntax.columns = inputs

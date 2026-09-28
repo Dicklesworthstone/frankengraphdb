@@ -94,21 +94,6 @@ impl PreparedGraphText {
     }
 }
 
-fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
-    if input.property.is_some() {
-        return GraphSetColumnType::Scalar;
-    }
-    match input.path {
-        None => GraphSetColumnType::Vertex,
-        Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
-        Some(GraphPathFunction::Length | GraphPathFunction::Type) => GraphSetColumnType::Scalar,
-        Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
-        Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
-        Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
-        Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
-    }
-}
-
 // Validate expression-column domains before the first catalog callback. These
 // typed NULL/empty-list witnesses only compile shape; no expression executes.
 fn admit_head(

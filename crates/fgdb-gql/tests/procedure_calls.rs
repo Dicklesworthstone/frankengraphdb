@@ -362,3 +362,38 @@ fn a_match_vertex_reusing_a_yielded_name_is_that_vertex_not_a_cross_product() {
         );
     }
 }
+
+#[test]
+fn a_return_reads_a_correlated_vertex_properties_without_a_with() {
+    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let run = |text: &str| {
+        prepare(text, &GqlParameters::new())
+            .execute_governed_with_procedures(
+                wide(),
+                graph(&values),
+                |call, arguments, _| host(call, arguments),
+                || Ok(()),
+            )
+            .unwrap()
+            .value
+    };
+    // t.scores() yields (1,1), (2,3), (3,2), (4,5); VId(i) has p = 10 * (i + 1).
+    let named = run("CALL t.scores() YIELD vertex AS n, score MATCH (n) \
+         RETURN n.p AS p, score ORDER BY score");
+    assert_eq!(column(&named, 0), [20, 40, 30, 50].map(int));
+    // Unaliased, `n.p` is named `p`, exactly as a MATCH-first RETURN names it.
+    let query = PreparedGraphSetText::prepare(
+        "CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN n.p, score ORDER BY score DESC",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(query.columns(), ["p", "score"]);
+    // The correlated column is carried as the vertex itself, and the hidden
+    // property read stays out of RETURN *.
+    let star = run("CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN * ORDER BY score");
+    assert_eq!(star[0].len(), 2);
+    assert_eq!(
+        column(&star, 0),
+        [1, 3, 2, 4].map(|id| GraphValue::Vertex(VId(id)))
+    );
+}
