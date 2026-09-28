@@ -76,7 +76,8 @@ impl PreparedGraphSet {
                 SetNode::Pattern(_) => (false, false),
                 // This new row-domain reducer has no admitted standing
                 // derivative yet. A window cannot make it transparent.
-                SetNode::Aggregate(_) => (true, true),
+                // Neither has a procedure call's relation.
+                SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => (true, true),
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
                 | SetNode::Project { input, .. } => shape(input),

@@ -118,15 +118,36 @@ impl core::fmt::Debug for GraphSetProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetProjectionError {
     Empty,
-    TooManyColumns { limit: usize, observed: usize },
-    InvalidName { column: usize },
-    DuplicateName { column: usize },
-    UnknownInput { column: usize, input: usize },
-    IntegerInput { column: usize, input: usize },
-    ListInput { column: usize },
-    ExpressionBounds { column: usize },
-    InvalidValue { column: usize },
+    TooManyColumns {
+        limit: usize,
+        observed: usize,
+    },
+    InvalidName {
+        column: usize,
+    },
+    DuplicateName {
+        column: usize,
+    },
+    UnknownInput {
+        column: usize,
+        input: usize,
+    },
+    IntegerInput {
+        column: usize,
+        input: usize,
+    },
+    ListInput {
+        column: usize,
+    },
+    ExpressionBounds {
+        column: usize,
+    },
+    InvalidValue {
+        column: usize,
+    },
     SetBuild(GraphSetBuildError),
+    /// CALL starts a read pipeline; it cannot follow another stage.
+    ProcedureNotFirst,
 }
 impl core::fmt::Display for GraphSetProjectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

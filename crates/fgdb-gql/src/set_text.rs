@@ -271,6 +271,30 @@ impl ReadStageTemplate {
                 bytes.extend_from_slice(name.as_bytes());
                 value.append_template_transcript(bytes);
             }
+            Self::Call {
+                namespace,
+                name,
+                arguments,
+                outputs,
+                ..
+            } => {
+                bytes.push(5);
+                for text in [namespace, name] {
+                    bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(text.as_bytes());
+                }
+                bytes.extend_from_slice(&(arguments.len() as u64).to_be_bytes());
+                for argument in arguments {
+                    argument.append_template_transcript(bytes);
+                }
+                bytes.extend_from_slice(&(outputs.len() as u64).to_be_bytes());
+                for (output, alias) in outputs {
+                    for text in [output, alias] {
+                        bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(text.as_bytes());
+                    }
+                }
+            }
             Self::Project {
                 projection,
                 quantifier,
@@ -435,6 +459,16 @@ pub(crate) enum ReadStageTemplate {
     Aggregate {
         at: usize,
         stage: aggregate::ReadAggregateStage,
+    },
+    /// `CALL namespace.name(arguments) YIELD output [AS alias], ...`, the
+    /// first stage of a read pipeline (Appendix C `ProcedureCall`).
+    Call {
+        at: usize,
+        namespace: String,
+        name: String,
+        arguments: Vec<ReadValueTemplate>,
+        /// (procedure output, column alias), in YIELD order.
+        outputs: Vec<(String, String)>,
     },
     Unwind {
         at: usize,
@@ -782,6 +816,7 @@ impl<'a> Composition<'a> {
         }
         if !(self.current().word("MATCH")
             || self.current().word("UNWIND")
+            || self.current().word("CALL")
             || self.current().word("RETURN")
             || self.current().word("WITH"))
         {
@@ -880,6 +915,7 @@ impl<'a> Composition<'a> {
         self.tokens.get(next).is_some_and(|token| {
             token.word("MATCH")
                 || token.word("UNWIND")
+                || token.word("CALL")
                 || token.word("RETURN")
                 || token.word("WITH")
                 || token.punct(b'(')

@@ -37,10 +37,7 @@ pub(super) fn collect<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(supports(query));

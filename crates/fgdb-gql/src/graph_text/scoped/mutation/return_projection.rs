@@ -80,7 +80,11 @@ impl<'a> Parser<'a> {
         mut self,
         statement: &'a str,
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
-        if self.is_word("UNWIND") || self.is_word("RETURN") || self.is_word("WITH") {
+        if self.is_word("UNWIND")
+            || self.is_word("CALL")
+            || self.is_word("RETURN")
+            || self.is_word("WITH")
+        {
             return self.parse_leading_pipeline(statement);
         }
         self.parse_match_prefix()?;
@@ -101,6 +105,12 @@ impl<'a> Parser<'a> {
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
         let mut schema = Vec::new();
         let mut leading = Vec::new();
+        // A procedure is a source: it can only start the pipeline.
+        if self.is_word("CALL") {
+            let at = self.current.at;
+            self.advance()?;
+            leading.push(self.call_stage(&mut schema, at)?);
+        }
         while self.is_word("UNWIND") {
             let at = self.current.at;
             self.advance()?;
@@ -736,6 +746,24 @@ fn bind_stages(
                     offset: *at,
                     kind: GraphSetTextErrorKind::ProjectionBuild(kind),
                 })?,
+            ReadStageTemplate::Call {
+                at,
+                namespace,
+                name,
+                arguments,
+                outputs,
+            } => {
+                let mut bound = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    bound.push(bind_read_value(argument, values)?);
+                }
+                input
+                    .procedure_call(namespace.clone(), name.clone(), bound, outputs.clone())
+                    .map_err(|kind| GraphSetTextError {
+                        offset: *at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?
+            }
             ReadStageTemplate::Project {
                 at,
                 projection,

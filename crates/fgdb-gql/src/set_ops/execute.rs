@@ -178,10 +178,7 @@ pub(super) fn execute<E, C, S, Checkpoint>(
     checkpoint: Checkpoint,
 ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     let mut meter = Meter {
@@ -214,10 +211,7 @@ fn run<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
@@ -265,6 +259,44 @@ where
     Ok(output)
 }
 
+/// Admit one source operand's rows: absorb its statistics, check every row
+/// against the declared column domains, then sort to the canonical bag order,
+/// so a pattern and a procedure feed the relation identically.
+fn admit_source_rows<E, C, Checkpoint>(
+    query: &PreparedGraphSet,
+    execution: GqlQueryExecution<GraphValueRow>,
+    at: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    meter.absorb(&execution, at)?;
+    for row in &execution.value {
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        if row.len() != query.types.len() {
+            return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                operand: at,
+            }));
+        }
+        for (value, kind) in row.values().iter().zip(&query.types) {
+            meter.event(GlaExecutionEvent::Work)?;
+            if !kind.accepts(value) {
+                return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                    operand: at,
+                }));
+            }
+        }
+    }
+    let mut rows = execution.value;
+    merge::sort(
+        &mut rows,
+        &mut |event| meter.event(event),
+        &mut |a, b, control| compare_rows(a, b, &[], control),
+    )?;
+    Ok(rows)
+}
+
 fn run_node<E, C, S, Checkpoint>(
     query: &PreparedGraphSet,
     source: &mut S,
@@ -272,10 +304,7 @@ fn run_node<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     Ok(match &query.node {
@@ -384,33 +413,40 @@ where
         SetNode::Pattern(pattern) => {
             let at = *operand;
             *operand += 1;
-            let execution =
-                source(pattern, meter.remaining()).map_err(|error| meter.source_error(error))?;
-            meter.absorb(&execution, at)?;
-            for row in &execution.value {
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                if row.len() != query.types.len() {
-                    return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
-                        operand: at,
-                    }));
-                }
-                for (value, kind) in row.values().iter().zip(&query.types) {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    let valid = kind.accepts(value);
-                    if !valid {
-                        return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
-                            operand: at,
-                        }));
+            let execution = source
+                .pattern(pattern, meter.remaining())
+                .map_err(|error| meter.source_error(error))?;
+            admit_source_rows(query, execution, at, meter)?
+        }
+        SetNode::ProcedureCall(call) => {
+            let at = *operand;
+            *operand += 1;
+            // Arguments are constants: evaluate each once, against no row.
+            let unit = GraphValueRow::unit();
+            let mut arguments = Vec::with_capacity(call.arguments.len());
+            for (column, argument) in call.arguments.iter().enumerate() {
+                let value = projection::evaluate_value(argument, &unit, column, &mut |event| {
+                    meter.event(event)
+                })
+                .map_err(|error| match error {
+                    projection::ProjectionFailure::Control(error) => error,
+                    projection::ProjectionFailure::Arithmetic { column, error } => {
+                        GqlQueryError::Source(GraphSetExecutionError::Projection {
+                            row: 0,
+                            column,
+                            error,
+                        })
                     }
-                }
+                })?;
+                arguments.push(value);
             }
-            let mut rows = execution.value;
-            merge::sort(
-                &mut rows,
-                &mut |event| meter.event(event),
-                &mut |a, b, control| compare_rows(a, b, &[], control),
-            )?;
-            rows
+            let execution = source
+                .procedure(call, &arguments, meter.remaining())
+                .ok_or(GqlQueryError::Source(
+                    GraphSetExecutionError::ProcedureUnavailable { operand: at },
+                ))?
+                .map_err(|error| meter.source_error(error))?;
+            admit_source_rows(query, execution, at, meter)?
         }
         SetNode::Scope(input) => run(input, source, meter, operand)?,
         SetNode::Filter { input, predicate } => {

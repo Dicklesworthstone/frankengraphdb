@@ -63,7 +63,8 @@ impl PreparedGraphSet {
             SetNode::Pattern(_) => Some((&[], None)),
             // Batch grouping is canonical, but no maintained row-domain
             // conversion contract is admitted by this window profile yet.
-            SetNode::Aggregate(_) => None,
+            // A procedure's rows have no standing derivative at all.
+            SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => None,
             SetNode::Join { left, right, spec } => {
                 use crate::row_join::RowJoinKind;
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);

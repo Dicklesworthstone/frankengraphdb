@@ -148,6 +148,13 @@ impl UnresolvedGraphText<'_> {
                 names.push(name.clone());
                 types.push(crate::GraphSetColumnType::Any);
             }
+            // A CALL source appends each YIELD alias, all Any, as UNWIND does.
+            if let ReadStageTemplate::Call { outputs, .. } = stage {
+                for (_, alias) in outputs {
+                    names.push(alias.clone());
+                    types.push(crate::GraphSetColumnType::Any);
+                }
+            }
         }
         (names, types)
     }

@@ -160,10 +160,7 @@ pub(super) fn visit<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     // Nonfoldable sorting/projection barriers keep their complete selected
@@ -198,10 +195,7 @@ pub(super) fn visit_unwindowed<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(query.has_foldable_node());
@@ -217,10 +211,7 @@ fn visit_expansion<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;

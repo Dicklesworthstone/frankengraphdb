@@ -242,6 +242,7 @@ impl PreparedGraphPipelineAggregateText {
                 operators.push(match stage {
                     ReadStageTemplate::Aggregate { .. } => "Aggregate",
                     ReadStageTemplate::Unwind { .. } => "Unwind",
+                    ReadStageTemplate::Call { .. } => "ProcedureCall",
                     ReadStageTemplate::Project { .. } => "ProjectValues",
                     ReadStageTemplate::Filter { .. } => "Select",
                     ReadStageTemplate::Page { .. } => "OrderByPage",

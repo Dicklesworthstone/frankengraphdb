@@ -93,10 +93,7 @@ fn collect<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<RepeatedRows, E, C>
 where
-    S: FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    S: GraphSetSource<E, C>,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;

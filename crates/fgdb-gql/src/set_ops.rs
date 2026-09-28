@@ -12,10 +12,12 @@ mod filter;
 mod incremental;
 mod join;
 mod merge;
+mod procedure;
 mod projection;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
+pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub(crate) use projection::evaluate_membership;
 pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 
@@ -144,6 +146,10 @@ pub enum GraphSetExecutionError<E> {
         column: usize,
         error: crate::GraphIntegerError,
     },
+    /// A CALL source reached a host that executes no procedures.
+    ProcedureUnavailable {
+        operand: usize,
+    },
 }
 impl<E> GraphSetExecutionError<E> {
     /// Preserve relational failures while translating only the host source.
@@ -163,6 +169,9 @@ impl<E> GraphSetExecutionError<E> {
             }
             Self::Projection { row, column, error } => {
                 GraphSetExecutionError::Projection { row, column, error }
+            }
+            Self::ProcedureUnavailable { operand } => {
+                GraphSetExecutionError::ProcedureUnavailable { operand }
             }
         }
     }
@@ -185,6 +194,12 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
             }
             Self::Projection { row, column, error } => {
                 write!(f, "projection row {row} column {column}: {error}")
+            }
+            Self::ProcedureUnavailable { operand } => {
+                write!(
+                    f,
+                    "set operand {operand} calls a procedure this host does not run"
+                )
             }
         }
     }
@@ -212,6 +227,8 @@ enum SetNode {
         input: Box<PreparedGraphSet>,
         value: GraphSetValue,
     },
+    /// A procedure's rows, supplied by the host (Appendix C `ProcedureCall`).
+    ProcedureCall(Box<PreparedProcedureCall>),
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
@@ -350,6 +367,74 @@ impl PreparedGraphSet {
         })
     }
 
+    /// A registered procedure's rows as this pipeline's source (Appendix C
+    /// `ProcedureCall`). CALL starts a read pipeline, so the input must be the
+    /// zero-column singleton and the call runs exactly once. `outputs` pairs
+    /// each procedure output with its column alias; every column is the Any
+    /// domain. Arguments are constants: literals or bound parameters.
+    pub fn procedure_call(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        outputs: Vec<(String, String)>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        use GraphSetProjectionError as Error;
+        if !matches!(self.node, SetNode::Values)
+            || !self.columns.is_empty()
+            || !self.order.is_empty()
+            || self.offset != 0
+            || self.count.is_some()
+        {
+            return Err(Error::ProcedureNotFirst);
+        }
+        if outputs.is_empty() {
+            return Err(Error::Empty);
+        }
+        if outputs.len() > crate::algebra::MAX_PATTERN_VERTICES {
+            return Err(Error::TooManyColumns {
+                limit: crate::algebra::MAX_PATTERN_VERTICES,
+                observed: outputs.len(),
+            });
+        }
+        for (column, argument) in arguments.iter().enumerate() {
+            projection::value_type(argument, &[], column)?;
+        }
+        let mut columns = Vec::with_capacity(outputs.len());
+        let mut names = Vec::with_capacity(outputs.len());
+        for (column, (output, alias)) in outputs.into_iter().enumerate() {
+            projection::validate_name(&alias, column)?;
+            if columns.contains(&alias) {
+                return Err(Error::DuplicateName { column });
+            }
+            columns.push(alias);
+            names.push(output);
+        }
+        let operands = self.operands + 1;
+        if operands > MAX_GRAPH_SET_OPERANDS {
+            return Err(Error::SetBuild(GraphSetBuildError::TooManyOperands {
+                limit: MAX_GRAPH_SET_OPERANDS,
+                observed: operands,
+            }));
+        }
+        let types = vec![GraphSetColumnType::Any; columns.len()];
+        Ok(Self {
+            node: SetNode::ProcedureCall(Box::new(PreparedProcedureCall {
+                namespace,
+                name,
+                arguments,
+                outputs: names,
+            })),
+            columns,
+            types,
+            operands,
+            depth: self.depth,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
     /// Concatenate each left row with each right row, in left-major order.
     /// Both children retain their own ordering/page and execute exactly once.
     pub fn cross_join(self, right: Self) -> Result<Self, GraphSetBuildError> {
@@ -395,7 +480,11 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            SetNode::Pattern(_) | SetNode::Aggregate(_) | SetNode::Join { .. } => false,
+            // Procedure rows are canonically sorted on arrival, like a pattern.
+            SetNode::Pattern(_)
+            | SetNode::ProcedureCall(_)
+            | SetNode::Aggregate(_)
+            | SetNode::Join { .. } => false,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
@@ -548,6 +637,10 @@ impl PreparedGraphSet {
                 bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
+            SetNode::ProcedureCall(call) => {
+                bytes.push(10);
+                call.append_transcript(bytes);
+            }
             SetNode::Unwind { input, value } => {
                 bytes.push(6);
                 input.append_transcript(bytes);
@@ -638,5 +731,50 @@ impl PreparedGraphSet {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed` plus a procedure host for CALL sources. `procedures`
+    /// receives each call with its evaluated constant arguments and returns
+    /// exactly `call.outputs()` columns per row, under the same allowance and
+    /// pinned snapshot contract as `patterns`. Without this entry a CALL
+    /// source refuses with `ProcedureUnavailable`.
+    pub fn execute_governed_with_procedures<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let mut source = WithProcedures {
+            patterns,
+            procedures,
+        };
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// Whether any source of this relation is a procedure call.
+    #[must_use]
+    pub fn calls_procedure(&self) -> bool {
+        match &self.node {
+            SetNode::ProcedureCall(_) => true,
+            SetNode::Pattern(_) | SetNode::Values => false,
+            SetNode::Aggregate(summary) => summary.input().calls_procedure(),
+            SetNode::Unwind { input, .. }
+            | SetNode::Scope(input)
+            | SetNode::Filter { input, .. }
+            | SetNode::Project { input, .. } => input.calls_procedure(),
+            SetNode::CrossJoin { left, right }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => {
+                left.calls_procedure() || right.calls_procedure()
+            }
+        }
     }
 }

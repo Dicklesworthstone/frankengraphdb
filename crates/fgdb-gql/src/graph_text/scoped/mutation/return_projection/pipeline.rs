@@ -88,7 +88,8 @@ fn append_stage(
         ReadStageTemplate::Aggregate { at, .. } => (*at, 3),
         ReadStageTemplate::Project { at, .. }
         | ReadStageTemplate::Filter { at, .. }
-        | ReadStageTemplate::Unwind { at, .. } => (*at, 1),
+        | ReadStageTemplate::Unwind { at, .. }
+        | ReadStageTemplate::Call { at, .. } => (*at, 1),
         ReadStageTemplate::Page { at, .. } => (*at, 0),
     };
     *depth += growth;
@@ -513,6 +514,62 @@ impl<'a> Parser<'a> {
             at,
             name: alias.text.to_owned(),
             value,
+        })
+    }
+
+    /// `CALL namespace.name(arguments) YIELD output [AS alias], ...` after the
+    /// CALL keyword. Arguments are constant row values (literals, parameters);
+    /// each yielded output becomes an Any-domain column, as UNWIND's does.
+    /// The host resolves the procedure and checks its arguments at execution.
+    pub(in crate::graph_text) fn call_stage(
+        &mut self,
+        schema: &mut RowSchema<'a>,
+        at: usize,
+    ) -> Result<ReadStageTemplate, GraphSetTextError> {
+        let namespace = self.name()?;
+        self.punct(b'.', "procedure name after the namespace")?;
+        let name = self.name()?;
+        self.punct(b'(', "procedure arguments")?;
+        let mut arguments = Vec::new();
+        if !self.take(b')')? {
+            loop {
+                arguments.push(self.read_row_value(schema, 0)?);
+                if self.take(b',')? {
+                    continue;
+                }
+                self.punct(b')', "closing procedure argument list")?;
+                break;
+            }
+        }
+        self.word("YIELD")?;
+        let mut outputs = Vec::new();
+        loop {
+            let output = self.name()?;
+            let alias = if self.take_word("AS")? {
+                self.name()?
+            } else {
+                output
+            };
+            if schema.iter().any(|(name, _)| name.text == alias.text) {
+                return Err(expected(alias.at, "new YIELD column name"));
+            }
+            self.capacity(
+                schema.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            schema.push((alias, GraphSetColumnType::Any));
+            outputs.push((output.text.to_owned(), alias.text.to_owned()));
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        Ok(ReadStageTemplate::Call {
+            at,
+            namespace: namespace.text.to_owned(),
+            name: name.text.to_owned(),
+            arguments,
+            outputs,
         })
     }
 

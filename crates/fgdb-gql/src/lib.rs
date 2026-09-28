@@ -182,8 +182,9 @@ pub use set_ops::row_filter;
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
     GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
-    GraphSetProjectionError, GraphSetQuantifier, GraphSetValue, MAX_GRAPH_SET_DEPTH,
-    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
+    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
+    PreparedProcedureCall, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
