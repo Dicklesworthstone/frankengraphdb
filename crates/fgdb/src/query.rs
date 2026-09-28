@@ -36,6 +36,8 @@ pub type QueryValue = GraphAggregateValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryResult {
+    /// Read results or explicit write RETURN rows. Transaction-local write rows
+    /// are not a durability acknowledgment; the caller must still finish.
     Rows {
         columns: Vec<String>,
         rows: Vec<Vec<QueryValue>>,
@@ -166,16 +168,44 @@ impl core::error::Error for QueryError {
 pub enum QueryWriteError<A> {
     Prepare(GraphWriteScriptError),
     Execute(GraphWriteScriptExecutionError<WriteTxnError, A, Cancel>),
+    /// CREATE/INSERT RETURN is a single native query, not a no-result script.
+    InsertText(GraphInsertTextError),
+    Insert(GqlQueryError<GraphInsertQueryError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Prepare(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
+            Self::InsertText(e) => e.fmt(f),
+            Self::Insert(e) => e.fmt(f),
         }
     }
 }
 impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> {}
+
+// Both public write entrypoints must bind the same native query. The parser,
+// not a text rewrite, owns statement framing, scopes and parameter occurrence
+// tables. List parameters may appear only in RETURN, without any UNWIND use
+// that would otherwise infer their kind.
+fn prepare_insert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    relation: RelationId,
+) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
+    let declarations: Vec<(&str, GqlParameterType)> = params
+        .parameter_types()
+        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List))
+        .collect();
+    PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
 
 pub(crate) fn values(columns: Vec<String>, rows: Vec<GraphValueRow>) -> QueryResult {
     QueryResult::Rows {
@@ -309,6 +339,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
     /// allocator remain explicit, exactly as in the existing native script API.
     /// A single statement is a one-step program; scripts share one work budget.
+    /// CREATE/INSERT RETURN produces Rows only after native transaction finish
+    /// succeeds. Writes without RETURN retain their Write receipt. A RETURN
+    /// failure is never retried as a script or as a read. Multi-statement RETURN
+    /// scripts are refused rather than executing a prefix and dropping rows.
     #[allow(clippy::too_many_arguments)]
     // Returns once per statement/script and wraps the script execution error,
     // whose record location plus program error is deliberate (write_scripts).
@@ -323,8 +357,27 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
-        allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
+        mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        if PreparedGraphInsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::InsertText)?
+        {
+            let query = prepare_insert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::InsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_insert_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.insertion_policy(),
+                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                )
+                .await
+                .map_err(QueryWriteError::Insert)?;
+            return Ok(values(columns, rows.value));
+        }
         let declarations: Vec<(&str, GqlParameterType)> = params
             .parameter_types()
             .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
@@ -351,7 +404,10 @@ impl<V: Vfs + Clone> Database<V> {
 
 impl WriteTxn {
     /// Stage a native statement/script atomically inside this transaction.
-    /// The caller alone decides when to finish the outer transaction.
+    /// The caller alone decides when to finish the outer transaction. Explicit
+    /// CREATE/INSERT RETURN produces transaction-local Rows, not a durability
+    /// acknowledgment. Its complete result is admitted before atomic staging;
+    /// errors preserve earlier staged effects and their read dependencies.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
@@ -363,8 +419,25 @@ impl WriteTxn {
         resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
-        allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
+        mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        if PreparedGraphInsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::InsertText)?
+        {
+            let query = prepare_insert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::InsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_insert_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.insertion_policy(),
+                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                )
+                .map_err(QueryWriteError::Insert)?;
+            return Ok(values(columns, rows.value));
+        }
         let declarations: Vec<(&str, GqlParameterType)> = params
             .parameter_types()
             .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
@@ -383,5 +456,326 @@ impl WriteTxn {
             receipt,
             completion: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod write_return_tests {
+    use super::*;
+    use crate::{DatabaseKeys, MemVfs, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::insertion::GraphInsertRequest;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x74; 32],
+            DatabaseSecurityNamespaceId([0x75; 32]),
+            [0x76; 32],
+        )
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn policy(rows: u64, vertices: u64, edges: u64) -> GraphWriteProgramPolicy {
+        GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(1_000, rows, 5_000_000, 2_000_000),
+            1_000,
+            vertices,
+            edges,
+        )
+    }
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn rows(result: QueryResult, expected_columns: &[&str]) -> Vec<Vec<GraphValue>> {
+        let QueryResult::Rows { columns, rows } = result else {
+            panic!("an explicit RETURN must not be replaced by a write receipt")
+        };
+        assert_eq!(
+            columns,
+            expected_columns.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>()
+        );
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| match value {
+                        GraphAggregateValue::Value(value) => value,
+                        _ => panic!("CREATE RETURN preserves native graph values"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn allocate(request: GraphWriteIdentityRequest) -> Result<ElementId, ()> {
+        assert_eq!(request.statement, 0);
+        Ok(match request.request {
+            GraphInsertRequest::Vertex { row, vertex } => {
+                ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128))
+            }
+            GraphInsertRequest::Edge { row, edge } => {
+                ElementId::Edge(EId(1_000 + row as u128 * 10 + edge as u128))
+            }
+        })
+    }
+
+    #[test]
+    fn public_write_return_preserves_identified_match_edges_and_durable_results() {
+        let ((), report) = run_async_under_lab(0xc8e7_0011, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(3))]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
+            seed.add_edge(EId(11), VId(1), VId(2), vec![(P, CanonicalScalar::Int(9))]);
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "MATCH (a)-[r:R]->(b)
+                     CREATE (copy:Copy {p:r.p+a.p}),(a)-[e:R {p:r.p}]->(copy)
+                     RETURN a,r,copy,e,r.p AS original,copy.p AS copied ORDER BY original",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(2, 2, 2),
+                    allocate,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows(result, &["a", "r", "copy", "e", "original", "copied"]),
+                vec![
+                    vec![
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Edge(EId(10)),
+                        GraphValue::Vertex(VId(100)),
+                        GraphValue::Edge(EId(1_000)),
+                        int(7),
+                        int(10),
+                    ],
+                    vec![
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Edge(EId(11)),
+                        GraphValue::Vertex(VId(110)),
+                        GraphValue::Edge(EId(1_010)),
+                        int(9),
+                        int(12),
+                    ],
+                ]
+            );
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 4);
+            assert_eq!(db.edges().unwrap().len(), 4);
+            for (vertex, edge, value) in [(100, 1_000, 10), (110, 1_010, 12)] {
+                assert_eq!(
+                    db.vertex(VId(vertex)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(value))]
+                );
+                let edge = db.edge(EId(edge)).unwrap().unwrap();
+                assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(vertex)));
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value - 3))]);
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_transaction_return_reads_staged_sources_and_keeps_prefix_after_failure() {
+        let ((), report) = run_async_under_lab(0xc8e7_0012, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            prefix.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(0))]);
+            transaction.write(&mut db, prefix).unwrap();
+            let digest = transaction.staged_effect_digest().unwrap();
+            let next = Cell::new(100_u128);
+            let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
+                assert_eq!(request.statement, 0);
+                assert!(matches!(request.request, GraphInsertRequest::Vertex { .. }));
+                let vertex = next.get();
+                next.set(vertex + 1);
+                Ok(ElementId::Vertex(VId(vertex)))
+            };
+            let result = transaction.query_write(
+                &mut db,
+                &cx,
+                "MATCH (n) CREATE (copy {p:n.p}) RETURN 10/copy.p AS quotient",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(2, 2, 0),
+                &mut allocate,
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Insert(GqlQueryError::Source(
+                    GraphInsertQueryError::Returning(_)
+                )))
+            ));
+            assert_eq!(next.get(), 102, "issued identities are not rolled back");
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 2);
+            assert!(transaction.vertex(&db, VId(100)).unwrap().is_none());
+            assert!(transaction.vertex(&db, VId(101)).unwrap().is_none());
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            let arguments = GqlParameters::new()
+                .with_int64("step", 3)
+                .unwrap()
+                .with_list("tail", vec![int(7)])
+                .unwrap();
+            let result = transaction
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "MATCH (n) WHERE n.p > 0 CREATE (copy {p:n.p+$step})
+                     RETURN n,copy,copy.p AS p,$tail AS tail ORDER BY n",
+                    &arguments,
+                    symbols,
+                    R,
+                    policy(1, 1, 0),
+                    &mut allocate,
+                )
+                .unwrap();
+            assert_eq!(
+                rows(result, &["n", "copy", "p", "tail"]),
+                vec![vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(102)),
+                    int(5),
+                    GraphValue::List(vec![int(7)].into_boxed_slice()),
+                ]]
+            );
+            assert!(db.vertex(VId(102)).unwrap().is_none());
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 3);
+            assert!(db.vertex(VId(100)).unwrap().is_none());
+            assert!(db.vertex(VId(101)).unwrap().is_none());
+            assert_eq!(
+                db.vertex(VId(102)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(5))]
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_return_refusals_budgets_and_cancellation_never_publish_a_prefix() {
+        let ((), report) = run_async_under_lab(0xc8e7_0013, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            for text in [
+                "CREATE (n:Copy) RETURN n; CREATE (m)",
+                "CREATE (n:Copy); CREATE (m) RETURN m",
+                "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
+            ] {
+                let calls = Cell::new(0);
+                let result = db
+                    .query_write(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        text,
+                        &GqlParameters::new(),
+                        |kind, name| {
+                            calls.set(calls.get() + 1);
+                            symbols(kind, name)
+                        },
+                        R,
+                        policy(2, 2, 0),
+                        |_| -> Result<ElementId, ()> { panic!("refused text cannot allocate") },
+                    )
+                    .await;
+                assert!(matches!(result, Err(QueryWriteError::InsertText(_))));
+                assert_eq!(calls.get(), 0, "refusal precedes catalog calls: {text}");
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "UNWIND [2,1] AS x CREATE (n:Copy {p:x}) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(1, 2, 0),
+                    allocate,
+                )
+                .await;
+            assert!(matches!(result, Err(QueryWriteError::Insert(GqlQueryError::Rows(_)))));
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+            let cancelled = cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cancelled,
+                    &commit,
+                    "CREATE (n:Copy) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(1, 1, 0),
+                    |_| -> Result<ElementId, ()> { panic!("cancelled query cannot allocate") },
+                )
+                .await;
+            assert!(matches!(result, Err(QueryWriteError::Insert(GqlQueryError::Interrupted(_)))));
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
