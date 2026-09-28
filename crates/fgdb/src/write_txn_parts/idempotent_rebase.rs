@@ -129,6 +129,7 @@ impl WriteTxn {
         attempt.transaction.prepare_idempotent_rebase(
             attempt.database,
             max_expanded_rows,
+            &cx.merge_eval(),
             &mut checkpoint,
         )?;
         attempt.entered_commit = true;
@@ -148,6 +149,7 @@ impl WriteTxn {
         &mut self,
         database: &mut Database<V>,
         max_expanded_rows: u64,
+        merge: &fgdb_types::MergeEvalCx,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<(), WriteTxnError> {
         let frontier = database.frontier()?;
@@ -236,8 +238,11 @@ impl WriteTxn {
         if frontier == self.basis {
             return Ok(());
         }
-        let prepared =
-            database.prepare_ordered_writes_bounded(self.staged.clone(), max_expanded_rows)?;
+        let prepared = database.prepare_ordered_writes_replay(
+            merge,
+            self.staged.clone(),
+            max_expanded_rows,
+        )?;
         checkpoint()?;
         debug_assert_eq!(prepared.basis, frontier);
         self.prepared = Some(prepared);

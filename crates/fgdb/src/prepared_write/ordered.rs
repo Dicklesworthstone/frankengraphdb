@@ -16,7 +16,7 @@ use crate::{Database, PendingRow, PreparedWrite, WriteBatch, WriteError, WriteTx
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, RelationId};
 use fgdb_strata::writer::BlockWriter;
-use fgdb_types::{CommitCx, CommitSeq, EId};
+use fgdb_types::{CommitCx, CommitSeq, EId, MergeEvalCx};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -293,6 +293,31 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_writable()?;
         self.admit_ordered_write_rows(batches.iter(), max_expanded_rows)?;
         self.prepare_ordered_writes(batches)
+    }
+
+    /// Deterministic intent replay for the rebase finalizers (FG-INV-17,
+    /// doctrine #3). This is the same evaluator and admission as
+    /// [`Self::prepare_ordered_writes_bounded`]. It runs only under the
+    /// capability-empty [`MergeEvalCx`], never a commit, transaction or query
+    /// context, so a rebase cannot re-evaluate with clock, entropy, I/O or
+    /// spawn authority. The runtime mask blocks mask-aware ambient effects
+    /// while it runs. See [`MergeEvalCx::with_restriction`] for what the pinned
+    /// runtime's mask does not cover.
+    ///
+    /// ```compile_fail,E0308
+    /// # use fgdb::{Database, MemVfs, WriteBatch};
+    /// # use fgdb_types::CommitCx;
+    /// fn replay_under_a_commit_context(db: &mut Database<MemVfs>, commit: &CommitCx) {
+    ///     let _ = db.prepare_ordered_writes_replay(commit, Vec::<WriteBatch>::new(), 1);
+    /// }
+    /// ```
+    pub fn prepare_ordered_writes_replay(
+        &mut self,
+        merge: &MergeEvalCx,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: u64,
+    ) -> Result<PreparedWrite, WriteTxnError> {
+        merge.with_restriction(|| self.prepare_ordered_writes_bounded(batches, max_expanded_rows))
     }
 
     /// Borrow the complete program so transaction admission does not first

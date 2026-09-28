@@ -546,6 +546,17 @@ impl CommitCx {
         self.inner.checkpoint().map_err(Box::new)
     }
 
+    /// The capability-empty context a commit's deterministic intent replay
+    /// runs under (FG-INV-17). Narrowing only: it keeps cancellation and drops
+    /// every effect. No conversion leads back to a commit, transaction or
+    /// query context.
+    #[must_use]
+    pub fn merge_eval(&self) -> MergeEvalCx {
+        MergeEvalCx {
+            inner: self.inner.restrict::<cap::None>(),
+        }
+    }
+
     pub fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
         let _guard = self.inner.clone().set_current_restricted();
         run()

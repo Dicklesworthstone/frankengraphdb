@@ -139,6 +139,7 @@ impl WriteTxn {
         &mut self,
         database: &mut Database<V>,
         max_expanded_rows: u64,
+        merge: &fgdb_types::MergeEvalCx,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<(), WriteTxnError> {
         let frontier = database.frontier()?;
@@ -209,8 +210,11 @@ impl WriteTxn {
         }
         // This reconstructs both the canonical effects and CURRENT dependency
         // set with the ordinary evaluator, rather than blessing a stale draft.
-        let prepared =
-            database.prepare_ordered_writes_bounded(self.staged.clone(), max_expanded_rows)?;
+        let prepared = database.prepare_ordered_writes_replay(
+            merge,
+            self.staged.clone(),
+            max_expanded_rows,
+        )?;
         checkpoint()?;
         if prepared.template != previous.template {
             return Err(WriteTxnError::AppendRebaseIneligible);

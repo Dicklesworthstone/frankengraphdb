@@ -252,18 +252,23 @@ impl WriteTxn {
             }
             .into());
         }
+        // Intent replay runs under the capability-empty merge context only
+        // (FG-INV-17); the commit context stays with validation and publication.
+        let merge = cx.merge_eval();
         match rebase {
             Some(RebasePreparation::Append(limit)) => attempt.transaction.prepare_append_rebase(
                 attempt.database,
                 limit,
+                &merge,
                 &mut checkpoint,
             )?,
             Some(RebasePreparation::DisjointFields(limit)) => attempt
                 .transaction
-                .prepare_field_rebase(attempt.database, limit, &mut checkpoint)?,
+                .prepare_field_rebase(attempt.database, limit, &merge, &mut checkpoint)?,
             Some(RebasePreparation::Mixed(limit)) => attempt.transaction.prepare_mixed_rebase(
                 attempt.database,
                 limit,
+                &merge,
                 &mut checkpoint,
             )?,
             None => {}
