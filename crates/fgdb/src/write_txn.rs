@@ -19,6 +19,7 @@ include!("write_txn_parts/lifecycle.rs");
 include!("write_txn_parts/bounded_ordered.rs");
 include!("write_txn_parts/historical_staging.rs");
 include!("write_txn_parts/historical_programs.rs");
+include!("write_txn_parts/historical_scripts.rs");
 include!("write_txn_parts/savepoints.rs");
 include!("write_txn_parts/refresh.rs");
 include!("write_txn_parts/append_rebase.rs");
