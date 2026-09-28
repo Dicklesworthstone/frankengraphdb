@@ -245,7 +245,7 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "MATCH (a)-[r:R]->(b) CREATE (r:Copy) RETURN r",
         "MATCH (a) CREATE (c)-[a:R]->(d) RETURN a",
         "MATCH (a) CREATE (a:Copy) RETURN a",
-        "UNWIND [1] AS x MATCH (m) CREATE (n:Copy) RETURN n",
+        "UNWIND [1] AS x MATCH (m) WITH m CREATE (n:Copy) RETURN n",
         "CREATE (n:Copy) RETURN absent",
         "CREATE (n:Copy) RETURN n+1 AS bad",
         "CREATE (n:Copy) RETURN CASE WHEN TRUE THEN 1 ELSE missing END AS bad",
@@ -603,4 +603,164 @@ fn empty_match_is_a_no_op_and_return_errors_expose_no_partial_proposal() {
         result.is_err(),
         "a failing RETURN cannot publish a CREATE prefix"
     );
+}
+
+// Imported keys are not identity bindings, and key 2 is non-unique. Either
+// a missing join or an incorrectly shifted graph slot
+// therefore changes an independently spelled expected answer.
+fn imported_props() -> Props {
+    Props::from([
+        ((VId(1), P), CanonicalScalar::Int(1)),
+        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(3), P), CanonicalScalar::Int(2)),
+        ((VId(1), Q), CanonicalScalar::Int(10)),
+        ((VId(2), Q), CanonicalScalar::Int(20)),
+        ((VId(3), Q), CanonicalScalar::Int(30)),
+    ])
+}
+
+#[test]
+fn imported_keys_create_connected_occurrences_with_frozen_source_and_result_fields() {
+    let query = prepare(
+        "UNWIND [2,1,2] AS x MATCH (a {p:x}) \
+         CREATE (a)-[e:R {q:x+1}]->(c:Copy {p:a.q+x}) \
+         RETURN x,a,a.q AS old,c,e,c.p AS value,e.q AS weight ORDER BY c",
+    );
+    let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    let expected: Vec<_> = [(2, 2, 20), (2, 3, 30), (1, 1, 10), (2, 2, 20), (2, 3, 30)]
+        .into_iter()
+        .enumerate()
+        .map(|(row, (key, vertex, old))| vec![
+            int(key), GraphValue::Vertex(VId(vertex)), int(old),
+            GraphValue::Vertex(VId(100 + row as u128 * 16)),
+            GraphValue::Edge(EId(1_000 + row as u128 * 16)), int(old + key), int(key + 1),
+        ])
+        .collect();
+    assert_eq!(values(&batch), expected);
+    assert_eq!(batch.insertion().stats().created_vertices, 5);
+    assert_eq!(batch.insertion().stats().created_edges, 5);
+    assert_eq!(batch.returning().rows.snapshot_records, 3);
+    for (row, vertex) in [2, 3, 1, 2, 3].into_iter().enumerate() {
+        assert!(matches!(
+            batch.insertion().intents()[2 * row + 1],
+            GraphInsertIntent::Edge { source, destination, .. }
+                if source == VId(vertex) && destination == VId(100 + row as u128 * 16)
+        ));
+    }
+}
+
+#[test]
+fn imported_correlations_share_where_and_map_lowering_and_all_keys_are_required() {
+    let map = prepare(
+        "UNWIND [1,2] AS x UNWIND [10,20] AS y MATCH (a {p:x,q:y}) \
+         CREATE (c {p:x+y}) RETURN x,y,a,c.p AS sum ORDER BY x,y",
+    );
+    let predicate = prepare(
+        "UNWIND [1,2] AS x UNWIND [10,20] AS y MATCH (a) WHERE a.p=x AND y=a.q \
+         CREATE (c {p:x+y}) RETURN x,y,a,c.p AS sum ORDER BY x,y",
+    );
+    assert_eq!(map.canonical_bytes(), predicate.canonical_bytes());
+    let batch = run_matched(&map, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    assert_eq!(values(&batch), vec![
+        vec![int(1), int(10), GraphValue::Vertex(VId(1)), int(11)],
+        vec![int(2), int(20), GraphValue::Vertex(VId(2)), int(22)],
+    ]);
+}
+
+#[test]
+fn imported_match_preserves_uncorrelated_bags_and_keeps_anonymous_bindings_private() {
+    // This was the formerly unsupported UNWIND/MATCH case in the refusal
+    // corpus. It is now a positive execution law, not a deleted assertion.
+    let query = prepare("UNWIND [1] AS x MATCH (m) CREATE (n:Copy) RETURN n");
+    let batch = run_matched(&query, &[VId(1), VId(2)], &[], &Props::new()).unwrap();
+    assert_eq!(batch.insertion().stats().created_vertices, 2);
+    assert_eq!(values(&batch), vec![
+        vec![GraphValue::Vertex(VId(100))],
+        vec![GraphValue::Vertex(VId(116))],
+    ]);
+    let query = prepare("UNWIND [7] AS x MATCH () CREATE (c) RETURN *");
+    assert_eq!(query.columns(), &["x", "c"]);
+    let batch = run_matched(&query, &[VId(1)], &[], &Props::new()).unwrap();
+    assert_eq!(values(&batch), vec![vec![int(7), GraphValue::Vertex(VId(100))]]);
+}
+
+#[test]
+fn imported_parameters_are_shared_and_null_or_wrong_kind_keys_never_match() {
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertQueryText::prepare(
+        "UNWIND $keys AS x MATCH (a {p:x}) WHERE a.q > $floor \
+         CREATE (c {q:a.q+$floor}) RETURN x,c.q AS q,$keys AS original",
+        R,
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    ).unwrap();
+    assert_eq!(calls.get(), 2);
+    let keys = vec![GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("2").unwrap()), int(2)];
+    let arguments = GqlParameters::new().with_list("keys", keys.clone()).unwrap()
+        .with_int64("floor", 25).unwrap();
+    let query = template.bind_parameters(&arguments).unwrap();
+    assert_eq!(calls.get(), 2);
+    let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    assert_eq!(values(&batch), vec![vec![int(2), int(55), GraphValue::List(keys.into_boxed_slice())]]);
+    assert_eq!(batch.insertion().stats().created_vertices, 1);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    assert!(template.bind_parameters(&arguments.with_int64("extra", 1).unwrap()).is_err());
+}
+
+#[test]
+fn imported_match_limits_output_without_suppressing_writes_or_expression_errors() {
+    for (suffix, count) in [("RETURN DISTINCT x LIMIT 1", 1), ("RETURN x LIMIT 0", 0)] {
+        let query = prepare(&format!(
+            "UNWIND [2,2] AS x MATCH (a {{p:x}}) CREATE (a)-[:R]->(c) {suffix}"
+        ));
+        let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+        assert_eq!(batch.returning().value.len(), count);
+        assert_eq!(batch.insertion().stats().created_vertices, 4);
+        assert_eq!(batch.insertion().stats().created_edges, 4);
+    }
+    let bad = prepare(
+        "UNWIND [1,2] AS x MATCH (a {p:x}) CREATE (c) RETURN 10/(2-x) AS value LIMIT 0"
+    );
+    assert!(run_matched(&bad, &[VId(1), VId(2)], &[], &imported_props()).is_err());
+    for list in ["[]", "NULL", "[99]"] {
+        let query = prepare(&format!(
+            "UNWIND {list} AS x MATCH (a {{p:x}}) CREATE (c {{p:1/0}}) RETURN 1/0 AS bad"
+        ));
+        let batch = run_matched(&query, &[VId(1), VId(2)], &[], &imported_props()).unwrap();
+        assert!(batch.insertion().intents().is_empty());
+        assert!(batch.returning().value.is_empty());
+    }
+}
+
+#[test]
+fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_calls() {
+    for text in [
+        "UNWIND [1] AS x MATCH (x) CREATE (c) RETURN c",
+        "UNWIND [1] AS x MATCH (a)-[x:R]->(b) CREATE (c) RETURN c",
+        "UNWIND [1] AS x MATCH (a) CREATE (x) RETURN x",
+        "UNWIND [1] AS x MATCH (a) CREATE (c {p:missing}) RETURN c",
+        "UNWIND [1] AS x MATCH (a) WHERE a.p=x OR a.q=1 CREATE (c) RETURN c",
+        "UNWIND [1] AS x MATCH (a) OPTIONAL MATCH (b {p:x}) CREATE (c) RETURN c",
+    ] {
+        let calls = Cell::new(0);
+        assert!(PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        }).is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    let mut text = String::new();
+    for index in 0..fgdb_gql::MAX_GRAPH_SET_DEPTH - 3 {
+        text.push_str(&format!("UNWIND [1] AS x{index} "));
+    }
+    text.push_str("MATCH (a {p:x0}) CREATE (c) RETURN c");
+    let calls = Cell::new(0);
+    assert!(PreparedGraphInsertQueryText::prepare(&text, R, |kind, name| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    }).is_err());
+    assert_eq!(calls.get(), 0);
 }

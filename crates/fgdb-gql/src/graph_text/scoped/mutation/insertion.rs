@@ -88,6 +88,92 @@ impl<'a> Parser<'a> {
         Ok((stages, schema))
     }
 
+    /// Imports feed MATCH's existing correlation compiler. A graph binding
+    /// must have a new name in this write profile: never shadow an imported
+    /// value or silently interpret a scalar as an existing endpoint.
+    pub(super) fn insertion_match_prefix(
+        &mut self,
+        imports: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("MATCH") {
+            return Ok(false);
+        }
+        self.read_row_bindings = imports.iter().map(|(name, _)| *name).collect();
+        self.parse_match_prefix()?;
+        for &(name, _) in imports {
+            if self.insertion_match_kind(name.text).is_some() {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "MATCH bindings distinct from imported UNWIND aliases",
+                    ),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    /// Resolve the combined row (imports, then projected MATCH fields) while
+    /// using the ordinary scalar compiler. The graph child is evaluated once;
+    /// these are projection slots, not deferred reads of the created graph.
+    fn insertion_source_value(
+        &mut self,
+        inputs: &mut Vec<Projection<'a>>,
+        imports: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
+        self.read_resolved_value(
+            &mut |parser| {
+                let TokenKind::Word(word) = parser.current.kind else {
+                    return Ok(None);
+                };
+                if parser.insertion_match_kind(word).is_some() {
+                    let name = parser.any_variable()?;
+                    let property = if parser.take(b'.')? {
+                        Some(parser.name()?)
+                    } else {
+                        None
+                    };
+                    let column = parser.mutation_projection(inputs, name, property)?;
+                    return Ok(Some(imports.len() + column));
+                }
+                if let Some(column) = imports.iter().position(|(name, _)| name.text == word) {
+                    parser.advance()?;
+                    return Ok(Some(column));
+                }
+                Ok(None)
+            },
+            0,
+        )
+    }
+
+    fn insertion_input_types(
+        &self,
+        imports: &[(Name<'a>, GraphSetColumnType)],
+        inputs: &[Projection<'a>],
+    ) -> Vec<GraphSetColumnType> {
+        imports
+            .iter()
+            .map(|(_, kind)| *kind)
+            .chain(inputs.iter().map(|input| {
+                if input.property.is_some() {
+                    GraphSetColumnType::Scalar
+                } else {
+                    match input.path {
+                        Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
+                        Some(GraphPathFunction::Length | GraphPathFunction::Type) => {
+                            GraphSetColumnType::Scalar
+                        }
+                        Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
+                        Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
+                        Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
+                        Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+                        None => GraphSetColumnType::Vertex,
+                    }
+                }
+            }))
+            .collect()
+    }
+
     fn insertion_field_capacity(&self, fields: &mut usize) -> Result<(), GraphInsertTextError> {
         if *fields >= MAX_GRAPH_INSERT_FIELDS {
             return Err(insertion_build(
@@ -142,8 +228,12 @@ impl<'a> Parser<'a> {
             self.punct(b':', ":")?;
             let at = self.current.at;
             let value = if let Some(schema) = row_schema {
-                let value = self.read_row_value(schema, 0)?;
-                let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
+                let value = if self.syntax.variables.is_empty() {
+                    self.read_row_value(schema, 0)?
+                } else {
+                    self.insertion_source_value(inputs, schema)?
+                };
+                let types = self.insertion_input_types(schema, inputs);
                 if !matches!(
                     value.column_type(&types, &self.syntax.parameters),
                     GraphSetColumnType::Scalar | GraphSetColumnType::Any
@@ -228,11 +318,10 @@ impl<'a> Parser<'a> {
                 .iter()
                 .any(|variable| variable.text == name.text)
             {
-                Some(GraphInsertEndpoint::Column(self.mutation_projection(
-                    &mut parsed.projections,
-                    name,
-                    None,
-                )?))
+                let column = self.mutation_projection(&mut parsed.projections, name, None)?;
+                Some(GraphInsertEndpoint::Column(
+                    row_schema.map_or(0, |schema| schema.len()) + column,
+                ))
             } else {
                 parsed
                     .vertices
@@ -515,11 +604,8 @@ impl PreparedGraphInsertText {
         GraphInsertTextError,
     > {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        let matched = parser.is_word("MATCH");
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
-        if matched {
-            parser.parse_match_prefix()?;
-        }
+        let matched = parser.insertion_match_prefix(&row_schema)?;
         let at = parser.current.at;
         let mut parsed = parser.insertion_clauses(
             (!leading.is_empty()).then_some(row_schema.as_slice()),
@@ -531,6 +617,26 @@ impl PreparedGraphInsertText {
             None
         };
         parser.end()?;
+        // Join keys may be absent from CREATE and RETURN. Append their hidden
+        // fields without shifting any previously compiled expression slot.
+        let mut correlations = Vec::new();
+        for (variable, key, row) in core::mem::take(&mut parser.read_correlations) {
+            let column =
+                parser.mutation_projection(&mut parsed.projections, variable, Some(key))?;
+            correlations.push((row, column));
+        }
+        let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);
+        if !leading.is_empty() && input_types.len() > MAX_PATTERN_VERTICES {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                    dimension: crate::algebra::PatternLimitDimension::Columns,
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: input_types.len(),
+                }),
+            )
+            .into());
+        }
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
@@ -545,21 +651,24 @@ impl PreparedGraphInsertText {
                 return_at: statement.len(),
                 projection: None,
                 quantifier: crate::GraphSetQuantifier::All,
-                pipeline: leading,
+                pipeline: Vec::new(),
                 singleton: true,
-                leading: Vec::new(),
+                leading,
                 correlations: Vec::new(),
             };
             // Compile all source and property expression shapes before any
             // catalog callback, including statically unreachable empty lists.
             let values = shape_arguments(&syntax.parameters);
             let shape = input.bind_values(&values)?;
-            shape.check_parent_depth().map_err(|kind| {
+            // A matched child adds a cross product and, when correlated, a
+            // filter. Admit those ancestors BEFORE any catalog callback.
+            let ancestors = 1 + usize::from(matched) + usize::from(!correlations.is_empty());
+            shape.check_ancestor_depth(ancestors).map_err(|kind| {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
             if returning.is_some() {
                 shape
-                    .check_ancestor_depth(2)
+                    .check_ancestor_depth(ancestors + 1)
                     .map_err(|kind| GraphInsertTextError {
                         offset: at,
                         kind: GraphInsertTextErrorKind::ReturnBuild(
@@ -574,7 +683,7 @@ impl PreparedGraphInsertText {
                 .chain(parsed.edges.iter().flat_map(|e| &e.properties))
             {
                 let value = return_projection::bind_read_value(value, &values)?;
-                crate::GraphSetProjection::admit_output(&value, shape.column_types(), 0).map_err(
+                crate::GraphSetProjection::admit_output(&value, &input_types, 0).map_err(
                     |kind| crate::GraphSetTextError {
                         offset: at,
                         kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
@@ -690,7 +799,19 @@ impl PreparedGraphInsertText {
                 return_at: at,
                 reverse_catalog: None,
             };
-            (InsertTextInput::Match(selection), Some(shape))
+            if let Some(mut input) = relational {
+                input.selection = Some(selection);
+                input.correlations = correlations;
+                (
+                    InsertTextInput::Relation {
+                        statement: statement.to_owned(),
+                        input,
+                    },
+                    None,
+                )
+            } else {
+                (InsertTextInput::Match(selection), Some(shape))
+            }
         } else if let Some(input) = relational {
             debug_assert!(parsed.projections.is_empty());
             (

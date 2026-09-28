@@ -85,7 +85,7 @@ impl<'a> ParsedReturn<'a> {
         if (word.eq_ignore_ascii_case("startNode") || word.eq_ignore_ascii_case("endNode"))
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
-            return self.endpoint(parser, syntax).map(Some);
+            return self.endpoint(parser, syntax, source.len()).map(Some);
         }
         // MATCH metadata and captured-path functions are ordinary source
         // projections, just as in SET and read RETURN. Keep them on the same
@@ -112,7 +112,7 @@ impl<'a> ParsedReturn<'a> {
                 unreachable!("a native graph function lowers to a source projection")
             };
             return self
-                .column(Binding::Input(column), name, kind)
+                .column(Binding::Input(source.len() + column), name, kind)
                 .map(Some);
         }
         let vertex = syntax
@@ -175,7 +175,7 @@ impl<'a> ParsedReturn<'a> {
             // column: creation may already have projected other properties.
             let input = parser.mutation_projection(&mut syntax.projections, name, property)?;
             (
-                Binding::Input(input),
+                Binding::Input(source.len() + input),
                 property.unwrap_or(name),
                 if property.is_some() {
                     GraphSetColumnType::Scalar
@@ -194,6 +194,7 @@ impl<'a> ParsedReturn<'a> {
         &mut self,
         parser: &mut Parser<'a>,
         syntax: &mut InsertionSyntax<'a>,
+        imported_width: usize,
     ) -> Result<usize, GraphPatternTextError> {
         let function = parser.name()?;
         let start = function.text.eq_ignore_ascii_case("startNode");
@@ -219,7 +220,9 @@ impl<'a> ParsedReturn<'a> {
             let edge = parser.edge_variable()?;
             parser.punct(b')', ")")?;
             let vertex = parser.edge_endpoint(edge, start)?;
-            Binding::Input(parser.mutation_projection(&mut syntax.projections, vertex, None)?)
+            Binding::Input(
+                imported_width + parser.mutation_projection(&mut syntax.projections, vertex, None)?,
+            )
         };
         self.column(binding, function, GraphSetColumnType::Vertex)
     }
@@ -325,11 +328,14 @@ impl<'a> Parser<'a> {
                 .chain(self.syntax.path)
                 .collect();
             for name in matched {
+                if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
+                    continue;
+                }
                 let kind = self
                     .insertion_match_kind(name.text)
                     .expect("visible MATCH binding has a domain");
                 let input = self.mutation_projection(&mut syntax.projections, name, None)?;
-                let column = returning.column(Binding::Input(input), name, kind)?;
+                let column = returning.column(Binding::Input(source.len() + input), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
                     value: ReadValueTemplate::Column(column),
