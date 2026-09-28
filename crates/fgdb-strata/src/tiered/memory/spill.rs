@@ -16,7 +16,9 @@
 //! are retained while writing. Opaque run handles contain all read coordinates
 //! and integrity evidence, never a path or a self-asserted on-disk length.
 
+mod paged;
 mod stream;
+pub use paged::{PagedSpillRun, PagedSpillWriter};
 
 use core::fmt;
 use std::io::{self, SeekFrom};
