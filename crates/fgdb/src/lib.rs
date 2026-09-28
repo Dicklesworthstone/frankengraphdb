@@ -112,9 +112,6 @@
 //! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
-// Lab tests prove Send across the nested authorized write/commit futures.
-// Give the trait solver enough depth without bypassing that proof.
-#![recursion_limit = "256"]
 
 mod bulk_load;
 pub use bulk_load::{
@@ -209,6 +206,12 @@ use fgdb_types::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// A type-erased `Send` future. The commit, completion, open and publication
+/// boundaries return one, so a caller's `Send` proof stops there instead of
+/// descending through Chronicle and Strata. Without it every lab test root
+/// overflowed rustc's default recursion limit (fgdb-a5y6m).
+pub(crate) type SendFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Re-exported because [`Database::write_with_crash`] takes one: a caller
 /// driving the crash-point matrix needs to name the instants, and importing them
@@ -2304,7 +2307,29 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(&self.snapshot.versions)
     }
 
-    async fn bind_with_vfs(
+    // Type-erased because every constructor funnels through this bind: a
+    // caller's `Send` proof stops at `dyn Future + Send` instead of descending
+    // through recovery, rebuild and publication (fgdb-a5y6m).
+    fn bind_with_vfs<'a>(
+        cx: &'a CommitCx,
+        vfs: V,
+        path: &'a Path,
+        keys: DatabaseKeys,
+        force_rebuild: bool,
+    ) -> SendFuture<'a, Result<Self, OpenError>>
+    where
+        V: 'a,
+    {
+        Box::pin(Self::bind_with_vfs_inner(
+            cx,
+            vfs,
+            path,
+            keys,
+            force_rebuild,
+        ))
+    }
+
+    async fn bind_with_vfs_inner(
         cx: &CommitCx,
         vfs: V,
         path: &Path,
@@ -3379,7 +3404,29 @@ impl<V: Vfs + Clone> Database<V> {
     /// derived Tier-D objects. Which validator instance judges the draft is
     /// the CALLER's statement about the template's basis — see
     /// `write_with_faults` and [`Database::commit_prepared`].
-    async fn commit_template(
+    ///
+    /// The future is type-erased here because every commit path crosses this
+    /// one boundary. A caller's `Send` proof then stops at `dyn Future + Send`
+    /// instead of descending through Chronicle and Strata, which overflowed
+    /// rustc's default recursion limit in every lab test root (fgdb-a5y6m).
+    fn commit_template<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
+        template: LogicalDeltaTemplate,
+        crash_at: Option<CrashPoint>,
+        publication_failure: Option<DerivedPublicationStage>,
+        block_store_crash_at: Option<BlockStoreCrashPoint>,
+    ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
+        Box::pin(self.commit_template_inner(
+            cx,
+            template,
+            crash_at,
+            publication_failure,
+            block_store_crash_at,
+        ))
+    }
+
+    async fn commit_template_inner(
         &mut self,
         cx: &CommitCx,
         template: LogicalDeltaTemplate,
@@ -5228,8 +5275,35 @@ async fn fold_stream<V: Vfs>(
 /// The publication tail every open path shares: publish from a clone, make
 /// the blocks/patches/root/manifest durable, and assemble the snapshot from
 /// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+///
+/// Type-erased because open, recovery and compaction all end here: a caller's
+/// `Send` proof stops at `dyn Future + Send` instead of descending through
+/// Strata publication (fgdb-a5y6m).
 #[allow(clippy::too_many_arguments)]
-async fn publish_and_snapshot<V: Vfs>(
+fn publish_and_snapshot<'a, V: Vfs>(
+    cx: &'a CommitCx,
+    store: &'a BlockStore<V>,
+    keys: &'a DatabaseKeys,
+    writer: BlockWriter,
+    versions: std::collections::BTreeMap<ElementId, ObjectId>,
+    frontier: CommitSeq,
+    next_birth_ordinal: u64,
+    published_chain_hash: Digest,
+) -> SendFuture<'a, Result<(Snapshot, BlockWriter), RebuildError>> {
+    Box::pin(publish_and_snapshot_inner(
+        cx,
+        store,
+        keys,
+        writer,
+        versions,
+        frontier,
+        next_birth_ordinal,
+        published_chain_hash,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_and_snapshot_inner<V: Vfs>(
     cx: &CommitCx,
     store: &BlockStore<V>,
     keys: &DatabaseKeys,

@@ -1,9 +1,5 @@
 //! Native MATCH ... MERGE relationship text through the real autocommit engine.
 
-// Lab tests prove Send across the nested authorized write/commit futures.
-// Give the trait solver enough depth without bypassing that proof.
-#![recursion_limit = "256"]
-
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};

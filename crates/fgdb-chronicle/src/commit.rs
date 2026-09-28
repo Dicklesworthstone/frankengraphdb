@@ -767,7 +767,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             scrub_stop(crash_at, ScrubCrashPoint::AfterTempWrite)?;
             file.flush().await?;
             scrub_stop(crash_at, ScrubCrashPoint::AfterTempFlush)?;
-            sync_file(cx, &file).await?;
+            sync_file(cx, &mut file).await?;
             scrub_stop(crash_at, ScrubCrashPoint::AfterTempFileSync)?;
             self.vfs.rename(&temporary, path).await?;
             scrub_stop(crash_at, ScrubCrashPoint::AfterRename)?;
@@ -814,7 +814,7 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// It goes through the capability context because that boundary is where a
     /// lab runtime attaches fsync lies, latency, and crash injection — the two
     /// barriers are exactly the instants a durability test needs to control.
-    async fn barrier(cx: &CommitCx, file: &V::File) -> Result<(), CommitError> {
+    async fn barrier(cx: &CommitCx, file: &mut V::File) -> Result<(), CommitError> {
         sync_file(cx, file).await?;
         Ok(())
     }
@@ -833,7 +833,7 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// the base guarantee that a successful flush is durable; this extra call
     /// prevents one transient successful no-op from becoming an acknowledged
     /// loss. D1 and D2 remain the protocol's two *logical* barriers.
-    async fn reinforce_barrier(cx: &CommitCx, file: &V::File) -> Result<(), CommitError> {
+    async fn reinforce_barrier(cx: &CommitCx, file: &mut V::File) -> Result<(), CommitError> {
         sync_file(cx, file).await?;
         Ok(())
     }
@@ -954,7 +954,7 @@ impl<V: Vfs> CommitCoordinator<V> {
         // pointing at bytes that may not exist.
         let capsule_path = Self::capsule_path(&self.dir, capsule_oid);
         let encoded_capsule = encode_container(&sealed);
-        let capsule_file = match self
+        let mut capsule_file = match self
             .vfs
             .open(
                 &capsule_path,
@@ -1018,7 +1018,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             return Err(CommitError::Io(std::io::Error::other("crash: before D1")));
         }
         let capsule_dir = self.dir.join(CAPSULE_DIR);
-        sync_created_entry(cx, &self.vfs, &capsule_file, &capsule_dir, || {
+        sync_created_entry(cx, &self.vfs, &mut capsule_file, &capsule_dir, || {
             if crash_at == Some(CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: capsule inode durable before directory entry",
@@ -1038,7 +1038,7 @@ impl<V: Vfs> CommitCoordinator<V> {
         }
         // `sync_created_entry` performed D1's primary file sync. Keep the
         // handle live for one reinforcement before any marker may name it.
-        Self::reinforce_barrier(cx, &capsule_file).await?;
+        Self::reinforce_barrier(cx, &mut capsule_file).await?;
         if crash_at == Some(CrashPoint::AfterD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
         }
@@ -1081,7 +1081,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             return Err(CommitError::Io(std::io::Error::other("crash: before D2")));
         }
         if log_created || self.commit_log_parent_sync_pending {
-            sync_created_entry(cx, &self.vfs, &log, &self.dir, || {
+            sync_created_entry(cx, &self.vfs, &mut log, &self.dir, || {
                 if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
                     return Err(std::io::Error::other(
                         "crash: marker-log inode durable before directory entry",
@@ -1092,7 +1092,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             .await?;
             self.commit_log_parent_sync_pending = false;
         } else {
-            Self::barrier(cx, &log).await?;
+            Self::barrier(cx, &mut log).await?;
             if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
                 return Err(CommitError::Io(std::io::Error::other(
                     "crash: marker-log inode durable",
@@ -1102,7 +1102,7 @@ impl<V: Vfs> CommitCoordinator<V> {
         // The branch above performed D2's primary file sync. A commit is not
         // acknowledged until one reinforcement has had the opportunity to
         // persist bytes a transient successful no-op left dirty.
-        Self::reinforce_barrier(cx, &log).await?;
+        Self::reinforce_barrier(cx, &mut log).await?;
 
         // Only now is the commit real, so only now does in-memory state move.
         self.chain.adopt(chained)?;

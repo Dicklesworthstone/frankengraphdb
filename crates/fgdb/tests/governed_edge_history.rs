@@ -1,5 +1,4 @@
 //! Edge history work is part of the public transaction read allowance.
-#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};

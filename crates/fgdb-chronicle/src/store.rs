@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 pub(crate) async fn sync_created_entry<V: Vfs>(
     cx: &CommitCx,
     vfs: &V,
-    file: &V::File,
+    file: &mut V::File,
     parent_directory: &Path,
     after_file_sync: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
@@ -64,7 +64,11 @@ pub(crate) async fn sync_created_entry<V: Vfs>(
 }
 
 /// Sync one already-open file through the commit capability boundary.
-pub(crate) async fn sync_file<F: VfsFile>(cx: &CommitCx, file: &F) -> std::io::Result<()> {
+///
+/// The handle is borrowed `&mut`, never `&`: `VfsFile` is `Send` but not
+/// `Sync`, so a shared borrow held across this await would make every commit
+/// future unprovably `Send` for a generic `Vfs` (fgdb-a5y6m).
+pub(crate) async fn sync_file<F: VfsFile>(cx: &CommitCx, file: &mut F) -> std::io::Result<()> {
     cx.with_restriction_async(file.sync_all()).await
 }
 
@@ -355,7 +359,7 @@ impl<V: Vfs> RootStore<V> {
                 "manifest.root has no parent directory",
             ))
         })?;
-        sync_created_entry(cx, &self.vfs, &file, parent, || {
+        sync_created_entry(cx, &self.vfs, &mut file, parent, || {
             if crash_at == Some(RootCreateCrashPoint::AfterFileSyncBeforeDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: root inode durable before directory entry",
@@ -470,7 +474,7 @@ impl<V: Vfs> RootStore<V> {
         file.seek(SeekFrom::Start(target_offset as u64)).await?;
         file.write_all(&next.serialize()).await?;
         file.flush().await?;
-        Self::barrier(cx, &file).await?;
+        Self::barrier(cx, &mut file).await?;
         after_barrier()?;
 
         // The reread that mints the evidence. It goes through the same Vfs
@@ -538,7 +542,7 @@ impl<V: Vfs> RootStore<V> {
     /// benchmark is most tempted to skip, and a durability claim measured
     /// without it is not a durability claim (doctrine 7: no non-durable
     /// benchmark mode reported as a result).
-    async fn barrier(cx: &CommitCx, file: &V::File) -> Result<(), StoreError> {
+    async fn barrier(cx: &CommitCx, file: &mut V::File) -> Result<(), StoreError> {
         // The capability context and the Vfs are what a lab runtime swaps to
         // inject fsync lies, latency, and crashes at this exact boundary.
         sync_file(cx, file).await?;

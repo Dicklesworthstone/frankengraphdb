@@ -1,6 +1,3 @@
-// The lab body's Send check nests past the default depth (next trait solver).
-#![recursion_limit = "256"]
-
 //! Engine capsule scrub acceptance: exact inventory, canonical bytes, loss fencing,
 //! retained-snapshot answers, and crashes at every repair I/O boundary.
 

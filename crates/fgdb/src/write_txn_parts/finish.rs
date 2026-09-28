@@ -159,21 +159,23 @@ impl WriteTxn {
         }
     }
 
-    async fn complete<V: Vfs + Clone>(
-        &mut self,
-        database: &mut Database<V>,
-        cx: &CommitCx,
+    // Type-erased because every finish and commit crosses this one boundary:
+    // a caller's `Send` proof stops at `dyn Future + Send` instead of
+    // descending through validation and the commit tail (fgdb-a5y6m).
+    fn complete<'a, V: Vfs + Clone>(
+        &'a mut self,
+        database: &'a mut Database<V>,
+        cx: &'a CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
-    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
-        cx.with_restriction_async(self.complete_controlled(
+    ) -> crate::SendFuture<'a, Result<EmbeddedTxnCompletion, WriteTxnError>> {
+        Box::pin(cx.with_restriction_async(self.complete_controlled(
             database,
             cx,
             crash_at,
             require_write,
             || cx.checkpoint().map_err(WriteTxnError::Interrupted),
-        ))
-        .await
+        )))
     }
 
     // The private checkpoint seam is shared verbatim by production and the

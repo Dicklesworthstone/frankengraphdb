@@ -174,8 +174,8 @@ impl<V: Vfs> CommitCoordinator<V> {
         // Arm before invoking any publication future. There is no await between
         // successful verification and disarming; unwind cannot reopen this gate.
         self.poisoned = true;
-        if let Some(file) = identical {
-            sync_file(cx, &file).await?;
+        if let Some(mut file) = identical {
+            sync_file(cx, &mut file).await?;
             sync_directory(cx, &self.vfs, &self.dir.join(super::CAPSULE_DIR)).await?;
         } else {
             self.replace_scrubbed_capsule(cx, &path, &bytes, crash_at)

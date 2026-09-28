@@ -1,5 +1,3 @@
-#![recursion_limit = "256"]
-
 //! Native multi-relation writes share one durable boundary. Compare complete
 //! caller-keyed graphs and GQL answers with separately committed statements.
 //! Recovery models both surviving marker bytes and an explicitly torn tail.

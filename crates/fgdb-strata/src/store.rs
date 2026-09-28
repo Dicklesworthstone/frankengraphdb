@@ -192,12 +192,14 @@ fn staging_inode_is_exclusive(cx: &CommitCx, staging_path: &Path) -> bool {
 async fn sync_file_and_directory<V: Vfs>(
     cx: &CommitCx,
     vfs: &V,
-    file: &V::File,
+    file: &mut V::File,
     parent_directory: &Path,
     after_file_sync: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    // `move` captures the `&mut` itself. A non-move closure would capture
+    // `*file` by shared borrow, and `VfsFile` is not `Sync` (fgdb-a5y6m).
     run_ordered_creation_barrier(
-        || cx.with_restriction_async(file.sync_all()),
+        move || cx.with_restriction_async(file.sync_all()),
         after_file_sync,
         || sync_directory(cx, vfs, parent_directory),
     )
@@ -305,9 +307,13 @@ struct StagedObject<F> {
 /// lab runtime) each completes inline on its first poll, in order. Every sync
 /// runs to completion before the first failure in order is reported, so none
 /// is abandoned mid-flight.
+///
+/// Files are borrowed `&mut`: `VfsFile` is `Send` but not `Sync`, and this
+/// future holds its argument, so shared borrows would make every commit future
+/// unprovably `Send` for a generic Vfs (fgdb-a5y6m).
 async fn sync_files_together<'f, F: VfsFile + 'f>(
     cx: &CommitCx,
-    files: impl Iterator<Item = &'f F>,
+    files: impl Iterator<Item = &'f mut F>,
 ) -> std::io::Result<()> {
     let mut syncs: Vec<_> = files
         .map(|file| (Box::pin(file.sync_all()), None))
@@ -879,11 +885,11 @@ impl<V: Vfs> BlockStore<V> {
         let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
 
-        if let Some(file) = self
+        if let Some(mut file) = self
             .existing_canonical(kind, cx, id, &path, bytes, limit)
             .await?
         {
-            sync_file_and_directory(cx, &self.vfs, &file, &self.dir, || {
+            sync_file_and_directory(cx, &self.vfs, &mut file, &self.dir, || {
                 if crash_at
                     == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
                 {
@@ -915,10 +921,10 @@ impl<V: Vfs> BlockStore<V> {
         self.vfs.rename(&staging_path, &path).await?;
 
         let published_opts = OpenOptions::new().read(true).write(true);
-        let published = cx
+        let mut published = cx
             .with_restriction_async(self.vfs.open(&path, &published_opts))
             .await?;
-        sync_file_and_directory(cx, &self.vfs, &published, &self.dir, || {
+        sync_file_and_directory(cx, &self.vfs, &mut published, &self.dir, || {
             if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
                 return Err(std::io::Error::other(
                     "crash: strata block inode durable before directory entry",
@@ -2319,15 +2325,18 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     }
 
     async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
-        let staged = std::mem::take(&mut self.staged);
+        let mut staged = std::mem::take(&mut self.staged);
         let creates = staged.iter().any(|object| object.staging.is_some());
         if creates && self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
             return Err(
                 std::io::Error::other("crash: batch staging bytes before inode sync").into(),
             );
         }
-        sync_files_together(cx, staged.iter().map(|object| &object.file)).await?;
-        for object in &staged {
+        sync_files_together(cx, staged.iter_mut().map(|object| &mut object.file)).await?;
+        // `&mut`, not `&`: a shared borrow of a staged object held across the
+        // await needs `V::File: Sync`, which `VfsFile` does not promise, so the
+        // commit future would not be provably `Send` for a generic Vfs.
+        for object in &mut staged {
             let durable = object.staging.as_deref().unwrap_or(&object.path);
             self.store
                 .verify_durable_bytes(cx, durable, &object.bytes, object.limit)

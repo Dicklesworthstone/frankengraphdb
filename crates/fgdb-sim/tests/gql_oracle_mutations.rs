@@ -1,5 +1,3 @@
-#![recursion_limit = "256"]
-
 //! Generated native write semantics, independently applied to ReferenceGraph.
 //! No engine deltas or evaluator outputs are used to compute expected state.
 use asupersync::lab::run_async_under_lab;
