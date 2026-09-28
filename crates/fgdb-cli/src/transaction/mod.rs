@@ -6,13 +6,25 @@
 //! success event reaches stdout before successful completion. Rollback and
 //! precommit errors discard both effects and buffered output. Issued identities
 //! are never reclaimed, and ambiguous completion is never reported as abort.
+//!
+//! A --write step may contain one native CREATE/INSERT ... RETURN query,
+//! including MATCH-selected or UNWIND-driven creation. Its rows are frozen at
+//! that step, carry kind=write and statements=1, and share the transaction-wide
+//! row/output allowances with --query results. All RETURN expressions and
+//! output admission precede the sole completion boundary; LIMIT affects rows,
+//! never creations. Other write steps retain their multi-statement programs.
 
-use super::{Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted};
+use super::{
+    Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted, value_cell,
+};
 use asupersync::fs::Vfs;
 use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
+use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
-    PreparedGraphWriteProgram, PreparedGraphWriteScript,
+    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphWriteProgram,
+    PreparedGraphWriteScript,
 };
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
@@ -78,6 +90,7 @@ impl Default for Limits {
 enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
     Write(Box<PreparedGraphWriteProgram>),
+    Returning(Box<PreparedGraphInsertQuery>),
 }
 fn prepare(
     options: &Options,
@@ -97,6 +110,26 @@ fn prepare(
                     .map_err(Failure::query)?;
             }
             if step.write {
+                // Native token framing, never substring matching or a failed
+                // read retried as a write. Each step keeps its own argument map.
+                if PreparedGraphInsertQueryText::has_return_clause(&step.text)
+                    .map_err(Failure::query)?
+                {
+                    let declarations: Vec<_> = params.parameter_types().collect();
+                    let query = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+                        &step.text,
+                        options.coordinate,
+                        &declarations,
+                        |kind, name| options.resolve(kind, name),
+                    )
+                    .map_err(Failure::query)?
+                    .bind_parameters(&params)
+                    .map_err(Failure::query)?;
+                    statements = statements
+                        .checked_add(1)
+                        .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
+                    return Ok(PreparedStep::Returning(Box::new(query)));
+                }
                 let declarations: Vec<_> = params
                     .parameter_types()
                     .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
@@ -182,30 +215,7 @@ fn buffer_rows(
     };
     let count =
         u64::try_from(rows.len()).map_err(|_| Failure::query("transaction row count overflow"))?;
-    if robot {
-        output.line(&format!(
-            r#"{{"v":1,"event":"statement","index":{index},"kind":"query","view":"transaction_local","basis":{basis},"count":{count}}}"#,
-        ))?;
-        output.line(&format!(
-            r#"{{"v":1,"event":"columns","statement":{index},"columns":[{}]}}"#,
-            columns
-                .iter()
-                .map(|name| quoted(name))
-                .collect::<Vec<_>>()
-                .join(",")
-        ))?;
-    } else {
-        output.line(&format!(
-            "statement {index}: query (transaction-local basis {basis})"
-        ))?;
-        output.line(
-            &columns
-                .iter()
-                .map(|s| s.chars().flat_map(char::escape_default).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\t"),
-        )?;
-    }
+    buffer_row_header(output, &columns, index, basis, robot, count, false)?;
     for row in rows {
         cx.checkpoint().map_err(Failure::query)?;
         let mut cells = Vec::with_capacity(row.len());
@@ -222,14 +232,88 @@ fn buffer_rows(
                 }
             });
         }
-        if robot {
-            output.line(&format!(
-                r#"{{"v":1,"event":"row","statement":{index},"cells":[{}]}}"#,
-                cells.join(",")
-            ))?;
-        } else {
-            output.line(&cells.join("\t"))?;
+        buffer_row(output, &cells, index, robot)?;
+    }
+    Ok(count)
+}
+
+// The two row-producing step types share framing and scalar encoding, not
+// storage execution. Insertion rows are borrowed during encoding: they are
+// never cloned into another complete QueryResult just to drive transport.
+fn buffer_row_header(
+    output: &mut BufferedOutput,
+    columns: &[String],
+    index: usize,
+    basis: u64,
+    robot: bool,
+    count: u64,
+    write: bool,
+) -> Result<(), Failure> {
+    let kind = if write { "write" } else { "query" };
+    if robot {
+        let statements = if write { ",\"statements\":1" } else { "" };
+        output.line(&format!(
+            r#"{{"v":1,"event":"statement","index":{index},"kind":"{kind}","view":"transaction_local","basis":{basis},"count":{count}{statements}}}"#,
+        ))?;
+        output.line(&format!(
+            r#"{{"v":1,"event":"columns","statement":{index},"columns":[{}]}}"#,
+            columns
+                .iter()
+                .map(|name| quoted(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))?;
+    } else {
+        output.line(&format!(
+            "statement {index}: {kind} (transaction-local basis {basis})"
+        ))?;
+        output.line(
+            &columns
+                .iter()
+                .map(|s| s.chars().flat_map(char::escape_default).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        )?;
+    }
+    Ok(())
+}
+
+fn buffer_row(
+    output: &mut BufferedOutput,
+    cells: &[String],
+    index: usize,
+    robot: bool,
+) -> Result<(), Failure> {
+    if robot {
+        output.line(&format!(
+            r#"{{"v":1,"event":"row","statement":{index},"cells":[{}]}}"#,
+            cells.join(",")
+        ))
+    } else {
+        output.line(&cells.join("\t"))
+    }
+}
+
+fn buffer_insert_rows(
+    output: &mut BufferedOutput,
+    columns: &[String],
+    rows: Vec<GraphValueRow>,
+    index: usize,
+    basis: u64,
+    robot: bool,
+    cx: &QueryCx,
+) -> Result<u64, Failure> {
+    let count =
+        u64::try_from(rows.len()).map_err(|_| Failure::query("transaction row count overflow"))?;
+    buffer_row_header(output, columns, index, basis, robot, count, true)?;
+    for row in rows {
+        cx.checkpoint().map_err(Failure::query)?;
+        let mut cells = Vec::with_capacity(row.values().len());
+        for value in row.values() {
+            cx.checkpoint().map_err(Failure::query)?;
+            cells.push(if robot { value_cell(value)? } else { human_value(value)? });
         }
+        buffer_row(output, &cells, index, robot)?;
     }
     Ok(count)
 }
@@ -297,6 +381,33 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .execute_in_transaction(&txn, db, &cx, params, allowance)
                             .map_err(execution_failure)?;
                         let added = buffer_rows(&mut output, rows, index + 1, basis, robot, &cx)?;
+                        count = count
+                            .checked_add(added)
+                            .filter(|n| *n <= limits.rows)
+                            .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
+                    }
+                    PreparedStep::Returning(query) => {
+                        let remaining = limits
+                            .rows
+                            .checked_sub(count)
+                            .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
+                        // Only final RETURN rows consume this allowance; source
+                        // occurrences/creations retain native insertion limits.
+                        let allowance = GqlQueryPolicy {
+                            rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
+                            ..policy()
+                        };
+                        let (_, rows) = txn
+                            .execute_graph_insert_query_engine_governed(
+                                db,
+                                &cx,
+                                query,
+                                GraphInsertPolicy::new(allowance, 100_000, 100_000),
+                            )
+                            .map_err(execution_failure)?;
+                        let added = buffer_insert_rows(
+                            &mut output, query.columns(), rows.value, index + 1, basis, robot, &cx,
+                        )?;
                         count = count
                             .checked_add(added)
                             .filter(|n| *n <= limits.rows)
@@ -387,3 +498,5 @@ async fn run_with_limits<V: Vfs + Clone>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod returning_tests;
