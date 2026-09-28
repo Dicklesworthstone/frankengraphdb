@@ -112,8 +112,10 @@ impl AsyncRead for File {
         if file.pending_read { return Poll::Pending; }
         let at = file.bytes.position() as usize;
         let len = out.remaining().min(file.bytes.get_ref().len().saturating_sub(at));
-        out.put_slice(&file.bytes.get_ref()[at..at + len]);
-        file.bytes.set_position((at + len) as u64);
+        if len != 0 {
+            out.put_slice(&file.bytes.get_ref()[at..at + len]);
+            file.bytes.set_position((at + len) as u64);
+        }
         file.reads += 1;
         Poll::Ready(Ok(()))
     }
@@ -397,3 +399,5 @@ fn run_catalog_capacity_is_admitted_before_source_io() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod prepared;

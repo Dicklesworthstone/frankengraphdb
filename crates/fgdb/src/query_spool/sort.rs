@@ -8,6 +8,7 @@ use fgdb_strata::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use std::cmp::Ordering;
 
 mod canonical;
+mod prepared;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
@@ -139,8 +140,9 @@ impl NativeResultSpool {
     /// sorted-result handle. Finished intermediate runs still consume quota;
     /// unfinished I/O/writers keep the existing poisoned-file cleanup law.
     ///
-    /// max_work_units covers frame transfer and comparisons with checkpoints;
-    /// the paged I/O implementation separately checks its QueryCx. Each page
+    /// max_work_units covers output frame bytes, structural visits, comparisons
+    /// and merge steps. It does not count page I/O or hashing; the paged I/O
+    /// implementation separately checks its QueryCx and file quotas. Each page
     /// authenticates before use; unread corrupt pages cannot enter comparisons.
     /// There is no eager fallback, new storage authority, Warden grant, spill
     /// for the decoded graph, or full larger-than-memory query-engine claim.
