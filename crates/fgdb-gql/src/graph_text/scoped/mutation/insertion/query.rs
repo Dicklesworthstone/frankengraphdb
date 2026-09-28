@@ -52,6 +52,10 @@ impl<'a> ParsedReturn<'a> {
             .iter()
             .position(|(old, _, _)| old.same(binding))
         {
+            // A graph function and a bare variable can denote the same
+            // vertex. Reuse its value slot, but keep the current spelling for
+            // an implicit output alias (e.g. startNode(e), endNode(e) on a loop).
+            self.bindings[column].1 = name;
             return Ok(column);
         }
         if self.bindings.len() == MAX_PATTERN_VERTICES {
@@ -78,6 +82,11 @@ impl<'a> ParsedReturn<'a> {
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);
         };
+        if (word.eq_ignore_ascii_case("startNode") || word.eq_ignore_ascii_case("endNode"))
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return self.endpoint(parser, syntax).map(Some);
+        }
         let vertex = syntax
             .vertices
             .iter()
@@ -148,6 +157,43 @@ impl<'a> ParsedReturn<'a> {
             )
         };
         self.column(binding, alias, kind).map(Some)
+    }
+
+    /// Endpoint identities are already in the native occurrence: created
+    /// edges name declaration slots, matched edges name source projections.
+    /// In particular, incoming syntax does not reverse the stored direction.
+    fn endpoint(
+        &mut self,
+        parser: &mut Parser<'a>,
+        syntax: &mut InsertionSyntax<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let function = parser.name()?;
+        let start = function.text.eq_ignore_ascii_case("startNode");
+        parser.punct(b'(', "(")?;
+        let created = if let TokenKind::Word(word) = parser.current.kind {
+            syntax
+                .edges
+                .iter()
+                .find(|edge| edge.name.is_some_and(|name| name.text == word))
+        } else {
+            None
+        };
+        let binding = if let Some(edge) = created {
+            parser.name()?;
+            parser.punct(b')', ")")?;
+            match if start { edge.source } else { edge.destination } {
+                GraphInsertEndpoint::Column(column) => Binding::Input(column),
+                GraphInsertEndpoint::CreatedVertex(vertex) => Binding::Vertex(vertex),
+            }
+        } else {
+            // Reuse the ordinary MATCH direction/domain checks rather than
+            // guessing endpoints for an undirected or quantified binding.
+            let edge = parser.edge_variable()?;
+            parser.punct(b')', ")")?;
+            let vertex = parser.edge_endpoint(edge, start)?;
+            Binding::Input(parser.mutation_projection(&mut syntax.projections, vertex, None)?)
+        };
+        self.column(binding, function, GraphSetColumnType::Vertex)
     }
 
     pub(super) fn admit(
