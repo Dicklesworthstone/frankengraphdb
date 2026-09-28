@@ -260,21 +260,20 @@ impl<'a> Parser<'a> {
             }
             deletion_mode = Some(deleting);
             loop {
-                if actions.len() >= MAX_GRAPH_MUTATION_ACTIONS {
-                    return Err(build_error(
-                        self.current.at,
-                        GraphMutationBuildError::TooManyActions {
-                            limit: MAX_GRAPH_MUTATION_ACTIONS,
-                            observed: actions.len() + 1,
-                        },
-                    ));
-                }
+                self.mutation_action_capacity(actions.len())?;
                 let variable = if deleting {
                     self.variable()?
                 } else {
                     self.property_variable()?
                 };
                 let target = self.mutation_projection(&mut columns, variable, None)?;
+                if setting && self.take(b'+')? {
+                    self.mutation_literal_map(&mut columns, &mut actions, target)?;
+                    if !self.take(b',')? {
+                        break;
+                    }
+                    continue;
+                }
                 let kind = if deleting {
                     ActionKind::Delete
                 } else if self.take(b':')? {
@@ -314,6 +313,62 @@ impl<'a> Parser<'a> {
         self.end()?;
         Ok((columns, actions))
     }
+
+    fn mutation_action_capacity(&self, count: usize) -> Result<(), GraphMutationTextError> {
+        if count >= MAX_GRAPH_MUTATION_ACTIONS {
+            return Err(build_error(
+                self.current.at,
+                GraphMutationBuildError::TooManyActions {
+                    limit: MAX_GRAPH_MUTATION_ACTIONS,
+                    observed: count + 1,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    // A literal map is syntax for simultaneous property assignments, not a
+    // runtime map value. Every field uses the original expression compiler and
+    // consumes one slot in the whole statement's existing action allowance.
+    fn mutation_literal_map(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+        actions: &mut Vec<Action<'a>>,
+        target: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        self.punct(b'=', "=")?;
+        let at = self.current.at;
+        self.punct(b'{', "literal property map after +=")?;
+        if self.is_punct(b'}') {
+            return Err(build_error(at, GraphMutationBuildError::EmptyActions));
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        loop {
+            self.mutation_action_capacity(actions.len())?;
+            let key = self.name()?;
+            if !keys.insert(key.text) {
+                return Err(error(
+                    key.at,
+                    GraphPatternTextErrorKind::Expected("distinct property keys in SET += map"),
+                )
+                .into());
+            }
+            self.punct(b':', ":")?;
+            let value = self.mutation_expression(columns)?;
+            actions.push(Action {
+                target,
+                kind: ActionKind::Property {
+                    key,
+                    value: Some(value),
+                },
+            });
+            if self.take(b'}')? {
+                break;
+            }
+            self.punct(b',', ", or }")?;
+        }
+        Ok(())
+    }
 }
 
 impl PreparedGraphMutationText {
@@ -321,6 +376,15 @@ impl PreparedGraphMutationText {
     /// existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores canonical NULL;
     /// REMOVE unsets a property. Bare DELETE, CREATE, RETURN and mixed deletion/
     /// update statements are not silently reinterpreted.
+    ///
+    /// `SET n += {p: expression, q: $value}` updates the named vertex or edge
+    /// properties through the same simultaneous assignments as `SET n.p = ...`.
+    /// All RHS values read the pre-statement graph; omitted properties remain
+    /// unchanged and NULL remains a stored scalar, with REMOVE used for absence.
+    /// Each field counts toward the statement's ordinary action limit. Keys are
+    /// property identifiers and must be distinct within each literal map. Empty
+    /// maps, dynamic map arguments, nested maps and map replacement are refused;
+    /// this syntax does not introduce a map value type.
     ///
     /// RHS arithmetic supports checked nullable i64 +, -, *, /, %, unary signs,
     /// parentheses, ABS, NULLIF and COALESCE with at least two arguments. Division
