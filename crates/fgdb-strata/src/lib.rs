@@ -290,6 +290,24 @@ impl AdjacencyEntry {
     pub fn visible_at(&self, as_of: CommitSeq) -> bool {
         self.created_at.0 <= as_of.0 && self.retired_at.is_none_or(|r| as_of.0 < r.0)
     }
+
+    /// This entry as a transaction pinned at `as_of` sees it
+    /// (fgdb-asof-lifetime-leak-d49rt).
+    ///
+    /// A version's effective interval ends at the earliest retirement visible
+    /// in the reader's ancestry (plan §5). A transaction's head is its basis,
+    /// and no read may see a commit after it (the SI oracle). So a retirement
+    /// stamped after `as_of` reads as live, and the transaction's rows stay
+    /// byte-identical when a concurrent commit retires them. Database-handle
+    /// history reads keep the full lifetime relative to their explicit head,
+    /// the frontier (fgdb-90jx); stored entries keep their true stamp.
+    #[must_use]
+    pub fn seen_at(self, as_of: CommitSeq) -> Self {
+        Self {
+            retired_at: self.retired_at.filter(|retired| retired.0 <= as_of.0),
+            ..self
+        }
+    }
 }
 
 /// Why a block could not be encoded, decoded, or scanned.

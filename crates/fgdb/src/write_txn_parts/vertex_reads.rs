@@ -9,10 +9,14 @@ impl WriteTxn {
         self.ensure_database(database)?;
 
         let live = database.frontier()?;
+        // A later commit's retirement is outside this transaction's basis
+        // (fgdb-asof-lifetime-leak-d49rt): the row reads as it stood there.
         let overlay = if live == self.basis {
             database.vertex(vid)?
         } else {
-            database.vertex_at(vid, self.basis)?
+            database
+                .vertex_at(vid, self.basis)?
+                .map(|row| row.seen_at(self.basis))
         };
         Ok(self.vertex_over_basis(vid, overlay))
     }
@@ -118,7 +122,7 @@ impl WriteTxn {
         let mut basis: std::collections::BTreeMap<VId, VertexRow> = database
             .vertices_at(self.basis)?
             .into_iter()
-            .map(|row| (row.vid, row))
+            .map(|row| (row.vid, row.seen_at(self.basis)))
             .collect();
         if let Some(label) = label {
             self.scanned_vertex_labels.borrow_mut().insert(label);

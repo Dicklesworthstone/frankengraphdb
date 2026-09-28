@@ -8,7 +8,12 @@ impl WriteTxn {
         eid: EId,
     ) -> Result<Option<EdgeRecord>, WriteTxnError> {
         self.ensure_database(database)?;
-        let overlay = database.edge_at(eid, self.basis)?;
+        // Seen at the basis: a later retirement is not this transaction's to
+        // observe (fgdb-asof-lifetime-leak-d49rt).
+        let overlay = database.edge_at(eid, self.basis)?.map(|mut record| {
+            record.entry = record.entry.seen_at(self.basis);
+            record
+        });
         Ok(self.edge_over_basis(eid, overlay))
     }
 
@@ -107,7 +112,10 @@ impl WriteTxn {
         let mut basis: std::collections::BTreeMap<EId, EdgeRecord> = database
             .edges_at(self.basis)?
             .into_iter()
-            .map(|record| (record.entry.eid, record))
+            .map(|mut record| {
+                record.entry = record.entry.seen_at(self.basis);
+                (record.entry.eid, record)
+            })
             .collect();
         self.scanned_edges.set(true);
         let mut eids: std::collections::BTreeSet<EId> = basis.keys().copied().collect();

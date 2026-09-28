@@ -99,6 +99,15 @@ impl VertexRow {
     pub fn visible_at(&self, as_of: CommitSeq) -> bool {
         self.created_at.0 <= as_of.0 && self.retired_at.is_none_or(|r| as_of.0 < r.0)
     }
+
+    /// This row as a transaction pinned at `as_of` sees it: a retirement
+    /// stamped after `as_of` reads as live, exactly as
+    /// [`crate::AdjacencyEntry::seen_at`].
+    #[must_use]
+    pub fn seen_at(mut self, as_of: CommitSeq) -> Self {
+        self.retired_at = self.retired_at.filter(|retired| retired.0 <= as_of.0);
+        self
+    }
 }
 
 /// Canonical patch rows, retaining the ordering proved by decoding or packing.

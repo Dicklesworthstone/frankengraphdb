@@ -122,13 +122,12 @@ fn bulk_edges_reuse_the_pinned_basis_and_preserve_ordered_staged_effects() {
         let after = transaction
             .edges(&database)
             .expect("bulk read keeps historical basis");
-        // The visible old statement gains its known future retirement when a
-        // successor commits. Its historical value and staged overlay stay the
-        // same; both bulk and point reads expose the complete lifetime.
-        let mut expected = before;
-        assert_eq!(expected[0].entry.retired_at, None);
-        expected[0].entry.retired_at = Some(live);
-        assert_eq!(after, expected);
+        // A successor commit retires the visible old statement, but after this
+        // transaction's basis, so bulk and point reads stay byte-identical,
+        // stamp included (fgdb-asof-lifetime-leak-d49rt; the SI oracle).
+        // Database-handle history reads keep the full lifetime (fgdb-90jx).
+        assert_eq!(before[0].entry.retired_at, None);
+        assert_eq!(after, before);
         let historical_points: Vec<_> = [EId(10), EId(11), EId(12), EId(13)]
             .into_iter()
             .filter_map(|eid| {

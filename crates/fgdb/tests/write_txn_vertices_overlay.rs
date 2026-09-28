@@ -124,10 +124,15 @@ fn bulk_vertices_preserve_staged_labels_properties_and_historical_birth_rows() {
         let after = transaction
             .vertices(&database)
             .expect("bulk read keeps pinned basis");
-        let mut expected = before;
-        assert_eq!(expected[0].retired_at, None);
-        expected[0].retired_at = Some(live);
-        assert_eq!(after, expected, "only the known future retirement changes");
+        // The concurrent commit retires VId(1)'s basis version, but that
+        // retirement lies after this transaction's basis, so the pinned read
+        // is byte-identical, stamp included (fgdb-asof-lifetime-leak-d49rt; the
+        // SI oracle: no read sees a sequence past its snapshot).
+        assert_eq!(before[0].retired_at, None);
+        assert_eq!(
+            after, before,
+            "a later commit cannot change a pinned-basis read"
+        );
         let historical_points: Vec<_> = [VId(1), VId(2), VId(3), VId(4)]
             .into_iter()
             .filter_map(|vid| {
