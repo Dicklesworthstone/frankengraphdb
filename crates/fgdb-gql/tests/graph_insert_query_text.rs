@@ -7,11 +7,12 @@ use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy, GraphInsertReque
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphInsertQueryBatch, GraphInsertQueryError, GraphInsertTextErrorKind,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphInsertQuery,
-    PreparedGraphInsertQueryText, PreparedGraphInsertText,
+    GraphPatternTextErrorKind, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
+    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphInsertText,
 };
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -240,7 +241,10 @@ fn query_parameter_table_is_shared_once_across_creation_return_and_paging() {
 #[test]
 fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call() {
     for statement in [
-        "MATCH (m) CREATE (n:Copy) RETURN n",
+        "MATCH (m) CREATE (n:Copy) SET n.p=1 RETURN n",
+        "MATCH (a)-[r:R]->(b) CREATE (r:Copy) RETURN r",
+        "MATCH (a) CREATE (c)-[a:R]->(d) RETURN a",
+        "MATCH (a) CREATE (a:Copy) RETURN a",
         "UNWIND [1] AS x MATCH (m) CREATE (n:Copy) RETURN n",
         "CREATE (n:Copy) RETURN absent",
         "CREATE (n:Copy) RETURN n+1 AS bad",
@@ -306,6 +310,8 @@ fn native_dispatch_distinguishes_clause_tokens_from_quotes_properties_and_script
         "UNWIND ['CREATE; RETURN','it''s RETURN'] AS x CREATE (n {p:x}) RETURN n",
         "INSERT (a)-[e:R]->(b) RETURN e;",
         "CREATE (a); CREATE (b) RETURN b",
+        "MATCH (n) CREATE (copy {p:n.p}) RETURN n,copy",
+        "MATCH (n) WHERE n.RETURN=1 CREATE (copy) RETURN copy",
     ] {
         assert!(
             PreparedGraphInsertQueryText::has_return_clause(statement).unwrap(),
@@ -320,6 +326,8 @@ fn native_dispatch_distinguishes_clause_tokens_from_quotes_properties_and_script
         "CREATE (RETURN)",
         "CREATE (n {RETURN:1})",
         "MATCH (n) RETURN n",
+        "MATCH (n) WHERE n.CREATE=1 RETURN n",
+        "MATCH (n) CREATE (copy {p:'RETURN'})",
         "UNWIND [1] AS x RETURN x",
     ] {
         assert!(
@@ -363,4 +371,207 @@ fn empty_sources_never_allocate_and_return_star_has_only_visible_bindings() {
         3,
         "anonymous nodes create effects without exposing synthetic names"
     );
+}
+
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Triple = (VId, RelationId, VId);
+
+fn run_matched(
+    query: &PreparedGraphInsertQuery,
+    vertices: &[VId],
+    edges: &[Triple],
+    props: &Props,
+) -> ResultOf {
+    let mut policy = policy();
+    policy.query = GqlQueryPolicy::new(1_000, 1_000, 2_000_000, 1_000_000);
+    query.execute_governed(
+        policy,
+        |selection, allowance| {
+            selection.plan().execute_governed_with_properties(
+                (vertices.len() + edges.len()) as u64,
+                vertices.iter().copied(),
+                edges.iter().copied(),
+                |vid, predicates| {
+                    Ok(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed(
+                            [],
+                            props.iter().filter_map(|(&(owner, key), value)| {
+                                (owner == vid).then_some((key, value))
+                            }),
+                        )
+                    }))
+                },
+                |vid, key| Ok(props.get(&(vid, key))),
+                allowance,
+                || Ok(()),
+            )
+        },
+        identity,
+        || Ok(()),
+    )
+}
+
+#[test]
+fn matched_creation_returns_original_and_created_bindings_for_every_occurrence() {
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertQueryText::prepare(
+        "MATCH (a)-[:R]->(b) WHERE a.p >= $floor \
+         CREATE (c:Copy {p:a.p+$step}),(a)-[e:R {q:$step}]->(c) \
+         RETURN a,b,c,e,a.p AS source,c.p AS copied,b.q AS return_only",
+        R,
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    assert_eq!(calls.get(), 4, "one resolution per name and domain");
+    let arguments = GqlParameters::new()
+        .with_int64("floor", 10)
+        .unwrap()
+        .with_int64("step", 1)
+        .unwrap();
+    let query = template.bind_parameters(&arguments).unwrap();
+    assert_eq!(calls.get(), 4, "binding does not parse or resolve again");
+    let vertices = [VId(1), VId(2), VId(3)];
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(3)),
+    ];
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(10)),
+        ((VId(2), P), CanonicalScalar::Int(20)),
+        ((VId(2), Q), CanonicalScalar::Int(7)),
+        ((VId(3), Q), CanonicalScalar::Int(8)),
+    ]);
+    let batch = run_matched(&query, &vertices, &edges, &props).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![
+                GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(100)), GraphValue::Edge(EId(1_000)),
+                int(10), int(11), int(7),
+            ],
+            vec![
+                GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(116)), GraphValue::Edge(EId(1_016)),
+                int(10), int(11), int(7),
+            ],
+            vec![
+                GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3)),
+                GraphValue::Vertex(VId(132)), GraphValue::Edge(EId(1_032)),
+                int(20), int(21), int(8),
+            ],
+        ]
+    );
+    assert_eq!(batch.insertion().stats().created_vertices, 3);
+    assert_eq!(batch.insertion().stats().created_edges, 3);
+    for (row, source) in [VId(1), VId(1), VId(2)].into_iter().enumerate() {
+        assert!(matches!(
+            batch.insertion().intents()[row * 2 + 1],
+            GraphInsertIntent::Edge { source: actual, destination, .. }
+                if actual == source && destination == VId(100 + row as u128 * 16)
+        ));
+    }
+    assert_eq!(
+        query.canonical_bytes(),
+        template.bind_parameters(&arguments).unwrap().canonical_bytes()
+    );
+}
+
+#[test]
+fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
+    let props = Props::from([((VId(1), Q), CanonicalScalar::Int(11))]);
+    let batch = run_matched(
+        &prepare("MATCH (n) CREATE (c {p:7}) RETURN n.q AS q,n,c ORDER BY n"),
+        &[VId(1), VId(2)],
+        &[],
+        &props,
+    )
+    .unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![int(11), GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(100))],
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(116)),
+            ],
+        ]
+    );
+    let query = prepare("MATCH (a)-[:R]->(b) CREATE (c),(a)-[e:R]->(c) RETURN *");
+    assert_eq!(query.columns(), &["a", "b", "c", "e"]);
+    let batch = run_matched(
+        &query,
+        &[VId(1), VId(2)],
+        &[(VId(1), R, VId(2))],
+        &Props::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![vec![
+            GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
+            GraphValue::Vertex(VId(100)), GraphValue::Edge(EId(1_000)),
+        ]]
+    );
+    let edge_query = prepare(
+        "MATCH (a)-[r:R]->(b) CREATE (c {p:r.p}) \
+         RETURN r,r.p AS weight,c.p AS copied",
+    );
+    assert_eq!(
+        edge_query.column_types(),
+        &[GraphSetColumnType::Edge, GraphSetColumnType::Scalar, GraphSetColumnType::Scalar]
+    );
+}
+
+#[test]
+fn match_output_distinct_and_limit_never_suppress_create_effects() {
+    let vertices = [VId(1), VId(2), VId(3)];
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(3)),
+    ];
+    let batch = run_matched(
+        &prepare("MATCH (a)-[:R]->(b) CREATE (c) RETURN DISTINCT a ORDER BY a LIMIT 1"),
+        &vertices,
+        &edges,
+        &Props::new(),
+    )
+    .unwrap();
+    assert_eq!(values(&batch), vec![vec![GraphValue::Vertex(VId(1))]]);
+    assert_eq!(batch.insertion().stats().created_vertices, 3);
+    let batch = run_matched(
+        &prepare("MATCH (n) CREATE (copy) RETURN 1 AS one LIMIT 0"),
+        &vertices,
+        &[],
+        &Props::new(),
+    )
+    .unwrap();
+    assert!(batch.returning().value.is_empty());
+    assert_eq!(batch.insertion().stats().created_vertices, 3);
+}
+
+#[test]
+fn empty_match_is_a_no_op_and_return_errors_expose_no_partial_proposal() {
+    let batch = run_matched(
+        &prepare("MATCH (n) CREATE (copy {p:1/0}) RETURN 1/0 AS bad"),
+        &[],
+        &[],
+        &Props::new(),
+    )
+    .unwrap();
+    assert!(batch.insertion().intents().is_empty());
+    assert_eq!(batch.insertion().stats().created_vertices, 0);
+    assert!(batch.returning().value.is_empty());
+    let result = run_matched(
+        &prepare("MATCH (n) CREATE (copy {p:1}) RETURN 1/0 AS bad"),
+        &[VId(1)],
+        &[],
+        &Props::new(),
+    );
+    assert!(result.is_err(), "a failing RETURN cannot publish a CREATE prefix");
 }

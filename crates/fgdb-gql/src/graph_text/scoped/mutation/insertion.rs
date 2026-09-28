@@ -49,6 +49,30 @@ fn expected(at: usize, message: &'static str) -> GraphInsertTextError {
 type UnwindPrefix<'a> = (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>);
 
 impl<'a> Parser<'a> {
+    /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
+    /// must not shadow a matched edge or path by silently declaring a vertex.
+    fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
+        if self.syntax.path.is_some_and(|path| path.text == name) {
+            Some(GraphSetColumnType::Path)
+        } else if self
+            .syntax
+            .edges
+            .iter()
+            .any(|edge| edge.variable.is_some_and(|variable| variable.text == name))
+        {
+            Some(GraphSetColumnType::Edge)
+        } else if self
+            .syntax
+            .variables
+            .iter()
+            .any(|variable| variable.text == name)
+        {
+            Some(GraphSetColumnType::Vertex)
+        } else {
+            None
+        }
+    }
+
     /// Parse the ordinary source-free UNWIND stages without evaluating them.
     /// Script dispatch uses this same native grammar to find CREATE/INSERT.
     pub(super) fn insertion_unwind_prefix(
@@ -180,10 +204,14 @@ impl<'a> Parser<'a> {
                 .edges
                 .iter()
                 .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                || matches!(
+                    self.insertion_match_kind(name.text),
+                    Some(GraphSetColumnType::Edge | GraphSetColumnType::Path)
+                )
             {
                 return Err(expected(
                     name.at,
-                    "CREATE vertex name distinct from edge bindings",
+                    "CREATE vertex name distinct from edge and path bindings",
                 ));
             }
             if row_schema
@@ -274,8 +302,9 @@ impl<'a> Parser<'a> {
                 self.punct(b'[', "[")?;
                 let name = if returning && matches!(self.current.kind, TokenKind::Word(_)) {
                     let name = self.name()?;
-                    if row_schema
-                        .is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
+                    if self.insertion_match_kind(name.text).is_some()
+                        || row_schema
+                            .is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
                         || parsed
                             .vertices
                             .iter()
@@ -486,23 +515,17 @@ impl PreparedGraphInsertText {
     > {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let matched = parser.is_word("MATCH");
-        if returning && matched {
-            return Err(expected(
-                parser.current.at,
-                "standalone or UNWIND CREATE before RETURN",
-            ));
-        }
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         if matched {
             parser.parse_match_prefix()?;
         }
         let at = parser.current.at;
-        let parsed = parser.insertion_clauses(
+        let mut parsed = parser.insertion_clauses(
             (!leading.is_empty()).then_some(row_schema.as_slice()),
             returning,
         )?;
         let returning = if returning {
-            Some(parser.insertion_return(&parsed, &row_schema)?)
+            Some(parser.insertion_return(&mut parsed, &row_schema)?)
         } else {
             None
         };
@@ -641,7 +664,7 @@ impl PreparedGraphInsertText {
                     alias: format!("_insert_input_{index}"),
                     variable: projection.variable.text.to_owned(),
                     key,
-                    path: None,
+                    path: projection.path,
                 });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
@@ -696,7 +719,12 @@ impl PreparedGraphInsertText {
         };
         // Catch catalog aliases collapsing distinct written keys, invalid
         // endpoint domains and all static expression columns during preparation.
-        template.instantiate(shape, None)?;
+        let prepared = template.instantiate(shape, None)?;
+        if let Some(returning) = &returning {
+            // Validate RETURN against the real source shape. Treating a MATCH
+            // as a singleton here would lose its columns and occurrence bag.
+            returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
+        }
         Ok((template, returning))
     }
 

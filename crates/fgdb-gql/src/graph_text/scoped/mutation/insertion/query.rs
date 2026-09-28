@@ -72,7 +72,7 @@ impl<'a> ParsedReturn<'a> {
     fn leaf(
         &mut self,
         parser: &mut Parser<'a>,
-        syntax: &InsertionSyntax<'a>,
+        syntax: &mut InsertionSyntax<'a>,
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(word) = parser.current.kind else {
@@ -87,7 +87,8 @@ impl<'a> ParsedReturn<'a> {
             .iter()
             .position(|edge| edge.name.is_some_and(|name| name.text == word));
         let input = source.iter().position(|(name, _)| name.text == word);
-        if vertex.is_none() && edge.is_none() && input.is_none() {
+        let matched = parser.insertion_match_kind(word);
+        if vertex.is_none() && edge.is_none() && input.is_none() && matched.is_none() {
             return Ok(None);
         }
         let name = parser.name()?;
@@ -114,8 +115,7 @@ impl<'a> ParsedReturn<'a> {
                 ),
                 None => (Binding::Edge(edge), name, GraphSetColumnType::Edge),
             }
-        } else {
-            let input = input.expect("one admitted CREATE result binding");
+        } else if let Some(input) = input {
             if property.is_some() {
                 return Err(error(
                     name.at,
@@ -123,6 +123,29 @@ impl<'a> ParsedReturn<'a> {
                 ));
             }
             (Binding::Input(input), name, source[input].1)
+        } else {
+            let kind = matched.expect("one admitted CREATE result binding");
+            if property.is_some()
+                && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected("vertex or edge property"),
+                ));
+            }
+            // RETURN-only source fields must join the same selection used by
+            // CREATE. An index into the visible alias list is NOT a projection
+            // column: creation may already have projected other properties.
+            let input = parser.mutation_projection(&mut syntax.projections, name, property)?;
+            (
+                Binding::Input(input),
+                property.unwrap_or(name),
+                if property.is_some() {
+                    GraphSetColumnType::Scalar
+                } else {
+                    kind
+                },
+            )
         };
         self.column(binding, alias, kind).map(Some)
     }
@@ -189,7 +212,7 @@ impl<'a> ParsedReturn<'a> {
 impl<'a> Parser<'a> {
     pub(super) fn insertion_return(
         &mut self,
-        syntax: &InsertionSyntax<'a>,
+        syntax: &mut InsertionSyntax<'a>,
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ParsedReturn<'a>, GraphInsertTextError> {
         let at = self.current.at;
@@ -213,6 +236,26 @@ impl<'a> Parser<'a> {
         if self.take(b'*')? {
             for (index, &(name, kind)) in source.iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((name, kind));
+            }
+            let matched: Vec<_> = self
+                .syntax
+                .variables
+                .iter()
+                .copied()
+                .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+                .chain(self.syntax.path)
+                .collect();
+            for name in matched {
+                let kind = self
+                    .insertion_match_kind(name.text)
+                    .expect("visible MATCH binding has a domain");
+                let input = self.mutation_projection(&mut syntax.projections, name, None)?;
+                let column = returning.column(Binding::Input(input), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
                     value: ReadValueTemplate::Column(column),
@@ -245,7 +288,7 @@ impl<'a> Parser<'a> {
                 }
             }
             if output.is_empty() {
-                return Err(expected(at, "named CREATE or UNWIND bindings for RETURN *"));
+                return Err(expected(at, "named MATCH, CREATE or UNWIND bindings for RETURN *"));
             }
         } else {
             loop {
@@ -303,7 +346,7 @@ impl<'a> Parser<'a> {
 }
 
 impl InsertReturnTemplate {
-    fn bind(
+    pub(super) fn bind(
         &self,
         insertion: PreparedGraphInsert,
         values: &[GqlParameterValue],
@@ -392,7 +435,7 @@ impl PreparedGraphInsertQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -451,8 +494,6 @@ impl PreparedGraphInsertQueryText {
             true,
         )?;
         let returning = returning.expect("query mode prepares a RETURN definition");
-        let values = shape_arguments(insertion.parameter_schema());
-        returning.bind(insertion.instantiate(None, None)?, &values)?;
         Ok(Self {
             statement: statement.to_owned(),
             insertion,
@@ -475,7 +516,11 @@ impl PreparedGraphInsertQueryText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
         let values = self.insertion.checked_arguments(arguments)?;
-        let insertion = self.insertion.instantiate(None, Some(&values))?;
+        let selection = match &self.insertion.input {
+            InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
+            InsertTextInput::Relation { .. } | InsertTextInput::Unit { .. } => None,
+        };
+        let insertion = self.insertion.instantiate(selection, Some(&values))?;
         self.returning.bind(insertion, &values)
     }
 }

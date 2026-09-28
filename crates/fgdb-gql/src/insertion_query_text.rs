@@ -19,13 +19,15 @@ pub(crate) struct InsertReturnTemplate {
     pub at: usize,
 }
 
-/// One standalone or leading-UNWIND CREATE/INSERT followed by RETURN.
+/// One standalone, MATCH-selected or leading-UNWIND CREATE/INSERT with RETURN.
 /// Each source occurrence retains its own created vertex/edge identities and
-/// frozen properties. RETURN accepts the native scalar/CASE/list expressions,
-/// DISTINCT, output-column ordering, SKIP and LIMIT. An empty source creates
-/// and returns nothing; result paging never suppresses creation effects.
+/// frozen properties. Matched bindings and source-only properties share the
+/// same input row as creation; they are not recovered by a later graph scan.
+/// RETURN accepts native scalar/CASE/list expressions, DISTINCT, output-column
+/// ordering, SKIP and LIMIT. An empty source creates and returns nothing;
+/// result paging never suppresses creation effects.
 ///
-/// MATCH-selected creation, aggregate RETURN, labels/type functions and
+/// Aggregate RETURN, labels/type functions, MATCH after UNWIND and
 /// multi-statement RETURN scripts are outside this prepared query's subset.
 #[derive(Clone)]
 pub struct PreparedGraphInsertQueryText {
