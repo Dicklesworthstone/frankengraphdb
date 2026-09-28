@@ -87,6 +87,34 @@ impl<'a> ParsedReturn<'a> {
         {
             return self.endpoint(parser, syntax).map(Some);
         }
+        // MATCH metadata and captured-path functions are ordinary source
+        // projections, just as in SET and read RETURN. Keep them on the same
+        // frozen source row as CREATE, including fields used only by RETURN.
+        // A bare binding named like a function still takes the normal path.
+        let name = Name {
+            text: word,
+            at: parser.current.at,
+        };
+        if let Ok(function) = Parser::path_function(name)
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let kind = match function {
+                GraphPathFunction::Value => GraphSetColumnType::Path,
+                GraphPathFunction::Length | GraphPathFunction::Type => GraphSetColumnType::Scalar,
+                GraphPathFunction::Nodes => GraphSetColumnType::Vertices,
+                GraphPathFunction::Edges => GraphSetColumnType::Edges,
+                GraphPathFunction::Edge => GraphSetColumnType::Edge,
+                GraphPathFunction::Labels => GraphSetColumnType::List,
+            };
+            // mutation_operand owns function spelling, argument/domain
+            // checks, projection deduplication and source-column limits.
+            let Operand::Column(column) = parser.mutation_operand(&mut syntax.projections)? else {
+                unreachable!("a native graph function lowers to a source projection")
+            };
+            return self
+                .column(Binding::Input(column), name, kind)
+                .map(Some);
+        }
         let vertex = syntax
             .vertices
             .iter()

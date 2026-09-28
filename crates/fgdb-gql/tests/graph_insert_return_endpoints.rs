@@ -327,3 +327,87 @@ fn match_dispatch_does_not_treat_binding_names_as_creation_clauses() {
         );
     }
 }
+
+#[test]
+fn matched_path_functions_share_the_creation_occurrence_and_keep_their_domains() {
+    let query = prepare(
+        "MATCH p=(a)-[old:R]->(b) CREATE (copy) \
+         RETURN copy,length(p) AS hops,nodes(p) AS members, \
+         relationships(p) AS links",
+    );
+    assert_eq!(
+        query.column_types(),
+        &[
+            GraphSetColumnType::Vertex,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Vertices,
+            GraphSetColumnType::Edges,
+        ]
+    );
+    let batch = run_matched(&query, &[VId(1), VId(2)], &[(EId(10), VId(1), R, VId(2))]).unwrap();
+    let rows = values(&batch);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], GraphValue::Vertex(VId(100)));
+    assert_eq!(rows[0][1], GraphValue::Scalar(CanonicalScalar::Int(1)));
+    let GraphValue::Vertices(members) = &rows[0][2] else {
+        panic!("nodes must keep the native vertex-list domain");
+    };
+    assert_eq!(members.as_ref(), &[VId(1), VId(2)]);
+    let GraphValue::Edges(links) = &rows[0][3] else {
+        panic!("relationships must keep the native edge-list domain");
+    };
+    assert_eq!(links.len(), 1);
+    assert_eq!(batch.insertion().stats().created_vertices, 1);
+}
+
+#[test]
+fn matched_metadata_preparation_preserves_function_bindings_and_output_schema() {
+    let query = prepare(
+        "MATCH (labels)-[type:R]->(b) CREATE (copy) \
+         RETURN labels,type,LABELS(labels) AS tags,TYPE(type) AS kind,copy",
+    );
+    assert_eq!(
+        query.column_types(),
+        &[
+            GraphSetColumnType::Vertex,
+            GraphSetColumnType::Edge,
+            GraphSetColumnType::List,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Vertex,
+        ]
+    );
+    assert_eq!(query.columns(), &["labels", "type", "tags", "kind", "copy"]);
+    let repeated = prepare(
+        "MATCH (a)-[e:R]->(b) CREATE (copy) \
+         RETURN type(e) AS first,type(e) AS second,labels(a) AS tags",
+    );
+    assert_eq!(
+        repeated.column_types(),
+        &[
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::List,
+        ]
+    );
+}
+
+#[test]
+fn matched_metadata_and_path_argument_errors_precede_catalog_resolution() {
+    for text in [
+        "MATCH (a)-[e:R]->(b) CREATE (copy) RETURN labels(e)",
+        "MATCH (a)-[e:R]->(b) CREATE (copy) RETURN type(a)",
+        "MATCH p=(a)-[e:R]->(b) CREATE (copy) RETURN length(a)",
+        "MATCH p=(a)-[e:R]->(b) CREATE (copy) RETURN nodes(e)",
+        "MATCH p=(a)-[e:R]->(b) CREATE (copy) RETURN relationships(a)",
+        "MATCH (a) CREATE (copy) RETURN labels(missing)",
+        "MATCH (a) CREATE (copy) RETURN labels(a,a)",
+    ] {
+        let calls = Cell::new(0);
+        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "unexpectedly accepted {text}");
+        assert_eq!(calls.get(), 0, "catalog reached for invalid function: {text}");
+    }
+}
