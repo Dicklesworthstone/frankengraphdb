@@ -1,4 +1,5 @@
 use super::*;
+use super::super::ShortestMultiplicity;
 use crate::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_gql::{
@@ -106,6 +107,18 @@ fn evaluate(adjacency: &BTreeMap<VId, Vec<VId>>, source: VId, bounds: GraphWalkB
     rows
 }
 
+fn evaluate_any(adjacency: &BTreeMap<VId, Vec<VId>>, source: VId, bounds: GraphWalkBounds) -> Vec<VId> {
+    let mut control = |_| Ok::<(), ()>(());
+    let mut cursor = GraphShortestWalkCursor::new_any(source, bounds, Some(adjacency), &mut control)
+        .unwrap();
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.next_with_control(&mut control).unwrap() {
+        rows.push(row);
+    }
+    rows.sort();
+    rows
+}
+
 #[test]
 fn every_small_graph_matches_unpruned_walk_enumeration_in_every_direction() {
     for mask in 0..512_u16 {
@@ -135,6 +148,10 @@ fn every_small_graph_matches_unpruned_walk_enumeration_in_every_direction() {
                         let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
                         assert_eq!(evaluate(&local, source, bounds), oracle(&full, source, bounds),
                             "mask={mask} source={source:?} direction={direction:?} bounds={bounds:?}");
+                        let mut expected = oracle(&full, source, bounds);
+                        expected.dedup();
+                        assert_eq!(evaluate_any(&local, source, bounds), expected,
+                            "ANY mask={mask} source={source:?} bounds={bounds:?}");
                     }
                 }
             }
@@ -292,10 +309,11 @@ fn one_allowance_covers_source_native_cursor_results_and_every_interruption() {
         }
         let at = db.write(&commit, seed).await.unwrap();
         let bounds = GraphWalkBounds::new(1, 3).unwrap();
+        for multiplicity in [ShortestMultiplicity::All, ShortestMultiplicity::Any] {
         let execute = |budget, stop| {
             let mut calls = 0;
             let result = super::super::execute_shortest_at(
-                &db.snapshot, VId(0), R, GlaDirection::Undirected, bounds, at, budget, || {
+                &db.snapshot, VId(0), R, GlaDirection::Undirected, bounds, at, multiplicity, budget, || {
                     calls += 1;
                     if calls == stop { Err(stop) } else { Ok(()) }
                 },
@@ -336,6 +354,101 @@ fn one_allowance_covers_source_native_cursor_results_and_every_interruption() {
         }
         assert_eq!(db.frontier().unwrap(), at);
         assert_eq!(execute(exact, usize::MAX).0.unwrap().value, baseline.value);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn any_shortest_finishes_under_one_result_allowance_despite_exponential_ties() {
+    let ((), report) = run_async_under_lab(0x5200_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for vertex in 0..=40 {
+            seed.create_vertex(VId(vertex), vec![], vec![]);
+        }
+        for vertex in 0..40 {
+            for parallel in 0..2 {
+                seed.add_edge(EId(2 * vertex + parallel), VId(vertex), VId(vertex + 1), vec![]);
+            }
+        }
+        db.write(&commit, seed).await.unwrap();
+        // Two choices at each of 40 hops: 2^40 tied WALK occurrences, but one
+        // ANY endpoint. A post-hoc DISTINCT implementation exhausts this quota.
+        let bounds = GraphWalkBounds::new(40, 40).unwrap();
+        let allowance = policy(80, 1);
+        let result = db.execute_any_shortest_walk_governed(
+            &query, VId(0), R, GlaDirection::Forward, bounds, allowance,
+        ).unwrap();
+        assert_eq!(result.value, vec![VId(40)]);
+        assert_eq!(result.rows.snapshot_records, 80);
+        assert_eq!(result.rows.result_rows, 1);
+        assert!(matches!(db.execute_all_shortest_walk_governed(
+            &query, VId(0), R, GlaDirection::Forward, bounds, allowance,
+        ), Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::ResultRows));
+        assert_eq!(db.execute_any_shortest_walk_governed(
+            &query, VId(0), R, GlaDirection::Forward, bounds, allowance,
+        ).unwrap().evaluator, result.evaluator);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn any_shortest_delays_settlement_and_preserves_pinned_historical_and_empty_results() {
+    let ((), report) = run_async_under_lab(0x5200_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for vertex in 0..=2 {
+            seed.create_vertex(VId(vertex), vec![], vec![]);
+        }
+        seed.add_edge(EId(0), VId(0), VId(1), vec![]);
+        seed.add_edge(EId(1), VId(0), VId(1), vec![]);
+        seed.add_edge(EId(2), VId(1), VId(0), vec![]);
+        let before = db.write(&commit, seed).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let bounds = GraphWalkBounds::new(2, 2).unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.delete_edge(EId(2));
+        changes.create_vertex(VId(3), vec![], vec![]);
+        changes.add_edge(EId(3), VId(1), VId(3), vec![]);
+        let after = db.write(&commit, changes).await.unwrap();
+        assert_eq!(pinned.execute_any_shortest_walk_governed(
+            &query, VId(0), R, GlaDirection::Forward, bounds, policy(3, 1),
+        ).unwrap().value, vec![VId(0)]);
+        assert_eq!(pinned.execute_any_shortest_walk_governed_at(
+            &query, VId(0), R, GlaDirection::Forward, bounds, before, policy(3, 1),
+        ).unwrap().value, vec![VId(0)]);
+        assert!(pinned.execute_any_shortest_walk_governed_at(
+            &query, VId(0), R, GlaDirection::Forward, bounds, after, policy(3, 1),
+        ).is_err());
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!(db.execute_any_shortest_walk_governed_at(
+            &query, VId(0), R, GlaDirection::Forward, bounds, before, policy(3, 1),
+        ).unwrap().value, vec![VId(0)]);
+        assert_eq!(db.execute_any_shortest_walk_governed(
+            &query, VId(0), R, GlaDirection::Forward, bounds, policy(3, 1),
+        ).unwrap().value, vec![VId(3)]);
+        for (source, minimum, expected) in [
+            (VId(2), 0, vec![VId(2)]),
+            (VId(2), 1, vec![]),
+            (VId(999), 0, vec![]),
+        ] {
+            let execution = db.execute_any_shortest_walk_governed(
+                &query, source, R, GlaDirection::Undirected,
+                GraphWalkBounds::new(minimum, 2).unwrap(), policy(0, 1),
+            ).unwrap();
+            assert_eq!(execution.value, expected);
+            assert_eq!(execution.rows.snapshot_records, 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

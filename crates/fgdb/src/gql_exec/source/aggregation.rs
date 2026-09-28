@@ -3,6 +3,7 @@
 mod cheapest_path;
 mod edge_stream;
 mod shortest_admission;
+mod shortest_any;
 mod vertex_stream;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
@@ -259,6 +260,12 @@ impl EmbeddedReadView {
 type ShortestResult =
     Result<GqlQueryExecution<VId>, GqlQueryError<GqlError, Box<asupersync::error::Error>>>;
 
+#[derive(Clone, Copy)]
+enum ShortestMultiplicity {
+    All,
+    Any,
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Return every shortest WALK occurrence from one existing source to each
     /// reachable endpoint inside the finite hop interval. Equal-length routes
@@ -319,6 +326,7 @@ impl<V: Vfs + Clone> Database<V> {
                 direction,
                 bounds,
                 as_of,
+                ShortestMultiplicity::All,
                 policy,
                 || cx.checkpoint(),
             )
@@ -371,6 +379,7 @@ impl EmbeddedReadView {
                 direction,
                 bounds,
                 as_of,
+                ShortestMultiplicity::All,
                 policy,
                 || cx.checkpoint(),
             )
@@ -420,6 +429,7 @@ fn execute_shortest_at<C>(
     direction: GlaDirection,
     bounds: GraphWalkBounds,
     as_of: CommitSeq,
+    multiplicity: ShortestMultiplicity,
     policy: GqlQueryPolicy,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<GqlQueryExecution<VId>, GqlQueryError<GqlError, C>> {
@@ -465,8 +475,16 @@ fn execute_shortest_at<C>(
         let mut evaluator = GlaExecutionStats::default();
         let mut control =
             |event| charge_shortest(&mut evaluator, remaining.evaluator, event, &mut checkpoint);
-        let mut cursor =
-            GraphShortestWalkCursor::new(source, bounds, Some(&adjacency), &mut control)?;
+        // ANY must coalesce ties DURING native traversal, not enumerate the
+        // potentially exponential ALL bag and deduplicate its final output.
+        let mut cursor = match multiplicity {
+            ShortestMultiplicity::All => {
+                GraphShortestWalkCursor::new(source, bounds, Some(&adjacency), &mut control)?
+            }
+            ShortestMultiplicity::Any => {
+                GraphShortestWalkCursor::new_any(source, bounds, Some(&adjacency), &mut control)?
+            }
+        };
         let mut counts = BTreeMap::<VId, u64>::new();
         let mut occurrences = 0_u64;
         while let Some(endpoint) = cursor.next_with_control(&mut control)? {
