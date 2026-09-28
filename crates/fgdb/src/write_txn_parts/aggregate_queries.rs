@@ -7,6 +7,10 @@ impl WriteTxn {
     /// output-budget or cancellation failures; wrong owners never admit data.
     /// Captured paths preserve canonical overlay EIds through grouping, even
     /// when the final result contains only a count or numeric summary.
+    /// Eligible single-vertex inputs retain their predicate domain, including
+    /// zero matches and groups hidden by output pagination. Acceptance waits
+    /// for grouping, result construction and the final combined allowance check;
+    /// data or budget failures keep the pending conservative scan witness.
     pub fn execute_graph_aggregate_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -28,10 +32,11 @@ impl WriteTxn {
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let mut usage = crate::gql_exec::AdmissionUsage::default();
             let pattern = aggregate.input_pattern();
-            let source = self.query_source_over_logical(
+            let source = self.query_source_with_witnesses(
                 snapshot,
                 pattern.plan().clone(),
                 pattern.required_vertex_label(),
+                true,
                 &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe(policy, event)
@@ -47,7 +52,9 @@ impl WriteTxn {
                 usage.remaining(policy),
                 || cx.checkpoint(),
             );
-            usage.finish(policy, result)
+            let result = usage.finish(policy, result)?;
+            source.accept_observations();
+            Ok(result)
         })
     }
 

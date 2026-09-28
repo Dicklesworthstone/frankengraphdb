@@ -331,3 +331,5 @@ fn historical_predicate_validation_is_cancellable_without_mutating_observations(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+include!("vertex_scan_aggregate_tests.rs");
