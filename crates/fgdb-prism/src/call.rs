@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 3;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 4;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -46,6 +46,8 @@ pub enum FnxOutput {
     Distance = 2,
     Component = 3,
     Triangles = 4,
+    /// A vertex's k-core number: an exact count.
+    Core = 5,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -55,6 +57,7 @@ impl FnxOutput {
             Self::Distance => "distance",
             Self::Component => "component",
             Self::Triangles => "triangles",
+            Self::Core => "core",
         }
     }
 }
@@ -239,7 +242,79 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
         execution_kernel: "fgdb-prism/clustering-degree-mark-v1",
     },
+    foundation(
+        "fnx.degree_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; degree / (|V| - 1); a single vertex scores 1",
+        "O(|V| + |E|)",
+        "fnx-algorithms/degree_centrality",
+    ),
+    foundation(
+        "fnx.closeness_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; Wasserman-Faust reachable-set closeness per connected component",
+        "O(|V| * (|V| + |E|))",
+        "fnx-algorithms/closeness_centrality",
+    ),
+    foundation(
+        "fnx.harmonic_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; sum of reciprocal hop distances to every other reachable vertex",
+        "O(|V| * (|V| + |E|))",
+        "fnx-algorithms/harmonic_centrality",
+    ),
+    foundation(
+        "fnx.betweenness_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; Brandes shortest-path betweenness, normalized by (|V|-1)(|V|-2)/2",
+        "O(|V| * |E|)",
+        "fnx-algorithms/betweenness_centrality",
+    ),
+    foundation(
+        "fnx.eigenvector_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; power iteration, at most 100 steps to tolerance 1e-6; non-convergence refuses",
+        "O(100 * (|V| + |E|))",
+        "fnx-algorithms/eigenvector_centrality_with_params",
+    ),
+    foundation(
+        "fnx.core_number",
+        FnxOutput::Core,
+        "explicit undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count",
+        "O(|V| + |E|)",
+        "fnx-algorithms/core_number",
+    ),
 ];
+
+/// A foundation row: one undirected, unweighted, parameter-free graph input
+/// over a decoded copy of the admitted projection, results in VId order.
+const fn foundation(
+    name: &'static str,
+    value: FnxOutput,
+    graph_laws: &'static str,
+    complexity: &'static str,
+    execution_kernel: &'static str,
+) -> FnxSignature {
+    FnxSignature {
+        name,
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: match value {
+            FnxOutput::Core => &[FnxOutput::Vertex, FnxOutput::Core],
+            _ => &[FnxOutput::Vertex, FnxOutput::Score],
+        },
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: match value {
+            FnxOutput::Core => FNX_DISCRETE_PROFILE,
+            _ => FNX_NUMERIC_PROFILE,
+        },
+        rng_policy: "none",
+        graph_laws,
+        complexity,
+        execution_kernel,
+    }
+}
 pub struct FnxSignatureRegistry;
 impl FnxSignatureRegistry {
     pub const fn version() -> u16 {
@@ -379,13 +454,18 @@ impl Default for PageRankOptions {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FnxAlgorithm {
     PageRank(PageRankOptions),
-    SingleSourceShortestPathLength { source: VId, cutoff: Option<usize> },
+    SingleSourceShortestPathLength {
+        source: VId,
+        cutoff: Option<usize>,
+    },
     ConnectedComponents,
     WeaklyConnectedComponents,
     StronglyConnectedComponents,
     SingleSourceDijkstraPathLength(DijkstraOptions),
     Triangles,
     ClusteringCoefficient,
+    /// A procedure the pinned franken_networkx catalog itself executes.
+    Foundation(FoundationAlgorithm),
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -398,8 +478,23 @@ impl FnxAlgorithm {
             Self::SingleSourceDijkstraPathLength(_) => 5,
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
+            Self::Foundation(algorithm) => 8 + algorithm as usize,
         }]
     }
+}
+
+/// The fnx-algorithms entry points Prism runs as-is over a decoded copy of the
+/// admitted projection (the labelled DECODED_CACHE boundary). The ordinal is
+/// the signature row after the eight in-house kernels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FoundationAlgorithm {
+    DegreeCentrality = 0,
+    ClosenessCentrality = 1,
+    HarmonicCentrality = 2,
+    BetweennessCentrality = 3,
+    EigenvectorCentrality = 4,
+    CoreNumber = 5,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxOutputColumn {
@@ -680,6 +775,22 @@ impl FnxCallSpec {
             "fnx.strongly_connected_components" => FnxAlgorithm::StronglyConnectedComponents,
             "fnx.triangles" => FnxAlgorithm::Triangles,
             "fnx.clustering_coefficient" => FnxAlgorithm::ClusteringCoefficient,
+            "fnx.degree_centrality" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+            }
+            "fnx.closeness_centrality" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::ClosenessCentrality)
+            }
+            "fnx.harmonic_centrality" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::HarmonicCentrality)
+            }
+            "fnx.betweenness_centrality" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
+            }
+            "fnx.eigenvector_centrality" => {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
+            }
+            "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
             _ => {
                 return Err(error(
                     FnxCallSite::Procedure,

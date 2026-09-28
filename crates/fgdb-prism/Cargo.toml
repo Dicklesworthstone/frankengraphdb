@@ -14,6 +14,5 @@ fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 fnx-algorithms = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f", default-features = false }
-
-[dev-dependencies]
+# The catalog's Graph type: foundation entry points take `&fnx_classes::Graph`.
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f", default-features = false }

@@ -28,6 +28,7 @@
 mod call;
 mod clustering;
 mod execute;
+mod foundation;
 mod input;
 mod projection;
 mod sealed;
@@ -40,8 +41,8 @@ pub use call::{
     FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
     FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
     FnxGraphKind, FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec,
-    FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, MAX_FNX_CALL_BYTES,
-    PageRankOptions,
+    FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, FoundationAlgorithm,
+    MAX_FNX_CALL_BYTES, PageRankOptions,
 };
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{

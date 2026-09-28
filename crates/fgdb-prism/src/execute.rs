@@ -44,6 +44,9 @@ pub enum FnxExecutionError<C> {
         max_iterations: usize,
         witness: ComplexityWitness,
     },
+    /// This procedure's graph law refuses a self-loop. Choose a projection
+    /// that drops self-loops; the call never discards one on its own.
+    SelfLoopRefused,
 }
 impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -78,8 +81,11 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
             Self::NotConverged { max_iterations, .. } => {
                 write!(
                     f,
-                    "PageRank did not converge within {max_iterations} iterations"
+                    "iterative analytics did not converge within {max_iterations} iterations"
                 )
+            }
+            Self::SelfLoopRefused => {
+                f.write_str("this procedure refuses self-loops; project with self-loops dropped")
             }
         }
     }
@@ -220,7 +226,7 @@ impl KernelValues {
                 .flatten()
                 .map(FnxValue::Float)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
-            (FnxOutput::Triangles, Self::Counts(values)) => values
+            (FnxOutput::Triangles | FnxOutput::Core, Self::Counts(values)) => values
                 .get(index)
                 .copied()
                 .map(FnxValue::Integer)
@@ -415,6 +421,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
             }
+            FnxAlgorithm::Foundation(algorithm) => {
+                crate::foundation::estimated_work(algorithm, n, arcs)
+            }
             _ => n.checked_add(arcs),
         }
         .ok_or(FnxExecutionError::SizeOverflow)?;
@@ -426,6 +435,9 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n)?
+            }
+            FnxAlgorithm::Foundation(_) => {
+                crate::foundation::copy_bytes(n, arcs).ok_or(FnxExecutionError::SizeOverflow)?
             }
             _ => {
                 let bytes_per_vertex = match algorithm {
@@ -476,6 +488,9 @@ impl FnxCallSpec {
                     row_count: n,
                     witness: output.witness,
                 }
+            }
+            FnxAlgorithm::Foundation(algorithm) => {
+                crate::foundation::run(graph, algorithm, &mut checkpoint)?
             }
             _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
         };
@@ -595,6 +610,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("call.rs"));
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
+        hash_text(&mut hash, include_str!("foundation.rs"));
         hash.finalize()
     })
 }

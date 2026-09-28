@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 8] = [
+const CALLS: [(&str, &str, &str, bool); 14] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -71,6 +71,13 @@ const CALLS: [(&str, &str, &str, bool); 8] = [
     ("single_source_dijkstra_path_length", "1", "distance", false),
     ("triangles", "", "triangles", true),
     ("clustering_coefficient", "", "score", true),
+    // The franken_networkx catalog itself (fgdb-lq1v6).
+    ("degree_centrality", "", "score", true),
+    ("closeness_centrality", "", "score", true),
+    ("harmonic_centrality", "", "score", true),
+    ("betweenness_centrality", "", "score", true),
+    ("eigenvector_centrality", "", "score", true),
+    ("core_number", "", "core", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -188,6 +195,16 @@ fn run<T>(test: impl AsyncFnOnce(&fgdb_types::CommitCx, &QueryCx) -> T) -> T {
 
 #[test]
 fn every_registered_procedure_composes_and_equals_the_standalone_call() {
+    // The table is the whole registry: a new row must join this law.
+    let registered: Vec<&str> = FnxSignatureRegistry::signatures()
+        .iter()
+        .map(|signature| signature.name)
+        .collect();
+    let listed: Vec<String> = CALLS
+        .iter()
+        .map(|(name, ..)| format!("fnx.{name}"))
+        .collect();
+    assert_eq!(listed, registered);
     run(async |commit, cx| {
         let db = open(commit).await;
         for (name, arguments, field, undirected) in CALLS {

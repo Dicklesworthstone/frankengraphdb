@@ -40,7 +40,8 @@ pub(crate) fn run<C>(
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
         | FnxAlgorithm::Triangles
-        | FnxAlgorithm::ClusteringCoefficient => Err(FnxExecutionError::InvalidUpstreamResult),
+        | FnxAlgorithm::ClusteringCoefficient
+        | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }
 

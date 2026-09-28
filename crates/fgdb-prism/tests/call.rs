@@ -61,8 +61,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 3);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 8);
+    assert_eq!(FnxSignatureRegistry::version(), 4);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 14);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 4);
@@ -71,7 +71,17 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         signature.implementation,
         FnxImplementationClass::InCoreDecodedCache
     );
-    assert!(FnxSignatureRegistry::lookup("fnx.betweenness_centrality").is_none());
+    // A foundation row runs fnx-algorithms itself over an undirected projection.
+    let foundation = FnxSignatureRegistry::lookup("fnx.betweenness_centrality").unwrap();
+    assert_eq!(foundation.graph_kind, FnxGraphKind::Undirected);
+    assert!(foundation.parameters.is_empty());
+    assert_eq!(
+        foundation.execution_kernel,
+        "fnx-algorithms/betweenness_centrality"
+    );
+    // Katz stays unregistered: its checked foundation entry drops the result
+    // and witness on non-convergence, so a refusal would have to invent one.
+    assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
 }
 
