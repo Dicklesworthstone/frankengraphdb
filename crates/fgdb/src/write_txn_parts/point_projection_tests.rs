@@ -26,7 +26,7 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
             vec![
                 (P, CanonicalScalar::Null),
                 (Q, CanonicalScalar::Int(7)),
-                (LARGE, CanonicalScalar::bytes(vec![0x35; 32_768]).unwrap()),
+                (LARGE, CanonicalScalar::bytes(vec![0x35; 8_192]).unwrap()),
             ],
         );
     }
@@ -36,7 +36,7 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
         VId(1),
         vec![
             (Q, CanonicalScalar::Int(8)),
-            (LARGE, CanonicalScalar::bytes(vec![0x53; 32_768]).unwrap()),
+            (LARGE, CanonicalScalar::bytes(vec![0x53; 8_192]).unwrap()),
         ],
     );
     batch.add_edge(

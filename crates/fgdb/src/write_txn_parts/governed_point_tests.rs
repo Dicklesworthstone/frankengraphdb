@@ -132,7 +132,12 @@ fn selected_payload_units_are_charged_before_copy_but_unrelated_fields_are_not()
         let txcx = contexts.txn();
         let query = contexts.query();
         let mut executions = Vec::new();
-        for (selected, unrelated) in [(64, 64), (1024, 64), (64, 32768)] {
+        // The unrelated payload is 32x the baseline, so copying it would cost
+        // dozens of payload units, but it keeps all three rows in one vertex
+        // patch. A size that splits the patch family changes the physical
+        // traversal (work units) without any copy, and the full-stats
+        // equality below would then no longer isolate copy charges.
+        for (selected, unrelated) in [(64, 64), (1024, 64), (64, 2048)] {
             let mut db = seeded(&cx, selected, unrelated).await;
             let txn = db.begin(&txcx).unwrap();
             let vertex = txn
@@ -501,17 +506,24 @@ fn native_unknown_and_recovery_fences_precede_governed_point_admission() {
             let txn = db.begin(&txcx).unwrap();
             let mut winner = WriteBatch::new(R);
             winner.set_vertex_label(VId(3), LabelId(2), true);
-            let prepared = db.prepare_write(winner).unwrap();
+            // Commit through the ordinary write path, which installs the
+            // first-committer-wins validator for the current basis. A bare
+            // commit_template keeps the seed's validator and is refused before
+            // the injected fault, leaving the handle Healthy (as in refresh.rs).
             let result = db
-                .commit_template(
+                .write_with_faults(
                     &cx,
-                    prepared.template,
+                    winner,
                     unknown.then_some(CrashPoint::AfterMarkerBeforeD2),
                     (!unknown).then_some(DerivedPublicationStage::FoldCommittedTemplate),
                     None,
                 )
                 .await;
-            assert!(result.is_err());
+            assert!(
+                matches!(result, Err(WriteError::CommitOutcomeUnknown { .. }))
+                    || !unknown && result.is_err(),
+                "the commit must fail at its injected point: {result:?}"
+            );
             for element in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))] {
                 let mut calls = 0;
                 let result = txn.point_governed_with_checkpoint(

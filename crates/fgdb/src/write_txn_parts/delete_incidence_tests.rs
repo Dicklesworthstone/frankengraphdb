@@ -570,17 +570,21 @@ fn owner_health_initial_cancel_and_edge_only_fast_path_preserve_lifecycle() {
         let txn = db.begin(&tcx).unwrap();
         let mut write = WriteBatch::new(R);
         write.create_vertex(VId(9), vec![], vec![]);
-        let prepared = db.prepare_write(write).unwrap();
-        assert!(
-            db.commit_template(
+        // Through the ordinary write path, so the commit reaches its injected
+        // fault instead of being refused by the seed's first-committer-wins
+        // validator (which leaves the handle Healthy; see refresh.rs).
+        let committed = db
+            .write_with_faults(
                 &cx,
-                prepared.template,
+                write,
                 Some(fgdb_chronicle::commit::CrashPoint::AfterMarkerBeforeD2),
                 None,
                 None,
             )
-            .await
-            .is_err()
+            .await;
+        assert!(
+            matches!(committed, Err(WriteError::CommitOutcomeUnknown { .. })),
+            "the commit must fail at its injected point: {committed:?}"
         );
         let result = txn.prove_delete_incidence(&db, &[VId(1)], &INCIDENT, &mut |_| -> Result<
             (),
