@@ -581,6 +581,24 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
+    /// Every relation whose edges this plan can read. Each edge operator
+    /// names exactly one relation, so no edge of another relation can
+    /// change this plan's rows. That is what lets a transaction record a
+    /// per-relation read witness instead of the whole edge table
+    /// (fgdb-whole-edge-read-flag-4qe1z). Empty when the plan reads no edges.
+    #[must_use]
+    pub fn edge_relations(&self) -> std::collections::BTreeSet<RelationId> {
+        self.operators
+            .iter()
+            .filter_map(|operator| match operator {
+                GlaOperator::ScanEdges { relation, .. }
+                | GlaOperator::Expand { relation, .. }
+                | GlaOperator::VarLengthExpand { relation, .. } => Some(*relation),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Captures and edge-unique traversal require actual source EIds. TRAIL
     /// cannot drop its identities merely because only endpoints are projected.
     #[must_use]

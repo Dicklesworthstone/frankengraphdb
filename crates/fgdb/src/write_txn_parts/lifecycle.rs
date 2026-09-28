@@ -19,6 +19,7 @@ impl WriteTxn {
             scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertices: std::cell::Cell::new(false),
             scanned_edges: std::cell::Cell::new(false),
+            scanned_edge_relations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             state: EmbeddedTxnState::Active,
             pin: Some(pin),
         })

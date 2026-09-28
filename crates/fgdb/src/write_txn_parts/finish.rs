@@ -327,6 +327,7 @@ impl WriteTxn {
         self.scanned_vertex_labels.get_mut().clear();
         self.scanned_vertices.set(false);
         self.scanned_edges.set(false);
+        self.scanned_edge_relations.get_mut().clear();
         self.release_pin();
     }
 
@@ -429,10 +430,12 @@ impl WriteTxn {
         };
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
+        let scanned_edge_relations = self.scanned_edge_relations.borrow();
         if read_set.is_empty()
             && point_reads.is_empty()
             && match_expansions.is_empty()
             && scanned_vertex_labels.is_empty()
+            && scanned_edge_relations.is_empty()
             && mutation_footprint.is_empty()
             && !scanned_vertices
             && !scanned_edges
@@ -482,7 +485,10 @@ impl WriteTxn {
                         }
                         fgdb_delta_types::DeltaRow::CreateEdge {
                             eid, src, relation, ..
-                        } if scanned_edges || match_expansions.contains(&(*src, *relation)) => {
+                        } if scanned_edges
+                            || scanned_edge_relations.contains(relation)
+                            || match_expansions.contains(&(*src, *relation)) =>
+                        {
                             return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Edge(*eid), seq)));
                         }
                         _ => {}

@@ -207,3 +207,89 @@ fn a_disjoint_concurrent_create_does_not_abort_the_matcher() {
         );
     });
 }
+
+const S: RelationId = RelationId(2);
+
+/// The seed plus an `:S`-only neighbourhood: `VId(5) -[:S]-> VId(6)`. No
+/// `:R` edge touches either vertex, so `MATCH (a)-[:R]->(b)` cannot read them.
+async fn seeded_with_s(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> Database {
+    let mut db = seeded(cx, dir).await;
+    let mut other = WriteBatch::new(S);
+    other.create_vertex(VId(5), vec![], vec![(PROP, int(5))]);
+    other.create_vertex(VId(6), vec![], vec![]);
+    other.add_edge(EId(20), VId(5), VId(6), vec![]);
+    db.write(cx, other)
+        .await
+        .expect("the :S neighbourhood commits");
+    db
+}
+
+/// Runs the `:R` matcher in a transaction staging a disjoint write, lets
+/// `concurrent` commit first, then returns the matcher's commit outcome.
+async fn matcher_after(
+    commit: &fgdb_types::context::CommitCx,
+    txn_cx: &fgdb_types::context::TxnCx,
+    dir: &PathBuf,
+    concurrent: WriteBatch,
+) -> Result<fgdb_types::CommitSeq, WriteTxnError> {
+    let mut db = seeded_with_s(commit, dir).await;
+    let mut txn_a = db.begin(txn_cx).expect("matcher txn begins");
+    let matched = txn_a
+        .execute_gql(&db, PINNED, &bind_r())
+        .expect("the txn's MATCH executes");
+    assert_eq!(matched, vec![VId(2)], "only the :R destination is matched");
+    let mut staged = WriteBatch::new(R);
+    staged.create_vertex(VId(3), vec![LabelId(5)], vec![(PROP, int(3))]);
+    txn_a.write(&mut db, staged).expect("stages its write");
+    let mut txn_b = db.begin(txn_cx).expect("concurrent txn begins");
+    txn_b
+        .write(&mut db, concurrent)
+        .expect("stages the concurrent write");
+    txn_b
+        .commit(&mut db, commit)
+        .await
+        .expect("the concurrent txn commits first");
+    txn_a.commit(&mut db, commit).await
+}
+
+/// fgdb-whole-edge-read-flag-4qe1z. The `:R` MATCH reads no `:S` edge, so a
+/// concurrent commit that creates an `:S` edge and changes an `:S`-only
+/// vertex's property changed nothing the matcher read. Before the per-relation
+/// witness, the whole-table flag aborted it on the new edge, and recording
+/// every scanned edge's endpoints aborted it on the property change.
+#[test]
+fn concurrent_writes_in_an_unread_relation_do_not_abort_the_matcher() {
+    under_lab(0xa1_03, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("unread-relation");
+        let mut other = WriteBatch::new(S);
+        other.add_edge(EId(21), VId(6), VId(5), vec![]);
+        other.set_vertex_property(VId(5), PROP, Some(int(50)));
+        matcher_after(&commit, &txn_cx, &dir, other)
+            .await
+            .expect("nothing the :R matcher read changed; an abort is a false conflict");
+    });
+}
+
+/// Soundness guard for the narrowed witness: a concurrent `:R` edge between
+/// vertices the matcher never read is a phantom for `MATCH (a)-[:R]->(b)`.
+/// It must still abort the matcher, typed FG-LAW-FCW-READ-01.
+#[test]
+fn a_concurrent_edge_in_the_read_relation_still_aborts_the_matcher() {
+    under_lab(0xa1_04, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("read-relation-phantom");
+        let mut phantom = WriteBatch::new(R);
+        phantom.add_edge(EId(22), VId(5), VId(6), vec![]);
+        let err = matcher_after(&commit, &txn_cx, &dir, phantom)
+            .await
+            .expect_err("a new :R edge could add a MATCH row; the commit must abort");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("FG-LAW-FCW-READ-01"),
+            "the abort must name the read-set law: {rendered}"
+        );
+    });
+}

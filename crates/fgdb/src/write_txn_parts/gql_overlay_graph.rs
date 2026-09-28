@@ -353,9 +353,18 @@ mod query_source {
             };
             let edge_scan = logical.scans_edges();
             let reads_edges = logical.reads_edges();
+            // Every edge operator names its relation, so the plan's rows
+            // depend on these relations' edges only. The phantom witness is
+            // per relation, not the whole edge table, and no other
+            // relation's edge is recorded as read. Other relations' edges are
+            // still scanned and counted, as every surface accounts them
+            // (fgdb-whole-edge-read-flag-4qe1z).
+            let edge_relations = logical.edge_relations();
             control(SourceEvent::Work)?;
             if reads_edges {
-                self.scanned_edges.set(true);
+                self.scanned_edge_relations
+                    .borrow_mut()
+                    .extend(edge_relations.iter().copied());
             }
             if !edge_scan && scan_observation.is_none() {
                 if let Some(label) = required_vertex_label {
@@ -376,7 +385,9 @@ mod query_source {
                         PendingRow::Vertex { vid, .. } | PendingRow::DeleteVertex { vid, .. } => {
                             self.note_query_read(&mut observed, ElementId::Vertex(*vid), control)?;
                         }
-                        PendingRow::Edge { eid, src, dst, .. } if reads_edges => {
+                        PendingRow::Edge { eid, src, dst, .. }
+                            if reads_edges && edge_relations.contains(&batch.relation) =>
+                        {
                             for element in [
                                 ElementId::Edge(*eid),
                                 ElementId::Vertex(*src),
@@ -400,12 +411,17 @@ mod query_source {
                     self.basis,
                     control,
                     |entry, props, control| {
-                        for element in [
-                            ElementId::Edge(entry.eid),
-                            ElementId::Vertex(entry.src),
-                            ElementId::Vertex(entry.dst),
-                        ] {
-                            self.note_query_read(&mut observed, element, control)?;
+                        // Source accounting still counts every scanned edge
+                        // (the cross-surface stats contract); only the read
+                        // witness narrows to the relations the plan reads.
+                        if edge_relations.contains(&entry.relation) {
+                            for element in [
+                                ElementId::Edge(entry.eid),
+                                ElementId::Vertex(entry.src),
+                                ElementId::Vertex(entry.dst),
+                            ] {
+                                self.note_query_read(&mut observed, element, control)?;
+                            }
                         }
                         control(SourceEvent::ScratchEntry)?;
                         edges.insert(

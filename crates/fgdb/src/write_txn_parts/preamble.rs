@@ -263,6 +263,10 @@ pub struct WriteTxn {
     /// witness models arbitrary property predicates or full predicate SSI.
     scanned_vertices: std::cell::Cell<bool>,
     scanned_edges: std::cell::Cell<bool>,
+    /// A plan-driven edge scan's phantom witness: any concurrent edge
+    /// creation in one of these relations could add a row. The plan reads no
+    /// other relation's edges, so it is not the whole-table `scanned_edges`.
+    scanned_edge_relations: std::cell::RefCell<std::collections::BTreeSet<RelationId>>,
     state: EmbeddedTxnState,
     pin: Option<PurposeObligation<Acquired>>,
 }
