@@ -290,6 +290,32 @@ async fn write_sweep(seed: u64, contexts: &PurposeContexts) {
                     .0
             };
             let expected = observed(&control);
+            // The open-transaction retry runs the script in a FRESH
+            // transaction after the prefix commits, so its receipt is compared
+            // with a control of that same shape. The counting control above
+            // stages the prefix in the script's own transaction, and receipt
+            // stats (selection and evaluator counters) legitimately charge
+            // staged effects a transaction must walk (e.g. plain DELETE's
+            // incidence proof since 6c0b23e5).
+            let retry_receipt = if open {
+                let mut shaped = seeded(&commit, seed).await;
+                shaped.write(&commit, prefix()).await.unwrap();
+                let mut txn = shaped.begin(&txcx).unwrap();
+                let receipt = txn
+                    .execute_graph_write_script_governed(
+                        &mut shaped,
+                        &cx,
+                        &script,
+                        &args,
+                        write_policy(),
+                        allocate,
+                    )
+                    .unwrap();
+                txn.commit(&mut shaped, &commit).await.unwrap();
+                Some(receipt)
+            } else {
+                None
+            };
             let n = count.calls();
             assert!(n > 10, "seed={seed} family={family} open={open} N={n}");
             let ks = stops(n, seed);
@@ -346,7 +372,7 @@ async fn write_sweep(seed: u64, contexts: &PurposeContexts) {
                             allocate,
                         )
                         .unwrap();
-                    assert_eq!(receipt, expected_receipt, "{diagnostic}");
+                    assert_eq!(Some(receipt), retry_receipt, "{diagnostic}");
                     retry.commit(&mut db, &commit).await.unwrap();
                 } else {
                     let error = db

@@ -51,13 +51,19 @@ fn existing_ensure_alias_survives_only_when_its_observed_edge_survives() {
             let frontier = db.frontier().expect("frontier");
             let result = txn.commit(&mut db, &cx).await;
             if delete_existing {
-                assert!(matches!(
-                    result,
-                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01",
-                        ..
-                    }))
-                ));
+                // Since ac05789c the ENSURE alias is a prepared mutation input,
+                // not an escaped read, so the prepared-dependency validator
+                // (FG-LAW-FCW-01) refuses the commit on the deleted alias.
+                assert!(
+                    matches!(
+                        &result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-01",
+                            detail,
+                        })) if detail.contains("Edge(EId(10))")
+                    ),
+                    "{result:?}"
+                );
                 assert_eq!(db.frontier().expect("no partial publication"), frontier);
                 assert!(db.vertex(VId(99)).expect("staged output absent").is_none());
                 assert!(

@@ -70,18 +70,29 @@ fn exact_limits_include_edge_scan_and_each_proposal_and_refusal_preserves_prefix
             .execute_graph_delete_returning_governed(&mut db, &query, &definition, policy())
             .unwrap();
         assert_eq!(targets, vec![VId(3), VId(4), VId(5), VId(6)]);
+        // Since 6c0b23e5 the incidence proof walks each target's adjacency
+        // index instead of scanning every edge. None of the four targets has an
+        // incident edge, so no edge row is read and no snapshot record is
+        // charged beyond the selection.
         assert_eq!(
             stats.selection.snapshot_records,
-            proposal.selection.snapshot_records + 4
+            proposal.selection.snapshot_records
         );
         assert_eq!(stats.selection.result_rows, proposal.selection.result_rows);
-        assert_eq!(
-            stats.evaluator.work_units,
-            proposal.evaluator.work_units + 4 + 4 + 1
-        );
+        // Scratch: one witness per target, then one staged deletion per target.
         assert_eq!(
             stats.evaluator.scratch_entries,
-            proposal.evaluator.scratch_entries + 4
+            proposal.evaluator.scratch_entries + 4 + 4
+        );
+        // Work: entry, the staged prefix's coordinate and effect, one unit per
+        // target plus that target's index probe, the proof's close, and the
+        // staging. Probe cost is the index's tree traversal (at least one node
+        // per face), so the exact total is pinned by the cap loop below.
+        let entry_prefix_targets_close_staging = 1 + 2 + 4 * (1 + 2) + 1 + 1;
+        let floor = proposal.evaluator.work_units + entry_prefix_targets_close_staging;
+        assert!(
+            stats.evaluator.work_units >= floor,
+            "{stats:?} vs {proposal:?}"
         );
         txn.abort();
         let caps = [
