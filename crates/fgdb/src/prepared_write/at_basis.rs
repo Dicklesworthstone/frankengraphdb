@@ -2,11 +2,12 @@
 //!
 //! Reconstruct only the derived writer/version state at the requested cut;
 //! never reinterpret an old batch against the live writer. The scope exposes
-//! preparation operations only, and restores the live state on return or unwind.
-//! No publication, validator installation, identity allocation or await occurs.
+//! preparation/staging operations only, and restores live state on return or
+//! unwind. No publication, validator installation, allocation of identities or
+//! await occurs.
 
 use crate::{
-    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteTxnError,
+    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteTxn, WriteTxnError,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::DeltaRow;
@@ -32,10 +33,7 @@ impl<V: Vfs> Drop for PreparationBasis<'_, V> {
 }
 
 impl<V: Vfs + Clone> PreparationBasis<'_, V> {
-    pub(crate) fn prepare_write(
-        &mut self,
-        batch: WriteBatch,
-    ) -> Result<PreparedWrite, WriteTxnError> {
+    pub(crate) fn prepare_write(&mut self, batch: WriteBatch) -> Result<PreparedWrite, WriteTxnError> {
         self.database.prepare_write_checked(batch).map_err(Into::into)
     }
 
@@ -51,6 +49,41 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
         batches: Vec<WriteBatch>,
     ) -> Result<PreparedWrite, WriteTxnError> {
         self.database.prepare_ordered_writes(batches)
+    }
+
+    // These adapters call only the existing synchronous staging entries. They
+    // deliberately do not expose the database or a publication-capable borrow.
+    pub(crate) fn stage_write(
+        &mut self,
+        txn: &mut WriteTxn,
+        batch: WriteBatch,
+    ) -> Result<(), WriteTxnError> {
+        txn.write(self.database, batch)
+    }
+
+    pub(crate) fn stage_atomic_writes(
+        &mut self,
+        txn: &mut WriteTxn,
+        batches: Vec<WriteBatch>,
+    ) -> Result<(), WriteTxnError> {
+        txn.write_atomic(self.database, batches)
+    }
+
+    pub(crate) fn stage_ordered_writes(
+        &mut self,
+        txn: &mut WriteTxn,
+        batches: Vec<WriteBatch>,
+    ) -> Result<(), WriteTxnError> {
+        txn.write_ordered(self.database, batches)
+    }
+
+    pub(crate) fn stage_ordered_writes_bounded(
+        &mut self,
+        txn: &mut WriteTxn,
+        batches: Vec<WriteBatch>,
+        max_expanded_rows: u64,
+    ) -> Result<(), WriteTxnError> {
+        txn.write_ordered_bounded(self.database, batches, max_expanded_rows)
     }
 }
 
@@ -109,10 +142,10 @@ impl<V: Vfs + Clone> Database<V> {
                 // Match the native per-commit seal law. The writer's live and
                 // permanently-spent identity state is the production fold's,
                 // including creations subsequently deleted before this basis.
-                writer
+                let _ = writer
                     .seal(self.keys.block_keys())
                     .map_err(|error| basis_rebuild(at, error))?;
-                writer
+                let _ = writer
                     .seal_vertices(self.keys.block_keys())
                     .map_err(|error| basis_rebuild(at, error))?;
             }
