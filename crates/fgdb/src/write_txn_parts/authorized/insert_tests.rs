@@ -302,11 +302,15 @@ fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
             .iter()
             .map(|id| db.vertex(*id).unwrap().unwrap().props)
             .collect();
+        // Creation follows the relation's row order. A pattern's value
+        // projection arrives in canonical value order (GLA ALL collector;
+        // `SetNode::Pattern` does not preserve row order), unlike the
+        // source-free UNWIND above, which keeps list order [3, 1, 3].
         assert_eq!(
             properties,
             vec![
-                vec![(P, CanonicalScalar::Int(3))],
                 vec![(P, CanonicalScalar::Int(1))],
+                vec![(P, CanonicalScalar::Int(3))],
                 vec![(P, CanonicalScalar::Int(3))],
             ]
         );
