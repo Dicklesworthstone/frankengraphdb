@@ -8,6 +8,7 @@
 
 mod aggregate;
 mod execute;
+pub(crate) use execute::finish_owned_projection;
 mod filter;
 mod incremental;
 mod join;
@@ -498,6 +499,10 @@ impl PreparedGraphSet {
     /// in the same depth bound, not reset admission at a subsystem boundary.
     pub(crate) fn check_parent_depth(&self) -> Result<(), GraphSetBuildError> {
         check_depth(self.depth + 1)
+    }
+
+    pub(crate) fn check_ancestor_depth(&self, ancestors: usize) -> Result<(), GraphSetBuildError> {
+        check_depth(self.depth.saturating_add(ancestors))
     }
 
     /// Combine exact, position-compatible relations. Heterogeneous canonical

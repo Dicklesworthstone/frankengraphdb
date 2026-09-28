@@ -2,6 +2,8 @@
 //! This module only prepares templates. Storage and identity allocation are
 //! absent from parsing/binding; the ordinary insertion/write paths own both.
 
+mod query;
+
 use super::*;
 use crate::insertion::{
     GraphInsertBuildError, GraphInsertEdge, GraphInsertEndpoint, GraphInsertVertex,
@@ -21,6 +23,7 @@ struct NewVertex<'a> {
     properties: ParsedFields<'a>,
 }
 struct NewEdge<'a> {
+    name: Option<Name<'a>>,
     source: GraphInsertEndpoint,
     destination: GraphInsertEndpoint,
     relation: Name<'a>,
@@ -173,6 +176,9 @@ impl<'a> Parser<'a> {
             None
         };
         let existing = if let Some(name) = name {
+            if parsed.edges.iter().any(|edge| edge.name.is_some_and(|old| old.text == name.text)) {
+                return Err(expected(name.at, "CREATE vertex name distinct from edge bindings"));
+            }
             if row_schema
                 .is_some_and(|schema| schema.iter().any(|(alias, _)| alias.text == name.text))
             {
@@ -240,6 +246,7 @@ impl<'a> Parser<'a> {
     fn insertion_clauses(
         &mut self,
         row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        returning: bool,
     ) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
         let create_at = self.current.at;
         if !self.take_word("INSERT")? {
@@ -258,6 +265,18 @@ impl<'a> Parser<'a> {
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
+                let name = if returning && matches!(self.current.kind, TokenKind::Word(_)) {
+                    let name = self.name()?;
+                    if row_schema.is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
+                        || parsed.vertices.iter().any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                        || parsed.edges.iter().any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                    {
+                        return Err(expected(name.at, "new CREATE edge binding"));
+                    }
+                    Some(name)
+                } else {
+                    None
+                };
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
                 let properties =
@@ -271,12 +290,18 @@ impl<'a> Parser<'a> {
                 // Reserve this not-yet-pushed edge while the right node may
                 // admit another vertex. A chain cannot step past the total cap.
                 let right = self.insertion_node(&mut parsed, &mut fields, 1, row_schema)?;
+                if let Some(name) = name
+                    && parsed.vertices.iter().any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                {
+                    return Err(expected(name.at, "CREATE edge name distinct from vertex bindings"));
+                }
                 let (source, destination) = if incoming {
                     (right, left)
                 } else {
                     (left, right)
                 };
                 parsed.edges.push(NewEdge {
+                    name,
                     source,
                     destination,
                     relation,
@@ -288,7 +313,6 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.end()?;
         if parsed.vertices.is_empty() && parsed.edges.is_empty() {
             return Err(insertion_build(create_at, GraphInsertBuildError::Empty));
         }
@@ -421,17 +445,40 @@ impl PreparedGraphInsertText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphInsertTextError> {
+        Self::prepare_definition(statement, relation, declarations, resolve, false)
+            .map(|(insertion, _)| insertion)
+    }
+
+    fn prepare_definition(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        returning: bool,
+    ) -> Result<(Self, Option<crate::insertion_query_text::InsertReturnTemplate>), GraphInsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let matched = parser.is_word("MATCH");
+        if returning && matched {
+            return Err(expected(parser.current.at, "standalone or UNWIND CREATE before RETURN"));
+        }
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         if matched {
             parser.parse_match_prefix()?;
         }
         let at = parser.current.at;
         let parsed =
-            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()))?;
+            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()), returning)?;
+        let returning = if returning {
+            Some(parser.insertion_return(&parsed, &row_schema)?)
+        } else {
+            None
+        };
+        parser.end()?;
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
         let syntax = parser.syntax;
         let relational = if leading.is_empty() {
             None
@@ -455,6 +502,14 @@ impl PreparedGraphInsertText {
             shape.check_parent_depth().map_err(|kind| {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
+            if returning.is_some() {
+                shape.check_ancestor_depth(2).map_err(|kind| GraphInsertTextError {
+                    offset: at,
+                    kind: GraphInsertTextErrorKind::ReturnBuild(
+                        crate::GraphInsertQueryBuildError::InputDepth(kind),
+                    ),
+                })?;
+            }
             for (_, value) in parsed
                 .vertices
                 .iter()
@@ -534,6 +589,7 @@ impl PreparedGraphInsertText {
                 properties: resolve_properties(edge.properties, &mut symbol)?,
             });
         }
+        let returning = returning.map(|returning| returning.resolve(&mut symbol)).transpose()?;
         let (input, shape) = if let Some((builder, filters, scopes)) = matching {
             let mut columns = Vec::new();
             for (index, projection) in parsed.projections.into_iter().enumerate() {
@@ -606,7 +662,7 @@ impl PreparedGraphInsertText {
         // Catch catalog aliases collapsing distinct written keys, invalid
         // endpoint domains and all static expression columns during preparation.
         template.instantiate(shape, None)?;
-        Ok(template)
+        Ok((template, returning))
     }
 
     #[must_use]
@@ -630,15 +686,21 @@ impl PreparedGraphInsertText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphInsert, GraphInsertTextError> {
+        let values = self.checked_arguments(arguments)?;
+        let selection = match &self.input {
+            InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
+            InsertTextInput::Relation { .. } | InsertTextInput::Unit { .. } => None,
+        };
+        self.instantiate(selection, Some(&values))
+    }
+
+    fn checked_arguments(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<Vec<GqlParameterValue>, GraphInsertTextError> {
         match &self.input {
-            InsertTextInput::Match(selection) => {
-                let values = selection.checked_arguments(arguments)?;
-                self.instantiate(Some(selection.bind_values(&values)?), Some(&values))
-            }
-            InsertTextInput::Relation { input, .. } => {
-                let values = input.checked_arguments(arguments)?;
-                self.instantiate(None, Some(&values))
-            }
+            InsertTextInput::Match(selection) => Ok(selection.checked_arguments(arguments)?),
+            InsertTextInput::Relation { input, .. } => Ok(input.checked_arguments(arguments)?),
             InsertTextInput::Unit {
                 statement,
                 parameters,
@@ -670,7 +732,7 @@ impl PreparedGraphInsertText {
                     )
                     .into());
                 }
-                self.instantiate(None, Some(&values))
+                Ok(values)
             }
         }
     }

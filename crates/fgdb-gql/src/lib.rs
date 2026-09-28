@@ -26,6 +26,8 @@ mod evidence_page;
 pub mod free_join;
 mod graph_text;
 pub mod insertion;
+pub mod insertion_query;
+mod insertion_query_text;
 mod insertion_text;
 mod integer_expression;
 mod mutation;
@@ -134,6 +136,11 @@ pub use graph_text::{
     GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog,
 };
+pub use insertion_query::{
+    GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
+    PreparedGraphInsertQuery,
+};
+pub use insertion_query_text::PreparedGraphInsertQueryText;
 pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
 pub use integer_expression::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,

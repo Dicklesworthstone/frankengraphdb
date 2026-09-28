@@ -218,7 +218,7 @@ where
     if page::supports(query) {
         return page::collect(query, source, meter, operand);
     }
-    let mut rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    let rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
         // Admit and finish both original children once, even if the left bag
         // is empty. Do not allocate rejected Cartesian candidate rows.
         let left = run(left, source, meter, operand)?;
@@ -230,19 +230,32 @@ where
     } else {
         run_node(query, source, meter, operand)?
     };
-    if !query.order.is_empty() {
+    order_page(rows, &query.order, query.offset, query.count, meter)
+}
+
+fn order_page<E, C, Checkpoint>(
+    mut rows: Vec<GraphValueRow>,
+    order: &[GraphValueOrder],
+    offset: u64,
+    count: Option<u64>,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    if !order.is_empty() {
         merge::sort(
             &mut rows,
             &mut |event| meter.event(event),
-            &mut |a, b, control| compare_rows(a, b, &query.order, control),
+            &mut |a, b, control| compare_rows(a, b, order, control),
         )?;
     }
-    if query.offset == 0 && query.count.is_none() {
+    if offset == 0 && count.is_none() {
         return Ok(rows);
     }
     let mut output = Vec::new();
-    let mut skip = query.offset;
-    let mut remaining = query.count.unwrap_or(u64::MAX);
+    let mut skip = offset;
+    let mut remaining = count.unwrap_or(u64::MAX);
     for row in rows {
         meter.event(GlaExecutionEvent::Work)?;
         if skip != 0 {
@@ -470,45 +483,7 @@ where
         } => {
             let preserve_order = input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
-            let mut output = Vec::new();
-            for (row_at, row) in input.into_iter().enumerate() {
-                meter.event(GlaExecutionEvent::Work)?;
-                let row = projection::evaluate(&row, projection, &mut |event| meter.event(event))
-                    .map_err(|error| match error {
-                    projection::ProjectionFailure::Control(error) => error,
-                    projection::ProjectionFailure::Arithmetic { column, error } => {
-                        GqlQueryError::Source(GraphSetExecutionError::Projection {
-                            row: row_at,
-                            column,
-                            error,
-                        })
-                    }
-                })?;
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                output.push(row);
-            }
-            // Canonicalize the actual projected tuple, not the hidden input.
-            // Reuse the fallible row sorter and DISTINCT kernel; no unmetered
-            // scalar comparisons and no extra graph source invocation.
-            if *quantifier == GraphSetQuantifier::Distinct {
-                merge::combine(
-                    output,
-                    Vec::new(),
-                    GraphSetOperation::Union,
-                    *quantifier,
-                    &mut |event| meter.event(event),
-                    &mut |a, b, control| compare_rows(a, b, &[], control),
-                )?
-            } else {
-                if !preserve_order {
-                    merge::sort(
-                        &mut output,
-                        &mut |event| meter.event(event),
-                        &mut |a, b, control| compare_rows(a, b, &[], control),
-                    )?;
-                }
-                output
-            }
+            project_rows(input, projection, *quantifier, preserve_order, meter)?
         }
         SetNode::Binary {
             operation,
@@ -527,6 +502,93 @@ where
                 &mut |a, b, control| compare_rows(a, b, &[], control),
             )?
         }
+    })
+}
+
+fn project_rows<E, C, Checkpoint>(
+    input: Vec<GraphValueRow>,
+    projection: &[GraphSetProjection],
+    quantifier: GraphSetQuantifier,
+    preserve_order: bool,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    let mut output = Vec::new();
+    for (row_at, row) in input.into_iter().enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        let row = GraphSetProjection::evaluate_row_with_control(
+            &row,
+            projection,
+            &mut |event| meter.event(event),
+            |column, error| {
+                GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: row_at,
+                    column,
+                    error,
+                })
+            },
+        )?;
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        output.push(row);
+    }
+    // Canonicalize the actual projected tuple, not the hidden input.
+    // Reuse the fallible row sorter and DISTINCT kernel; no unmetered
+    // scalar comparisons and no extra graph source invocation.
+    Ok(if quantifier == GraphSetQuantifier::Distinct {
+        merge::combine(
+            output,
+            Vec::new(),
+            GraphSetOperation::Union,
+            quantifier,
+            &mut |event| meter.event(event),
+            &mut |a, b, control| compare_rows(a, b, &[], control),
+        )?
+    } else {
+        if !preserve_order {
+            merge::sort(
+                &mut output,
+                &mut |event| meter.event(event),
+                &mut |a, b, control| compare_rows(a, b, &[], control),
+            )?;
+        }
+        output
+    })
+}
+
+/// Finish an already admitted owned bag using the ordinary native projection,
+/// DISTINCT, ordering and page kernels. The private owner has checked the input
+/// schema and charged every retained input cell; counters include its complete
+/// prefix and are continued, never reset or added for a second time.
+pub(crate) fn finish_owned_projection<E, C>(
+    input: GqlQueryExecution<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    projection: &[GraphSetProjection],
+    quantifier: GraphSetQuantifier,
+    order: &[GraphValueOrder],
+    page: (u64, Option<u64>),
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    let mut meter = Meter {
+        policy,
+        checkpoint,
+        rows: GqlExecutionStats {
+            snapshot_records: input.rows.snapshot_records,
+            result_rows: 0,
+        },
+        evaluator: input.evaluator,
+    };
+    let rows = project_rows(input.value, projection, quantifier, true, &mut meter)?;
+    let rows = order_page(rows, order, page.0, page.1, &mut meter)?;
+    for _ in &rows {
+        meter.event(GlaExecutionEvent::ResultRow)?;
+    }
+    (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
+    Ok(GqlQueryExecution {
+        value: rows,
+        rows: meter.rows,
+        evaluator: meter.evaluator,
     })
 }
 

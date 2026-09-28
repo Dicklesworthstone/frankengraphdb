@@ -3,7 +3,7 @@
 //! constructed. Hidden source columns retain every requested property read.
 
 mod aggregate;
-mod pipeline;
+pub(super) mod pipeline;
 mod with_aggregate;
 
 use super::*;

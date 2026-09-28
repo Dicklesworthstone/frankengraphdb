@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+use crate::insertion_query::GraphInsertBinding;
 use crate::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
     GraphIntegerEvaluationError,
@@ -91,6 +92,31 @@ fn endpoint<E, A, C>(
     }
 }
 
+fn copy_scalar<E, A, C>(
+    value: &CanonicalScalar,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<CanonicalScalar, E, A, C> {
+    // Reserve the field and its variable payload before its only clone.
+    let sizes = match value {
+        CanonicalScalar::Text(value) => [
+            value.len(),
+            value.canonical_sort_key().map_or(0, <[u8]>::len),
+        ],
+        CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
+        CanonicalScalar::Timestamp(value) => {
+            [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
+        }
+        _ => [0, 0],
+    };
+    control(GlaExecutionEvent::ScratchEntry)?;
+    for bytes in sizes {
+        for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+    }
+    Ok(value.clone())
+}
+
 fn fields<E, A, C>(
     properties: &Properties,
     row: &[GraphValue],
@@ -157,27 +183,56 @@ fn fields<E, A, C>(
                 continue;
             }
         };
-        // Reserve the field and its variable payload before its only clone.
-        let sizes = match value {
-            CanonicalScalar::Text(value) => [
-                value.len(),
-                value.canonical_sort_key().map_or(0, <[u8]>::len),
-            ],
-            CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
-            CanonicalScalar::Timestamp(value) => {
-                [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
-            }
-            _ => [0, 0],
-        };
-        control(GlaExecutionEvent::ScratchEntry)?;
-        for bytes in sizes {
-            for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
-                control(GlaExecutionEvent::ScratchEntry)?;
-            }
-        }
-        result.push((*key, value.clone()));
+        result.push((*key, copy_scalar(value, control)?));
     }
     Ok(result)
+}
+
+fn property_binding<E, A, C>(
+    properties: &Fields,
+    key: PropertyKeyId,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    for (candidate, value) in properties {
+        control(GlaExecutionEvent::Work)?;
+        if *candidate == key {
+            return copy_scalar(value, control).map(GraphValue::Scalar);
+        }
+        if *candidate > key {
+            break;
+        }
+    }
+    control(GlaExecutionEvent::ScratchEntry)?;
+    Ok(GraphValue::Scalar(CanonicalScalar::Null))
+}
+
+fn freeze_bindings<E, A, C>(
+    bindings: &[GraphInsertBinding],
+    row: &[GraphValue],
+    vertices: &[Fields],
+    edges: &[EdgeDraft],
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<Vec<GraphValue>, E, A, C> {
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut values = Vec::new();
+    for binding in bindings {
+        control(GlaExecutionEvent::Work)?;
+        let value = match *binding {
+            GraphInsertBinding::Input(column) => row[column].copy_with_control(control)?,
+            GraphInsertBinding::VertexProperty { vertex, key } => {
+                property_binding(&vertices[vertex], key, control)?
+            }
+            GraphInsertBinding::EdgeProperty { edge, key } => {
+                property_binding(&edges[edge].properties, key, control)?
+            }
+            GraphInsertBinding::CreatedVertex(_) | GraphInsertBinding::CreatedEdge(_) => {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            }
+        };
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn allocate_id<E, A, C>(
@@ -214,13 +269,14 @@ fn allocate_id<E, A, C>(
 pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
+    bindings: Option<&[GraphInsertBinding]>,
     mut source: impl FnMut(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
     mut allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
-) -> ResultOf<GraphInsertBatch, E, A, C> {
+) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
     let (selected_rows, selection, evaluator) = match &insertion.input {
         Input::Pattern(pattern) => {
@@ -311,6 +367,8 @@ pub(super) fn execute<E, A, C>(
     meter.event(GlaExecutionEvent::Work)?;
     let columns = &insertion.column_types;
     let mut drafts = Vec::new();
+    // No per-draft field or retained-row allocation on ordinary insertion.
+    let mut returned = bindings.map(|_| Vec::new());
     // A unit occurrence has no values or graph identity. Ordinary rows retain
     // their existing order and are freed as their draft is completed. Neither
     // path duplicates graph matching or property evaluation.
@@ -365,6 +423,15 @@ pub(super) fn execute<E, A, C>(
             });
         }
         meter.event(GlaExecutionEvent::ScratchEntry)?;
+        if let (Some(bindings), Some(returned)) = (bindings, &mut returned) {
+            returned.push(freeze_bindings(
+                bindings,
+                row,
+                &vertices,
+                &edges,
+                &mut |event| meter.event(event),
+            )?);
+        }
         drafts.push(RowDraft { vertices, edges });
     }
     // Every selected property's value has now been checked without requesting
@@ -390,6 +457,14 @@ pub(super) fn execute<E, A, C>(
                 unreachable!("allocator kind was checked")
             };
             created.push(id);
+            if let (Some(bindings), Some(returned)) = (bindings, &mut returned) {
+                for (column, binding) in bindings.iter().enumerate() {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    if *binding == GraphInsertBinding::CreatedVertex(vertex) {
+                        returned[row][column] = GraphValue::Vertex(id);
+                    }
+                }
+            }
             let mut labels = Vec::new();
             for label in &declaration.labels {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
@@ -418,6 +493,14 @@ pub(super) fn execute<E, A, C>(
             else {
                 unreachable!("allocator kind was checked")
             };
+            if let (Some(bindings), Some(returned)) = (bindings, &mut returned) {
+                for (column, binding) in bindings.iter().enumerate() {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    if *binding == GraphInsertBinding::CreatedEdge(edge) {
+                        returned[row][column] = GraphValue::Edge(id);
+                    }
+                }
+            }
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             intents.push(GraphInsertIntent::Edge {
                 edge: id,
@@ -428,14 +511,24 @@ pub(super) fn execute<E, A, C>(
             });
         }
     }
+    let mut rows = Vec::new();
+    if let Some(returned) = returned {
+        for values in returned {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            rows.push(GraphValueRow::from_owned_values(values));
+        }
+    }
     meter.event(GlaExecutionEvent::Work)?;
-    Ok(GraphInsertBatch {
-        intents,
-        stats: GraphInsertStats {
-            selection,
-            evaluator: meter.evaluator,
-            created_vertices: created_vertices as u64,
-            created_edges: created_edges as u64,
+    Ok((
+        GraphInsertBatch {
+            intents,
+            stats: GraphInsertStats {
+                selection,
+                evaluator: meter.evaluator,
+                created_vertices: created_vertices as u64,
+                created_edges: created_edges as u64,
+            },
         },
-    })
+        rows,
+    ))
 }

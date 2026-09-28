@@ -15,6 +15,7 @@ pub enum GraphInsertTextErrorKind {
     Relation(crate::GraphSetTextErrorKind),
     Expression(GraphMutationTextErrorKind),
     Build(GraphInsertBuildError),
+    ReturnBuild(crate::GraphInsertQueryBuildError),
 }
 #[derive(Debug)]
 pub struct GraphInsertTextError {

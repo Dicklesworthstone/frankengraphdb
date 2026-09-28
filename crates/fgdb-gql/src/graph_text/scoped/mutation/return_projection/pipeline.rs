@@ -573,7 +573,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(super) fn row_page(
+    pub(in crate::graph_text) fn row_page(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
@@ -770,7 +770,10 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub(super) fn page_value(number: &ReadPageNumber, values: &[GqlParameterValue]) -> u64 {
+pub(in crate::graph_text) fn page_value(
+    number: &ReadPageNumber,
+    values: &[GqlParameterValue],
+) -> u64 {
     match number {
         ReadPageNumber::Literal(value) => *value,
         ReadPageNumber::Parameter(index) => match &values[*index] {

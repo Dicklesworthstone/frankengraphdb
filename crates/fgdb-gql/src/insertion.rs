@@ -469,6 +469,9 @@ impl PreparedGraphInsert {
     pub const fn relation(&self) -> RelationId {
         self.relation
     }
+    pub(crate) fn input_column_types(&self) -> &[GraphSetColumnType] {
+        &self.column_types
+    }
     #[must_use]
     pub fn vertices_per_row(&self) -> usize {
         self.vertices.len()
@@ -503,7 +506,22 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
-        collect::execute(self, policy, source, allocate, checkpoint)
+        collect::execute(self, policy, None, source, allocate, checkpoint)
+            .map(|(batch, _)| batch)
+    }
+
+    pub(crate) fn execute_returning<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        bindings: &[crate::insertion_query::GraphInsertBinding],
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<(GraphInsertBatch, Vec<GraphValueRow>), GqlQueryError<GraphInsertError<E, A>, C>> {
+        collect::execute(self, policy, Some(bindings), source, allocate, checkpoint)
     }
 
     /// Application definition, not a durable effect encoding or allocation log.
