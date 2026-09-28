@@ -417,6 +417,99 @@ fn a_certified_call_replays_byte_identically_after_later_commits() {
     });
 }
 
+/// fgdb-3b1v7: the query certificate carries Prism's own certificate for
+/// each CALL, so a replay under a different kernel refuses even if its rows
+/// happen to match. A read without CALL keeps its v1 certificate bytes.
+#[test]
+fn a_call_certificate_folds_in_prism_evidence_and_replay_checks_it() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        let params = GqlParameters::new();
+        let (_, certificate) = db
+            .execute_certified(
+                cx,
+                "CALL fnx.pagerank() YIELD vertex, score RETURN vertex, score ORDER BY vertex",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        // Independent: the standalone call over the same projection at the
+        // same sequence certifies the same call, kernel, result and witness.
+        let standalone = db
+            .call_fnx(
+                cx,
+                "CALL fnx.pagerank() YIELD vertex, score",
+                &FnxParameters::new(),
+                explicit(false),
+            )
+            .unwrap()
+            .analytics
+            .certificate;
+        assert_eq!(certificate.procedures.len(), 1);
+        let evidence = certificate.procedures[0];
+        assert_eq!(
+            evidence,
+            fgdb::NativeProcedureEvidence::from_fnx(&standalone)
+        );
+        assert_eq!(evidence.call_digest, standalone.call_digest);
+        let bytes = certificate.canonical_bytes();
+        assert_eq!(
+            bytes[33], 2,
+            "a read that ran a procedure is the v2 envelope"
+        );
+        assert_eq!(
+            fgdb::NativeResultCertificate::decode(&bytes).unwrap(),
+            certificate
+        );
+        // The kernel digest names the executing kernel: pagerank's in-house
+        // kernel and betweenness's foundation kernel certify differently.
+        let (_, foundation) = db
+            .execute_certified(
+                cx,
+                "CALL fnx.betweenness_centrality() YIELD vertex, score RETURN vertex, score",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        assert_ne!(
+            foundation.procedures[0].kernel_digest,
+            evidence.kernel_digest
+        );
+        assert!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .is_ok()
+        );
+        // A different kernel identity refuses typed, before the rows count.
+        let mut kernel = certificate.clone();
+        kernel.procedures[0].kernel_digest.0[0] ^= 1;
+        assert_eq!(
+            db.replay(cx, &kernel, &params, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ProcedureKernelMismatch { index: 0 })
+        );
+        // Any other evidence drift, or a missing procedure, refuses too.
+        let mut witness = certificate.clone();
+        witness.procedures[0].evidence_digest.0[0] ^= 1;
+        assert_eq!(
+            db.replay(cx, &witness, &params, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ProcedureMismatch { index: 0 })
+        );
+        let mut missing = certificate.clone();
+        missing.procedures.clear();
+        assert_eq!(
+            db.replay(cx, &missing, &params, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ProcedureMismatch { index: 0 })
+        );
+        // Control: a read without CALL certifies no procedure (v1 bytes).
+        let (_, plain) = db
+            .execute_certified(cx, "MATCH (n:Person) RETURN n", &params, symbols, policy())
+            .unwrap();
+        assert!(plain.procedures.is_empty());
+        assert_eq!(plain.canonical_bytes()[33], 1);
+    });
+}
+
 #[test]
 fn refusals_are_typed_and_name_the_offending_site() {
     run(async |commit, cx| {

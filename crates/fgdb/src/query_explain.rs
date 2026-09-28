@@ -268,7 +268,7 @@ impl PreparedNativeRead {
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
         let as_of = self.snapshot_seq(db, params)?;
-        self.execute_at_seq(db, cx, params, budget, as_of)
+        self.execute_at_seq(db, cx, params, budget, as_of, &mut Vec::new())
     }
 }
 
@@ -442,7 +442,9 @@ impl<V: Vfs + Clone> Database<V> {
         let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
         let snapshot_seq = prepared.snapshot_seq(self, params)?;
         let plan_certificate = NativePlanCertificate::new(&prepared, snapshot_seq);
-        let result = prepared.execute_at_seq(self, cx, params, budget, snapshot_seq)?;
+        let mut evidence = Vec::new();
+        let result =
+            prepared.execute_at_seq(self, cx, params, budget, snapshot_seq, &mut evidence)?;
         let snapshot_identity = crate::chain_commitment_at(self.coordinator.chain(), snapshot_seq)
             .ok_or_else(|| QueryError::Unsupported {
                 diagnostics: vec!["certified history unavailable".to_owned()],
@@ -471,6 +473,10 @@ impl<V: Vfs + Clone> Database<V> {
                 facade_class: prepared.facade_class(),
                 snapshot_identity,
                 database_identity: self.replay_database_identity(),
+                procedures: evidence
+                    .iter()
+                    .map(crate::gql_cert::NativeProcedureEvidence::from_fnx)
+                    .collect(),
             },
         ))
     }
@@ -536,11 +542,37 @@ impl<V: Vfs + Clone> Database<V> {
         {
             return Err(ReplayRefusal::PlanMismatch);
         }
+        let mut evidence = Vec::new();
         let result = prepared
-            .execute_at_seq(self, cx, params, budget, certificate.plan.snapshot_seq)
+            .execute_at_seq(
+                self,
+                cx,
+                params,
+                budget,
+                certificate.plan.snapshot_seq,
+                &mut evidence,
+            )
             .map_err(|error| ReplayRefusal::Execution {
                 reason: error.to_string(),
             })?;
+        // Procedure evidence first: a different kernel is refused even when
+        // it happens to produce the certified rows (fgdb-3b1v7).
+        let replayed: Vec<_> = evidence
+            .iter()
+            .map(crate::gql_cert::NativeProcedureEvidence::from_fnx)
+            .collect();
+        for index in 0..certificate.procedures.len().max(replayed.len()) {
+            match (certificate.procedures.get(index), replayed.get(index)) {
+                (Some(certified), Some(fresh)) if certified == fresh => {}
+                (Some(certified), Some(fresh))
+                    if certified.call_digest == fresh.call_digest
+                        && certified.kernel_digest != fresh.kernel_digest =>
+                {
+                    return Err(ReplayRefusal::ProcedureKernelMismatch { index });
+                }
+                _ => return Err(ReplayRefusal::ProcedureMismatch { index }),
+            }
+        }
         let QueryResult::Rows {
             ref columns,
             ref rows,
@@ -582,6 +614,12 @@ pub enum ReplayRefusal {
     Execution { reason: String },
     /// The re-executed result bytes differ from the certified digest.
     ResultMismatch { certified: Digest, replayed: Digest },
+    /// The procedure at `index` ran under a different kernel, registry or
+    /// numeric profile than certified (fgdb-3b1v7).
+    ProcedureKernelMismatch { index: usize },
+    /// The procedure at `index` is missing, extra, a different call, or
+    /// produced a different Prism certificate (projection, result, witness).
+    ProcedureMismatch { index: usize },
 }
 impl core::fmt::Display for ReplayRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -599,6 +637,15 @@ impl core::fmt::Display for ReplayRefusal {
                 f,
                 "result mismatch: certified {certified:?}, replayed {replayed:?}"
             ),
+            Self::ProcedureKernelMismatch { index } => {
+                write!(f, "procedure {index} kernel differs from the certified one")
+            }
+            Self::ProcedureMismatch { index } => {
+                write!(
+                    f,
+                    "procedure {index} evidence differs from the certified one"
+                )
+            }
         }
     }
 }
@@ -629,6 +676,8 @@ impl PreparedNativeRead {
         }
     }
     /// Bind and execute through the existing governed as-of engines.
+    /// `evidence` receives each executed procedure's Prism certificate, in
+    /// execution order; only set and relational-aggregate reads host CALL.
     fn execute_at_seq<V: Vfs + Clone>(
         &self,
         db: &Database<V>,
@@ -636,6 +685,7 @@ impl PreparedNativeRead {
         params: &GqlParameters,
         budget: GqlQueryPolicy,
         as_of: CommitSeq,
+        evidence: &mut Vec<fgdb_prism::FnxCertificate>,
     ) -> Result<QueryResult, QueryError> {
         match self {
             Self::TemporalAggregate(prepared) => {
@@ -663,7 +713,13 @@ impl PreparedNativeRead {
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalSetText)?;
                 let result = db
-                    .execute_graph_set_governed_at(cx, query.query(), query.as_of(), budget)
+                    .execute_graph_set_evidenced_at(
+                        cx,
+                        query.query(),
+                        query.as_of(),
+                        budget,
+                        evidence,
+                    )
                     .map_err(QueryError::Set)?;
                 Ok(values(prepared.columns().to_vec(), result.value))
             }
@@ -674,7 +730,7 @@ impl PreparedNativeRead {
                     let query = prepared
                         .bind_relation_parameters(params)
                         .map_err(QueryError::PipelineText)?;
-                    db.execute_graph_set_aggregate_governed_at(cx, &query, as_of, budget)
+                    db.execute_graph_set_aggregate_evidenced_at(cx, &query, as_of, budget, evidence)
                         .map_err(QueryError::Aggregate)?
                 } else {
                     let query = prepared
@@ -716,7 +772,7 @@ impl PreparedNativeRead {
                     .bind_parameters(params)
                     .map_err(QueryError::SetText)?;
                 let result = db
-                    .execute_graph_set_governed_at(cx, &query, as_of, budget)
+                    .execute_graph_set_evidenced_at(cx, &query, as_of, budget, evidence)
                     .map_err(QueryError::Set)?;
                 Ok(values(prepared.columns().to_vec(), result.value))
             }

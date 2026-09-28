@@ -13,11 +13,11 @@ use fgdb_gql::{
 };
 use fgdb_prism::{
     Directedness, FnxArgument, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
-    FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
-    ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
-    SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
-    SnapshotGraphView,
+    FnxCertificate, FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError,
+    FnxReadOptions, FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue,
+    ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits,
+    ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy,
+    SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
@@ -63,12 +63,15 @@ impl core::error::Error for ProcedureError {
 /// the same typed resolution as `call_fnx`, then run it over the canonical
 /// whole-graph projection at the read's own snapshot, so a later MATCH and
 /// the analytics see one generation. Admission is capped by what the read
-/// has left; the rows' cost is charged to that same policy.
+/// has left; the rows' cost is charged to that same policy. A completed
+/// call's Prism certificate is appended to `evidence`, in execution order,
+/// for a certified read to fold into its own certificate (fgdb-3b1v7).
 pub(crate) fn fnx_procedure(
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],
     as_of: CommitSeq,
     remaining: GqlQueryPolicy,
+    evidence: &mut Vec<FnxCertificate>,
     execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxReadResult, Error>,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
     let refuse = |error| GqlQueryError::Source(GqlError::Procedure(error));
@@ -146,9 +149,9 @@ pub(crate) fn fnx_procedure(
         }
         rows.push(GraphValueRow::from_owned_values(values));
     }
-    let certificate = &analytics.certificate;
+    let certificate = analytics.certificate;
     let records = certificate.vertices.saturating_add(certificate.input_edges);
-    Ok(GqlQueryExecution {
+    let execution = GqlQueryExecution {
         rows: GqlExecutionStats {
             snapshot_records: u64::try_from(records).unwrap_or(u64::MAX),
             result_rows: rows.len() as u64,
@@ -158,7 +161,9 @@ pub(crate) fn fnx_procedure(
             scratch_entries: rows.len() as u64,
         },
         value: rows,
-    })
+    };
+    evidence.push(certificate);
+    Ok(execution)
 }
 
 #[cfg(test)]

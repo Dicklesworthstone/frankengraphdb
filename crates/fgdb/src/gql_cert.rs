@@ -599,15 +599,85 @@ pub struct NativeResultCertificate {
     pub facade_class: NativeReadClass,
     pub snapshot_identity: Digest,
     pub database_identity: Digest,
+    /// Every Prism procedure the read executed, in execution order
+    /// (fgdb-3b1v7). Empty for a read without CALL.
+    pub procedures: Vec<NativeProcedureEvidence>,
+}
+
+/// One `CALL fnx.*` a certified read executed: Prism's own certificate,
+/// folded into the query certificate (plan section 11: CGSE witnesses ride
+/// in the query certificate). Replay recomputes it and compares, so a
+/// different kernel is refused even when its rows happen to be equal.
+///
+/// Prism's projection digest, and so its whole-certificate digest, also
+/// binds the root of the generation that served the read
+/// (`SnapshotBinding`). A later commit changes that root without changing
+/// the data at the certified sequence. This certificate binds the data by
+/// `snapshot_identity` instead, and the projection is a function of that
+/// data and the call. The root-bound digests are therefore left out, so a
+/// faithful replay after later commits matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeProcedureEvidence {
+    /// The bound call: procedure, arguments and output columns.
+    pub call_digest: Digest,
+    /// Registry version, foundation revision, execution kernel, kernel
+    /// source digest and numeric profile: which code computed the rows.
+    pub kernel_digest: Digest,
+    /// What that code produced and at what cost: Prism's result digest, the
+    /// adapter path, projection and work sizes, and the complexity witness.
+    pub evidence_digest: Digest,
+}
+
+impl NativeProcedureEvidence {
+    #[must_use]
+    pub fn from_fnx(certificate: &fgdb_prism::FnxCertificate) -> Self {
+        let mut kernel = Hasher::new();
+        kernel.update(NATIVE_PROCEDURE_KERNEL_DOMAIN_V1);
+        kernel.update(&certificate.registry_version.to_be_bytes());
+        update_string(&mut kernel, certificate.implementation_revision);
+        update_string(&mut kernel, certificate.execution_kernel);
+        kernel.update(&certificate.kernel_source_digest.0);
+        update_string(&mut kernel, certificate.numeric_profile);
+        let mut evidence = Hasher::new();
+        evidence.update(NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V1);
+        evidence.update(&certificate.result_digest.0);
+        update_string(&mut evidence, certificate.adapter.as_str());
+        let witness = &certificate.witness;
+        for number in [
+            certificate.vertices,
+            certificate.edges,
+            certificate.input_edges,
+            certificate.estimated_work,
+            certificate.kernel_workspace_bytes,
+            witness.nodes_touched,
+            witness.edges_scanned,
+            witness.queue_peak,
+        ] {
+            evidence.update(&(number as u64).to_be_bytes());
+        }
+        update_string(&mut evidence, &witness.algorithm);
+        update_string(&mut evidence, &witness.complexity_claim);
+        Self {
+            call_digest: certificate.call_digest,
+            kernel_digest: kernel.finalize(),
+            evidence_digest: evidence.finalize(),
+        }
+    }
 }
 
 impl NativeResultCertificate {
-    /// Portable v1 envelope: plan identity and snapshot, parameter and result
-    /// digests, history/database identities, facade class, and statement text.
+    /// Portable envelope: plan identity and snapshot, parameter and result
+    /// digests, history/database identities, facade class, and statement
+    /// text. A read without procedures is the v1 envelope byte for byte; a
+    /// read with procedures is v2, which appends their evidence.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.to_vec();
-        bytes.push(NATIVE_RESULT_CERTIFICATE_VERSION_V1);
+        bytes.push(if self.procedures.is_empty() {
+            NATIVE_RESULT_CERTIFICATE_VERSION_V1
+        } else {
+            NATIVE_RESULT_CERTIFICATE_VERSION_V2
+        });
         bytes.extend_from_slice(&self.plan.digest.0);
         bytes.extend_from_slice(&self.plan.snapshot_seq.0.to_be_bytes());
         bytes.extend_from_slice(&self.values_digest.0);
@@ -617,11 +687,22 @@ impl NativeResultCertificate {
         bytes.push(self.facade_class as u8);
         bytes.extend_from_slice(&(self.statement.len() as u64).to_be_bytes());
         bytes.extend_from_slice(self.statement.as_bytes());
+        if !self.procedures.is_empty() {
+            bytes.extend_from_slice(&(self.procedures.len() as u64).to_be_bytes());
+            for procedure in &self.procedures {
+                bytes.extend_from_slice(&procedure.call_digest.0);
+                bytes.extend_from_slice(&procedure.kernel_digest.0);
+                bytes.extend_from_slice(&procedure.evidence_digest.0);
+            }
+        }
         bytes
     }
 }
 
 const NATIVE_RESULT_CERTIFICATE_VERSION_V1: u8 = 1;
+const NATIVE_RESULT_CERTIFICATE_VERSION_V2: u8 = 2;
+const NATIVE_PROCEDURE_KERNEL_DOMAIN_V1: &[u8] = b"fgdb:native-procedure-kernel:v1";
+const NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V1: &[u8] = b"fgdb:native-procedure-evidence:v1";
 
 /// Decode error for the versioned portable certificate envelope. Every
 /// refusal is explicit: version, length, magic, or trailing bytes.
@@ -639,6 +720,9 @@ pub enum CertificateDecodeError {
     Trailing(usize),
     /// Facade class tag is outside the admitted set.
     FacadeClass(u8),
+    /// A v2 procedure section that is empty (a read without procedures is
+    /// v1) or shorter than its declared count.
+    Procedures,
 }
 impl core::fmt::Display for CertificateDecodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -649,14 +733,16 @@ impl core::fmt::Display for CertificateDecodeError {
             Self::Statement => write!(f, "certificate statement length invalid"),
             Self::Trailing(n) => write!(f, "{n} trailing certificate bytes"),
             Self::FacadeClass(tag) => write!(f, "certificate facade class {tag} unknown"),
+            Self::Procedures => write!(f, "certificate procedure section invalid"),
         }
     }
 }
 impl core::error::Error for CertificateDecodeError {}
 
 impl NativeResultCertificate {
-    /// Strict decode of the v1 envelope: exact magic, version, fixed fields,
-    /// statement length prefix, and zero trailing bytes.
+    /// Strict decode of the v1 or v2 envelope: exact magic, version, fixed
+    /// fields, statement length prefix, the v2 procedure section (at least
+    /// one entry), and zero trailing bytes.
     ///
     /// # Errors
     /// Typed [`CertificateDecodeError`] on any structural mismatch.
@@ -672,7 +758,9 @@ impl NativeResultCertificate {
         let mut at = magic;
         let version = bytes[at];
         at += 1;
-        if version != NATIVE_RESULT_CERTIFICATE_VERSION_V1 {
+        if version != NATIVE_RESULT_CERTIFICATE_VERSION_V1
+            && version != NATIVE_RESULT_CERTIFICATE_VERSION_V2
+        {
             return Err(CertificateDecodeError::Version(version));
         }
         let read_digest = |at: usize| -> [u8; 32] {
@@ -714,6 +802,27 @@ impl NativeResultCertificate {
         let statement = core::str::from_utf8(&rest[..statement_len])
             .map_err(|_| CertificateDecodeError::Statement)?;
         at += statement_len;
+        let mut procedures = Vec::new();
+        if version == NATIVE_RESULT_CERTIFICATE_VERSION_V2 {
+            let count = bytes
+                .get(at..at + 8)
+                .map(|count| u64::from_be_bytes(count.try_into().expect("eight bytes")))
+                .ok_or(CertificateDecodeError::Procedures)?;
+            at += 8;
+            // Each entry is three digests; the count cannot exceed the bytes.
+            let entries = usize::try_from(count)
+                .ok()
+                .filter(|&count| count > 0 && count <= (bytes.len() - at) / 96)
+                .ok_or(CertificateDecodeError::Procedures)?;
+            for _ in 0..entries {
+                procedures.push(NativeProcedureEvidence {
+                    call_digest: Digest(read_digest(at)),
+                    kernel_digest: Digest(read_digest(at + 32)),
+                    evidence_digest: Digest(read_digest(at + 64)),
+                });
+                at += 96;
+            }
+        }
         if bytes.len() != at {
             return Err(CertificateDecodeError::Trailing(bytes.len() - at));
         }
@@ -728,6 +837,7 @@ impl NativeResultCertificate {
             facade_class,
             snapshot_identity,
             database_identity,
+            procedures,
         })
     }
 }
@@ -1004,6 +1114,15 @@ mod tests {
             facade_class: NativeReadClass::TemporalPattern,
             snapshot_identity: fgdb_crypto::Digest([6; 32]),
             database_identity: fgdb_crypto::Digest([5; 32]),
+            procedures: Vec::new(),
+        }
+    }
+
+    fn sample_procedure(seed: u8) -> super::NativeProcedureEvidence {
+        super::NativeProcedureEvidence {
+            call_digest: fgdb_crypto::Digest([seed; 32]),
+            kernel_digest: fgdb_crypto::Digest([seed + 1; 32]),
+            evidence_digest: fgdb_crypto::Digest([seed + 2; 32]),
         }
     }
 
@@ -1016,17 +1135,55 @@ mod tests {
         assert_eq!(decoded.canonical_bytes(), bytes, "encode(decode(b)) == b");
     }
 
+    /// fgdb-3b1v7: a read that ran procedures is the v2 envelope: the v1
+    /// bytes with version 2 and an appended evidence section. A read that ran
+    /// none stays v1 byte for byte.
+    #[test]
+    fn procedure_evidence_is_a_v2_suffix_and_round_trips() {
+        use super::CertificateDecodeError as E;
+        let plain = sample_result_certificate();
+        let v1 = plain.canonical_bytes();
+        let version_at = super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len();
+        assert_eq!(v1[version_at], 1);
+        let mut certificate = plain.clone();
+        certificate.procedures = vec![sample_procedure(10), sample_procedure(20)];
+        let v2 = certificate.canonical_bytes();
+        assert_eq!(v2[version_at], 2);
+        assert_eq!(v2[..version_at], v1[..version_at]);
+        assert_eq!(v2[version_at + 1..v1.len()], v1[version_at + 1..]);
+        assert_eq!(v2.len(), v1.len() + 8 + 2 * 96);
+        let decoded = NativeResultCertificate::decode(&v2).unwrap();
+        assert_eq!(decoded, certificate);
+        assert_eq!(decoded.canonical_bytes(), v2);
+        // Every truncation inside the procedure section refuses typed.
+        for cut in v1.len()..v2.len() {
+            assert!(
+                matches!(
+                    NativeResultCertificate::decode(&v2[..cut]),
+                    Err(E::Procedures | E::Trailing(_))
+                ),
+                "cut={cut}"
+            );
+        }
+        // A v2 envelope with no procedures would be a second spelling of v1.
+        let mut empty = v1.clone();
+        empty[version_at] = 2;
+        empty.extend_from_slice(&0_u64.to_be_bytes());
+        assert_eq!(NativeResultCertificate::decode(&empty), Err(E::Procedures));
+    }
+
     #[test]
     fn result_certificate_decode_refuses_structural_damage_typed() {
         let bytes = sample_result_certificate().canonical_bytes();
         use super::CertificateDecodeError as E;
         // Unknown version refuses before any field is trusted. The version
-        // byte immediately follows the 33-byte magic.
+        // byte immediately follows the 33-byte magic. (2 is the procedure
+        // evidence envelope, fgdb-3b1v7, so the first unknown one is 3.)
         let mut version = bytes.clone();
-        version[super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len()] = 2;
+        version[super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len()] = 3;
         assert!(matches!(
             NativeResultCertificate::decode(&version),
-            Err(E::Version(2))
+            Err(E::Version(3))
         ));
         // Truncation at every prefix length refuses; no panic, no partial read.
         for cut in 0..bytes.len() {

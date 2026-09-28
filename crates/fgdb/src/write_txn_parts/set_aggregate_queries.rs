@@ -40,6 +40,20 @@ mod set_aggregate_queries {
             as_of: CommitSeq,
             policy: GqlQueryPolicy,
         ) -> ResultRows<GqlError> {
+            self.execute_graph_set_aggregate_evidenced_at(cx, query, as_of, policy, &mut Vec::new())
+        }
+
+        /// [`Self::execute_graph_set_aggregate_governed_at`], appending each
+        /// executed procedure's Prism certificate to `evidence` in execution
+        /// order, for a certified read (fgdb-3b1v7).
+        pub(crate) fn execute_graph_set_aggregate_evidenced_at(
+            &self,
+            cx: &QueryCx,
+            query: &PreparedGraphSetAggregate,
+            as_of: CommitSeq,
+            policy: GqlQueryPolicy,
+            evidence: &mut Vec<fgdb_prism::FnxCertificate>,
+        ) -> ResultRows<GqlError> {
             self.ensure_readable()
                 .and_then(|()| self.snapshot.check_frontier(as_of))
                 .map_err(|error| {
@@ -58,6 +72,7 @@ mod set_aggregate_queries {
                             arguments,
                             as_of,
                             remaining,
+                            evidence,
                             |spec, options| self.execute_fnx(cx, spec, options),
                         )
                     },
@@ -104,6 +119,7 @@ mod set_aggregate_queries {
                             arguments,
                             as_of,
                             remaining,
+                            &mut Vec::new(),
                             |spec, options| self.execute_fnx(cx, spec, options),
                         )
                     },
