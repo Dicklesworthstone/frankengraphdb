@@ -96,8 +96,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// This is resident-source, in-core decoded execution, not compressed or
     /// external-memory authorization. Mixed-scope history may be inspected and
     /// charged by existing source visitors. This does NOT prove descriptor-I/O,
-    /// timing, error-detail or resource-failure noninterference, provide general
-    /// GQL CALL composition, or authorize the other privileged database APIs.
+    /// timing, error-detail or resource-failure noninterference, or authorize
+    /// the other privileged database APIs. A `CALL fnx.*` composed inside an
+    /// authorized native read runs through this same `execute` over the same
+    /// masked source (fgdb-7qznp).
     #[allow(clippy::too_many_arguments)]
     pub fn execute_fnx_authorized(
         &self,

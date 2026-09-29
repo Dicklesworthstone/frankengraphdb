@@ -621,6 +621,11 @@ impl AdmissionUsage {
         *self = next;
         Ok(())
     }
+    /// Snapshot records admitted so far, for a source that reports its own
+    /// execution stats (an authorized procedure call).
+    pub(crate) fn snapshot_records(&self) -> u64 {
+        self.records
+    }
     pub(crate) fn remaining(
         self,
         mut policy: fgdb_gql::GqlQueryPolicy,

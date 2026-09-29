@@ -15,12 +15,10 @@ use fgdb_gql::{
     PreparedGraphSetAggregate,
 };
 
-fn set_error(error: GqlQueryError<GraphSetExecutionError<ReadError>, QueryError>) -> QueryError {
+fn set_error(error: GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
-        GqlQueryError::Source(error) => {
-            QueryError::Set(GqlQueryError::Source(error.map_source(GqlError::Read)))
-        }
+        GqlQueryError::Source(error) => QueryError::Set(GqlQueryError::Source(error)),
         GqlQueryError::Rows(error) => QueryError::Set(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Set(GqlQueryError::Evaluator(error)),
         GqlQueryError::IdentifiedEdgesRequired => {
@@ -31,11 +29,15 @@ fn set_error(error: GqlQueryError<GraphSetExecutionError<ReadError>, QueryError>
 }
 
 fn aggregate_error(error: GqlQueryError<GraphAggregateError<ReadError>, QueryError>) -> QueryError {
+    aggregate_gql_error(error.map_source(|error| error.map_source(GqlError::Read)))
+}
+
+fn aggregate_gql_error(
+    error: GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
+) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
-        GqlQueryError::Source(error) => {
-            QueryError::Aggregate(GqlQueryError::Source(error.map_source(GqlError::Read)))
-        }
+        GqlQueryError::Source(error) => QueryError::Aggregate(GqlQueryError::Source(error)),
         GqlQueryError::Rows(error) => QueryError::Aggregate(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Aggregate(GqlQueryError::Evaluator(error)),
         GqlQueryError::IdentifiedEdgesRequired => {
@@ -54,13 +56,68 @@ fn set_at<Clock: FnMut() -> u64>(
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphValueRow>, QueryError> {
     query
-        .execute_governed(
+        .execute_governed_with_procedures(
             policy,
-            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+            |pattern, remaining| {
+                pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                    .map_err(|error| error.map_source(GqlError::Read))
+            },
+            |call, arguments, remaining| {
+                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+            },
             || execution.borrow_mut().checkpoint(),
         )
         .map(|result| result.value)
         .map_err(set_error)
+}
+
+/// A CALL stage under the capability (fgdb-7qznp). It binds exactly as every
+/// host does, then runs Prism through the authorized analytics path over the
+/// token's projection, never the privileged `Database::execute_fnx`. Masked
+/// vertices, labels, relations and weights are removed before the graph is
+/// built, so a hidden edge changes no degree or component (FG-INV-20:
+/// security applies before expansion). The call spends this read's own live
+/// permit and allowance. No Prism certificate escapes, as on every
+/// authorized analytics path.
+fn procedure_at<Clock: FnMut() -> u64>(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    call: &fgdb_gql::PreparedProcedureCall,
+    arguments: &[fgdb_gql::algebra::GraphValue],
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    remaining: GqlQueryPolicy,
+) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
+    let spec = crate::query::bind_procedure(call, arguments)?;
+    let options = crate::query::procedure_options(&spec, at, remaining);
+    super::analytics::preflight(&spec, options.projection.directedness)
+        .map_err(crate::query::procedure_failure)?;
+    let mut usage = AdmissionUsage::default();
+    let rows = super::analytics::execute(
+        snapshot,
+        fgdb_prism::SnapshotBinding {
+            root: snapshot.root.0,
+            as_of: at,
+        },
+        &spec,
+        options,
+        scope,
+        execution,
+        |event| usage.observe(remaining, event).map_err(query_error),
+    )
+    .map_err(crate::query::procedure_failure)?;
+    let value = crate::query::procedure_rows(rows)?;
+    usage.finish(
+        remaining,
+        Ok(fgdb_gql::GqlQueryExecution {
+            rows: fgdb_gql::GqlExecutionStats {
+                snapshot_records: usage.snapshot_records(),
+                result_rows: value.len() as u64,
+            },
+            evaluator: fgdb_gql::GlaExecutionStats::default(),
+            value,
+        }),
+    )
 }
 
 fn aggregate_at<Clock: FnMut() -> u64>(
@@ -72,13 +129,19 @@ fn aggregate_at<Clock: FnMut() -> u64>(
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
     query
-        .execute_governed(
+        .execute_governed_with_procedures(
             policy,
-            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+            |pattern, remaining| {
+                pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                    .map_err(|error| error.map_source(GqlError::Read))
+            },
+            |call, arguments, remaining| {
+                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+            },
             || execution.borrow_mut().checkpoint(),
         )
         .map(|result| result.value)
-        .map_err(aggregate_error)
+        .map_err(aggregate_gql_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {

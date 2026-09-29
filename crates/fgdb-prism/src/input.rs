@@ -217,6 +217,32 @@ pub enum FnxReadError<S, C> {
         reason: FnxWeightError,
     },
 }
+impl<S, C> FnxReadError<S, C> {
+    /// `Err(c)` for a source or kernel cancellation, otherwise the same
+    /// refusal under any cancellation type (see
+    /// [`FnxExecutionError::split_cancel`]).
+    pub fn split_cancel<D>(self) -> Result<FnxReadError<S, D>, C> {
+        Ok(match self {
+            Self::Cancelled(cancel) => return Err(cancel),
+            Self::Execution(error) => FnxReadError::Execution(error.split_cancel()?),
+            Self::Bind(error) => FnxReadError::Bind(error),
+            Self::Read(error) => FnxReadError::Read(error),
+            Self::Projection(error) => FnxReadError::Projection(error),
+            Self::SourceLimit {
+                resource,
+                limit,
+                requested,
+            } => FnxReadError::SourceLimit {
+                resource,
+                limit,
+                requested,
+            },
+            Self::SizeOverflow => FnxReadError::SizeOverflow,
+            Self::AllocationFailed => FnxReadError::AllocationFailed,
+            Self::Weight { edge, reason } => FnxReadError::Weight { edge, reason },
+        })
+    }
+}
 impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxReadError<S, C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

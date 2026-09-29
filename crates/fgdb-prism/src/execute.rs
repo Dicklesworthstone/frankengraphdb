@@ -48,6 +48,42 @@ pub enum FnxExecutionError<C> {
     /// that drops self-loops; the call never discards one on its own.
     SelfLoopRefused,
 }
+impl<C> FnxExecutionError<C> {
+    /// A cancellation is the caller's own interruption, never a refusal:
+    /// `Err(c)` for `Cancelled(c)`, otherwise the same refusal under any
+    /// cancellation type. A host can then report refusals uniformly while
+    /// surfacing each caller's cancellation in that caller's own type.
+    pub fn split_cancel<D>(self) -> Result<FnxExecutionError<D>, C> {
+        Ok(match self {
+            Self::Cancelled(cancel) => return Err(cancel),
+            Self::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => FnxExecutionError::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            },
+            Self::SizeOverflow => FnxExecutionError::SizeOverflow,
+            Self::AllocationFailed => FnxExecutionError::AllocationFailed,
+            Self::NegativeWeight => FnxExecutionError::NegativeWeight,
+            Self::NonFiniteWeightSum => FnxExecutionError::NonFiniteWeightSum,
+            Self::InvalidNumericResult => FnxExecutionError::InvalidNumericResult,
+            Self::InvalidUpstreamResult => FnxExecutionError::InvalidUpstreamResult,
+            Self::UnknownSource(vertex) => FnxExecutionError::UnknownSource(vertex),
+            Self::GraphKind { required } => FnxExecutionError::GraphKind { required },
+            Self::NotConverged {
+                max_iterations,
+                witness,
+            } => FnxExecutionError::NotConverged {
+                max_iterations,
+                witness,
+            },
+            Self::SelfLoopRefused => FnxExecutionError::SelfLoopRefused,
+        })
+    }
+}
 impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

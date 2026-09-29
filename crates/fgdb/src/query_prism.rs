@@ -13,11 +13,11 @@ use fgdb_gql::{
 };
 use fgdb_prism::{
     Directedness, FnxArgument, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
-    FnxCertificate, FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError,
-    FnxReadOptions, FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue,
-    ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits,
-    ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy,
-    SnapshotBinding, SnapshotGraphView,
+    FnxCertificate, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError, FnxReadOptions,
+    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
+    ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
+    SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
+    SnapshotGraphView,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
@@ -36,8 +36,10 @@ pub enum ProcedureError {
     /// Arguments keep their exact domain: text, decimal, list, path and edge
     /// values have no Prism argument type and are never coerced.
     Bind(FnxCallError),
-    /// Projection, source admission or kernel execution refused.
-    Read(Box<Error>),
+    /// Projection, source admission or kernel execution refused. A
+    /// cancellation is never a refusal: it surfaces as the read's own
+    /// interruption, so this error cannot carry one.
+    Read(Box<FnxReadError<ReadError, core::convert::Infallible>>),
     /// A count beyond the GQL Int64 domain.
     ResultDomain,
 }
@@ -74,7 +76,40 @@ pub(crate) fn fnx_procedure(
     evidence: &mut Vec<FnxCertificate>,
     execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxReadResult, Error>,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
-    let refuse = |error| GqlQueryError::Source(GqlError::Procedure(error));
+    let spec = bind_procedure(call, arguments)?;
+    let analytics = execute(&spec, procedure_options(&spec, as_of, remaining))
+        .map_err(procedure_failure)?
+        .analytics;
+    let rows = procedure_rows(analytics.rows)?;
+    let certificate = analytics.certificate;
+    let records = certificate.vertices.saturating_add(certificate.input_edges);
+    let execution = GqlQueryExecution {
+        rows: GqlExecutionStats {
+            snapshot_records: u64::try_from(records).unwrap_or(u64::MAX),
+            result_rows: rows.len() as u64,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: u64::try_from(certificate.estimated_work).unwrap_or(u64::MAX),
+            scratch_entries: rows.len() as u64,
+        },
+        value: rows,
+    };
+    evidence.push(certificate);
+    Ok(execution)
+}
+
+fn refuse<C>(error: ProcedureError) -> GqlQueryError<GqlError, C> {
+    GqlQueryError::Source(GqlError::Procedure(error))
+}
+
+/// Bind a CALL stage through the same typed resolution as `call_fnx`: exact
+/// argument domains, the registry's YIELD fields, and the vertex requirement
+/// a written or implied MATCH places on an output (fgdb-luq0b). Every host,
+/// authorized or not, binds here, so a call means the same thing in each.
+pub(crate) fn bind_procedure<C>(
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     let mut supplied = Vec::with_capacity(arguments.len());
     for (index, value) in arguments.iter().enumerate() {
         let argument = match value {
@@ -116,7 +151,17 @@ pub(crate) fn fnx_procedure(
             })));
         }
     }
-    let mut options = FnxReadOptions::whole_graph_for(&spec, Some(as_of));
+    Ok(spec)
+}
+
+/// The canonical whole-graph projection at the read's sequence, admitted
+/// within what the read has left.
+pub(crate) fn procedure_options(
+    spec: &FnxCallSpec,
+    as_of: CommitSeq,
+    remaining: GqlQueryPolicy,
+) -> FnxReadOptions {
+    let mut options = FnxReadOptions::whole_graph_for(spec, Some(as_of));
     if let Some(records) = remaining.rows.max_snapshot_records() {
         options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);
     }
@@ -124,17 +169,26 @@ pub(crate) fn fnx_procedure(
         .execution_limits
         .max_estimated_work
         .min(usize::try_from(remaining.evaluator.max_work_units).unwrap_or(usize::MAX));
-    let analytics = execute(&spec, options)
-        .map_err(|error| match error {
-            FnxReadError::Cancelled(cancel)
-            | FnxReadError::Execution(FnxExecutionError::Cancelled(cancel)) => {
-                GqlQueryError::Interrupted(cancel)
-            }
-            error => refuse(ProcedureError::Read(Box::new(error))),
-        })?
-        .analytics;
-    let mut rows = Vec::with_capacity(analytics.rows.len());
-    for row in analytics.rows {
+    options
+}
+
+/// A failed Prism read: the caller's own cancellation, or a typed refusal.
+pub(crate) fn procedure_failure<C>(
+    error: FnxReadError<ReadError, C>,
+) -> GqlQueryError<GqlError, C> {
+    match error.split_cancel::<core::convert::Infallible>() {
+        Err(cancel) => GqlQueryError::Interrupted(cancel),
+        Ok(refusal) => refuse(ProcedureError::Read(Box::new(refusal))),
+    }
+}
+
+/// Prism rows as GQL rows: vertex identities, exact counts within the Int64
+/// domain, and floats.
+pub(crate) fn procedure_rows<C>(
+    rows: Vec<Vec<FnxValue>>,
+) -> Result<Vec<GraphValueRow>, GqlQueryError<GqlError, C>> {
+    let mut converted = Vec::with_capacity(rows.len());
+    for row in rows {
         let mut values = Vec::with_capacity(row.len());
         for value in row {
             values.push(match value {
@@ -147,23 +201,9 @@ pub(crate) fn fnx_procedure(
                 }
             });
         }
-        rows.push(GraphValueRow::from_owned_values(values));
+        converted.push(GraphValueRow::from_owned_values(values));
     }
-    let certificate = analytics.certificate;
-    let records = certificate.vertices.saturating_add(certificate.input_edges);
-    let execution = GqlQueryExecution {
-        rows: GqlExecutionStats {
-            snapshot_records: u64::try_from(records).unwrap_or(u64::MAX),
-            result_rows: rows.len() as u64,
-        },
-        evaluator: GlaExecutionStats {
-            work_units: u64::try_from(certificate.estimated_work).unwrap_or(u64::MAX),
-            scratch_entries: rows.len() as u64,
-        },
-        value: rows,
-    };
-    evidence.push(certificate);
-    Ok(execution)
+    Ok(converted)
 }
 
 #[cfg(test)]

@@ -1095,3 +1095,122 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A simple graph for composed CALLs (the whole-graph projection of a CALL
+/// inside GQL refuses parallel edges). Visible: 1->2->3. Hidden: vertex 99
+/// (label 99) on 1->99->3, and 1->3 in relation 2. The oracle omits the
+/// hidden elements physically.
+async fn simple_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x31; 32], NS, [0x32; 32]))
+        .await
+        .unwrap();
+    let mut batch = WriteBatch::new(RelationId(1));
+    for id in [1, 2, 3] {
+        batch.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+    }
+    for (eid, source, target) in [(1, 1, 2), (2, 2, 3)] {
+        batch.add_edge(EId(eid), VId(source), VId(target), vec![]);
+    }
+    if hidden {
+        batch.create_vertex(VId(99), vec![LabelId(99)], vec![]);
+        for (eid, source, target) in [(90, 1, 99), (91, 99, 3)] {
+            batch.add_edge(EId(eid), VId(source), VId(target), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden {
+        let mut other = WriteBatch::new(RelationId(2));
+        other.add_edge(EId(200), VId(1), VId(3), vec![]);
+        db.write(cx, other).await.unwrap();
+    }
+    db
+}
+
+/// fgdb-7qznp: `CALL fnx.*` inside a capability-authorized native read runs
+/// over the token's masked projection, the same answer as a database that
+/// physically lacks the hidden topology. The unmasked read of the same
+/// database differs, so the mask is doing the work.
+#[test]
+fn an_authorized_read_hosts_call_over_the_masked_projection() {
+    let ((), report) = run_async_under_lab(0x5ec0_3070, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = simple_database(&c.commit(), true).await;
+        let oracle = simple_database(&c.commit(), false).await;
+        let issuer = authority(307, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |_: fgdb_gql::GraphSymbolKind, _: &str| None;
+        for text in [
+            "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \
+             RETURN vertex, distance ORDER BY vertex",
+            "CALL fnx.degree_centrality() YIELD vertex, score RETURN vertex, score ORDER BY vertex",
+            "CALL fnx.connected_components() YIELD vertex, component \
+             RETURN vertex, component ORDER BY vertex",
+            "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \
+             RETURN count(*) AS reached",
+        ] {
+            let masked = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                masked,
+                oracle.query(&cx, text, &params, symbols, policy).unwrap(),
+                "{text}"
+            );
+            assert_ne!(
+                masked,
+                db.query(&cx, text, &params, symbols, policy).unwrap(),
+                "unmasked control must differ: {text}"
+            );
+        }
+        // The call spends this read's signed allowance: three visible
+        // vertices do not fit a two-node token, and the refusal is the
+        // authorization error itself, not a procedure failure.
+        let tight = token.attenuate(Restriction::MaxNodes(2)).unwrap();
+        assert!(matches!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &tight,
+                BRANCH,
+                "CALL fnx.degree_centrality() YIELD vertex, score RETURN vertex",
+                &params,
+                symbols,
+                policy,
+                || 100
+            ),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            )))
+        ));
+        // Authentication still precedes the call: a foreign issuer refuses.
+        let stranger = authority(308, NS);
+        assert!(matches!(
+            db.query_authorized(
+                &cx,
+                &stranger,
+                &token,
+                BRANCH,
+                "CALL fnx.degree_centrality() YIELD vertex, score RETURN vertex",
+                &params,
+                symbols,
+                policy,
+                || 100
+            ),
+            Err(QueryError::Authorization(_))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
