@@ -114,6 +114,22 @@ impl VertexScanRead {
         }
         Ok(true)
     }
+
+    /// The label-domain superset of `matches`, for a scan that did not complete.
+    /// It skipped non-matching rows' reads, so it cannot trust the property
+    /// predicates, but its label predicates still bound what it could have read.
+    /// A new vertex outside every required label changes nothing it observed.
+    /// With no label predicate, every existing vertex is in the domain.
+    fn matches_labels(&self, row: Option<&VertexRow>) -> bool {
+        use fgdb_gql::algebra::VertexPredicate;
+        let Some(row) = row else {
+            return false;
+        };
+        self.predicates.iter().all(|predicate| match predicate {
+            VertexPredicate::HasLabel(label) => row.labels.binary_search(label).is_ok(),
+            _ => true,
+        })
+    }
 }
 
 impl PointReads {
@@ -148,10 +164,10 @@ impl PointReads {
         let mut images = None;
         for scan in &self.2 {
             checkpoint()?;
-            if !scan.complete {
-                return Ok(Some(ElementId::Vertex(vid)));
-            }
-            if !scan.relevant(row, checkpoint)? {
+            // A refused or unwound scan keeps its label-domain witness, as the
+            // pre-precise label phantom did; any change in that domain
+            // conflicts, but a vertex outside it does not (fgdb-xwh00).
+            if scan.complete && !scan.relevant(row, checkpoint)? {
                 continue;
             }
             if images.is_none() {
@@ -173,7 +189,12 @@ impl PointReads {
                 images = Some((before, after));
             }
             let (before, after) = images.expect("historical images selected above");
-            if scan.matches(before, checkpoint)? || scan.matches(after, checkpoint)? {
+            let hit = if scan.complete {
+                scan.matches(before, checkpoint)? || scan.matches(after, checkpoint)?
+            } else {
+                scan.matches_labels(before) || scan.matches_labels(after)
+            };
+            if hit {
                 return Ok(Some(ElementId::Vertex(vid)));
             }
         }
