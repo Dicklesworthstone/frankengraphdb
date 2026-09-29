@@ -60,6 +60,27 @@ pub enum GraphSetValue {
         list: Box<GraphSetValue>,
         predicate: Box<GraphSetValue>,
     },
+    /// `list[from..to]`, with openCypher bounds (see slice_bounds); a NULL
+    /// list or bound is NULL. `tail(list)` is `list[1..]`.
+    Slice {
+        list: Box<GraphSetValue>,
+        from: Option<Box<GraphSetValue>>,
+        to: Option<Box<GraphSetValue>>,
+    },
+    /// `range(start, end, step)`, end inclusive, step 1 when absent.
+    Range {
+        start: Box<GraphSetValue>,
+        end: Box<GraphSetValue>,
+        step: Option<Box<GraphSetValue>>,
+    },
+    /// `reduce(acc = init, x IN list | expr)`: `expr` evaluates over the
+    /// row extended by the accumulator then the element (Local(1), Local(0)).
+    /// A NULL list is NULL; an empty list is `init`.
+    Reduce {
+        init: Box<GraphSetValue>,
+        list: Box<GraphSetValue>,
+        expr: Box<GraphSetValue>,
+    },
 }
 
 /// The openCypher list predicate functions.
@@ -428,7 +449,47 @@ fn admit(
             admit(predicate, types, column, depth + 1, nodes, locals + 1)?;
             GraphSetColumnType::Scalar
         }
+        GraphSetValue::Slice { list, from, to } => {
+            admit_list(list, types, column, depth + 1, nodes, locals)?;
+            for bound in [from, to].into_iter().flatten() {
+                admit_scalar(bound, types, column, depth + 1, nodes, locals)?;
+            }
+            GraphSetColumnType::List
+        }
+        GraphSetValue::Range { start, end, step } => {
+            for part in [Some(start), Some(end), step.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                admit_scalar(part, types, column, depth + 1, nodes, locals)?;
+            }
+            GraphSetColumnType::List
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            admit(init, types, column, depth + 1, nodes, locals)?;
+            admit_list(list, types, column, depth + 1, nodes, locals)?;
+            admit(expr, types, column, depth + 1, nodes, locals + 2)?;
+            GraphSetColumnType::Any
+        }
     })
+}
+
+/// A value that must be a scalar (an integer bound or step) at run time.
+fn admit_scalar(
+    value: &GraphSetValue,
+    types: &[GraphSetColumnType],
+    column: usize,
+    depth: usize,
+    nodes: &mut usize,
+    locals: usize,
+) -> Result<(), GraphSetProjectionError> {
+    if !matches!(
+        admit(value, types, column, depth, nodes, locals)?,
+        GraphSetColumnType::Scalar | GraphSetColumnType::Any
+    ) {
+        return Err(GraphSetProjectionError::ListInput { column });
+    }
+    Ok(())
 }
 
 fn admit_list(
@@ -520,6 +581,35 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             append_value_transcript(list, bytes);
             append_value_transcript(predicate, bytes);
         }
+        GraphSetValue::Slice { list, from, to } => {
+            bytes.push(11);
+            append_value_transcript(list, bytes);
+            for bound in [from, to] {
+                append_optional_transcript(bound.as_deref(), bytes);
+            }
+        }
+        GraphSetValue::Range { start, end, step } => {
+            bytes.push(12);
+            append_value_transcript(start, bytes);
+            append_value_transcript(end, bytes);
+            append_optional_transcript(step.as_deref(), bytes);
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            bytes.push(13);
+            append_value_transcript(init, bytes);
+            append_value_transcript(list, bytes);
+            append_value_transcript(expr, bytes);
+        }
+    }
+}
+
+fn append_optional_transcript(value: Option<&GraphSetValue>, bytes: &mut Vec<u8>) {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            append_value_transcript(value, bytes);
+        }
+        None => bytes.push(0),
     }
 }
 
@@ -765,10 +855,11 @@ fn evaluate_value_at<E>(
                 let members = list
                     .as_list()
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                let mut scope = element_scope(row, control)?;
+                let mut scope = element_scope(row, 1, control)?;
                 let mut kept = Vec::new();
                 for member in members {
-                    scope.set_element(
+                    scope.set_from_end(
+                        0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     if let Some(filter) = filter
@@ -805,10 +896,11 @@ fn evaluate_value_at<E>(
                 let members = list
                     .as_list()
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                let mut scope = element_scope(row, control)?;
+                let mut scope = element_scope(row, 1, control)?;
                 let mut results = Vec::new();
                 for member in members {
-                    scope.set_element(
+                    scope.set_from_end(
+                        0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -819,14 +911,110 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
+        GraphSetValue::Slice { list, from, to } => {
+            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let mut bounds = [None, None];
+            let mut null = list.is_null();
+            for (slot, bound) in bounds.iter_mut().zip([from, to]) {
+                if let Some(bound) = bound {
+                    match integer_part(bound, row, column, control, depth, nodes)? {
+                        Some(value) => *slot = Some(i128::from(value)),
+                        None => null = true,
+                    }
+                }
+            }
+            if null {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else {
+                let members = list
+                    .as_list()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                let mut kept = Vec::new();
+                for member in &members[slice_bounds(members.len(), bounds[0], bounds[1])] {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    kept.push(copy_value(member, control).map_err(ProjectionFailure::Control)?);
+                }
+                GraphValue::List(kept.into_boxed_slice())
+            }
+        }
+        GraphSetValue::Range { start, end, step } => {
+            let start = integer_part(start, row, column, control, depth, nodes)?;
+            let end = integer_part(end, row, column, control, depth, nodes)?;
+            let step = match step {
+                Some(step) => integer_part(step, row, column, control, depth, nodes)?,
+                None => Some(1),
+            };
+            match (start, end, step) {
+                (Some(start), Some(end), Some(step)) => {
+                    let members = range_values(start, end, step).map_err(failure)?;
+                    for _ in &members {
+                        control(GlaExecutionEvent::ScratchEntry)
+                            .map_err(ProjectionFailure::Control)?;
+                    }
+                    GraphValue::List(members.into_boxed_slice())
+                }
+                _ => {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                }
+            }
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            let mut accumulator = evaluate_value_at(init, row, column, control, depth + 1, nodes)?;
+            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            if list.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else {
+                let members = list
+                    .as_list()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                let mut scope = element_scope(row, 2, control)?;
+                for member in members {
+                    scope.set_from_end(1, accumulator);
+                    scope.set_from_end(
+                        0,
+                        copy_value(member, control).map_err(ProjectionFailure::Control)?,
+                    );
+                    accumulator =
+                        evaluate_value_at(expr, &scope, column, control, depth + 1, &mut 0)?;
+                }
+                accumulator
+            }
+        }
     };
     Ok(result)
+}
+
+/// An integer bound, step or range endpoint: Some(value), None for NULL, and
+/// any other value a typed NonInteger error.
+fn integer_part<E>(
+    value: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<Option<i64>, ProjectionFailure<E>> {
+    match evaluate_value_at(value, row, column, control, depth + 1, nodes)? {
+        GraphValue::Scalar(CanonicalScalar::Int(value)) => Ok(Some(value)),
+        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
+        _ => Err(ProjectionFailure::Arithmetic {
+            column,
+            error: GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::NonInteger,
+            },
+        }),
+    }
 }
 
 /// Copy `row` into a list-comprehension element scope, under the same
 /// per-value reservations as any other row copy.
 fn element_scope<E>(
     row: &GraphValueRow,
+    slots: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValueRow, ProjectionFailure<E>> {
     let mut values = Vec::new();
@@ -834,8 +1022,59 @@ fn element_scope<E>(
         control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
         values.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
     }
-    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-    Ok(GraphValueRow::element_scope(values))
+    for _ in 0..slots {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    }
+    Ok(GraphValueRow::element_scope(values, slots))
+}
+
+/// openCypher list-slice bounds over `len` members: a negative bound
+/// counts from the end, both bounds clamp to the list, an absent lower
+/// bound is 0 and an absent upper bound is the length (fgdb-20foe).
+pub(crate) fn slice_bounds(
+    len: usize,
+    from: Option<i128>,
+    to: Option<i128>,
+) -> core::ops::Range<usize> {
+    let len = len as i128;
+    let resolve = |bound: i128| {
+        let at = if bound < 0 { len + bound } else { bound };
+        at.clamp(0, len) as usize
+    };
+    let start = from.map_or(0, resolve);
+    let end = to.map_or(len as usize, resolve);
+    start..end.max(start)
+}
+
+/// openCypher range(start, end, step), end inclusive. A zero step is a
+/// typed error, and the member count is checked against the list bound
+/// before anything is allocated (fgdb-20foe).
+pub(crate) fn range_values(
+    start: i64,
+    end: i64,
+    step: i64,
+) -> Result<Vec<GraphValue>, crate::GraphIntegerErrorKind> {
+    use crate::GraphIntegerErrorKind as Kind;
+    if step == 0 {
+        return Err(Kind::InvalidRangeStep);
+    }
+    let (start, end, step) = (i128::from(start), i128::from(end), i128::from(step));
+    let span = end - start;
+    let count = if span == 0 || (span > 0) == (step > 0) {
+        span / step + 1
+    } else {
+        0
+    };
+    if count > GraphValue::MAX_LIST_NODES as i128 {
+        return Err(Kind::Overflow);
+    }
+    (0..count)
+        .map(|at| {
+            i64::try_from(start + at * step)
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                .map_err(|_| Kind::Overflow)
+        })
+        .collect()
 }
 
 /// A per-element predicate's three-valued result: TRUE, FALSE or UNKNOWN

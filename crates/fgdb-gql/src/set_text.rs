@@ -104,12 +104,42 @@ pub(crate) enum ReadValueTemplate {
         list: Box<ReadValueTemplate>,
         predicate: Box<ReadValueTemplate>,
     },
+    Slice {
+        list: Box<ReadValueTemplate>,
+        from: Option<Box<ReadValueTemplate>>,
+        to: Option<Box<ReadValueTemplate>>,
+    },
+    Range {
+        start: Box<ReadValueTemplate>,
+        end: Box<ReadValueTemplate>,
+        step: Option<Box<ReadValueTemplate>>,
+    },
+    Reduce {
+        init: Box<ReadValueTemplate>,
+        list: Box<ReadValueTemplate>,
+        expr: Box<ReadValueTemplate>,
+    },
 }
 impl ReadValueTemplate {
     /// Whether this value binds a list-comprehension element anywhere.
     pub(crate) fn binds_elements(&self) -> bool {
         match self {
-            Self::Local(_) | Self::Comprehension { .. } | Self::Quantifier { .. } => true,
+            Self::Local(_)
+            | Self::Comprehension { .. }
+            | Self::Quantifier { .. }
+            | Self::Reduce { .. } => true,
+            Self::Slice { list, from, to } => {
+                list.binds_elements()
+                    || [from, to]
+                        .into_iter()
+                        .flatten()
+                        .any(|bound| bound.binds_elements())
+            }
+            Self::Range { start, end, step } => {
+                start.binds_elements()
+                    || end.binds_elements()
+                    || step.as_deref().is_some_and(Self::binds_elements)
+            }
             Self::List(items) => items.iter().any(Self::binds_elements),
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
             Self::Size(inner) => inner.binds_elements(),
@@ -127,7 +157,11 @@ impl ReadValueTemplate {
     ) -> GraphSetColumnType {
         match self {
             Self::Column(index) => input[*index],
-            Self::List(_) | Self::Comprehension { .. } => GraphSetColumnType::List,
+            Self::List(_)
+            | Self::Comprehension { .. }
+            | Self::Slice { .. }
+            | Self::Range { .. } => GraphSetColumnType::List,
+            Self::Reduce { .. } => GraphSetColumnType::Any,
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. }
@@ -156,6 +190,15 @@ impl ReadValueTemplate {
     pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
         fn ordinal(bytes: &mut Vec<u8>, value: usize) {
             bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        fn optional(bytes: &mut Vec<u8>, value: Option<&ReadValueTemplate>) {
+            match value {
+                Some(value) => {
+                    bytes.push(1);
+                    value.append_template_transcript(bytes);
+                }
+                None => bytes.push(0),
+            }
         }
         match self {
             Self::Column(index) => {
@@ -225,6 +268,25 @@ impl ReadValueTemplate {
                 bytes.extend_from_slice(&[10, kind.tag()]);
                 list.append_template_transcript(bytes);
                 predicate.append_template_transcript(bytes);
+            }
+            Self::Slice { list, from, to } => {
+                bytes.push(11);
+                list.append_template_transcript(bytes);
+                for bound in [from, to] {
+                    optional(bytes, bound.as_deref());
+                }
+            }
+            Self::Range { start, end, step } => {
+                bytes.push(12);
+                start.append_template_transcript(bytes);
+                end.append_template_transcript(bytes);
+                optional(bytes, step.as_deref());
+            }
+            Self::Reduce { init, list, expr } => {
+                bytes.push(13);
+                init.append_template_transcript(bytes);
+                list.append_template_transcript(bytes);
+                expr.append_template_transcript(bytes);
             }
         }
     }

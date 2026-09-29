@@ -211,8 +211,93 @@ fn expression<'g, E, C>(
         // a typed failure for a hand-built plan, never a guessed element.
         GraphSetValue::Local(_)
         | GraphSetValue::Comprehension { .. }
-        | GraphSetValue::Quantifier { .. } => {
+        | GraphSetValue::Quantifier { .. }
+        | GraphSetValue::Reduce { .. } => {
             return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+        }
+        // The row evaluator's slice and range laws (set_ops slice_bounds and
+        // range_values), over the aggregate cells.
+        GraphSetValue::Slice { list, from, to } => {
+            let list = expression(list, input, column, control)?;
+            let mut bounds = [None, None];
+            let mut null = list.cell().is_null();
+            for (slot, bound) in bounds.iter_mut().zip([from, to]) {
+                if let Some(bound) = bound {
+                    let bound = expression(bound, input, column, control)?;
+                    let cell = bound.cell();
+                    if cell.is_null() {
+                        null = true;
+                    } else {
+                        *slot =
+                            Some(cell.integer().ok_or_else(|| {
+                                failure(column, GraphIntegerErrorKind::NonInteger)
+                            })?);
+                    }
+                }
+            }
+            if null {
+                OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+            } else {
+                let Cell::Value(ValueRef::List(values)) = list.cell() else {
+                    return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+                };
+                let mut kept = Vec::new();
+                for value in
+                    &values[crate::set_ops::slice_bounds(values.len(), bounds[0], bounds[1])]
+                {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    kept.push(value.copy_with_control(control)?);
+                }
+                OutputValue::Owned(GraphAggregateValue::Value(GraphValue::List(
+                    kept.into_boxed_slice(),
+                )))
+            }
+        }
+        GraphSetValue::Range { start, end, step } => {
+            let mut parts = [None, None, Some(1_i128)];
+            let mut null = false;
+            for (slot, part) in parts
+                .iter_mut()
+                .zip([Some(start), Some(end), step.as_ref()])
+            {
+                let Some(part) = part else {
+                    continue;
+                };
+                let part = expression(part, input, column, control)?;
+                let cell = part.cell();
+                if cell.is_null() {
+                    null = true;
+                } else {
+                    *slot = Some(
+                        cell.integer()
+                            .ok_or_else(|| failure(column, GraphIntegerErrorKind::NonInteger))?,
+                    );
+                }
+            }
+            let narrow = |value: Option<i128>| {
+                value
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| failure(column, GraphIntegerErrorKind::Overflow))
+            };
+            match (
+                null,
+                narrow(parts[0])?,
+                narrow(parts[1])?,
+                narrow(parts[2])?,
+            ) {
+                (false, Some(start), Some(end), Some(step)) => {
+                    let members = crate::set_ops::range_values(start, end, step)
+                        .map_err(|kind| failure(column, kind))?;
+                    for _ in &members {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::List(
+                        members.into_boxed_slice(),
+                    )))
+                }
+                _ => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
+            }
         }
         GraphSetValue::Index { list, index } => {
             let list = expression(list, input, column, control)?;

@@ -479,20 +479,28 @@ impl GraphValueRow {
     }
 
     /// A list-comprehension element scope (fgdb-20foe): this row's values,
-    /// already copied under the caller's reservations, followed by one
-    /// element slot. Element scopes may exceed the pattern column bound by
-    /// their nesting depth, which the expression-nesting limit bounds.
-    pub(crate) fn element_scope(values: Vec<GraphValue>) -> Self {
+    /// already copied under the caller's reservations, followed by `slots`
+    /// element slots (one per binding, innermost last). Element scopes may
+    /// exceed the pattern column bound by their nesting depth, which the
+    /// expression-nesting limit bounds.
+    pub(crate) fn element_scope(values: Vec<GraphValue>, slots: usize) -> Self {
         let mut values = values;
-        values.push(GraphValue::Scalar(fgdb_types::CanonicalScalar::Null));
+        for _ in 0..slots {
+            values.push(GraphValue::Scalar(fgdb_types::CanonicalScalar::Null));
+        }
         Self {
             values: values.into_boxed_slice(),
         }
     }
 
-    /// Bind the element slot of a scope made by `element_scope`.
-    pub(crate) fn set_element(&mut self, value: GraphValue) {
-        if let Some(slot) = self.values.last_mut() {
+    /// Bind the slot `offset` positions before the end of an element scope
+    /// (0 is the innermost binding).
+    pub(crate) fn set_from_end(&mut self, offset: usize, value: GraphValue) {
+        let len = self.values.len();
+        if let Some(slot) = len
+            .checked_sub(offset + 1)
+            .and_then(|at| self.values.get_mut(at))
+        {
             *slot = value;
         }
     }

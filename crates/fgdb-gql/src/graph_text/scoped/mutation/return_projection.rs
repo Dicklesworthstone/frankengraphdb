@@ -53,6 +53,16 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
     }
 }
 
+/// The openCypher list functions parsed as values (fgdb-20foe).
+#[derive(Clone, Copy)]
+enum ListFunction {
+    Head,
+    Last,
+    Tail,
+    Range,
+    Reduce,
+}
+
 struct GraphProjectionHead<'a> {
     with: bool,
     inputs: Vec<Projection<'a>>,
@@ -729,6 +739,20 @@ impl<'a> Parser<'a> {
                 }
             }
             ReadValueTemplate::List(items)
+        } else if let Some(function) = self.list_function()? {
+            // head/last/tail/range/reduce (fgdb-20foe).
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let value = self.list_function_call(
+                function,
+                inputs.as_deref_mut(),
+                schema,
+                resolve,
+                depth,
+                at,
+            )?;
+            self.punct(b')', ")")?;
+            value
         } else if self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -779,15 +803,155 @@ impl<'a> Parser<'a> {
             value = ReadValueTemplate::Local(*offset);
         }
         while self.take(b'[')? {
-            let index =
-                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-            self.punct(b']', "]")?;
-            value = ReadValueTemplate::Index {
-                list: Box::new(value),
-                index: Box::new(index),
+            // `[i]` indexes; `[a..b]`, `[a..]` and `[..b]` slice (fgdb-20foe).
+            let from = if self.starts_range_dots()? {
+                None
+            } else {
+                Some(self.read_recursive_value(
+                    inputs.as_deref_mut(),
+                    schema,
+                    resolve,
+                    depth + 1,
+                )?)
             };
+            if self.starts_range_dots()? {
+                self.advance()?;
+                self.advance()?;
+                let to = if self.is_punct(b']') {
+                    None
+                } else {
+                    Some(self.read_recursive_value(
+                        inputs.as_deref_mut(),
+                        schema,
+                        resolve,
+                        depth + 1,
+                    )?)
+                };
+                self.punct(b']', "]")?;
+                value = ReadValueTemplate::Slice {
+                    list: Box::new(value),
+                    from: from.map(Box::new),
+                    to: to.map(Box::new),
+                };
+            } else {
+                let index = from.ok_or(GraphSetTextError {
+                    offset: self.current.at,
+                    kind: GraphSetTextErrorKind::Expected("a list index or slice"),
+                })?;
+                self.punct(b']', "]")?;
+                value = ReadValueTemplate::Index {
+                    list: Box::new(value),
+                    index: Box::new(index),
+                };
+            }
         }
         Ok(value)
+    }
+
+    fn starts_range_dots(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(
+            self.is_punct(b'.')
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')),
+        )
+    }
+
+    /// HEAD, LAST, TAIL, RANGE or REDUCE directly followed by `(`.
+    fn list_function(&self) -> Result<Option<ListFunction>, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let function = [
+            ("HEAD", ListFunction::Head),
+            ("LAST", ListFunction::Last),
+            ("TAIL", ListFunction::Tail),
+            ("RANGE", ListFunction::Range),
+            ("REDUCE", ListFunction::Reduce),
+        ]
+        .into_iter()
+        .find(|(name, _)| word.eq_ignore_ascii_case(name))
+        .map(|(_, function)| function);
+        let Some(function) = function else {
+            return Ok(None);
+        };
+        Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
+    }
+
+    /// The arguments of a list function, after `(` and before `)`. head and
+    /// last are index desugars, tail a slice from 1; reduce binds its
+    /// accumulator then its element, innermost last.
+    #[allow(clippy::type_complexity)]
+    fn list_function_call(
+        &mut self,
+        function: ListFunction,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<
+            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        >,
+        depth: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let integer = |value: i64| -> Result<ReadValueTemplate, GraphSetTextError> {
+            Ok(ReadValueTemplate::Literal(scalar(
+                GqlParameterValue::Int64(value),
+                at,
+            )?))
+        };
+        let next = |parser: &mut Self,
+                    inputs: Option<&mut Vec<Projection<'a>>>,
+                    resolve: &mut Option<_>| {
+            parser.read_recursive_value(inputs, schema, resolve, depth + 1)
+        };
+        Ok(match function {
+            ListFunction::Head | ListFunction::Last | ListFunction::Tail => {
+                let list = Box::new(next(self, inputs, resolve)?);
+                match function {
+                    ListFunction::Head => ReadValueTemplate::Index {
+                        list,
+                        index: Box::new(integer(0)?),
+                    },
+                    ListFunction::Last => ReadValueTemplate::Index {
+                        list,
+                        index: Box::new(integer(-1)?),
+                    },
+                    _ => ReadValueTemplate::Slice {
+                        list,
+                        from: Some(Box::new(integer(1)?)),
+                        to: None,
+                    },
+                }
+            }
+            ListFunction::Range => {
+                let start = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
+                self.punct(b',', ",")?;
+                let end = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
+                let step = if self.take(b',')? {
+                    Some(Box::new(next(self, inputs, resolve)?))
+                } else {
+                    None
+                };
+                ReadValueTemplate::Range { start, end, step }
+            }
+            ListFunction::Reduce => {
+                let accumulator = self.name()?;
+                self.punct(b'=', "=")?;
+                let init = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
+                self.punct(b',', ",")?;
+                let element = self.name()?;
+                self.word("IN")?;
+                let list = Box::new(next(self, inputs.as_deref_mut(), resolve)?);
+                self.punct(b'|', "|")?;
+                self.elements.push(accumulator.text);
+                self.elements.push(element.text);
+                let expr = next(self, inputs, resolve);
+                self.elements.truncate(self.elements.len() - 2);
+                ReadValueTemplate::Reduce {
+                    init,
+                    list,
+                    expr: Box::new(expr?),
+                }
+            }
+        })
     }
 
     /// `x IN list (WHERE p)? (| e)?`, with `x` in scope only for `p` and `e`
@@ -1113,6 +1277,31 @@ pub(in crate::graph_text) fn bind_read_value(
             kind: *kind,
             list: Box::new(bind_read_value(list, values)?),
             predicate: Box::new(bind_read_value(predicate, values)?),
+        },
+        ReadValueTemplate::Slice { list, from, to } => {
+            let part = |part: &Option<Box<ReadValueTemplate>>| {
+                part.as_deref()
+                    .map(|part| bind_read_value(part, values).map(Box::new))
+                    .transpose()
+            };
+            GraphSetValue::Slice {
+                list: Box::new(bind_read_value(list, values)?),
+                from: part(from)?,
+                to: part(to)?,
+            }
+        }
+        ReadValueTemplate::Range { start, end, step } => GraphSetValue::Range {
+            start: Box::new(bind_read_value(start, values)?),
+            end: Box::new(bind_read_value(end, values)?),
+            step: step
+                .as_deref()
+                .map(|step| bind_read_value(step, values).map(Box::new))
+                .transpose()?,
+        },
+        ReadValueTemplate::Reduce { init, list, expr } => GraphSetValue::Reduce {
+            init: Box::new(bind_read_value(init, values)?),
+            list: Box::new(bind_read_value(list, values)?),
+            expr: Box::new(bind_read_value(expr, values)?),
         },
     })
 }

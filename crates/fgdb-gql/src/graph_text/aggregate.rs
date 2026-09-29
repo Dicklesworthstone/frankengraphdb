@@ -969,6 +969,24 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             remap_output_columns(list, columns);
             remap_output_columns(predicate, columns);
         }
+        ReadValueTemplate::Slice { list, from, to } => {
+            remap_output_columns(list, columns);
+            for bound in [from, to].into_iter().flatten() {
+                remap_output_columns(bound, columns);
+            }
+        }
+        ReadValueTemplate::Range { start, end, step } => {
+            remap_output_columns(start, columns);
+            remap_output_columns(end, columns);
+            if let Some(step) = step {
+                remap_output_columns(step, columns);
+            }
+        }
+        ReadValueTemplate::Reduce { init, list, expr } => {
+            for part in [init, list, expr] {
+                remap_output_columns(part, columns);
+            }
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
         | ReadValueTemplate::Local(_) => {}

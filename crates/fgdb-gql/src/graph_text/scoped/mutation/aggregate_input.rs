@@ -222,6 +222,31 @@ impl PreparedGraphAggregateText {
                 list: Box::new(Self::bind_input_value(list, values)?),
                 predicate: Box::new(Self::bind_input_value(predicate, values)?),
             }),
+            ReadValueTemplate::Slice { list, from, to } => {
+                let part = |part: &Option<Box<ReadValueTemplate>>| {
+                    part.as_deref()
+                        .map(|part| Self::bind_input_value(part, values).map(Box::new))
+                        .transpose()
+                };
+                Ok(GraphSetValue::Slice {
+                    list: Box::new(Self::bind_input_value(list, values)?),
+                    from: part(from)?,
+                    to: part(to)?,
+                })
+            }
+            ReadValueTemplate::Range { start, end, step } => Ok(GraphSetValue::Range {
+                start: Box::new(Self::bind_input_value(start, values)?),
+                end: Box::new(Self::bind_input_value(end, values)?),
+                step: step
+                    .as_deref()
+                    .map(|step| Self::bind_input_value(step, values).map(Box::new))
+                    .transpose()?,
+            }),
+            ReadValueTemplate::Reduce { init, list, expr } => Ok(GraphSetValue::Reduce {
+                init: Box::new(Self::bind_input_value(init, values)?),
+                list: Box::new(Self::bind_input_value(list, values)?),
+                expr: Box::new(Self::bind_input_value(expr, values)?),
+            }),
         }
     }
 }

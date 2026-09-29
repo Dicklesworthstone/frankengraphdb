@@ -252,6 +252,8 @@ pub enum GraphIntegerErrorKind {
     NonScalar,
     IncompatibleOperands,
     InvalidSubstring,
+    /// openCypher range() with a step of 0 (fgdb-20foe).
+    InvalidRangeStep,
     TextConstruction,
 }
 impl GraphIntegerErrorKind {

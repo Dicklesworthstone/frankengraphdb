@@ -33,6 +33,17 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Quantifier {
             list, predicate, ..
         } => constant(list) && constant(predicate),
+        GraphSetValue::Slice { list, from, to } => {
+            constant(list)
+                && from.as_deref().is_none_or(constant)
+                && to.as_deref().is_none_or(constant)
+        }
+        GraphSetValue::Range { start, end, step } => {
+            constant(start) && constant(end) && step.as_deref().is_none_or(constant)
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            constant(init) && constant(list) && constant(expr)
+        }
     }
 }
 

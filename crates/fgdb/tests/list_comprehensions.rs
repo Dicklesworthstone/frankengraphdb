@@ -247,3 +247,81 @@ fn out_of_profile_comprehensions_refuse_typed() {
         assert!(result.is_err(), "{result:?}");
     });
 }
+
+#[test]
+fn list_functions_slices_ranges_and_reduce_follow_opencypher() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let params = GqlParameters::new();
+        let one = |text: &str| {
+            cells(db.query(cx, text, &params, symbols, policy()).expect(text))
+                .into_iter()
+                .next()
+                .and_then(|row| row.into_iter().next())
+        };
+        for (text, expected) in [
+            // head/last index the ends; tail drops the first member.
+            ("RETURN head([1, 2, 3]) AS v", int(1)),
+            ("RETURN head([]) AS v", null()),
+            ("RETURN last([1, 2, 3]) AS v", int(3)),
+            ("RETURN last([]) AS v", null()),
+            ("RETURN tail([1, 2, 3]) AS v", ints(&[2, 3])),
+            ("RETURN tail([]) AS v", ints(&[])),
+            // Slices: bounds clamp, negatives count from the end.
+            ("RETURN [1, 2, 3, 4][1..3] AS v", ints(&[2, 3])),
+            ("RETURN [1, 2, 3, 4][..2] AS v", ints(&[1, 2])),
+            ("RETURN [1, 2, 3, 4][2..] AS v", ints(&[3, 4])),
+            ("RETURN [1, 2, 3, 4][-2..] AS v", ints(&[3, 4])),
+            ("RETURN [1, 2, 3][..-1] AS v", ints(&[1, 2])),
+            ("RETURN [1, 2, 3][5..9] AS v", ints(&[])),
+            ("RETURN [1, 2, 3][2..1] AS v", ints(&[])),
+            // A NULL bound is NULL. (A bare `null..` reads as a property
+            // access in the shared operand parser, so the bound is wrapped.)
+            ("RETURN [1, 2, 3][(null)..2] AS v", null()),
+            // range is end-inclusive in its step's direction.
+            ("RETURN range(1, 4) AS v", ints(&[1, 2, 3, 4])),
+            ("RETURN range(0, 10, 3) AS v", ints(&[0, 3, 6, 9])),
+            ("RETURN range(5, 1, -2) AS v", ints(&[5, 3, 1])),
+            ("RETURN range(1, 0) AS v", ints(&[])),
+            ("RETURN range(3, 3, -1) AS v", ints(&[3])),
+            // reduce folds left from init; NULL list is NULL, empty is init.
+            ("RETURN reduce(s = 0, x IN [1, 2, 3] | s + x) AS v", int(6)),
+            ("RETURN reduce(s = 1, x IN [2, 3, 4] | s * x) AS v", int(24)),
+            ("RETURN reduce(s = 7, x IN [] | s + x) AS v", int(7)),
+            ("RETURN reduce(s = 0, x IN null | s + x) AS v", null()),
+            // A list element is whole at value level: the last step is
+            // size([3]). (Inside arithmetic, size() is the scalar VM's text
+            // length, so `s + size(x)` over lists is a typed error.)
+            (
+                "RETURN reduce(s = 0, x IN [[1, 2], [3]] | size(x)) AS v",
+                int(1),
+            ),
+            // Order matters: 10*(10*0+1)+2 = 12, not 21.
+            (
+                "RETURN reduce(s = 0, x IN [1, 2] | s * 10 + x) AS v",
+                int(12),
+            ),
+        ] {
+            assert_eq!(one(text), Some(expected), "{text}");
+        }
+        // Over rows and aggregate outputs.
+        assert_eq!(
+            one("MATCH (n:Person) WHERE n.p = 20 RETURN range(n.p, n.p + 2) AS v"),
+            Some(ints(&[20, 21, 22]))
+        );
+        assert_eq!(
+            one("MATCH (n:Person) RETURN size(collect(n.p)[1..]) AS v"),
+            Some(int(3))
+        );
+        assert_eq!(
+            one("MATCH (n:Person) RETURN range(1, count(*)) AS v"),
+            Some(ints(&[1, 2, 3, 4]))
+        );
+        // A zero step and a non-integer bound are typed errors.
+        for text in ["RETURN range(1, 3, 0) AS v", "RETURN [1, 2][1..'x'] AS v"] {
+            let result = db.query(cx, text, &params, symbols, policy());
+            assert!(result.is_err(), "{text}: {result:?}");
+        }
+    });
+}
