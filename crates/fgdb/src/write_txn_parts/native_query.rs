@@ -189,8 +189,9 @@ impl<V: Vfs + Clone> Database<V> {
 impl WriteTxn {
     /// Stage a native text write with database-owned identity reservations.
     ///
-    /// Ownership and lifecycle admission precede allocator acquisition and
-    /// symbol resolution. Execution delegates once to [`WriteTxn::query_write`]
+    /// Ownership, lifecycle, health and basis admission precede allocator
+    /// acquisition and symbol resolution. A stale workspace is not refreshed or
+    /// discarded. Execution delegates once to [`WriteTxn::query_write`]
     /// over this transaction's existing overlay; it never autocommits or opens
     /// another transaction. RETURN rows remain transaction-local, and receipts
     /// retain completion=None until the caller finishes the outer transaction.
@@ -208,6 +209,19 @@ impl WriteTxn {
         policy: GraphWriteProgramPolicy,
     ) -> Result<QueryResult, QueryWriteError<WriteTxnError>> {
         self.ensure_database(database).map_err(write_preflight)?;
+        // Match the native executor's basis admission before even acquiring an
+        // allocator or invoking caller catalog code. Rejection leaves the
+        // existing workspace available for explicit completion or rollback.
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(write_preflight)?;
+        if live != self.basis() {
+            return Err(write_preflight(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis(),
+                live,
+            }));
+        }
         let mut allocate = database.engine_allocator(cx).map_err(write_preflight)?;
         self.query_write(
             database,
@@ -230,11 +244,13 @@ mod engine_write_tests {
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_gql::GraphAggregateValue;
     use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::context::SimulationCheckpointProbe;
     use fgdb_types::{
         CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
         VId,
     };
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     const R: RelationId = RelationId(1);
     const P: PropertyKeyId = PropertyKeyId(1);
@@ -428,6 +444,195 @@ mod engine_write_tests {
                 db.vertex(copies[0]).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(8))]
             );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    fn preflight_error(
+        result: Result<QueryResult, QueryWriteError<WriteTxnError>>,
+    ) -> WriteTxnError {
+        match result {
+            Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
+                GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error)),
+            ))) => error,
+            _ => panic!("expected an unchanged native preflight error"),
+        }
+    }
+
+    #[test]
+    fn engine_text_admission_precedes_catalog_and_preserves_stale_workspace() {
+        let ((), report) = run_async_under_lab(0xe119_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut other = Database::open_memory(&commit, keys()).await.unwrap();
+            let other_before = other.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            transaction
+                .query_write_engine(
+                    &mut db, &cx, "CREATE (n {p:1})", &GqlParameters::new(),
+                    symbols, R, policy(),
+                )
+                .unwrap();
+            let digest = transaction.staged_effect_digest().unwrap();
+            let basis = transaction.basis();
+            let error = preflight_error(transaction.query_write_engine(
+                &mut other, &cx, "CREATE (n {p:2}) RETURN n", &GqlParameters::new(),
+                |_, _| panic!("wrong owner must refuse before catalog resolution"),
+                R, policy(),
+            ));
+            assert!(matches!(error, WriteTxnError::WrongDatabase));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(other.frontier().unwrap(), other_before);
+            assert!(other.vertices().unwrap().is_empty());
+            db.query_write_engine(
+                &txcx, &cx, &commit, "CREATE (n {p:3})", &GqlParameters::new(),
+                symbols, R, policy(),
+            )
+            .await
+            .unwrap();
+            let advanced = db.frontier().unwrap();
+            let error = preflight_error(transaction.query_write_engine(
+                &mut db, &cx, "CREATE (n {p:4}) RETURN n", &GqlParameters::new(),
+                |_, _| panic!("stale basis must refuse before catalog resolution"),
+                R, policy(),
+            ));
+            assert!(matches!(
+                error,
+                WriteTxnError::SnapshotAdvanced { pinned, live }
+                    if pinned == basis && live == advanced
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.basis(), basis);
+            assert_eq!(db.frontier().unwrap(), advanced);
+            drop(transaction);
+            assert_eq!(db.vertices().unwrap().len(), 1);
+            let mut closed = db.begin(&txcx).unwrap();
+            closed.finish(&mut db, &commit).await.unwrap();
+            let error = preflight_error(closed.query_write_engine(
+                &mut db, &cx, "CREATE (n {p:5}) RETURN n", &GqlParameters::new(),
+                |_, _| panic!("finished workspace must refuse before catalog resolution"),
+                R, policy(),
+            ));
+            assert!(matches!(error, WriteTxnError::Finished));
+            assert_eq!(db.frontier().unwrap(), advanced);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn engine_text_late_result_and_cumulative_budget_failures_preserve_prefix() {
+        let ((), report) = run_async_under_lab(0xe119_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            transaction
+                .query_write_engine(
+                    &mut db, &cx, "CREATE (n {p:7})", &GqlParameters::new(),
+                    symbols, R, policy(),
+                )
+                .unwrap();
+            let prefix = transaction.staged_effect_digest().unwrap();
+            let result = transaction.query_write_engine(
+                &mut db, &cx, "CREATE (n {p:0}) RETURN 1/n.p AS bad",
+                &GqlParameters::new(), symbols, R, policy(),
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Insert(fgdb_gql::GqlQueryError::Source(
+                    fgdb_gql::GraphInsertQueryError::Returning(_)
+                )))
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), prefix);
+            let mut one_creation = policy();
+            one_creation.max_created_vertices = 1;
+            let result = transaction.query_write_engine(
+                &mut db, &cx, "CREATE (n); CREATE (m)", &GqlParameters::new(),
+                symbols, R, one_creation,
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(_)))
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), prefix);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            let ids = vertex_rows(
+                transaction
+                    .query_write_engine(
+                        &mut db, &cx, "CREATE (n {p:9}) RETURN n", &GqlParameters::new(),
+                        symbols, R, policy(),
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(ids.len(), 1);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(
+                db.vertex(ids[0]).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(9))]
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn engine_text_autocommit_refusals_do_not_publish_or_poison_next_write() {
+        let ((), report) = run_async_under_lab(0xe119_0005, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            for text in [
+                "CREATE (n); CREATE (m) RETURN m",
+                "CREATE (n {p:$missing}) RETURN n",
+            ] {
+                let result = db
+                    .query_write_engine(
+                        &txcx, &cx, &commit, text, &GqlParameters::new(), symbols, R, policy(),
+                    )
+                    .await;
+                assert!(result.is_err(), "{text}");
+                assert!(db.vertices().unwrap().is_empty());
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+            let cancelled =
+                cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
+            let result = db
+                .query_write_engine(
+                    &txcx, &cancelled, &commit, "CREATE (n) RETURN n", &GqlParameters::new(),
+                    symbols, R, policy(),
+                )
+                .await;
+            assert!(result.is_err());
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+            let ids = vertex_rows(
+                db.query_write_engine(
+                    &txcx, &cx, &commit, "CREATE (n) RETURN n", &GqlParameters::new(),
+                    symbols, R, policy(),
+                )
+                .await
+                .unwrap(),
+            );
+            assert_eq!(ids.len(), 1);
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 1);
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
