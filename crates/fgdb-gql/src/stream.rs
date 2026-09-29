@@ -407,6 +407,42 @@ pub trait VertexScanSource {
     > {
         Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
     }
+
+    /// Borrow a selected relationship property at the SAME admitted cut as
+    /// probe_edge(). None is an absent edge; Some(None) is an absent or masked
+    /// field on a present edge. An unavailable reader must refuse, not invent
+    /// either answer. Private captures authorize no additional source access.
+    ///
+    /// The default preserves ordinary borrowed records and their controlled
+    /// field search. A topology-only or scope-masked source must override this
+    /// method with its own admitted field lookup (or refuse), rather than let
+    /// omitted payloads masquerade as missing properties. Source authorization
+    /// precedes payload inspection, work accounting and any value copy.
+    fn probe_edge_property<'a, C>(
+        &'a self,
+        eid: EId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<
+        Option<Option<&'a CanonicalScalar>>,
+        crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>,
+    > {
+        let Some(row) = self.probe_edge(eid, control)? else {
+            return Ok(None);
+        };
+        seek(row.properties, &key, |entry| entry.0, &mut |event| {
+            control(match event {
+                VertexScanEvent::Work => GlaExecutionEvent::Work,
+                VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            })
+        })
+        .map(|entry| Some(entry.map(|(_, value)| value)))
+        .map_err(|error| {
+            crate::edge_stream::EdgeExpansionSourceError::Read(
+                VertexScanSourceError::Control(error),
+            )
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -110,6 +110,22 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
             .map_err(source_error)
     }
 
+    fn edge_property<'a, C>(
+        &'a self,
+        eid: EId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+        // A topology record need not contain payloads. Preserve the source's
+        // separately admitted scalar route, just as vertex_property does.
+        self.0
+            .probe_edge_property(eid, key, control)
+            .map_err(|error| match error {
+                EdgeExpansionSourceError::Unavailable => EdgeScanSourceError::Source(unavailable()),
+                EdgeExpansionSourceError::Read(error) => source_error(error),
+            })
+    }
+
     fn vertex_record<'a, C>(
         &'a self,
         vid: VId,
@@ -189,3 +205,6 @@ mod record_tests;
 
 #[cfg(test)]
 mod relation_tests;
+
+#[cfg(test)]
+mod property_tests;
