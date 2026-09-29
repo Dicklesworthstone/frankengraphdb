@@ -38,9 +38,7 @@ impl ScanSortTail {
 
     // Only physical compilers call this. They must still audit EVERY source,
     // predicate and projection instruction, not just recognize the final tail.
-    pub(crate) fn compile(
-        plan: &crate::algebra::GlaPlan<GraphValueRow>,
-    ) -> Result<Self, usize> {
+    pub(crate) fn compile(plan: &crate::algebra::GlaPlan<GraphValueRow>) -> Result<Self, usize> {
         use crate::algebra::{GlaOperator, GraphValueOrder, MAX_PATTERN_VERTICES};
         let ops = plan.operators();
         let at = ops.len().checked_sub(2).ok_or(0_usize)?;
@@ -84,7 +82,12 @@ impl ScanSortTail {
             }
             _ => return Err(at),
         };
-        Ok(Self { order, distinct, offset: *offset, count: *count })
+        Ok(Self {
+            order,
+            distinct,
+            offset: *offset,
+            count: *count,
+        })
     }
 }
 

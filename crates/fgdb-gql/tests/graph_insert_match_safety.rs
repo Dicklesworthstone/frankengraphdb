@@ -99,14 +99,10 @@ fn values(batch: &GraphInsertQueryBatch) -> Vec<Vec<GraphValue>> {
 
 #[test]
 fn null_matched_endpoints_refuse_before_any_identity_is_allocated() {
-    let query = prepare(
-        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) CREATE (b)-[e:R]->(n) RETURN n,e",
-    );
+    let query = prepare("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) CREATE (b)-[e:R]->(n) RETURN n,e");
     let result: ResultOf = query.execute_governed(
         matched_policy(),
-        |selection, allowance| {
-            match_rows(selection, allowance, &[VId(1)], &[], &Props::new())
-        },
+        |selection, allowance| match_rows(selection, allowance, &[VId(1)], &[], &Props::new()),
         |_| panic!("the null endpoint must be checked before identity allocation"),
         || Ok(()),
     );
@@ -140,7 +136,11 @@ fn matched_late_return_failure_and_cancellation_never_return_a_partial_proposal(
         result,
         Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
     ));
-    assert_eq!(allocations.get(), 2, "RETURN fails only after complete creation");
+    assert_eq!(
+        allocations.get(),
+        2,
+        "RETURN fails only after complete creation"
+    );
 
     allocations.set(0);
     let result: ResultOf = prepare("MATCH (a) CREATE (n) RETURN a,n").execute_governed(
@@ -150,10 +150,19 @@ fn matched_late_return_failure_and_cancellation_never_return_a_partial_proposal(
             allocations.set(allocations.get() + 1);
             identity(request)
         },
-        || if allocations.get() == 0 { Ok(()) } else { Err(()) },
+        || {
+            if allocations.get() == 0 {
+                Ok(())
+            } else {
+                Err(())
+            }
+        },
     );
     assert!(matches!(result, Err(GqlQueryError::Interrupted(()))));
-    assert!(allocations.get() > 0, "exercise cancellation after allocation starts");
+    assert!(
+        allocations.get() > 0,
+        "exercise cancellation after allocation starts"
+    );
 }
 
 #[test]
@@ -164,9 +173,7 @@ fn matched_source_and_creation_limits_fail_before_allocation_but_output_limit_is
     limited.max_vertices = 1;
     let result: ResultOf = query.execute_governed(
         limited,
-        |selection, allowance| {
-            match_rows(selection, allowance, &vertices, &[], &Props::new())
-        },
+        |selection, allowance| match_rows(selection, allowance, &vertices, &[], &Props::new()),
         |_| panic!("all creation counts must be admitted before allocation"),
         || Ok(()),
     );
@@ -178,9 +185,7 @@ fn matched_source_and_creation_limits_fail_before_allocation_but_output_limit_is
     ));
     let result: ResultOf = query.execute_governed(
         policy(), // The standalone allowance admits zero snapshot records.
-        |selection, allowance| {
-            match_rows(selection, allowance, &vertices, &[], &Props::new())
-        },
+        |selection, allowance| match_rows(selection, allowance, &vertices, &[], &Props::new()),
         |_| panic!("source admission must fail before allocation"),
         || Ok(()),
     );
@@ -191,9 +196,7 @@ fn matched_source_and_creation_limits_fail_before_allocation_but_output_limit_is
     let allocations = Cell::new(0);
     let result: ResultOf = query.execute_governed(
         limited,
-        |selection, allowance| {
-            match_rows(selection, allowance, &vertices, &[], &Props::new())
-        },
+        |selection, allowance| match_rows(selection, allowance, &vertices, &[], &Props::new()),
         |request| {
             allocations.set(allocations.get() + 1);
             identity(request)
@@ -201,7 +204,11 @@ fn matched_source_and_creation_limits_fail_before_allocation_but_output_limit_is
         || Ok(()),
     );
     assert!(matches!(result, Err(GqlQueryError::Rows(_))));
-    assert_eq!(allocations.get(), 2, "the final row limit cannot truncate CREATE");
+    assert_eq!(
+        allocations.get(),
+        2,
+        "the final row limit cannot truncate CREATE"
+    );
 }
 
 #[test]
@@ -249,11 +256,16 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
         let GraphValue::Vertex(created) = &rows[at][2] else {
             panic!("the created vertex must not be confused with the matched edge");
         };
-        assert!(batch.insertion().intents().contains(&GraphInsertIntent::Vertex {
-            vertex: *created,
-            labels: vec![],
-            properties: vec![(P, property)],
-        }));
+        assert!(
+            batch
+                .insertion()
+                .intents()
+                .contains(&GraphInsertIntent::Vertex {
+                    vertex: *created,
+                    labels: vec![],
+                    properties: vec![(P, property)],
+                })
+        );
     }
     assert_ne!(rows[0][2], rows[1][2]);
     assert_eq!(batch.insertion().stats().created_vertices, 2);
@@ -276,7 +288,10 @@ fn matched_edge_return_requires_identified_input_and_preserves_source_failures()
         |_| panic!("an unidentified edge cannot be guessed from its endpoints"),
         || Ok(()),
     );
-    assert!(matches!(result, Err(GqlQueryError::IdentifiedEdgesRequired)));
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::IdentifiedEdgesRequired)
+    ));
 
     let result: ResultOf = query.execute_governed(
         matched_policy(),

@@ -221,7 +221,8 @@ impl<'a> ParsedReturn<'a> {
             parser.punct(b')', ")")?;
             let vertex = parser.edge_endpoint(edge, start)?;
             Binding::Input(
-                imported_width + parser.mutation_projection(&mut syntax.projections, vertex, None)?,
+                imported_width
+                    + parser.mutation_projection(&mut syntax.projections, vertex, None)?,
             )
         };
         self.column(binding, function, GraphSetColumnType::Vertex)

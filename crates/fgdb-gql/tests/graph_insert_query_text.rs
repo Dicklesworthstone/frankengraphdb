@@ -630,11 +630,17 @@ fn imported_keys_create_connected_occurrences_with_frozen_source_and_result_fiel
     let expected: Vec<_> = [(2, 2, 20), (2, 3, 30), (1, 1, 10), (2, 2, 20), (2, 3, 30)]
         .into_iter()
         .enumerate()
-        .map(|(row, (key, vertex, old))| vec![
-            int(key), GraphValue::Vertex(VId(vertex)), int(old),
-            GraphValue::Vertex(VId(100 + row as u128 * 16)),
-            GraphValue::Edge(EId(1_000 + row as u128 * 16)), int(old + key), int(key + 1),
-        ])
+        .map(|(row, (key, vertex, old))| {
+            vec![
+                int(key),
+                GraphValue::Vertex(VId(vertex)),
+                int(old),
+                GraphValue::Vertex(VId(100 + row as u128 * 16)),
+                GraphValue::Edge(EId(1_000 + row as u128 * 16)),
+                int(old + key),
+                int(key + 1),
+            ]
+        })
         .collect();
     assert_eq!(values(&batch), expected);
     assert_eq!(batch.insertion().stats().created_vertices, 5);
@@ -661,10 +667,13 @@ fn imported_correlations_share_where_and_map_lowering_and_all_keys_are_required(
     );
     assert_eq!(map.canonical_bytes(), predicate.canonical_bytes());
     let batch = run_matched(&map, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
-    assert_eq!(values(&batch), vec![
-        vec![int(1), int(10), GraphValue::Vertex(VId(1)), int(11)],
-        vec![int(2), int(20), GraphValue::Vertex(VId(2)), int(22)],
-    ]);
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![int(1), int(10), GraphValue::Vertex(VId(1)), int(11)],
+            vec![int(2), int(20), GraphValue::Vertex(VId(2)), int(22)],
+        ]
+    );
 }
 
 #[test]
@@ -674,14 +683,20 @@ fn imported_match_preserves_uncorrelated_bags_and_keeps_anonymous_bindings_priva
     let query = prepare("UNWIND [1] AS x MATCH (m) CREATE (n:Copy) RETURN n");
     let batch = run_matched(&query, &[VId(1), VId(2)], &[], &Props::new()).unwrap();
     assert_eq!(batch.insertion().stats().created_vertices, 2);
-    assert_eq!(values(&batch), vec![
-        vec![GraphValue::Vertex(VId(100))],
-        vec![GraphValue::Vertex(VId(116))],
-    ]);
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![GraphValue::Vertex(VId(100))],
+            vec![GraphValue::Vertex(VId(116))],
+        ]
+    );
     let query = prepare("UNWIND [7] AS x MATCH () CREATE (c) RETURN *");
     assert_eq!(query.columns(), &["x", "c"]);
     let batch = run_matched(&query, &[VId(1)], &[], &Props::new()).unwrap();
-    assert_eq!(values(&batch), vec![vec![int(7), GraphValue::Vertex(VId(100))]]);
+    assert_eq!(
+        values(&batch),
+        vec![vec![int(7), GraphValue::Vertex(VId(100))]]
+    );
 }
 
 #[test]
@@ -695,19 +710,37 @@ fn imported_parameters_are_shared_and_null_or_wrong_kind_keys_never_match() {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(calls.get(), 2);
-    let keys = vec![GraphValue::Scalar(CanonicalScalar::Null),
-        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("2").unwrap()), int(2)];
-    let arguments = GqlParameters::new().with_list("keys", keys.clone()).unwrap()
-        .with_int64("floor", 25).unwrap();
+    let keys = vec![
+        GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("2").unwrap()),
+        int(2),
+    ];
+    let arguments = GqlParameters::new()
+        .with_list("keys", keys.clone())
+        .unwrap()
+        .with_int64("floor", 25)
+        .unwrap();
     let query = template.bind_parameters(&arguments).unwrap();
     assert_eq!(calls.get(), 2);
     let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
-    assert_eq!(values(&batch), vec![vec![int(2), int(55), GraphValue::List(keys.into_boxed_slice())]]);
+    assert_eq!(
+        values(&batch),
+        vec![vec![
+            int(2),
+            int(55),
+            GraphValue::List(keys.into_boxed_slice())
+        ]]
+    );
     assert_eq!(batch.insertion().stats().created_vertices, 1);
     assert!(template.bind_parameters(&GqlParameters::new()).is_err());
-    assert!(template.bind_parameters(&arguments.with_int64("extra", 1).unwrap()).is_err());
+    assert!(
+        template
+            .bind_parameters(&arguments.with_int64("extra", 1).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -721,9 +754,8 @@ fn imported_match_limits_output_without_suppressing_writes_or_expression_errors(
         assert_eq!(batch.insertion().stats().created_vertices, 4);
         assert_eq!(batch.insertion().stats().created_edges, 4);
     }
-    let bad = prepare(
-        "UNWIND [1,2] AS x MATCH (a {p:x}) CREATE (c) RETURN 10/(2-x) AS value LIMIT 0"
-    );
+    let bad =
+        prepare("UNWIND [1,2] AS x MATCH (a {p:x}) CREATE (c) RETURN 10/(2-x) AS value LIMIT 0");
     assert!(run_matched(&bad, &[VId(1), VId(2)], &[], &imported_props()).is_err());
     for list in ["[]", "NULL", "[99]"] {
         let query = prepare(&format!(
@@ -746,10 +778,14 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
         "UNWIND [1] AS x MATCH (a) OPTIONAL MATCH (b {p:x}) CREATE (c) RETURN c",
     ] {
         let calls = Cell::new(0);
-        assert!(PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls.get(), 0, "{text}");
     }
     let mut text = String::new();
@@ -758,9 +794,12 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
     }
     text.push_str("MATCH (a {p:x0}) CREATE (c) RETURN c");
     let calls = Cell::new(0);
-    assert!(PreparedGraphInsertQueryText::prepare(&text, R, |kind, name| {
-        calls.set(calls.get() + 1);
-        symbols(kind, name)
-    }).is_err());
+    assert!(
+        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .is_err()
+    );
     assert_eq!(calls.get(), 0);
 }

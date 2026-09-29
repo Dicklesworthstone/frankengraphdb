@@ -438,9 +438,9 @@ pub trait VertexScanSource {
         })
         .map(|entry| Some(entry.map(|(_, value)| value)))
         .map_err(|error| {
-            crate::edge_stream::EdgeExpansionSourceError::Read(
-                VertexScanSourceError::Control(error),
-            )
+            crate::edge_stream::EdgeExpansionSourceError::Read(VertexScanSourceError::Control(
+                error,
+            ))
         })
     }
 }

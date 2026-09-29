@@ -92,7 +92,10 @@ mod query_source {
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
         fn accept_observations(&self) {
             if let Some((transaction, index)) = self.scan_observation {
-                transaction.point_reads.borrow_mut().complete_vertex_scan(index);
+                transaction
+                    .point_reads
+                    .borrow_mut()
+                    .complete_vertex_scan(index);
             }
         }
 
@@ -222,7 +225,11 @@ mod query_source {
         ) -> Result<OverlayQuerySource<'a>, WriteTxnError> {
             let snapshot = self.query_snapshot(database)?;
             self.query_source_with_witnesses(
-                snapshot, GlaPlan::lower(plan), plan.src_label, true, &mut |_| Ok(()),
+                snapshot,
+                GlaPlan::lower(plan),
+                plan.src_label,
+                true,
+                &mut |_| Ok(()),
             )
         }
 
@@ -313,7 +320,11 @@ mod query_source {
             // Callers that own a different acceptance boundary keep the old
             // broad witnesses until they explicitly opt into this protocol.
             self.query_source_with_witnesses(
-                snapshot, logical, required_vertex_label, false, control,
+                snapshot,
+                logical,
+                required_vertex_label,
+                false,
+                control,
             )
         }
 
@@ -442,7 +453,11 @@ mod query_source {
                                 // historical images. Observe every affected ID
                                 // broadly, even if it leaves the predicate or
                                 // its statement is subsequently rolled back.
-                                self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
+                                self.note_query_read(
+                                    &mut observed,
+                                    ElementId::Vertex(vid),
+                                    control,
+                                )?;
                             }
                             apply_vertex(&mut vertices, effect, None, control)?;
                         }

@@ -25,32 +25,41 @@ fn open<'q>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
     max_input_rows: u64,
-) -> core::result::Result<
-    (Vec<String>, impl SpoolInput + 'q + use<'q>, ScanSortTail),
-    QueryError,
-> {
+) -> core::result::Result<(Vec<String>, impl SpoolInput + 'q + use<'q>, ScanSortTail), QueryError> {
     let (query, as_of) = match prepared {
         PreparedNativeRead::Pattern(template) => (
-            template.bind_parameters(params).map_err(QueryError::PatternText)?,
+            template
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?,
             view.frontier(),
         ),
         PreparedNativeRead::TemporalPattern(template) => {
-            let bound = template.bind_parameters(params).map_err(QueryError::TemporalText)?;
+            let bound = template
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
             (bound.pattern().clone(), bound.as_of())
         }
-        _ => return Err(QueryError::StreamingUnsupported { facade: prepared.facade_class() }),
+        _ => {
+            return Err(QueryError::StreamingUnsupported {
+                facade: prepared.facade_class(),
+            });
+        }
     };
     // Exact-cut admission precedes physical compilation, as for ordinary scans.
     // This clones only the existing immutable source pin, never candidate rows.
-    let source = view.vertex_scan_source(cx, as_of)
+    let source = view
+        .vertex_scan_source(cx, as_of)
         .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))?;
     let (plan, tail) = VertexScanPlan::compile_sort_input(query.plan())
         .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
     cx.with_restriction(|| cx.checkpoint())
         .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
-    let cursor = VertexScanCursor::new(source, plan, input_policy(policy, max_input_rows), move || {
-        cx.with_restriction(|| cx.checkpoint())
-    });
+    let cursor = VertexScanCursor::new(
+        source,
+        plan,
+        input_policy(policy, max_input_rows),
+        move || cx.with_restriction(|| cx.checkpoint()),
+    );
     Ok((query.columns().to_vec(), cursor, tail))
 }
 
@@ -117,13 +126,28 @@ impl PreparedNativeRead {
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
     {
-        let opened = database.read_session()
+        let opened = database
+            .read_session()
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))
             .and_then(|view| open(self, &view, cx, params, policy, max_input_rows));
         async move {
-            let (columns, cursor, tail) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(cx, columns, cursor, tail, policy, scratch, destination, run_rows,
-                max_runs, page_bytes, max_row_bytes, max_sort_work).await
+            let (columns, cursor, tail) =
+                opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
+            evaluate(
+                cx,
+                columns,
+                cursor,
+                tail,
+                policy,
+                scratch,
+                destination,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_sort_work,
+            )
+            .await
         }
     }
 
@@ -151,9 +175,23 @@ impl PreparedNativeRead {
     {
         let opened = open(self, view, cx, params, policy, max_input_rows);
         async move {
-            let (columns, cursor, tail) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(cx, columns, cursor, tail, policy, scratch, destination, run_rows,
-                max_runs, page_bytes, max_row_bytes, max_sort_work).await
+            let (columns, cursor, tail) =
+                opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
+            evaluate(
+                cx,
+                columns,
+                cursor,
+                tail,
+                policy,
+                scratch,
+                destination,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_sort_work,
+            )
+            .await
         }
     }
 }
@@ -178,22 +216,52 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
-    cx.with_restriction(|| cx.checkpoint()).map_err(SpillError::Interrupted)?;
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(SpillError::Interrupted)?;
     validate_order(tail.order(), columns.len())?;
     if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
         return Err(SpillError::InvalidLimits.into());
     }
     if max_runs == 0 {
-        return Err(NativeSpoolError::SortRunLimit { required: 1, limit: 0 });
+        return Err(NativeSpoolError::SortRunLimit {
+            required: 1,
+            limit: 0,
+        });
     }
     if max_sort_work == 0 {
-        return Err(NativeSpoolError::SortWorkLimit { attempted: 1, limit: 0 });
+        return Err(NativeSpoolError::SortWorkLimit {
+            attempted: 1,
+            limit: 0,
+        });
     }
     let input = drain(cx, columns, cursor, destination, page_bytes, max_row_bytes).await?;
-    let (sorted, used) = input.sort_into(cx, destination, scratch, tail.order(), run_rows,
-        max_runs, page_bytes, max_sort_work).await?;
-    let mut work = Work { cx, used, limit: max_sort_work };
-    let result = window(&sorted, scratch, destination, &tail, policy.rows, page_bytes, &mut work).await?;
+    let (sorted, used) = input
+        .sort_into(
+            cx,
+            destination,
+            scratch,
+            tail.order(),
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_sort_work,
+        )
+        .await?;
+    let mut work = Work {
+        cx,
+        used,
+        limit: max_sort_work,
+    };
+    let result = window(
+        &sorted,
+        scratch,
+        destination,
+        &tail,
+        policy.rows,
+        page_bytes,
+        &mut work,
+    )
+    .await?;
     Ok((result, work.used))
 }
 
@@ -230,7 +298,8 @@ where
             skip -= 1;
         } else if tail.count().is_none_or(|count| selected < count) {
             let next = selected.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            budget.check(GqlBudgetDimension::ResultRows, next)
+            budget
+                .check(GqlBudgetDimension::ResultRows, next)
                 .map_err(|e| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(e))))?;
             write_row(&mut writer, row.as_ref(), work).await?;
             largest = largest.max(row.len());
@@ -255,7 +324,10 @@ where
         columns: Arc::clone(&sorted.columns),
         snapshot: sorted.snapshot,
         kind: sorted.kind,
-        rows: GqlExecutionStats { snapshot_records: sorted.rows.snapshot_records, result_rows: selected },
+        rows: GqlExecutionStats {
+            snapshot_records: sorted.rows.snapshot_records,
+            result_rows: selected,
+        },
         evaluator: sorted.evaluator,
         max_row_bytes: largest,
         run,

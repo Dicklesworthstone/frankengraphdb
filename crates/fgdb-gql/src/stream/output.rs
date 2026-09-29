@@ -41,13 +41,15 @@ impl super::VertexScanPlan<GraphValueRow> {
             let GlaOperator::ProjectValues { columns } = projection else {
                 return false;
             };
-            matches!(order, GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. })
-                && columns.iter().all(|column| match column {
-                    ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
-                        slot.ordinal() == 0
-                    }
-                    _ => false,
-                })
+            matches!(
+                order,
+                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. }
+            ) && columns.iter().all(|column| match column {
+                ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                    slot.ordinal() == 0
+                }
+                _ => false,
+            })
         })?;
         input.offset = 0;
         input.count = None;

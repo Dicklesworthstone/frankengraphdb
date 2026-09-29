@@ -19,8 +19,11 @@ impl VertexScanRead {
         logical: &fgdb_gql::algebra::GlaPlan<Row>,
     ) -> Option<&[fgdb_gql::algebra::VertexPredicate]> {
         use fgdb_gql::algebra::GlaOperator;
-        let [GlaOperator::ScanVertices, GlaOperator::Select { slot, predicates }, tail @ ..] =
-            logical.operators()
+        let [
+            GlaOperator::ScanVertices,
+            GlaOperator::Select { slot, predicates },
+            tail @ ..,
+        ] = logical.operators()
         else {
             return None;
         };
@@ -29,9 +32,7 @@ impl VertexScanRead {
         }
         let terminal = tail.iter().all(|operator| match operator {
             GlaOperator::Project { slot } => slot.ordinal() == 0,
-            GlaOperator::ProjectBindings { slots } => {
-                slots.iter().all(|slot| slot.ordinal() == 0)
-            }
+            GlaOperator::ProjectBindings { slots } => slots.iter().all(|slot| slot.ordinal() == 0),
             GlaOperator::ProjectValues { .. }
             | GlaOperator::Distinct
             | GlaOperator::OrderByVertexId
@@ -68,9 +69,7 @@ impl VertexScanRead {
         for predicate in &self.predicates {
             checkpoint()?;
             let relevant = match row {
-                DeltaRow::Property { property, .. } => {
-                    predicate.property_key() == Some(*property)
-                }
+                DeltaRow::Property { property, .. } => predicate.property_key() == Some(*property),
                 DeltaRow::LabelMembership { label, .. } => {
                     matches!(predicate, VertexPredicate::HasLabel(required) if required == label)
                 }
@@ -118,10 +117,7 @@ impl VertexScanRead {
 }
 
 impl PointReads {
-    fn begin_vertex_scan(
-        &mut self,
-        predicates: &[fgdb_gql::algebra::VertexPredicate],
-    ) -> usize {
+    fn begin_vertex_scan(&mut self, predicates: &[fgdb_gql::algebra::VertexPredicate]) -> usize {
         let index = self.2.len();
         self.2.push(VertexScanRead {
             predicates: predicates.to_vec(),

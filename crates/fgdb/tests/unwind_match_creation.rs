@@ -21,7 +21,11 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xc4; 32], DatabaseSecurityNamespaceId([0xc5; 32]), [0xc6; 32])
+    DatabaseKeys::new(
+        [0xc4; 32],
+        DatabaseSecurityNamespaceId([0xc5; 32]),
+        [0xc6; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -71,7 +75,10 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
         );
         let (stats, _) = db
             .execute_graph_write_program_autocommit_engine_governed(
-                &txcx, &cx, &commit, &plan,
+                &txcx,
+                &cx,
+                &commit,
+                &plan,
                 GraphWriteProgramPolicy::new(policy(), 1_000, 8, 5),
             )
             .await
@@ -82,21 +89,33 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
         assert_eq!(db.vertices().unwrap().len(), 8);
         assert_eq!(db.edges().unwrap().len(), 5);
         for (edge, source, destination, key) in [
-            (1, 2, 4, 2), (2, 3, 5, 2), (3, 1, 6, 1), (4, 2, 7, 2), (5, 3, 8, 2),
+            (1, 2, 4, 2),
+            (2, 3, 5, 2),
+            (3, 1, 6, 1),
+            (4, 2, 7, 2),
+            (5, 3, 8, 2),
         ] {
             let stored = db.edge(EId(edge)).unwrap().unwrap();
-            assert_eq!((stored.entry.src, stored.entry.dst), (VId(source), VId(destination)));
+            assert_eq!(
+                (stored.entry.src, stored.entry.dst),
+                (VId(source), VId(destination))
+            );
             assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(key + 10))]);
-            assert_eq!(db.vertex(VId(destination)).unwrap().unwrap().props, vec![
-                (P, CanonicalScalar::Int(key + 100)),
-                (Q, CanonicalScalar::Int((key + 100) * 2)),
-            ]);
+            assert_eq!(
+                db.vertex(VId(destination)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(key + 100)),
+                    (Q, CanonicalScalar::Int((key + 100) * 2)),
+                ]
+            );
         }
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         db.compact(&commit).await.unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.frontier().unwrap().0, before.0 + 1);
         assert_eq!(reopened.vertices().unwrap(), vertices);
         assert_eq!(reopened.edges().unwrap(), edges);
@@ -109,7 +128,9 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
 fn a_late_script_failure_preserves_only_the_outer_transaction_prefix() {
     let ((), report) = run_async_under_lab(0xb01c_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         let before = db.frontier().unwrap();
         let mut txn = db.begin(&contexts.txn()).unwrap();
         let mut prefix = WriteBatch::new(R);
@@ -122,10 +143,15 @@ fn a_late_script_failure_preserves_only_the_outer_transaction_prefix() {
              MATCH (c:Copy) SET c.q=1/0",
             &GqlParameters::new(),
         );
-        assert!(txn.execute_graph_write_program_engine_governed(
-            &mut db, &contexts.query(), &plan,
-            GraphWriteProgramPolicy::new(policy(), 1_000, 1_000, 1_000),
-        ).is_err());
+        assert!(
+            txn.execute_graph_write_program_engine_governed(
+                &mut db,
+                &contexts.query(),
+                &plan,
+                GraphWriteProgramPolicy::new(policy(), 1_000, 1_000, 1_000),
+            )
+            .is_err()
+        );
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
         assert!(txn.vertex(&db, VId(10)).unwrap().is_some());
         assert!(db.vertices().unwrap().is_empty());
@@ -144,7 +170,9 @@ fn a_late_script_failure_preserves_only_the_outer_transaction_prefix() {
 fn returning_imports_keep_matched_and_created_endpoint_functions_in_their_slots() {
     let ((), report) = run_async_under_lab(0xb01c_0003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![SOURCE], vec![(P, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(2), vec![SOURCE], vec![(P, CanonicalScalar::Int(2))]);
@@ -157,18 +185,35 @@ fn returning_imports_keep_matched_and_created_endpoint_functions_in_their_slots(
              RETURN wanted,startNode(r) AS old_start,endNode(r) AS old_end,
                     startNode(e) AS new_start,endNode(e) AS new_end,c.p AS value
              ORDER BY new_start",
-            R, symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
-        let (stats, rows, _) = db.execute_graph_insert_query_autocommit_engine_governed(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &query,
-            GraphInsertPolicy::new(policy(), 2, 2),
-        ).await.unwrap();
-        let expected: Vec<_> = [3, 4].into_iter().map(|created| {
-            GraphValueRow::from_owned_values(vec![
-                int(1), GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2)),
-                GraphValue::Vertex(VId(created)), GraphValue::Vertex(VId(1)), int(3),
-            ])
-        }).collect();
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let (stats, rows, _) = db
+            .execute_graph_insert_query_autocommit_engine_governed(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &query,
+                GraphInsertPolicy::new(policy(), 2, 2),
+            )
+            .await
+            .unwrap();
+        let expected: Vec<_> = [3, 4]
+            .into_iter()
+            .map(|created| {
+                GraphValueRow::from_owned_values(vec![
+                    int(1),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                    GraphValue::Vertex(VId(created)),
+                    GraphValue::Vertex(VId(1)),
+                    int(3),
+                ])
+            })
+            .collect();
         assert_eq!(rows.value, expected);
         assert_eq!((stats.created_vertices, stats.created_edges), (2, 2));
         for (edge, created) in [(11, 3), (12, 4)] {
@@ -185,7 +230,9 @@ fn returning_imports_keep_matched_and_created_endpoint_functions_in_their_slots(
 fn invalid_import_values_and_creation_caps_refuse_before_requesting_an_identity() {
     let ((), report) = run_async_under_lab(0xb01c_0004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![SOURCE], vec![(P, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(2), vec![SOURCE], vec![(P, CanonicalScalar::Int(2))]);
@@ -194,23 +241,35 @@ fn invalid_import_values_and_creation_caps_refuse_before_requesting_an_identity(
         let mut txn = db.begin(&contexts.txn()).unwrap();
         let digest = txn.staged_effect_digest().unwrap();
         for (text, cap) in [
-            ("UNWIND [1,0] AS x MATCH (a:Source) CREATE (:Copy {p:10/x})", 10),
+            (
+                "UNWIND [1,0] AS x MATCH (a:Source) CREATE (:Copy {p:10/x})",
+                10,
+            ),
             ("UNWIND [1,1] AS x MATCH (a:Source) CREATE (:Copy {p:x})", 3),
-            ("UNWIND [1,[2]] AS x MATCH (a:Source) CREATE (:Copy {p:x})", 10),
+            (
+                "UNWIND [1,[2]] AS x MATCH (a:Source) CREATE (:Copy {p:x})",
+                10,
+            ),
         ] {
             let insertion = PreparedGraphInsertText::prepare(text, R, symbols)
-                .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
             let calls = AtomicUsize::new(0);
             let result = txn.execute_graph_insert_governed(
-                &mut db, &contexts.query(), &insertion,
+                &mut db,
+                &contexts.query(),
+                &insertion,
                 GraphInsertPolicy::new(policy(), cap, 10),
                 |request| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, ()>(match request {
-                        GraphInsertRequest::Vertex { row, vertex } =>
-                            ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128)),
-                        GraphInsertRequest::Edge { row, edge } =>
-                            ElementId::Edge(EId(100 + row as u128 * 10 + edge as u128)),
+                        GraphInsertRequest::Vertex { row, vertex } => {
+                            ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128))
+                        }
+                        GraphInsertRequest::Edge { row, edge } => {
+                            ElementId::Edge(EId(100 + row as u128 * 10 + edge as u128))
+                        }
                     })
                 },
             );
@@ -239,7 +298,8 @@ fn invalid_imported_script_scopes_refuse_before_any_statement_catalog_resolution
         let error = PreparedGraphWriteScript::prepare(&text, R, |kind, name| {
             calls.fetch_add(1, Ordering::SeqCst);
             symbols(kind, name)
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error.statement, Some(1), "{tail}");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{tail}");
     }

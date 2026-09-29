@@ -408,6 +408,10 @@ fn matched_metadata_and_path_argument_errors_precede_catalog_resolution() {
             symbols(kind, name)
         });
         assert!(result.is_err(), "unexpectedly accepted {text}");
-        assert_eq!(calls.get(), 0, "catalog reached for invalid function: {text}");
+        assert_eq!(
+            calls.get(),
+            0,
+            "catalog reached for invalid function: {text}"
+        );
     }
 }

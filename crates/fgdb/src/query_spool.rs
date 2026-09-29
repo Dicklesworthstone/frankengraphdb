@@ -237,7 +237,9 @@ impl PreparedNativeRead {
 // Type-only adapters for the SAME native cursors. The writer/framing loop is
 // shared by ordered result streams and private blocking-operator input.
 trait SpoolInput {
-    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>>;
+    fn pull(
+        &mut self,
+    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>>;
     fn spool_state(&self) -> ScanState;
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats);
 }
@@ -249,14 +251,21 @@ where
     VF: FnMut() -> Result<(), Cancel>,
     EF: FnMut() -> Result<(), Cancel>,
 {
-    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
+    fn pull(
+        &mut self,
+    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
         self.next()
     }
     fn spool_state(&self) -> ScanState {
         self.state()
     }
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
-        (self.snapshot_seq(), self.kind(), self.row_stats(), self.evaluator_stats())
+        (
+            self.snapshot_seq(),
+            self.kind(),
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
     }
 }
 
@@ -265,14 +274,22 @@ where
     S: VertexScanSource<Error = ReadError>,
     C: FnMut() -> Result<(), Cancel>,
 {
-    fn pull(&mut self) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
-        self.next().map(|row| row.map_err(|error| error.map_source(ScanError::Vertex)))
+    fn pull(
+        &mut self,
+    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
+        self.next()
+            .map(|row| row.map_err(|error| error.map_source(ScanError::Vertex)))
     }
     fn spool_state(&self) -> ScanState {
         self.state()
     }
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
-        (self.snapshot_seq(), ScanKind::Vertex, self.row_stats(), self.evaluator_stats())
+        (
+            self.snapshot_seq(),
+            ScanKind::Vertex,
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
     }
 }
 
