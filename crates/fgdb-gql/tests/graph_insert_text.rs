@@ -881,7 +881,8 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         "UNWIND [1] AS x CREATE (:Copy {p:x.name})",
         "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
         "UNWIND $items AS x CREATE (:Copy {p:$items})",
-        "UNWIND [1] AS x MATCH (n) CREATE (:Copy {p:x})",
+        // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its
+        // positive laws are in graph_insert_query_text.rs.
         "UNWIND [1] AS x CREATE (n:Copy {p:x}) RETURN n",
         "UNWIND [1] AS x MERGE (:Copy {p:x})",
     ] {

@@ -495,7 +495,8 @@ fn unwind_insert_scripts_preserve_native_dispatch_parameters_and_literal_keyword
     for bad in [
         "UNWIND [1] AS x RETURN x",
         "UNWIND [1] AS x MERGE (:Person {p:x})",
-        "UNWIND [1] AS x MATCH (n) CREATE (:Person {p:x})",
+        // `UNWIND ... MATCH ... CREATE` scripts run since ad1d948a; its
+        // positive laws are in crates/fgdb/tests/unwind_match_creation.rs.
     ] {
         let calls = Cell::new(0);
         assert!(
