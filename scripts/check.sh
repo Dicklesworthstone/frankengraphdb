@@ -1453,10 +1453,31 @@ run_ubs() {
 # tree reads 827. Anchored scans against d2afc90d attribute the +20, all test
 # code: insertion/relational_tests.rs +10 (bfaff477), tests/graph_insert_text.rs
 # +6 and tests/write_script_execution.rs +4 (5765cc1b).
+# fgdb-jqf28 re-pin (2026-09-28, UBS v5.4.9, regex mode, 1,723 tracked files):
+# main read 872 at e4af4dd4. The 229 .rs files changed since the 4040d93a pin,
+# scanned jointly, read 112 there and 157 at e4af4dd4: 827 - 112 + 157 = 872
+# exactly, so the tree moved, not the tool. Anchored per-file attribution sums
+# to +45, every site in a test file or a cfg(test) module:
+# - fgdb-gql: tests/graph_insert_match_safety.rs +6 (0359d73b),
+#   tests/graph_insert_return_endpoints.rs +5 (0359d73b, 3de3bafa),
+#   insertion_query/tests.rs +5 and tests/graph_insert_query_text.rs +3
+#   (ca046040), captured_tests.rs +1 (d64e0b30), property_tests.rs +1
+#   (14ef6f19);
+# - fgdb cfg(test) modules: query.rs +4 (3a9861a3), historical_programs.rs +3
+#   (f43e2eda), historical_staging.rs +2 (17537229), historical_scripts.rs +1
+#   (409c1b3f), lib.rs +1 (b7b3236d: the root-capacity law's generator guard,
+#   landed without this re-pin);
+# - fgdb test files: edge_property_tests.rs +4 (493a5383),
+#   tests/create_returning.rs +3 (247bf931), at_basis_tests.rs +1 (35d0acb9),
+#   shortest_admission_tests.rs +1 (881282a0), native_order_tests.rs +1
+#   (a8c0b10b);
+# - fgdb-strata spill/paged/tests.rs +2 (c95261fe); fgdb-cli
+#   transaction/returning_tests.rs +1 (a4b455e4).
+# Secret/token comparisons and Command::new are unchanged at 16 and 1.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=827"
+  "panic!/unreachable!/todo!/unimplemented!=872"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1475,7 +1496,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=827"
+  "panic!/unreachable!/todo!/unimplemented!=872"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
