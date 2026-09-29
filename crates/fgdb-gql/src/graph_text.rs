@@ -1121,7 +1121,10 @@ impl<'a> Parser<'a> {
             Ok(GraphPathFunction::Length)
         } else if name.text.eq_ignore_ascii_case("nodes") {
             Ok(GraphPathFunction::Nodes)
-        } else if name.text.eq_ignore_ascii_case("edges") {
+        } else if name.text.eq_ignore_ascii_case("edges")
+            // openCypher's spelling of the same list (fgdb-2277w laws use it).
+            || name.text.eq_ignore_ascii_case("relationships")
+        {
             Ok(GraphPathFunction::Edges)
         } else if name.text.eq_ignore_ascii_case("labels") {
             Ok(GraphPathFunction::Labels)
