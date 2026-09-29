@@ -2,6 +2,8 @@
 //! No text rewriting, identity-prefix injection, eager fallback or new evaluator.
 
 use super::*;
+use fgdb_gql::algebra::GlaOperator;
+use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanError, EdgeScanPlan};
 use fgdb_gql::scan_stream::ScanSortTail;
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
 use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
@@ -47,36 +49,68 @@ fn open<'q>(
     };
     // Exact-cut admission precedes physical compilation, as for ordinary scans.
     // This clones only the existing immutable source pin, never candidate rows.
-    let source = view
-        .vertex_scan_source(cx, as_of)
-        .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))?;
-    let (plan, tail) = VertexScanPlan::compile_sort_input(query.plan())
-        .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
-    cx.with_restriction(|| cx.checkpoint())
-        .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
-    let cursor = VertexScanCursor::new(
-        source,
-        plan,
-        input_policy(policy, max_input_rows),
-        move || cx.with_restriction(|| cx.checkpoint()),
-    );
+    // Select once from the bound root, never by retrying a failed source or
+    // compiler. Both variants retain their own errors, counters and one pin.
+    let (cursor, tail) = if matches!(
+        query.plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        let source = view
+            .edge_scan_source(cx, as_of)
+            .map_err(|e| QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Source(e))))?;
+        let (plan, tail) = EdgeScanPlan::compile_sort_input(query.plan())
+            .map_err(|e| QueryError::EdgeStream(GqlQueryError::Source(EdgeScanError::Plan(e))))?;
+        cx.with_restriction(|| cx.checkpoint())
+            .map_err(|e| QueryError::EdgeStream(GqlQueryError::Interrupted(e)))?;
+        (
+            ScanCursor::Edge(EdgeScanCursor::new(
+                source,
+                plan,
+                input_policy(policy, max_input_rows),
+                move || cx.with_restriction(|| cx.checkpoint()),
+            )),
+            tail,
+        )
+    } else {
+        let source = view
+            .vertex_scan_source(cx, as_of)
+            .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))?;
+        let (plan, tail) = VertexScanPlan::compile_sort_input(query.plan())
+            .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
+        cx.with_restriction(|| cx.checkpoint())
+            .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
+        (
+            ScanCursor::Vertex(VertexScanCursor::new(
+                source,
+                plan,
+                input_policy(policy, max_input_rows),
+                move || cx.with_restriction(|| cx.checkpoint()),
+            )),
+            tail,
+        )
+    };
     Ok((query.columns().to_vec(), cursor, tail))
 }
 
 impl PreparedNativeRead {
-    /// Execute a single-vertex native query with external ORDER BY, THEN SKIP/LIMIT.
+    /// Execute a native scan or fixed-edge join with external ORDER BY, THEN SKIP/LIMIT.
     ///
     /// Unlike spool_sorted's caller-supplied post-selection order, this compiles
     /// the query's OWN terminal clauses from its bound GLA. Property-only and
     /// property-first projections, explicit direction/null placement, implicit
     /// canonical whole-row ordering, predicates and supported EXISTS probes use
-    /// the ordinary vertex collector and source. No synthetic identity column
+    /// the ordinary collectors and pinned sources. No synthetic identity column
     /// changes DISTINCT, ties or the public schema. DISTINCT compares complete
     /// canonical rows after sorting and BEFORE pagination; it retains only the
     /// previous unique frame, not an input-sized seen-set. Equal ORDER BY keys
-    /// alone never collapse rows. The current profile refuses
-    /// edge-rooted/relational/aggregate plans, hidden sort columns and
-    /// every operator the vertex compiler cannot execute. There is no fallback.
+    /// alone never collapse rows. Edge-rooted fixed-hop chains, branches and
+    /// identity closures retain the native indexed join traversal, edge/path
+    /// values and property predicates. Parallel edges and both undirected
+    /// orientations remain distinct input occurrences; only explicit DISTINCT
+    /// can collapse equal complete output rows. Traversal state is proportional
+    /// to the admitted fixed hop count, not the number of matches.
+    /// Relational/aggregate plans, optional/variable-length joins, hidden sort
+    /// columns and unsupported physical instructions refuse. There is no fallback.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
     /// future borrows ONLY cx and the two scratch files; writer/template/params

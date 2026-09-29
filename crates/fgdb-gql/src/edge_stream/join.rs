@@ -29,21 +29,59 @@ pub(super) struct JoinPlan {
     emit_rows: bool,
 }
 
+// Keep occurrence delivery separate from the proof that source traversal is
+// already in final result order. Sort input needs a row allowance but cannot
+// drop duplicates or apply the query window before its blocking consumer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    OrderedRows,
+    AggregateInput,
+    SortInput,
+}
+
 // Private GLA construction is still the logical authority. Audit every operand
 // here before accepting a physical execution profile, including LIMIT zero.
 pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, EdgeScanBuildError> {
-    compile_output(plan, true)
+    compile_output(plan, Output::OrderedRows)
 }
 
 pub(super) fn compile_aggregate(
     plan: &GlaPlan<GraphValueRow>,
 ) -> Result<EdgeScanPlan, EdgeScanBuildError> {
-    compile_output(plan, false)
+    compile_output(plan, Output::AggregateInput)
+}
+
+impl EdgeScanPlan {
+    /// Compile fixed-edge matches as input to a blocking external ORDER BY.
+    ///
+    /// Reuse the complete indexed join compiler, including the single-edge
+    /// case, its native predicates, captures, probes and value projections.
+    /// Every source instruction is checked; only the leading-identity order
+    /// proof is relaxed. No synthetic identity column changes row equality.
+    ///
+    /// The returned cursor yields ALL matching occurrences in traversal order,
+    /// including parallel edges and undirected orientations. ResultRows counts
+    /// these intermediate occurrences and must receive an explicit input cap.
+    /// The consumer must sort, apply complete-row DISTINCT when requested,
+    /// then SKIP/LIMIT under its final output allowance. Even LIMIT 0 does not
+    /// make the input empty or suppress a later source/data error.
+    ///
+    /// Ordinary ordered streams and aggregate compilation retain their own
+    /// eligibility rules. Optional/variable-length joins, hidden sort columns,
+    /// catalog-name projections and unsupported instructions still refuse.
+    pub fn compile_sort_input(
+        plan: &GlaPlan<GraphValueRow>,
+    ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
+        let tail = crate::scan_stream::ScanSortTail::compile(plan)
+            .map_err(|operator| EdgeScanBuildError { operator })?;
+        let input = compile_output(plan, Output::SortInput)?;
+        Ok((input, tail))
+    }
 }
 
 fn compile_output(
     plan: &GlaPlan<GraphValueRow>,
-    emit_rows: bool,
+    output: Output,
 ) -> Result<EdgeScanPlan, EdgeScanBuildError> {
     let ops = plan.operators();
     let Some(GlaOperator::ScanEdges {
@@ -147,7 +185,7 @@ fn compile_output(
                     matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
                         if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
                 };
-                if emit_rows
+                if output == Output::OrderedRows
                     && (!edge_column(columns.first(), 0)
                         || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
                         || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step)))
@@ -194,19 +232,24 @@ fn compile_output(
     if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
         // A numeric reducer consumes occurrences, not projected support.
         // Its private unordered input cannot implement DISTINCT by omission.
-        if !emit_rows {
+        if output == Output::AggregateInput {
             return Err(EdgeScanBuildError { operator: at });
         }
         at += 1;
     }
-    if plan.visible_columns.is_some() || !matches!(ops.get(at), Some(GlaOperator::OrderByValues)) {
+    let ordering_supported = match ops.get(at) {
+        Some(GlaOperator::OrderByValues) => true,
+        Some(GlaOperator::OrderByValueColumns { .. }) => output == Output::SortInput,
+        _ => false,
+    };
+    if plan.visible_columns.is_some() || !ordering_supported {
         return Err(EdgeScanBuildError { operator: at });
     }
     at += 1;
     let Some(GlaOperator::Limit { offset, count }) = ops.get(at) else {
         return Err(EdgeScanBuildError { operator: at });
     };
-    if !emit_rows && (*offset != 0 || count.is_some()) {
+    if output == Output::AggregateInput && (*offset != 0 || count.is_some()) {
         return Err(EdgeScanBuildError { operator: at });
     }
     if at + 1 != ops.len() {
@@ -217,12 +260,12 @@ fn compile_output(
         direction: *direction,
         instructions: Arc::from([]),
         projection,
-        offset: *offset,
-        count: *count,
+        offset: if output == Output::SortInput { 0 } else { *offset },
+        count: if output == Output::SortInput { None } else { *count },
         joined: Some(Arc::new(JoinPlan {
             expansions,
             stages,
-            emit_rows,
+            emit_rows: output != Output::AggregateInput,
         })),
     })
 }

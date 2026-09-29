@@ -416,7 +416,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
         let pool = MemoryPool::new(32_768, 0).unwrap();
         for text in [
             "MATCH (n:L) RETURN count(*) AS count LIMIT 0",
-            "MATCH (a)-[e:R]->(b) RETURN e AS edge, a AS source LIMIT 0",
+            "MATCH (a)-[e:R]->(b) RETURN count(*) AS count LIMIT 0",
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
@@ -897,3 +897,6 @@ fn duplicate_frame_equality_checks_every_byte_and_propagates_every_control_cut()
     }
     assert!(equal_frame(&left, &left, &mut |_| Ok(())).unwrap());
 }
+
+#[path = "native_edge_order_tests.rs"]
+mod edge_tests;
