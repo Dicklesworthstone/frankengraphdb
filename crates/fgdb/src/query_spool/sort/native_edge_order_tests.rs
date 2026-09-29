@@ -479,7 +479,9 @@ fn unsupported_edge_instructions_remain_ineligible_even_with_zero_limits() {
         let db = multigraph(&c.commit()).await;
         let pool = MemoryPool::new(32_768, 0).unwrap();
         for text in [
-            "MATCH (a)-[e:R]->(b) OPTIONAL MATCH (b)-[f:R]->(c) RETURN e AS edge, a AS source LIMIT 0",
+            // An edge variable inside OPTIONAL MATCH refuses at preparation
+            // (InvalidPathCapture), so the OPTIONAL edge here is anonymous.
+            "MATCH (a)-[e:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN e AS edge, a AS source LIMIT 0",
             "MATCH (a)-[:R*1..2]->(b) RETURN b AS target LIMIT 0",
             "MATCH (a)-[e:R]->(b) RETURN type(e) AS kind LIMIT 0",
         ] {
