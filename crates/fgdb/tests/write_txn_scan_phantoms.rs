@@ -3,9 +3,9 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch, WriteError, WriteTxnError};
-use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlExecutionBudget;
-use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -173,6 +173,113 @@ fn point_reads_and_edge_scans_do_not_become_global_commit_fences() {
             db.write(&cx, winner).await.expect("unrelated vertex only");
             txn.commit(&mut db, &cx).await.expect("disjoint commit");
             assert!(db.vertex(VId(99)).expect("committed output").is_some());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-h1d6l. A labelled scan binds only vertices carrying its label, so a
+/// concurrent change to an existing vertex outside the label changes nothing
+/// it read. Surface 3 is a labelled root with a correlated OPTIONAL, which
+/// takes the non-precise scan: before, it recorded every scanned vertex
+/// beside its label witness and aborted on the outsider. Surfaces 0-2 take the
+/// precise single-vertex scan and are the control. On every surface, the same
+/// change to a matched vertex, or a membership that brings the outsider into
+/// the label, still aborts.
+#[test]
+fn labelled_scans_ignore_changes_to_existing_vertices_outside_the_label() {
+    let ((), report) = run_async_under_lab(0x5ca0_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txn_cx = contexts.txn();
+        let query_cx = contexts.query();
+        let bind = RelationBind::new().with_label("L", LabelId(1));
+        let key = PropertyKeyId(7);
+        let optional = fgdb_gql::PreparedGraphText::prepare(
+            "MATCH (a:L) OPTIONAL MATCH (a)-[:R]->(b) RETURN a",
+            |kind, name| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Label, "L") => {
+                    Some(fgdb_gql::GraphSymbol::Label(LabelId(1)))
+                }
+                (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                    Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+                }
+                _ => None,
+            },
+        )
+        .expect("prepare")
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .expect("bind");
+        for surface in 0..4 {
+            for change in 0..4 {
+                let mut db = Database::open_memory(&cx, keys()).await.expect("database");
+                let mut seed = WriteBatch::new(RelationId(1));
+                seed.create_vertex(VId(1), vec![LabelId(1)], vec![]);
+                seed.create_vertex(VId(2), vec![LabelId(2)], vec![]);
+                db.write(&cx, seed).await.expect("seed");
+                let mut txn = db.begin(&txn_cx).expect("begin");
+                let query = txn
+                    .prepare_gql_query("MATCH (a:L) RETURN a", &bind)
+                    .expect("prepare");
+                let rows = match surface {
+                    0 => txn
+                        .execute_gql(&db, "MATCH (a:L) RETURN a", &bind)
+                        .expect("ordinary scan"),
+                    1 => txn
+                        .execute_prepared_query(&db, &query)
+                        .expect("prepared scan"),
+                    2 => {
+                        txn.execute_prepared_query_limited(
+                            &db,
+                            &query,
+                            fgdb_gql::GlaExecutionLimits::new(100, 100),
+                        )
+                        .expect("limited scan")
+                        .value
+                    }
+                    _ => txn
+                        .execute_graph_pattern_governed(
+                            &db,
+                            &query_cx,
+                            &optional,
+                            fgdb_gql::GqlQueryPolicy::new(100, 100, 1_000_000, 100_000),
+                        )
+                        .expect("governed OPTIONAL scan")
+                        .value
+                        .iter()
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                        .collect(),
+                };
+                assert_eq!(rows, vec![VId(1)]);
+                let mut staged = WriteBatch::new(RelationId(1));
+                staged.create_vertex(VId(99), vec![], vec![]);
+                txn.write(&mut db, staged).expect("stage");
+                let mut winner = WriteBatch::new(RelationId(1));
+                match change {
+                    0 => {
+                        winner.set_vertex_property(VId(2), key, Some(CanonicalScalar::Int(1)));
+                    }
+                    1 => {
+                        winner.delete_vertex(VId(2));
+                    }
+                    2 => {
+                        winner.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(1)));
+                    }
+                    _ => {
+                        winner.set_vertex_label(VId(2), LabelId(1), true);
+                    }
+                }
+                db.write(&cx, winner).await.expect("concurrent change");
+                if change < 2 {
+                    let committed = txn.commit(&mut db, &cx).await;
+                    assert!(
+                        committed.is_ok(),
+                        "surface {surface} change {change}: false conflict {committed:?}"
+                    );
+                } else {
+                    assert_read_conflict(txn.commit(&mut db, &cx).await);
+                }
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

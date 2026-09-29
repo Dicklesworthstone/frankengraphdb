@@ -314,6 +314,31 @@ pub enum GlaOperator {
     },
 }
 
+/// The vertices a plan's vertex scans can bind. An edge root or expansion
+/// binds only endpoints of edges in [`GlaPlan::edge_relations`], so the edge
+/// reads witness those vertices, not this domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexScanDomain {
+    /// No vertex scan: every bound vertex is an endpoint of a read edge.
+    Unscanned,
+    /// One root scan whose conjunctive selection requires this label.
+    Label(LabelId),
+    /// Any vertex can be bound.
+    All,
+}
+
+impl VertexScanDomain {
+    /// Whether a vertex carrying `labels` can be bound by a vertex scan.
+    #[must_use]
+    pub fn admits(self, labels: &[LabelId]) -> bool {
+        match self {
+            Self::Unscanned => false,
+            Self::Label(label) => labels.contains(&label),
+            Self::All => true,
+        }
+    }
+}
+
 /// Immutable logical definition with a statically determined output row shape.
 /// Existing language and API calls retain their default `VId` result type.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -597,6 +622,37 @@ impl<Row> GlaPlan<Row> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Which vertices this plan's vertex scans can bind (fgdb-h1d6l). Slot 0
+    /// is always the root, because a nested scope offsets its slots past the
+    /// outer frame, so a label selected on slot 0 filters every row. Any
+    /// other vertex scan (an independent component, or a scope's
+    /// uncorrelated root) can bind any vertex.
+    #[must_use]
+    pub fn vertex_scan_domain(&self) -> VertexScanDomain {
+        let mut scans = self
+            .operators
+            .iter()
+            .enumerate()
+            .filter(|(_, operator)| matches!(operator, GlaOperator::ScanVertices));
+        match (scans.next(), scans.next()) {
+            (None, _) => VertexScanDomain::Unscanned,
+            (Some((0, _)), None) => self
+                .operators
+                .iter()
+                .find_map(|operator| match operator {
+                    GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
+                        predicates.iter().find_map(|predicate| match predicate {
+                            VertexPredicate::HasLabel(label) => Some(*label),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .map_or(VertexScanDomain::All, VertexScanDomain::Label),
+            _ => VertexScanDomain::All,
+        }
     }
 
     /// Captures and edge-unique traversal require actual source EIds. TRAIL

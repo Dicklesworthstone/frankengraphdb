@@ -3,10 +3,11 @@
 
 use super::{Database, EdgeRecord, PendingRow, VertexRow, Vfs, WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
-use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId};
+use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::VertexScanDomain;
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{CanonicalScalar, EId, VId};
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Private statement-lifetime owner. Neither the transaction nor database can
 /// mutate while borrowed rows or the sparse replacements are in use. A missing
@@ -175,15 +176,32 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
     /// A refusal stops before the next output and retains the scan witness.
     /// The caller decides which events are polls versus charged admissions;
     /// authorized callers must NOT bill physical traversal of hidden records.
+    ///
+    /// `domain` is the plan's vertex scan domain. A basis vertex enters the
+    /// read set only if the domain admits its basis or its staged image, and
+    /// the phantom witness matches: the label for a labelled root, nothing
+    /// when no vertex is scanned (the edge reads witness every bound vertex),
+    /// the whole vertex table for `All` (fgdb-h1d6l). Every vertex is still
+    /// visited and offered. `All` is the incumbent's witness exactly.
     pub(crate) fn visit_vertices<'s, E, C>(
         &'s self,
+        domain: VertexScanDomain,
         control: &mut C,
         mut visit: impl FnMut(&'s VertexRow, &mut C) -> Result<(), E>,
     ) -> Result<(), E>
     where
         C: FnMut(SourceEvent) -> Result<(), E>,
     {
-        self.transaction.scanned_vertices.set(true);
+        match domain {
+            VertexScanDomain::All => self.transaction.scanned_vertices.set(true),
+            VertexScanDomain::Label(label) => {
+                self.transaction
+                    .scanned_vertex_labels
+                    .borrow_mut()
+                    .insert(label);
+            }
+            VertexScanDomain::Unscanned => {}
+        }
         let mut replacements = self.vertices.iter().peekable();
         source::visit_vertices(
             &self.database.snapshot.patches,
@@ -191,10 +209,18 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             control,
             |basis, control| {
                 control(SourceEvent::Work)?;
-                self.transaction
-                    .read_set
-                    .borrow_mut()
-                    .insert(ElementId::Vertex(basis.vid));
+                if domain.admits(&basis.labels)
+                    || self
+                        .vertices
+                        .get(&basis.vid)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|staged| domain.admits(&staged.labels))
+                {
+                    self.transaction
+                        .read_set
+                        .borrow_mut()
+                        .insert(ElementId::Vertex(basis.vid));
+                }
                 while replacements
                     .peek()
                     .is_some_and(|(vid, _)| **vid < basis.vid)
@@ -235,8 +261,16 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
     /// None means this owner was deliberately prepared for vertex-only reads.
     /// Callers requiring edges must reject that case rather than using the basis
     /// without its staged changes. Returned properties remain borrowed.
+    ///
+    /// `relations` names every relation the caller's plan reads. Only their
+    /// edges enter the read set, with BOTH endpoints, because a narrowed vertex
+    /// scan no longer records every vertex (fgdb-h1d6l). The phantom witness
+    /// is those relations, not the whole edge table
+    /// (fgdb-whole-edge-read-flag-4qe1z). Every edge is still visited and
+    /// offered. `None` keeps the whole-table witness, edge and source only.
     pub(crate) fn visit_edges<'s, E, C>(
         &'s self,
+        relations: Option<&BTreeSet<RelationId>>,
         control: &mut C,
         mut visit: impl FnMut(
             &'s AdjacencyEntry,
@@ -248,21 +282,39 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         C: FnMut(SourceEvent) -> Result<(), E>,
     {
         let edges = self.edges.as_ref()?;
+        // Records `entry` as read when the plan reads its relation.
+        let observe = |entry: &AdjacencyEntry| {
+            let mut reads = self.transaction.read_set.borrow_mut();
+            match relations {
+                None => {}
+                Some(read) if read.contains(&entry.relation) => {
+                    reads.insert(ElementId::Vertex(entry.dst));
+                }
+                Some(_) => return false,
+            }
+            reads.insert(ElementId::Edge(entry.eid));
+            reads.insert(ElementId::Vertex(entry.src));
+            true
+        };
         Some((|| {
-            self.transaction.scanned_edges.set(true);
+            match relations {
+                None => self.transaction.scanned_edges.set(true),
+                Some(read) => self
+                    .transaction
+                    .scanned_edge_relations
+                    .borrow_mut()
+                    .extend(read.iter().copied()),
+            }
             let mut replacements = edges.iter().peekable();
             let mut emit = |entry: &'s AdjacencyEntry,
                             properties: &'s [(PropertyKeyId, CanonicalScalar)],
                             control: &mut C| {
-                {
-                    let mut reads = self.transaction.read_set.borrow_mut();
-                    reads.insert(ElementId::Edge(entry.eid));
-                    reads.insert(ElementId::Vertex(entry.src));
+                if observe(entry) {
+                    self.transaction
+                        .match_expansions
+                        .borrow_mut()
+                        .insert((entry.src, entry.relation));
                 }
-                self.transaction
-                    .match_expansions
-                    .borrow_mut()
-                    .insert((entry.src, entry.relation));
                 visit(entry, properties, control)
             };
             self.database.snapshot.visit_indexed_edges(
@@ -272,11 +324,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
                     control(SourceEvent::Work)?;
                     // Observe the original source even when the winner is a
                     // tombstone or is replaced before being offered downstream.
-                    {
-                        let mut reads = self.transaction.read_set.borrow_mut();
-                        reads.insert(ElementId::Edge(basis.eid));
-                        reads.insert(ElementId::Vertex(basis.src));
-                    }
+                    observe(basis);
                     while replacements
                         .peek()
                         .is_some_and(|(eid, _)| **eid < basis.eid)

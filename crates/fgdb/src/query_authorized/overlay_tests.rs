@@ -328,6 +328,116 @@ fn sparse_authorized_admission_preserves_all_charged_callbacks_and_native_thresh
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// The edge-rooted query binds no vertex by scan (every vertex it reads is an
+/// endpoint of an `:R` edge); the vertex query's scan is labelled `:L`.
+const EDGE_QUERY: &str = "MATCH (a:L)-[e:R]->(b:L) RETURN e.p";
+const VERTEX_QUERY: &str = "MATCH (a:L) RETURN a.p";
+
+/// Runs one authorized query inside a transaction staging a disjoint write,
+/// lets `concurrent` commit first, then returns the transaction's commit
+/// outcome. The seed has 10 -[:R]-> 20, both `:L`, and an unlabelled `:S`
+/// neighbourhood 30 -[:S]-> 40 that neither query can bind.
+async fn authorized_query_after(
+    contexts: &PurposeContexts,
+    query: &str,
+    concurrent: WriteBatch,
+) -> Result<fgdb_types::CommitSeq, crate::WriteTxnError> {
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let txcx = contexts.txn();
+    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+    let mut batch = WriteBatch::new(R);
+    for (id, labels) in [(10, vec![L]), (20, vec![L]), (30, vec![]), (40, vec![])] {
+        batch.create_vertex(VId(id), labels, vec![(P, CanonicalScalar::Int(id as i64))]);
+    }
+    batch.add_edge(EId(1), VId(10), VId(20), vec![(P, CanonicalScalar::Int(1))]);
+    db.write(&commit, batch).await.unwrap();
+    let mut other = WriteBatch::new(S);
+    other.add_edge(EId(2), VId(30), VId(40), vec![(P, CanonicalScalar::Int(2))]);
+    db.write(&commit, other).await.unwrap();
+    let authority = authority();
+    let token = authority.issue_at(&grant(), 100).unwrap();
+    let verified = authority.verify_at(&token, "main", 100).unwrap();
+    let mut transaction = db.begin(&txcx).unwrap();
+    {
+        let owner = OverlayRows::new(&transaction, &db, true, &mut || Ok(())).unwrap();
+        let rows = db
+            .select_for_authorized_overlay(
+                &cx,
+                &owner,
+                &pattern(query),
+                verified.predicates(),
+                policy(),
+                || Ok(()),
+                || Ok(()),
+                || Ok(()),
+            )
+            .unwrap();
+        let expected = if query == EDGE_QUERY { 1 } else { 2 };
+        assert_eq!(rows.value.len(), expected, "{query}");
+    }
+    let mut staged = WriteBatch::new(R);
+    staged.create_vertex(VId(50), vec![L], vec![]);
+    transaction.write(&mut db, staged).unwrap();
+    let mut writer = db.begin(&txcx).unwrap();
+    writer.write(&mut db, concurrent).unwrap();
+    writer.commit(&mut db, &commit).await.unwrap();
+    transaction.commit(&mut db, &commit).await
+}
+
+/// fgdb-h1d6l. Neither query can bind the unlabelled `:S` neighbourhood, so
+/// a concurrent `:S` edge and a property change on vertex 30 change nothing
+/// either read. Before, the authorized vertex scan recorded every vertex and
+/// the edge scan every edge, and both aborted on vertex 30.
+#[test]
+fn authorized_scans_ignore_writes_they_cannot_bind() {
+    let ((), report) = run_async_under_lab(0xa722, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for query in [EDGE_QUERY, VERTEX_QUERY] {
+            let mut concurrent = WriteBatch::new(S);
+            concurrent.add_edge(EId(3), VId(40), VId(30), vec![]);
+            concurrent.set_vertex_property(VId(30), P, Some(CanonicalScalar::Int(300)));
+            let committed = authorized_query_after(&contexts, query, concurrent).await;
+            assert!(committed.is_ok(), "{query}: false conflict {committed:?}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Soundness guards for the narrowed witnesses, one per way a row can
+/// appear or change: a new `:R` edge (the relation witness), a matched
+/// destination leaving `:L` (its endpoint read), an outsider joining `:L`
+/// (the label witness) and a matched vertex's property (its read).
+#[test]
+fn authorized_scans_still_abort_on_changes_they_can_bind() {
+    let ((), report) = run_async_under_lab(0xa723, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut phantom = WriteBatch::new(R);
+        phantom.add_edge(EId(3), VId(30), VId(40), vec![]);
+        let mut destination = WriteBatch::new(R);
+        destination.set_vertex_label(VId(20), L, false);
+        let mut member = WriteBatch::new(R);
+        member.set_vertex_label(VId(30), L, true);
+        let mut matched = WriteBatch::new(R);
+        matched.set_vertex_property(VId(10), P, Some(CanonicalScalar::Int(100)));
+        for (case, query, concurrent) in [
+            ("new :R edge", EDGE_QUERY, phantom),
+            ("destination leaves :L", EDGE_QUERY, destination),
+            ("outsider joins :L", VERTEX_QUERY, member),
+            ("matched property", VERTEX_QUERY, matched),
+        ] {
+            let committed = authorized_query_after(&contexts, query, concurrent).await;
+            assert!(
+                committed
+                    .as_ref()
+                    .is_err_and(|error| format!("{error:?}").contains("FG-LAW-FCW-READ-01")),
+                "{case}: a row the query read changed; the commit must abort: {committed:?}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn missing_edge_domain_refuses_instead_of_falling_back_to_unstaged_basis() {
     let ((), report) = run_async_under_lab(0xa721, |root| async move {

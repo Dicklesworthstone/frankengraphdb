@@ -374,6 +374,18 @@ mod query_source {
                     self.scanned_vertices.set(true);
                 }
             }
+            // Under that label witness, a basis vertex without the label cannot
+            // be bound by the root: it enters the domain only by gaining the
+            // label, which the witness catches, and an expansion reaches it only
+            // through a read edge. So only labelled vertices are recorded, never
+            // the whole table (fgdb-h1d6l). The plan's own domain must agree
+            // with the caller's label, or the scan stays broad.
+            let witness_label = required_vertex_label.filter(|label| {
+                !edge_scan
+                    && scan_observation.is_none()
+                    && logical.vertex_scan_domain()
+                        == fgdb_gql::algebra::VertexScanDomain::Label(*label)
+            });
             let mut observed = BTreeSet::new();
             // Raw intentions contribute only negative-read identities. The
             // canonical template, not these intentions, creates query rows.
@@ -435,7 +447,8 @@ mod query_source {
             if !edge_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
                     let view = VertexView::new(&row.labels, &row.props);
-                    let mut selected = true;
+                    let mut selected =
+                        witness_label.is_none_or(|label| row.labels.contains(&label));
                     if let Some(predicates) = predicates {
                         for predicate in predicates {
                             control(SourceEvent::Work)?;
@@ -462,7 +475,7 @@ mod query_source {
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
                         if !edge_scan {
-                            if scan_observation.is_some()
+                            if (scan_observation.is_some() || witness_label.is_some())
                                 && let Some(vid) = super::VertexScanRead::target(effect)
                             {
                                 // Staged overrides are transaction-local, not

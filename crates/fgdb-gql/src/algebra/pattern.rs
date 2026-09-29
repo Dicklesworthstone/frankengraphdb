@@ -209,28 +209,13 @@ impl<Row> PreparedGraphPattern<Row> {
     }
     #[must_use]
     pub fn required_vertex_label(&self) -> Option<LabelId> {
-        if self.logical.scans_edges()
-            || self
-                .logical
-                .operators()
-                .iter()
-                .skip(1)
-                .any(|op| matches!(op, GlaOperator::ScanVertices))
-        {
-            // The shared vertex domain serves every independent component.
-            // A root label cannot narrow admission or phantom observations for
-            // another component, including an OPTIONAL/EXISTS child scan.
-            return None;
+        // The shared vertex domain serves every independent component. A root
+        // label cannot narrow admission or phantom observations for another
+        // component, including an OPTIONAL/EXISTS child scan.
+        match self.logical.vertex_scan_domain() {
+            super::VertexScanDomain::Label(label) => Some(label),
+            super::VertexScanDomain::Unscanned | super::VertexScanDomain::All => None,
         }
-        self.logical.operators().iter().find_map(|op| match op {
-            GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
-                predicates.iter().find_map(|p| match p {
-                    VertexPredicate::HasLabel(label) => Some(*label),
-                    _ => None,
-                })
-            }
-            _ => None,
-        })
     }
 }
 

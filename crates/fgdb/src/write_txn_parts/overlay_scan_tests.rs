@@ -45,12 +45,12 @@ fn collect(owner: &OverlayRows<'_, MemVfs>) -> (Vec<VertexRow>, Vec<EdgeRecord>)
     let mut vertices = Vec::new();
     let mut edges = Vec::new();
     owner
-        .visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
+        .visit_vertices(VertexScanDomain::All, &mut |_| Ok::<_, ()>(()), |row, _| {
             vertices.push(row.clone());
             Ok(())
         })
         .unwrap();
-    if let Some(result) = owner.visit_edges(&mut |_| Ok::<_, ()>(()), |entry, props, _| {
+    if let Some(result) = owner.visit_edges(None, &mut |_| Ok::<_, ()>(()), |entry, props, _| {
         edges.push(EdgeRecord {
             entry: *entry,
             props: props.to_vec(),
@@ -177,7 +177,7 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             assert!(owner.edges.is_none());
             let mut borrowed = 0;
             owner
-                .visit_vertices(&mut |_| Ok::<_, ()>(()), |row, _| {
+                .visit_vertices(VertexScanDomain::All, &mut |_| Ok::<_, ()>(()), |row, _| {
                     let basis =
                         source::find_vertex(&db.snapshot.patches, row.vid, txn.basis, &mut |_| {
                             Ok::<_, ()>(())
@@ -197,7 +197,7 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             assert_eq!(borrowed, 127);
             assert!(
                 owner
-                    .visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                    .visit_edges(None, &mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
                     .is_none()
             );
             assert!(!txn.scanned_edges.get());
@@ -218,7 +218,7 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             )
             .unwrap();
             owner
-                .visit_edges(&mut |_| Ok::<_, ()>(()), |entry, props, _| {
+                .visit_edges(None, &mut |_| Ok::<_, ()>(()), |entry, props, _| {
                     if entry.eid != EId(2) {
                         let (old, old_props) = original[&entry.eid];
                         assert!(std::ptr::eq(entry, old));
@@ -303,9 +303,9 @@ fn every_sparse_preparation_and_scan_poll_can_stop_without_changing_staged_state
                 assert!(matches!(error, WriteTxnError::AuthorizedMutationRefused));
                 calls.get()
             })?;
-            owner.visit_vertices(&mut |_| poll(), |_, _| Ok(()))?;
+            owner.visit_vertices(VertexScanDomain::All, &mut |_| poll(), |_, _| Ok(()))?;
             owner
-                .visit_edges(&mut |_| poll(), |_, _, _| Ok(()))
+                .visit_edges(None, &mut |_| poll(), |_, _, _| Ok(()))
                 .unwrap()?;
             Ok(calls.get())
         };
@@ -341,7 +341,7 @@ fn refusal_and_unwind_stop_before_the_next_output_and_leave_the_owner_reusable()
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
             let expected = collect(&owner);
             let mut visits = 0;
-            let result = owner.visit_vertices(&mut |_| Ok(()), |_, _| {
+            let result = owner.visit_vertices(VertexScanDomain::All, &mut |_| Ok(()), |_, _| {
                 visits += 1;
                 Err(17)
             });
@@ -351,6 +351,7 @@ fn refusal_and_unwind_stop_before_the_next_output_and_leave_the_owner_reusable()
             let mut edge_polls = 0;
             let result = owner
                 .visit_edges(
+                    None,
                     &mut |_| {
                         edge_polls += 1;
                         Ok(())
@@ -368,9 +369,11 @@ fn refusal_and_unwind_stop_before_the_next_output_and_leave_the_owner_reusable()
                 "a refused first row scanned the raw suffix: {edge_polls}"
             );
             let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = owner.visit_vertices(&mut |_| Ok::<_, ()>(()), |_, _| {
-                    panic!("injected consumer unwind")
-                });
+                let _ = owner.visit_vertices(
+                    VertexScanDomain::All,
+                    &mut |_| Ok::<_, ()>(()),
+                    |_, _| panic!("injected consumer unwind"),
+                );
             }));
             assert!(unwind.is_err());
             assert_eq!(collect(&owner), expected);
@@ -451,17 +454,13 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
         assert!(gap(&txn));
         for refuse in [true, false] {
             let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
-            let result =
-                owner.visit_vertices(
-                    &mut |_| Ok(()),
-                    |_, _| {
-                        if refuse { Err(17) } else { Ok(()) }
-                    },
-                );
+            let result = owner.visit_vertices(VertexScanDomain::All, &mut |_| Ok(()), |_, _| {
+                if refuse { Err(17) } else { Ok(()) }
+            });
             assert_eq!(result, if refuse { Err(17) } else { Ok(()) });
             if !refuse {
                 owner
-                    .visit_edges(&mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                    .visit_edges(None, &mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
                     .unwrap()
                     .unwrap();
             }

@@ -39,18 +39,25 @@ impl<V: Vfs + Clone> Database<V> {
                 };
                 // Historical traversal and sparse shadowing never bill hidden
                 // data. Tables admit each winner BEFORE retaining its reference.
+                // Every record is still admitted and charged; only the read
+                // witness narrows to what the plan can bind (fgdb-h1d6l).
                 let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
-                overlay.visit_vertices(&mut scan, |row, _| {
-                    tables.admit_vertex(
-                        row,
-                        scope,
-                        &mut || node().map_err(GqlQueryError::Interrupted),
-                        &mut control,
-                    )
-                })?;
+                overlay.visit_vertices(
+                    pattern.plan().vertex_scan_domain(),
+                    &mut scan,
+                    |row, _| {
+                        tables.admit_vertex(
+                            row,
+                            scope,
+                            &mut || node().map_err(GqlQueryError::Interrupted),
+                            &mut control,
+                        )
+                    },
+                )?;
                 if pattern.plan().reads_edges() {
+                    let relations = pattern.plan().edge_relations();
                     overlay
-                        .visit_edges(&mut scan, |edge, properties, _| {
+                        .visit_edges(Some(&relations), &mut scan, |edge, properties, _| {
                             tables.admit_edge(
                                 ((edge.eid, edge.src, edge.relation, edge.dst), properties),
                                 scope,
