@@ -251,6 +251,58 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
             .map_err(VertexScanSourceError::Source)?;
         Ok(Some(row))
     }
+
+    // Private common admission for topology and scalar reads. The selected
+    // historical edge and BOTH endpoints must be in scope before any logical
+    // charge or payload inspection. A capture is not cached authorization.
+    fn admitted_probe_edge<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let Some(edge) = self
+            .inner
+            .probe_edge(eid, &mut poll)
+            .map_err(scoped_expansion_error)?
+        else {
+            return Ok(None);
+        };
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_relation(edge.relation)
+        {
+            return Ok(None);
+        }
+        let endpoints = [
+            Some(edge.source),
+            (edge.target != edge.source).then_some(edge.target),
+        ];
+        for endpoint in endpoints.into_iter().flatten() {
+            if !self
+                .visible(endpoint)
+                .map_err(EdgeExpansionSourceError::Read)?
+            {
+                return Ok(None);
+            }
+        }
+        control(GlaExecutionEvent::Work)
+            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
+        for endpoint in endpoints.into_iter().flatten() {
+            if self
+                .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+                .map_err(EdgeExpansionSourceError::Read)?
+                .is_none()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(edge))
+    }
 }
 impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'_, S> {
     type Error = QueryError;
@@ -464,53 +516,64 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
-        // The edge's history lookup costs more as history grows, including
-        // history this capability cannot see: resolve it unmetered, and charge
-        // one unit only once the relation is admitted (FG-INV-20).
-        let execution = Rc::clone(&self.execution);
-        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
-        let Some(edge) = self
-            .inner
-            .probe_edge(eid, &mut poll)
-            .map_err(scoped_expansion_error)?
-        else {
+        let Some(edge) = self.admitted_probe_edge(eid, control)? else {
             return Ok(None);
         };
-        if !self
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(edge.relation)
-        {
-            return Ok(None);
-        }
-        control(GlaExecutionEvent::Work)
-            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
-        for endpoint in [
-            Some(edge.source),
-            (edge.target != edge.source).then_some(edge.target),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if self
-                .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
-                .map_err(EdgeExpansionSourceError::Read)?
-                .is_none()
-            {
-                return Ok(None); // A hidden transit vertex removes the edge itself.
-            }
-        }
-        // The checked profile has no captured probe edges or edge-property
-        // operands. Give it only admitted topology, not unused raw properties.
-        // compile() explicitly refuses captures even if a future kernel grows.
+        // Captures retain identities, never raw payloads. Their predicates use
+        // the separately admitted scalar route below, on the same permit/cut.
         Ok(Some(EdgeScanRow {
             source: edge.source,
             target: edge.target,
             relation: edge.relation,
             properties: &[],
         }))
+    }
+
+    fn probe_edge_property<'a, C>(
+        &'a self,
+        eid: EId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeExpansionSourceError<QueryError, C>> {
+        let Some(edge) = self.admitted_probe_edge(eid, control)? else {
+            return Ok(None);
+        };
+        control(GlaExecutionEvent::Work)
+            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_property(key)
+        {
+            return Ok(Some(None));
+        }
+        // Never binary-search raw layout: hidden keys would change the quota
+        // threshold. Hidden traversal polls cancellation only, without sampling
+        // the issuer clock; admitted keys alone spend native and signed work.
+        for (candidate, value) in edge.properties {
+            self.execution.borrow_mut().poll().map_err(|error| {
+                EdgeExpansionSourceError::Read(VertexScanSourceError::Source(error))
+            })?;
+            if !self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_property(*candidate)
+            {
+                continue;
+            }
+            control(GlaExecutionEvent::Work)
+                .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
+            match candidate.cmp(&key) {
+                core::cmp::Ordering::Less => {}
+                core::cmp::Ordering::Greater => break,
+                core::cmp::Ordering::Equal => return Ok(Some(Some(value))),
+            }
+        }
+        Ok(Some(None))
     }
 }
 
@@ -535,16 +598,34 @@ fn compile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<RowPlan, Que
 }
 
 fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
-    // This source exposes admitted probe topology, not edge payloads. Captured
-    // edge/path operands remain outside its profile even if the native probe
-    // compiler later grows them. Other admission belongs to that compiler.
-    if let Some(operator) = pattern
-        .plan()
-        .operators()
-        .iter()
-        .position(|operator| matches!(operator, GlaOperator::CapturePath { .. }))
-    {
-        return Err(plan_error(VertexScanBuildError { operator }));
+    // Admit private single-edge probe captures, not arbitrary captured paths
+    // or outer capture export. The native compiler still proves fixed-edge
+    // producers, operand domains, scope-local IDs and the full output profile.
+    // Keep this source fence shared by row and aggregate factories.
+    let operators = pattern.plan().operators();
+    let mut probe_end = None;
+    for (operator, op) in operators.iter().enumerate() {
+        if probe_end == Some(operator) {
+            probe_end = None;
+        }
+        match op {
+            GlaOperator::Probe { group, end, .. } => {
+                let end = *end as usize;
+                if probe_end.is_some()
+                    || end <= operator
+                    || !matches!(operators.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group)
+                {
+                    return Err(plan_error(VertexScanBuildError { operator }));
+                }
+                probe_end = Some(end);
+            }
+            GlaOperator::CapturePath { segments, .. }
+                if probe_end.is_none() || segments.len() != 1 =>
+            {
+                return Err(plan_error(VertexScanBuildError { operator }));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -729,7 +810,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// Opening authenticates before binding/profile/source admission and scans
     /// no candidate. Correlated/independent EXISTS and NOT EXISTS, with fixed
     /// or finite variable-length anonymous hops, use the existing indexed probe
-    /// engine. Both historical endpoints must be visible at every hop, including
+    /// engine. Fixed probe relationships may bind private property operands;
+    /// each field lookup re-admits the edge, its endpoints and selected key.
+    /// Both historical endpoints must be visible at every hop, including
     /// transit vertices; labels and properties are masked before predicates.
     /// Denied relation types do not open incidence directories. Signed node
     /// usage includes repeated admitted endpoint/property reads, without a new
@@ -738,8 +821,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// The selected native compiler refuses unsupported projections, optional
     /// or nested scopes, variable-length outer joins, catalog-name outputs and
     /// alternate ordering before source access; no eager or privileged fallback.
-    /// Root-vertex probes retain their anonymous-edge restriction. Aggregates
-    /// use stream_aggregate; compound relations are not admitted here.
+    /// Probe captures cannot escape into output or correlate to outer edges.
+    /// Aggregates use stream_aggregate; compound relations are not admitted here.
     /// Native candidate accounting differs from eager full-table admission.
     /// The writer remains independent, but this borrows the session until the
     /// cursor is dropped so its trusted clock and capability cannot be replaced.
@@ -827,3 +910,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
 #[cfg(test)]
 #[path = "stream/probe_tests.rs"]
 mod probe_tests;
+
+#[cfg(test)]
+#[path = "stream/edge_property_tests.rs"]
+mod edge_property_tests;
