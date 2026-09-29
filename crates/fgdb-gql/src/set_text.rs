@@ -558,6 +558,8 @@ impl PageNumber {
 #[derive(Clone)]
 struct OrderKey {
     name: String,
+    /// `Some(var)` for an `ORDER BY var.name` key (fgdb-2t30i).
+    variable: Option<String>,
     at: usize,
     order: GraphValueOrder,
 }
@@ -653,16 +655,37 @@ impl Node {
         let schema = &schemas[first];
         let mut used = BTreeSet::new();
         for key in &mut self.order {
-            let column = schema
-                .columns
-                .iter()
-                .position(|name| *name == key.name)
-                .ok_or_else(|| expected(key.at, "a leftmost output column name"))?;
+            let column = match &key.variable {
+                None => schema
+                    .columns
+                    .iter()
+                    .position(|name| *name == key.name)
+                    .ok_or_else(|| expected(key.at, "a leftmost output column name"))?,
+                // `ORDER BY var.name` names the RETURN item that is exactly
+                // that property (fgdb-2t30i). Only a query's own RETURN: after
+                // a set operator, ORDER BY names output columns only.
+                Some(variable) => matches!(self.kind, NodeKind::Leaf(_))
+                    .then(|| {
+                        schema.returned.iter().position(|source| {
+                            source
+                                .as_ref()
+                                .is_some_and(|(v, p)| v == variable && *p == key.name)
+                        })
+                    })
+                    .flatten()
+                    .ok_or_else(|| expected(key.at, "a returned property or output column name"))?,
+            };
             if !used.insert(column) {
                 return Err(fail(
                     key.at,
                     GraphSetTextErrorKind::OrderBuild(GraphOrderError::DuplicateColumn { column }),
                 ));
+            }
+            // A resolved key names its output column, so the template records
+            // the statement, not its spelling: `ORDER BY m.p` over
+            // `RETURN m.p AS v` equals `ORDER BY v`.
+            if key.variable.take().is_some() {
+                key.name.clone_from(&schema.columns[column]);
             }
             key.order.column = column;
         }
@@ -707,6 +730,78 @@ struct Schema {
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
     depth: usize,
+    /// Per column, `(var, name)` when its RETURN item is exactly `var.name`.
+    returned: Vec<Option<(String, String)>>,
+}
+
+/// The terminal RETURN's plain property items, one entry per output column:
+/// `(var, name)` for an item that is exactly `var.name`, with or without an
+/// alias. An entry is kept only when the item's position names the column it
+/// should (its alias, else the default `name`), so a RETURN this cannot read
+/// item by item yields no entries rather than a misaligned one.
+fn returned_properties(
+    tokens: &[TextToken<'_>],
+    columns: &[String],
+) -> Vec<Option<(String, String)>> {
+    let mut depth = 0_usize;
+    let mut start = None;
+    for (at, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 && token.word("RETURN") => start = Some(at + 1),
+            _ => {}
+        }
+    }
+    let mut items = Vec::new();
+    if let Some(mut at) = start {
+        if tokens.get(at).is_some_and(|token| token.word("DISTINCT")) {
+            at += 1;
+        }
+        let mut item = Vec::new();
+        depth = 0;
+        for token in &tokens[at..] {
+            match token.kind {
+                TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TextKind::Punct(b',') if depth == 0 => {
+                    items.push(std::mem::take(&mut item));
+                    continue;
+                }
+                TextKind::End => break,
+                _ => {}
+            }
+            item.push(token.kind);
+        }
+        items.push(item);
+    }
+    if items.len() != columns.len() {
+        return vec![None; columns.len()];
+    }
+    items
+        .iter()
+        .zip(columns)
+        .map(|(item, column)| match item.as_slice() {
+            [
+                TextKind::Word(v),
+                TextKind::Punct(b'.'),
+                TextKind::Word(p),
+                rest @ ..,
+            ] => {
+                let named = match rest {
+                    [] => *p,
+                    [TextKind::Word(as_), TextKind::Word(alias)]
+                        if as_.eq_ignore_ascii_case("AS") =>
+                    {
+                        *alias
+                    }
+                    _ => return None,
+                };
+                (named == column.as_str()).then(|| ((*v).to_owned(), (*p).to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 struct Span {
     start: usize,
@@ -940,8 +1035,16 @@ impl<'a> Composition<'a> {
                 let TextKind::Word(name) = self.current().kind else {
                     return Err(expected(at, "output column name"));
                 };
-                let name = name.to_owned();
+                let mut name = name.to_owned();
                 self.advance();
+                let mut variable = None;
+                if self.take(b'.') {
+                    let TextKind::Word(property) = self.current().kind else {
+                        return Err(expected(self.current().at, "property name"));
+                    };
+                    variable = Some(std::mem::replace(&mut name, property.to_owned()));
+                    self.advance();
+                }
                 let descending = self.take_word("DESC");
                 if !descending {
                     self.take_word("ASC");
@@ -968,6 +1071,7 @@ impl<'a> Composition<'a> {
                 }
                 node.order.push(OrderKey {
                     name,
+                    variable,
                     at,
                     order: GraphValueOrder {
                         column: 0,
@@ -1047,6 +1151,9 @@ impl PreparedGraphSetText {
     /// Parentheses preserve operand-local order/page. An unparenthesized final
     /// ORDER BY/SKIP/LIMIT applies to the complete set, never only its last arm.
     /// ORDER BY accepts leftmost output names, ASC/DESC and NULLS FIRST/LAST.
+    /// Without a set operator it also accepts `var.prop` when the RETURN
+    /// projected exactly that property, aliased or not, and orders by that
+    /// output column.
     /// Use parentheses around an operand with a local order or page.
     ///
     /// Leaf syntax is the shared graph-pattern profile, including WALK,
@@ -1138,10 +1245,13 @@ impl PreparedGraphSetText {
                 ));
             }
             let (columns, types) = input.column_schema();
+            let returned =
+                returned_properties(&parser.tokens[span.first_token..span.last_token], &columns);
             schemas.push(Schema {
                 columns,
                 types,
                 depth: input.depth(),
+                returned,
             });
             for (spec, offset) in input
                 .parameter_schema()

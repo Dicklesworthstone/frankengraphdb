@@ -618,3 +618,87 @@ fn full_pipeline_shares_exact_resource_limits_and_all_interruption_points() {
         assert_eq!(at, stop);
     }
 }
+
+/// fgdb-2t30i. After a WITH, `ORDER BY v.p` names the RETURN item that is
+/// exactly `v.p`, aliased or not. It is the same statement as ordering by that
+/// item's output name: identical template bytes and rows, including DESC and
+/// NULLS placement. Before, the key stopped at `v` and the statement refused
+/// with Expected("end of compound statement").
+#[test]
+fn order_by_a_returned_property_after_with_is_its_output_column() {
+    let values = [
+        CanonicalScalar::Int(3),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Null,
+    ];
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .map_err(|error| format!("{text}: {error:?}"))
+            .unwrap()
+    };
+    for (qualified, named, column, expected) in [
+        (
+            "MATCH (n) WITH n RETURN n.p ORDER BY n.p",
+            "MATCH (n) WITH n RETURN n.p ORDER BY p",
+            0,
+            vec![Some(1), Some(2), Some(3), None, None],
+        ),
+        (
+            "MATCH (n) WITH n RETURN n.p ORDER BY n.p DESC NULLS FIRST",
+            "MATCH (n) WITH n RETURN n.p ORDER BY p DESC NULLS FIRST",
+            0,
+            vec![None, None, Some(3), Some(2), Some(1)],
+        ),
+        (
+            "MATCH (n) WITH n AS m RETURN m, m.p AS v ORDER BY m.p DESC",
+            "MATCH (n) WITH n AS m RETURN m, m.p AS v ORDER BY v DESC",
+            1,
+            vec![Some(3), Some(2), Some(1), None, None],
+        ),
+    ] {
+        let (a, b) = (template(qualified), template(named));
+        assert_eq!(
+            a.canonical_template_bytes(),
+            b.canonical_template_bytes(),
+            "{qualified}"
+        );
+        let bind =
+            |text: &PreparedGraphSetText| text.bind_parameters(&GqlParameters::new()).unwrap();
+        let rows = run(&bind(&a), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        assert_eq!(ints(&rows, column), expected, "{qualified}");
+        let named_rows = run(&bind(&b), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        assert_eq!(rows, named_rows, "{qualified}");
+    }
+}
+
+/// Planted negatives for fgdb-2t30i. They refuse before any catalog call: a
+/// property the RETURN did not project, another variable's property, a
+/// computed item, and a key after a set operator, where ORDER BY names only
+/// output columns.
+#[test]
+fn order_by_a_property_the_return_did_not_project_still_refuses() {
+    for text in [
+        "MATCH (n) WITH n RETURN n.p ORDER BY n.q",
+        "MATCH (n) WITH n AS m RETURN m.p ORDER BY n.p",
+        "MATCH (n) WITH n RETURN n.p + 1 AS p ORDER BY n.p",
+        "MATCH (n) WITH n RETURN n.p UNION MATCH (n) WITH n RETURN n.p ORDER BY n.p",
+    ] {
+        let calls = Cell::new(0);
+        let prepared = PreparedGraphSetText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(
+            matches!(&prepared, Err(error) if matches!(error.kind, GraphSetTextErrorKind::Expected(_))),
+            "{text}: must refuse with Expected: {:?}",
+            prepared.as_ref().err()
+        );
+        assert_eq!(calls.get(), 0, "{text}: refused after a catalog call");
+    }
+}
