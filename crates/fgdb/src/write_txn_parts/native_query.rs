@@ -5,10 +5,10 @@
 //! transaction observations. No parser, executor or snapshot is duplicated.
 
 use super::WriteTxn;
-use crate::{Database, WriteTxnError};
 use crate::query::{
     PreparedNativeRead, QueryError, QueryResult, QueryWriteError, aggregates, values,
 };
+use crate::{Database, WriteTxnError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
@@ -246,8 +246,7 @@ mod engine_write_tests {
     use fgdb_gql::algebra::GraphValue;
     use fgdb_types::context::SimulationCheckpointProbe;
     use fgdb_types::{
-        CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
-        VId,
+        CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts, VId,
     };
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -344,7 +343,11 @@ mod engine_write_tests {
                 )
                 .await
                 .unwrap();
-            let QueryResult::Write { receipt, completion } = result else {
+            let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            else {
                 panic!("a no-RETURN script must preserve its write receipt")
             };
             assert_eq!(receipt.stats().completed_statements, 2);
@@ -473,32 +476,51 @@ mod engine_write_tests {
             let mut transaction = db.begin(&txcx).unwrap();
             transaction
                 .query_write_engine(
-                    &mut db, &cx, "CREATE (n {p:1})", &GqlParameters::new(),
-                    symbols, R, policy(),
+                    &mut db,
+                    &cx,
+                    "CREATE (n {p:1})",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
                 )
                 .unwrap();
             let digest = transaction.staged_effect_digest().unwrap();
             let basis = transaction.basis();
             let error = preflight_error(transaction.query_write_engine(
-                &mut other, &cx, "CREATE (n {p:2}) RETURN n", &GqlParameters::new(),
+                &mut other,
+                &cx,
+                "CREATE (n {p:2}) RETURN n",
+                &GqlParameters::new(),
                 |_, _| panic!("wrong owner must refuse before catalog resolution"),
-                R, policy(),
+                R,
+                policy(),
             ));
             assert!(matches!(error, WriteTxnError::WrongDatabase));
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert_eq!(other.frontier().unwrap(), other_before);
             assert!(other.vertices().unwrap().is_empty());
             db.query_write_engine(
-                &txcx, &cx, &commit, "CREATE (n {p:3})", &GqlParameters::new(),
-                symbols, R, policy(),
+                &txcx,
+                &cx,
+                &commit,
+                "CREATE (n {p:3})",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
             )
             .await
             .unwrap();
             let advanced = db.frontier().unwrap();
             let error = preflight_error(transaction.query_write_engine(
-                &mut db, &cx, "CREATE (n {p:4}) RETURN n", &GqlParameters::new(),
+                &mut db,
+                &cx,
+                "CREATE (n {p:4}) RETURN n",
+                &GqlParameters::new(),
                 |_, _| panic!("stale basis must refuse before catalog resolution"),
-                R, policy(),
+                R,
+                policy(),
             ));
             assert!(matches!(
                 error,
@@ -513,9 +535,13 @@ mod engine_write_tests {
             let mut closed = db.begin(&txcx).unwrap();
             closed.finish(&mut db, &commit).await.unwrap();
             let error = preflight_error(closed.query_write_engine(
-                &mut db, &cx, "CREATE (n {p:5}) RETURN n", &GqlParameters::new(),
+                &mut db,
+                &cx,
+                "CREATE (n {p:5}) RETURN n",
+                &GqlParameters::new(),
                 |_, _| panic!("finished workspace must refuse before catalog resolution"),
-                R, policy(),
+                R,
+                policy(),
             ));
             assert!(matches!(error, WriteTxnError::Finished));
             assert_eq!(db.frontier().unwrap(), advanced);
@@ -536,14 +562,24 @@ mod engine_write_tests {
             let mut transaction = db.begin(&txcx).unwrap();
             transaction
                 .query_write_engine(
-                    &mut db, &cx, "CREATE (n {p:7})", &GqlParameters::new(),
-                    symbols, R, policy(),
+                    &mut db,
+                    &cx,
+                    "CREATE (n {p:7})",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
                 )
                 .unwrap();
             let prefix = transaction.staged_effect_digest().unwrap();
             let result = transaction.query_write_engine(
-                &mut db, &cx, "CREATE (n {p:0}) RETURN 1/n.p AS bad",
-                &GqlParameters::new(), symbols, R, policy(),
+                &mut db,
+                &cx,
+                "CREATE (n {p:0}) RETURN 1/n.p AS bad",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
             );
             assert!(matches!(
                 result,
@@ -555,12 +591,19 @@ mod engine_write_tests {
             let mut one_creation = policy();
             one_creation.max_created_vertices = 1;
             let result = transaction.query_write_engine(
-                &mut db, &cx, "CREATE (n); CREATE (m)", &GqlParameters::new(),
-                symbols, R, one_creation,
+                &mut db,
+                &cx,
+                "CREATE (n); CREATE (m)",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                one_creation,
             );
             assert!(matches!(
                 result,
-                Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(_)))
+                Err(QueryWriteError::Execute(
+                    GraphWriteScriptExecutionError::Program(_)
+                ))
             ));
             assert_eq!(transaction.staged_effect_digest().unwrap(), prefix);
             assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
@@ -569,8 +612,13 @@ mod engine_write_tests {
             let ids = vertex_rows(
                 transaction
                     .query_write_engine(
-                        &mut db, &cx, "CREATE (n {p:9}) RETURN n", &GqlParameters::new(),
-                        symbols, R, policy(),
+                        &mut db,
+                        &cx,
+                        "CREATE (n {p:9}) RETURN n",
+                        &GqlParameters::new(),
+                        symbols,
+                        R,
+                        policy(),
                     )
                     .unwrap(),
             );
@@ -602,7 +650,14 @@ mod engine_write_tests {
             ] {
                 let result = db
                     .query_write_engine(
-                        &txcx, &cx, &commit, text, &GqlParameters::new(), symbols, R, policy(),
+                        &txcx,
+                        &cx,
+                        &commit,
+                        text,
+                        &GqlParameters::new(),
+                        symbols,
+                        R,
+                        policy(),
                     )
                     .await;
                 assert!(result.is_err(), "{text}");
@@ -614,8 +669,14 @@ mod engine_write_tests {
                 cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
             let result = db
                 .query_write_engine(
-                    &txcx, &cancelled, &commit, "CREATE (n) RETURN n", &GqlParameters::new(),
-                    symbols, R, policy(),
+                    &txcx,
+                    &cancelled,
+                    &commit,
+                    "CREATE (n) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
                 )
                 .await;
             assert!(result.is_err());
@@ -624,8 +685,14 @@ mod engine_write_tests {
             assert_eq!(txcx.outstanding_obligations(), 0);
             let ids = vertex_rows(
                 db.query_write_engine(
-                    &txcx, &cx, &commit, "CREATE (n) RETURN n", &GqlParameters::new(),
-                    symbols, R, policy(),
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "CREATE (n) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
                 )
                 .await
                 .unwrap(),

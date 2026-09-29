@@ -47,7 +47,21 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
         // Independently counted: four non-self edges have two orientations;
         // the self-loop has one. Missing and explicit NULL form one class.
         for (distinct, suffix, values) in [
-            (false, "", vec![None, None, None, None, Some(3), Some(2), Some(2), Some(1), Some(1)]),
+            (
+                false,
+                "",
+                vec![
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(3),
+                    Some(2),
+                    Some(2),
+                    Some(1),
+                    Some(1),
+                ],
+            ),
             (true, "", vec![None, Some(3), Some(2), Some(1)]),
             (false, "SKIP 1 LIMIT 2", vec![None, None]),
             (true, "SKIP 1 LIMIT 2", vec![Some(3), Some(2)]),
@@ -67,8 +81,18 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
             allowance.rows = GqlExecutionBudget::new(5, values.len() as u64);
             let (spool, _) = prepared
                 .spool_ordered(
-                    &db, &cx, &params, allowance, &mut scratch, &mut destination,
-                    1, 9, 31, 4096, 9, 1_000_000,
+                    &db,
+                    &cx,
+                    &params,
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    9,
+                    31,
+                    4096,
+                    9,
+                    1_000_000,
                 )
                 .await
                 .unwrap();
@@ -76,7 +100,10 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
             assert_eq!(spool.columns(), &["value"]);
             assert_eq!(spool.row_stats().snapshot_records, 5);
             assert_eq!(spool.row_count(), values.len() as u64);
-            assert_eq!(contents(&spool, &mut destination, &cx).await, scalar_frames(&values));
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                scalar_frames(&values)
+            );
             assert_eq!(pool.used(), 0);
         }
         // Move the former edge-LIMIT-0 refusal into an actual success law.
@@ -84,8 +111,18 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
         let (mut destination, _) = file(&cx, &pool).await;
         let (spool, _) = plan("MATCH (a)-[e:R]->(b) RETURN e AS edge, a AS source LIMIT 0")
             .spool_ordered(
-                &db, &cx, &GqlParameters::new(), policy(), &mut scratch,
-                &mut destination, 1, 5, 31, 4096, 5, 1_000_000,
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                &mut destination,
+                1,
+                5,
+                31,
+                4096,
+                5,
+                1_000_000,
             )
             .await
             .unwrap();
@@ -104,7 +141,12 @@ fn chains_branches_cycles_paths_and_private_probes_match_the_eager_engine() {
         let mut db = multigraph(&c.commit()).await;
         let mut extra = WriteBatch::new(RelationId(1));
         for (id, from, to) in [(5, 2, 0), (6, 3, 4), (7, 4, 3), (8, 6, 7)] {
-            extra.add_edge(EId(id), VId(from), VId(to), vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+            extra.add_edge(
+                EId(id),
+                VId(from),
+                VId(to),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
         }
         db.write(&c.commit(), extra).await.unwrap();
         let view = db.read_session().unwrap();
@@ -125,15 +167,29 @@ fn chains_branches_cycles_paths_and_private_probes_match_the_eager_engine() {
                 let (mut destination, _) = file(&cx, &pool).await;
                 let (spool, _) = plan(text)
                     .spool_ordered_in_view(
-                        &view, &cx, &GqlParameters::new(), policy(), &mut scratch,
-                        &mut destination, run_rows, 128, 127, 4096, 1000, 100_000_000,
+                        &view,
+                        &cx,
+                        &GqlParameters::new(),
+                        policy(),
+                        &mut scratch,
+                        &mut destination,
+                        run_rows,
+                        128,
+                        127,
+                        4096,
+                        1000,
+                        100_000_000,
                     )
                     .await
                     .unwrap();
                 assert_eq!(spool.kind(), ScanKind::Edge);
                 assert_eq!(spool.snapshot_seq(), view.frontier());
                 assert_eq!(spool.row_count(), wanted.len() as u64);
-                assert_eq!(contents(&spool, &mut destination, &cx).await, wanted, "{text}");
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    wanted,
+                    "{text}"
+                );
                 assert_eq!(pool.used(), 0);
             }
         }
@@ -151,7 +207,9 @@ fn joined_output_exceeds_the_pool_without_retaining_the_match_population() {
         for from in 1..32 {
             for parallel in 0..2 {
                 edges.add_edge(
-                    EId(from * 2 + parallel), VId(from), VId(from - 1),
+                    EId(from * 2 + parallel),
+                    VId(from),
+                    VId(from - 1),
                     vec![(PropertyKeyId(1), CanonicalScalar::Int(parallel as i64))],
                 );
             }
@@ -166,8 +224,18 @@ fn joined_output_exceeds_the_pool_without_retaining_the_match_population() {
         let (mut destination, _) = file(&cx, &pool).await;
         let (spool, _) = plan(text)
             .spool_ordered(
-                &db, &cx, &GqlParameters::new(), policy(), &mut scratch,
-                &mut destination, 3, 40, 257, 4096, 120, 100_000_000,
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                &mut destination,
+                3,
+                40,
+                257,
+                4096,
+                120,
+                100_000_000,
             )
             .await
             .unwrap();
@@ -188,7 +256,8 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
         let view = db.read_session().unwrap();
         let at = view.frontier();
         let weak = Arc::downgrade(&db.snapshot);
-        let text = "MATCH (a)-[e:R]->(b) RETURN e.p AS cost, b AS target ORDER BY cost DESC NULLS LAST";
+        let text =
+            "MATCH (a)-[e:R]->(b) RETURN e.p AS cost, b AS target ORDER BY cost DESC NULLS LAST";
         let wanted = expected(&view, &cx, text);
         let prepared = plan(text);
         let params = GqlParameters::new();
@@ -196,8 +265,18 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
         let future = prepared.spool_ordered(
-            &db, &cx, &params, policy(), &mut scratch, &mut destination,
-            2, 5, 31, 4096, 5, 1_000_000,
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut scratch,
+            &mut destination,
+            2,
+            5,
+            31,
+            4096,
+            5,
+            1_000_000,
         );
         let mut drift = WriteBatch::new(RelationId(1));
         drift.set_edge_property(EId(0), PropertyKeyId(1), Some(CanonicalScalar::Int(999)));
@@ -218,8 +297,18 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
         ));
         let (spool, _) = historical
             .spool_ordered_in_view(
-                &newest, &cx, &GqlParameters::new(), policy(), &mut scratch,
-                &mut destination, 2, 5, 31, 4096, 5, 1_000_000,
+                &newest,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut scratch,
+                &mut destination,
+                2,
+                5,
+                31,
+                4096,
+                5,
+                1_000_000,
             )
             .await
             .unwrap();
@@ -237,7 +326,9 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
         let cx = c.query();
         let mut db = multigraph(&c.commit()).await;
         let pool = MemoryPool::new(32_768, 0).unwrap();
-        let prepared = plan("MATCH (a)-[e:R]-(b) RETURN DISTINCT e.p AS value ORDER BY value DESC NULLS FIRST LIMIT 1");
+        let prepared = plan(
+            "MATCH (a)-[e:R]-(b) RETURN DISTINCT e.p AS value ORDER BY value DESC NULLS FIRST LIMIT 1",
+        );
         for (records, input, output, dimension, limit) in [
             (4, 9, 1, GqlBudgetDimension::SnapshotRecords, 4),
             (5, 8, 1, GqlBudgetDimension::ResultRows, 8),
@@ -249,17 +340,34 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
             allowance.rows = GqlExecutionBudget::new(records, output);
             let error = prepared
                 .spool_ordered(
-                    &db, &cx, &GqlParameters::new(), allowance, &mut scratch,
-                    &mut destination, 1, 9, 31, 4096, input, 1_000_000,
+                    &db,
+                    &cx,
+                    &GqlParameters::new(),
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    9,
+                    31,
+                    4096,
+                    input,
+                    1_000_000,
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(error.execution_error(), Some(GqlQueryError::Rows(e))
-                if e.dimension == dimension && e.limit == limit && e.observed == limit + 1));
+            assert!(
+                matches!(error.execution_error(), Some(GqlQueryError::Rows(e))
+                if e.dimension == dimension && e.limit == limit && e.observed == limit + 1)
+            );
             assert_eq!(pool.used(), 0);
         }
         let mut later = WriteBatch::new(RelationId(1));
-        later.add_edge(EId(99), VId(6), VId(7), vec![(PropertyKeyId(1), CanonicalScalar::Int(0))]);
+        later.add_edge(
+            EId(99),
+            VId(6),
+            VId(7),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(0))],
+        );
         db.write(&c.commit(), later).await.unwrap();
         for limit in [0, 1] {
             let prepared = plan(&format!(
@@ -269,12 +377,25 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
             let (mut destination, _) = file(&cx, &pool).await;
             let error = prepared
                 .spool_ordered(
-                    &db, &cx, &GqlParameters::new(), policy(), &mut scratch,
-                    &mut destination, 1, 10, 31, 4096, 10, 1_000_000,
+                    &db,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    10,
+                    31,
+                    4096,
+                    10,
+                    1_000_000,
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(error.execution_error(), Some(GqlQueryError::Data(_))));
+            assert!(matches!(
+                error.execution_error(),
+                Some(GqlQueryError::Data(_))
+            ));
             assert_eq!(destination.stats().published_runs, 0);
             assert!(destination.is_poisoned());
             assert_eq!(scratch.stats(), SpillStats::default());
@@ -291,28 +412,54 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
         let cx = c.query();
         let db = multigraph(&c.commit()).await;
         let weak = Arc::downgrade(&db.snapshot);
-        let prepared = plan("MATCH (a)-[e:R]->(b)-[f:R]->(c) RETURN f.p AS value ORDER BY value DESC LIMIT 1");
+        let prepared =
+            plan("MATCH (a)-[e:R]->(b)-[f:R]->(c) RETURN f.p AS value ORDER BY value DESC LIMIT 1");
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let params = GqlParameters::new();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, backing) = file(&cx, &pool).await;
         drop(prepared.spool_ordered(
-            &db, &cx, &params, policy(), &mut scratch, &mut destination,
-            1, 100, 31, 4096, 100, 1_000_000,
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut scratch,
+            &mut destination,
+            1,
+            100,
+            31,
+            4096,
+            100,
+            1_000_000,
         ));
         assert_eq!(scratch.stats(), SpillStats::default());
         assert_eq!(destination.stats(), SpillStats::default());
         backing.0.lock().unwrap().pending_write = true;
         let future = prepared.spool_ordered(
-            &db, &cx, &params, policy(), &mut scratch, &mut destination,
-            1, 100, 31, 4096, 100, 1_000_000,
+            &db,
+            &cx,
+            &params,
+            policy(),
+            &mut scratch,
+            &mut destination,
+            1,
+            100,
+            31,
+            4096,
+            100,
+            1_000_000,
         );
         drop(db);
         drop(prepared);
         drop(params);
         {
             let mut future = std::pin::pin!(future);
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
             assert!(weak.upgrade().is_some());
         }
         assert!(weak.upgrade().is_none());

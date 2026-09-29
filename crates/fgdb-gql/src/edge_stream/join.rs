@@ -260,8 +260,16 @@ fn compile_output(
         direction: *direction,
         instructions: Arc::from([]),
         projection,
-        offset: if output == Output::SortInput { 0 } else { *offset },
-        count: if output == Output::SortInput { None } else { *count },
+        offset: if output == Output::SortInput {
+            0
+        } else {
+            *offset
+        },
+        count: if output == Output::SortInput {
+            None
+        } else {
+            *count
+        },
         joined: Some(Arc::new(JoinPlan {
             expansions,
             stages,
