@@ -462,7 +462,7 @@ fn conditional_reads_keep_unselected_inputs_and_phantom_dependencies_after_refus
         let cx = contexts.query();
         let txcx = contexts.txn();
         for mode in 0..5 {
-            for winner in 0..3 {
+            for winner in 0..4 {
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 seed(&mut db, &commit).await;
                 let mut txn = db.begin(&txcx).unwrap();
@@ -500,8 +500,8 @@ fn conditional_reads_keep_unselected_inputs_and_phantom_dependencies_after_refus
                 }
                 let mut competing = WriteBatch::new(R);
                 match winner {
-                    // q is projected even when CASE selects p. In the empty
-                    // selection case its vertex was inspected by WHERE.
+                    // q is projected even when CASE selects p, so a selected
+                    // vertex's q is a dependency.
                     0 => {
                         competing.set_vertex_property(VId(3), Q, Some(CanonicalScalar::Int(99)));
                     }
@@ -512,15 +512,31 @@ fn conditional_reads_keep_unselected_inputs_and_phantom_dependencies_after_refus
                             vec![(P, CanonicalScalar::Int(999))],
                         );
                     }
-                    _ => {
+                    2 => {
                         competing.create_vertex(VId(6), vec![], vec![]);
+                    }
+                    // WHERE's own input: VId(3) now satisfies even n.p>100.
+                    _ => {
+                        competing.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(200)));
                     }
                 }
                 db.write(&commit, competing).await.unwrap();
                 let frontier = db.frontier().unwrap();
                 // No transaction read after the query can repair a lost witness.
                 let committed = txn.commit(&mut db, &commit).await;
-                if winner < 2 {
+                // Every selected vertex is a full read, and a scan that did not
+                // complete (the row refusal of mode 2, the projection failure of
+                // mode 3) keeps its label domain. Mode 4 completed and selected
+                // nothing: its rows depend on WHERE's inputs alone. VId(3)'s q
+                // is not one of them and its p = 3 fails n.p>100 before and after,
+                // so winner 0 changes no row and commits (6ca6a55a's precise
+                // witness; fgdb-vw7l3). Moving p into the predicate still aborts.
+                let aborts = match winner {
+                    0 => mode != 4,
+                    2 => false,
+                    _ => true,
+                };
+                if aborts {
                     assert!(
                         matches!(
                             committed,
