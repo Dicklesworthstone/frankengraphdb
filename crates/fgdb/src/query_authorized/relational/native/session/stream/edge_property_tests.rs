@@ -78,8 +78,12 @@ struct Observation {
 }
 fn auth_error(error: EdgeExpansionSourceError<QueryError, QueryError>) -> AuthorizationError {
     match error {
-        EdgeExpansionSourceError::Read(VertexScanSourceError::Source(QueryError::Authorization(e)))
-        | EdgeExpansionSourceError::Read(VertexScanSourceError::Control(QueryError::Authorization(e))) => e,
+        EdgeExpansionSourceError::Read(VertexScanSourceError::Source(
+            QueryError::Authorization(e),
+        ))
+        | EdgeExpansionSourceError::Read(VertexScanSourceError::Control(
+            QueryError::Authorization(e),
+        )) => e,
         other => panic!("unexpected source refusal: {other:?}"),
     }
 }
@@ -96,8 +100,7 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
         samples.set(samples.get() + 1);
         100
     };
-    let execution: Shared<'_> =
-        Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(clock))));
+    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(clock))));
     let source = ScopedSource {
         inner: raw,
         execution: Rc::clone(&execution),
@@ -139,9 +142,12 @@ fn hidden_edge_fields_and_history_do_not_change_logical_usage_or_refusal_thresho
             (PropertyKeyId(33), CanonicalScalar::Null),
         ];
         let mut mixed = fields.clone();
-        for key in 1..128 {
+        for key in 1u8..128 {
             if ![17, 25, 33].contains(&key) {
-                mixed.push((PropertyKeyId(key), CanonicalScalar::Int(i64::from(key))));
+                mixed.push((
+                    PropertyKeyId(u64::from(key)),
+                    CanonicalScalar::Int(i64::from(key)),
+                ));
             }
         }
         mixed.push((
@@ -181,7 +187,11 @@ fn relation_and_both_endpoints_are_admitted_before_charging_or_lending_a_field()
         let fields = vec![(PropertyKeyId(17), CanonicalScalar::Int(7))];
         for case in 0..3 {
             let mut raw = Raw::new(fields.clone());
-            raw.relation = if case == 0 { RelationId(99) } else { RelationId(1) };
+            raw.relation = if case == 0 {
+                RelationId(99)
+            } else {
+                RelationId(1)
+            };
             raw.hidden_target = case == 1;
             let id = if case == 2 { EId(99) } else { EId(7) };
             assert_eq!(
@@ -273,7 +283,8 @@ fn pull<R: GraphSymbolResolver, C: FnMut() -> u64>(
     let prepared = session.prepare(cx, text, &params)?;
     session.stream(cx, &prepared, &params)?.collect()
 }
-const EXISTS: &str = "MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.p > a.p } RETURN a";
+const EXISTS: &str =
+    "MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.p > a.p } RETURN a";
 
 async fn seed(db: &mut Database<crate::MemVfs>, cx: &fgdb_types::CommitCx) -> CommitSeq {
     let p = PropertyKeyId(1);
@@ -285,7 +296,12 @@ async fn seed(db: &mut Database<crate::MemVfs>, cx: &fgdb_types::CommitCx) -> Co
             vec![(p, CanonicalScalar::Int(10))],
         );
     }
-    for (id, a, b, value) in [(10, 1, 3, 0), (11, 1, 3, 20), (12, 3, 4, 0), (13, 3, 2, 100)] {
+    for (id, a, b, value) in [
+        (10, 1, 3, 0),
+        (11, 1, 3, 20),
+        (12, 3, 4, 0),
+        (13, 3, 2, 100),
+    ] {
         batch.add_edge(
             EId(id),
             VId(a),
@@ -306,7 +322,9 @@ fn authorized_private_relationship_predicates_match_scoped_eager_results() {
         let cx = contexts.query();
         let issuer = issuer(8803);
         let keys = crate::DatabaseKeys::new([0x37; 32], issuer.namespace(), [0x95; 32]);
-        let mut db = Database::open_memory(&contexts.commit(), keys).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys)
+            .await
+            .unwrap();
         seed(&mut db, &contexts.commit()).await;
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let mut session = db
@@ -314,12 +332,30 @@ fn authorized_private_relationship_predicates_match_scoped_eager_results() {
             .unwrap();
         for (text, expected) in [
             (EXISTS, vec![VId(1)]),
-            ("MATCH (a) WHERE NOT EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.p > a.p } RETURN a", vec![VId(3), VId(4)]),
-            ("MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.secret = 999 } RETURN a", vec![]),
-            ("MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.secret IS NULL } RETURN a", vec![VId(1), VId(3)]),
-            ("MATCH (a) WHERE EXISTS { MATCH (a)<-[edge:R]-(b) WHERE edge.p > 0 } RETURN a", vec![VId(3)]),
-            ("MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]-(b) WHERE edge.p > 0 } RETURN a", vec![VId(1), VId(3)]),
-            ("MATCH (a) WHERE NOT EXISTS { MATCH (a)-[edge:S]->(b) WHERE edge.p > 0 } RETURN a", vec![VId(1), VId(3), VId(4)]),
+            (
+                "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.p > a.p } RETURN a",
+                vec![VId(3), VId(4)],
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.secret = 999 } RETURN a",
+                vec![],
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]->(b) WHERE edge.secret IS NULL } RETURN a",
+                vec![VId(1), VId(3)],
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)<-[edge:R]-(b) WHERE edge.p > 0 } RETURN a",
+                vec![VId(3)],
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[edge:R]-(b) WHERE edge.p > 0 } RETURN a",
+                vec![VId(1), VId(3)],
+            ),
+            (
+                "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[edge:S]->(b) WHERE edge.p > 0 } RETURN a",
+                vec![VId(1), VId(3), VId(4)],
+            ),
         ] {
             let rows = pull(&mut session, &cx, text).unwrap();
             assert_eq!(ids(&rows), expected, "{text}");
@@ -362,7 +398,9 @@ fn every_issuer_expiry_boundary_closes_the_private_edge_cursor_and_session() {
         let cx = contexts.query();
         let issuer = issuer(8805);
         let keys = crate::DatabaseKeys::new([0x37; 32], issuer.namespace(), [0x95; 32]);
-        let mut db = Database::open_memory(&contexts.commit(), keys).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys)
+            .await
+            .unwrap();
         seed(&mut db, &contexts.commit()).await;
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let calls = Cell::new(0);
@@ -414,9 +452,15 @@ fn every_issuer_expiry_boundary_closes_the_private_edge_cursor_and_session() {
                     error
                 }
             };
-            assert!(matches!(failure, QueryError::Authorization(AuthorizationError::Expired)));
+            assert!(matches!(
+                failure,
+                QueryError::Authorization(AuthorizationError::Expired)
+            ));
             assert!([VId(1)].starts_with(&ids(&delivered)));
-            assert!(session.is_closed(), "expiry at callback {stop} retained the session");
+            assert!(
+                session.is_closed(),
+                "expiry at callback {stop} retained the session"
+            );
             assert_eq!(calls.get(), stop, "failed execution called its clock again");
             assert_eq!(Arc::strong_count(&db.snapshot), baseline_refs);
         }
@@ -431,7 +475,9 @@ fn signed_row_refusal_is_not_empty_success_and_does_not_widen_the_next_query() {
         let cx = contexts.query();
         let issuer = issuer(8806);
         let keys = crate::DatabaseKeys::new([0x37; 32], issuer.namespace(), [0x95; 32]);
-        let mut db = Database::open_memory(&contexts.commit(), keys).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys)
+            .await
+            .unwrap();
         seed(&mut db, &contexts.commit()).await;
         let mut grant = grant();
         grant.limits.max_rows = 0;
@@ -443,9 +489,9 @@ fn signed_row_refusal_is_not_empty_success_and_does_not_widen_the_next_query() {
             let result = pull(&mut session, &cx, EXISTS);
             assert!(matches!(
                 result,
-                Err(QueryError::Authorization(AuthorizationError::LimitExceeded(
-                    LimitDimension::Rows
-                )))
+                Err(QueryError::Authorization(
+                    AuthorizationError::LimitExceeded(LimitDimension::Rows)
+                ))
             ));
             assert!(!session.is_closed());
             assert!(
@@ -457,7 +503,9 @@ fn signed_row_refusal_is_not_empty_success_and_does_not_widen_the_next_query() {
         issuer.retire();
         assert!(matches!(
             pull(&mut session, &cx, &format!("{EXISTS} LIMIT 0")),
-            Err(QueryError::Authorization(AuthorizationError::AuthorityRetired))
+            Err(QueryError::Authorization(
+                AuthorizationError::AuthorityRetired
+            ))
         ));
         assert!(session.is_closed());
     });
@@ -506,7 +554,9 @@ fn scoped_edge_fields_follow_pinned_history_after_writes_and_reopen() {
         }
         drop(pinned);
         drop(db);
-        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys).await.unwrap();
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys)
+            .await
+            .unwrap();
         let mut session = reopened
             .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
             .unwrap();
