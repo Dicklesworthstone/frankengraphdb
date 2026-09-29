@@ -50,20 +50,8 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
     let (mut parens, mut brackets, mut braces) = (0_u32, 0_u32, 0_u32);
     while at < bytes.len() {
         let ch = bytes[at];
-        if ch == b'\'' {
-            at += 1;
-            while at < bytes.len() {
-                if bytes[at] == b'\'' {
-                    if bytes.get(at + 1) == Some(&b'\'') {
-                        at += 2;
-                    } else {
-                        at += 1;
-                        break;
-                    }
-                } else {
-                    at += text[at..].chars().next().map_or(1, char::len_utf8);
-                }
-            }
+        if let Some(end) = crate::graph_text::literal::opaque_end(text, at) {
+            at = end;
             continue;
         }
         match ch {
@@ -174,20 +162,8 @@ fn parameter_names(text: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut at = 0;
     while at < bytes.len() {
-        if bytes[at] == b'\'' {
-            at += 1;
-            while at < bytes.len() {
-                if bytes[at] == b'\'' {
-                    if bytes.get(at + 1) == Some(&b'\'') {
-                        at += 2;
-                    } else {
-                        at += 1;
-                        break;
-                    }
-                } else {
-                    at += text[at..].chars().next().map_or(1, char::len_utf8);
-                }
-            }
+        if let Some(end) = crate::graph_text::literal::opaque_end(text, at) {
+            at = end;
             continue;
         }
         if bytes[at] == b'$' {

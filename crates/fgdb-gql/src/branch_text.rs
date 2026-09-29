@@ -354,17 +354,14 @@ fn tokens(text: &str) -> Result<Vec<Token<'_>>, GraphBranchTextError> {
             at += ch.len_utf8();
             continue;
         }
-        if bytes[at..].starts_with(b"//") {
-            at += text[at..].find('\n').unwrap_or(bytes.len() - at);
-            continue;
-        }
-        if bytes[at..].starts_with(b"/*") {
-            let start = at;
-            let end = text[at + 2..]
-                .find("*/")
-                .ok_or_else(|| error(start, GraphBranchTextErrorKind::UnclosedComment))?;
-            at += end + 4;
-            continue;
+        // The shared lexical rule (graph_text::literal), not a local copy.
+        match crate::graph_text::literal::comment_end(text, at) {
+            Ok(Some(end)) => {
+                at = end;
+                continue;
+            }
+            Ok(None) => {}
+            Err(start) => return Err(error(start, GraphBranchTextErrorKind::UnclosedComment)),
         }
         if result.len() == MAX_GRAPH_TEXT_TOKENS {
             return Err(error(at, GraphBranchTextErrorKind::TooManyTokens));
@@ -373,24 +370,11 @@ fn tokens(text: &str) -> Result<Vec<Token<'_>>, GraphBranchTextError> {
         let depth = stack.len();
         let byte = bytes[at];
         let kind = if b"'\"`".contains(&byte) {
-            at += 1;
-            let body = at;
-            loop {
-                let Some(next) = bytes.get(at) else {
-                    return Err(error(start, GraphBranchTextErrorKind::UnclosedQuote));
-                };
-                if *next == byte {
-                    if bytes.get(at + 1) == Some(&byte) {
-                        at += 2;
-                        continue;
-                    }
-                    break;
-                }
-                at += 1;
-            }
-            let raw = &text[body..at];
-            at += 1;
-            Kind::Quoted(raw, byte)
+            let Ok(Some(end)) = crate::graph_text::literal::quoted_end(text, at) else {
+                return Err(error(start, GraphBranchTextErrorKind::UnclosedQuote));
+            };
+            at = end;
+            Kind::Quoted(&text[start + 1..end - 1], byte)
         } else if byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' {
             let parameter = byte == b'$';
             if parameter {

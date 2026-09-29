@@ -89,9 +89,12 @@ positive-LIMIT restriction. Missing properties project as canonical nulls.
 No arbitrary ORDER BY or expression-ordering semantics are implied.
 
 Keywords are ASCII case-insensitive, while names are case-sensitive ASCII
-identifiers. Unicode whitespace is accepted and errors carry byte offsets.
-Quoted identifiers, comments, semicolon terminators, multiple statements,
-edge variables, property maps, OR/NOT, optional matches, variable-length paths,
+identifiers or backtick-delimited identifiers (`` `first name` ``). Unicode
+whitespace, `//` line comments and non-nesting `/* */` block comments are
+trivia, and errors carry byte offsets. Text literals take single or double
+quotes; a doubled delimiter is the only escape and a backslash is an ordinary
+byte. A delimited identifier that spells a keyword refuses (fgdb-285i2).
+Semicolon terminators, multiple statements, edge variables, property maps, OR/NOT, optional matches, variable-length paths,
 aggregates, arbitrary projection expressions and general ORDER BY are outside
 this profile and refuse rather than being silently ignored. This is not full
 GQL/openCypher conformance or the complete registered LanguageContract.
@@ -416,8 +419,8 @@ and 4,355 interrupted prefixes; the earlier single-column pattern model had
 15,147 projection comparisons and an explicitly reported large mixed-direction
 fixture timeout. None becomes acceptance evidence for this Rust integration.
 
-Remaining: full text language/profile and CLI/wire integration, quoted names,
-comments, optional/edge/path columns, arbitrary projection expressions,
+Remaining: full text language/profile and CLI/wire integration,
+optional/edge/path columns, arbitrary projection expressions,
 complete GQL bag/path semantics, pattern evidence and catalog/session contracts,
 registered FreeJoin/authorized-Strata access, variable-length paths, spill and
 byte-accurate whole-operation governance.

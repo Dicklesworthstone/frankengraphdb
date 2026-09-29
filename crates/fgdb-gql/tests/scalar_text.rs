@@ -6,7 +6,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    PreparedGraphAggregateText, PreparedGraphText,
+    PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText, PreparedGraphWriteScript,
+    PreparedTemporalGraphText,
 };
 use fgdb_types::{CanonicalScalar, VId};
 use std::collections::BTreeMap;
@@ -103,19 +104,179 @@ fn quoted_payloads_are_not_query_tokens_and_doubled_quotes_are_the_only_escape()
     ] {
         let encoded = value.replace('\'', "''");
         let statement = format!("MATCH (n) WHERE n.p = '{encoded}' RETURN n");
-        assert_eq!(
-            ids(
-                &statement,
-                &[Some(text(value)), None, Some(text("different"))]
-            ),
-            vec![VId(0)]
+        // The same payload double-quoted, where only a doubled " escapes
+        // (fgdb-285i2): the same rows and the same plan bytes.
+        let double = format!(
+            "MATCH (n) WHERE n.p = \"{}\" RETURN n",
+            value.replace('"', "\"\"")
         );
+        for statement in [&statement, &double] {
+            assert_eq!(
+                ids(
+                    statement,
+                    &[Some(text(value)), None, Some(text("different"))]
+                ),
+                vec![VId(0)],
+                "{statement}"
+            );
+        }
+        let plan = |statement: &str| {
+            PreparedGraphText::prepare(statement, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .canonical_bytes()
+        };
+        assert_eq!(plan(&statement), plan(&double), "{double}");
         let prepared = PreparedGraphText::prepare(&statement, symbols).unwrap();
         assert!(prepared.parameter_schema().is_empty());
         assert!(!format!("{prepared:?}").contains(value));
         for at in (0..statement.len()).filter(|at| statement.is_char_boundary(*at)) {
             let _ = PreparedGraphText::prepare(&statement[..at], symbols);
         }
+    }
+}
+
+/// One lexical rule (fgdb-285i2): comments are trivia, a double-quoted
+/// literal is text, and a backtick-delimited identifier is the identifier it
+/// spells. Each spelling prepares to exactly the plan of its plain form.
+#[test]
+fn comments_double_quotes_and_delimited_identifiers_prepare_the_plain_plan() {
+    let plan = |statement: &str| {
+        PreparedGraphText::prepare(statement, symbols)
+            .expect(statement)
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    let plain = plan("MATCH (n:L)-[:R]->(m) WHERE n.p = 'a;b' RETURN n, m.p ORDER BY m.p");
+    for spelling in [
+        "MATCH (n:L)-[:R]->(m) WHERE n.p = \"a;b\" RETURN n, m.p ORDER BY m.p",
+        "// leading comment\nMATCH (n:L)-[:R]->(m) WHERE n.p = 'a;b' RETURN n, m.p ORDER BY m.p",
+        "MATCH /* inline */ (n:L)-[:R]->(m) WHERE n.p = 'a;b' RETURN n, m.p ORDER BY m.p // tail",
+        "MATCH (n:L)-[:R]->(m) WHERE n.p = 'a;b' // RETURN nothing\n RETURN n, m.p ORDER BY m.p",
+        "MATCH (`n`:`L`)-[:`R`]->(`m`) WHERE `n`.`p` = 'a;b' RETURN `n`, `m`.p ORDER BY m.`p`",
+        "MATCH (n:L)-[:R]->(m)/**/WHERE n.p = \"a;b\"/* '\" */RETURN n, m.p ORDER BY m.p",
+    ] {
+        assert_eq!(plan(spelling), plain, "{spelling}");
+    }
+    // Delimiters and comment markers inside a literal are its payload.
+    let quoted = |value: &str| {
+        ids(
+            &format!("MATCH (n) WHERE n.p = {value} RETURN n"),
+            &[
+                Some(text("it's")),
+                Some(text("say \"hi\"")),
+                Some(text("/* x */")),
+                Some(text("a\\b")),
+            ],
+        )
+    };
+    assert_eq!(quoted("\"it's\""), vec![VId(0)]);
+    assert_eq!(quoted("'say \"hi\"'"), vec![VId(1)]);
+    assert_eq!(quoted("\"say \"\"hi\"\"\""), vec![VId(1)]);
+    assert_eq!(quoted("\"/* x */\""), vec![VId(2)]);
+    // A backslash is an ordinary byte in both quote styles.
+    assert_eq!(quoted("\"a\\b\""), vec![VId(3)]);
+    assert_eq!(quoted("'a\\b'"), vec![VId(3)]);
+}
+
+/// The temporal root scanner, UNION composition, aggregate text and the
+/// write-script splitter see the same trivia and quoted spans as the graph
+/// lexer: clause keywords or a `;` inside a comment or a double-quoted literal
+/// are not syntax.
+#[test]
+fn every_statement_family_shares_the_lexical_rule() {
+    let temporal = |statement: &str| {
+        PreparedTemporalGraphText::prepare(statement, symbols)
+            .expect(statement)
+            .canonical_template_bytes()
+    };
+    assert_eq!(
+        temporal(
+            "MATCH (n) /* FOR SYSTEM_TIME AS OF SEQ 9 */ FOR SYSTEM_TIME AS OF SEQ 3 \
+             // FOR SYSTEM_TIME AS OF SEQ 8\n RETURN n"
+        ),
+        temporal("MATCH (n) FOR SYSTEM_TIME AS OF SEQ 3 RETURN n")
+    );
+    let set = |statement: &str| {
+        PreparedGraphSetText::prepare(statement, symbols)
+            .expect(statement)
+            .canonical_template_bytes()
+    };
+    assert_eq!(
+        set(
+            "MATCH (a) RETURN a.p AS x /* UNION */ UNION MATCH (b) WHERE b.p = \"y\" RETURN b.p AS x"
+        ),
+        set("MATCH (a) RETURN a.p AS x UNION MATCH (b) WHERE b.p = 'y' RETURN b.p AS x")
+    );
+    let aggregate = |statement: &str| {
+        PreparedGraphAggregateText::prepare(statement, symbols)
+            .expect(statement)
+            .canonical_template_bytes()
+    };
+    assert_eq!(
+        aggregate("MATCH (`n`) WHERE n.p = \"k\" // count them\n RETURN count(*) AS c"),
+        aggregate("MATCH (n) WHERE n.p = 'k' RETURN count(*) AS c")
+    );
+    let args = GqlParameters::new();
+    let script = |text: &str| {
+        let script = PreparedGraphWriteScript::prepare(text, RelationId(1), symbols).expect(text);
+        (
+            script.statements().len(),
+            script.bind_parameters(&args).expect(text),
+        )
+    };
+    assert_eq!(
+        script(
+            "CREATE (n {p: \"a;b\"}); /* ; */ MATCH (n) WHERE n.p = \"a;b\" DELETE n // ;\n; // done"
+        ),
+        script("CREATE (n {p: 'a;b'}); MATCH (n) WHERE n.p = 'a;b' DELETE n")
+    );
+}
+
+#[test]
+fn unclosed_or_keyword_delimited_spans_refuse_before_catalog_calls() {
+    for (statement, expected) in [
+        ("MATCH (n) WHERE n.p = \"x RETURN n", "closing double quote"),
+        ("MATCH (`n) RETURN n", "closing backtick"),
+        (
+            "MATCH (n) /* never closed RETURN n",
+            "*/ closing the block comment",
+        ),
+        (
+            "MATCH (``) RETURN n",
+            "a nonempty delimited identifier without a doubled backtick",
+        ),
+        (
+            "MATCH (`a``b`) RETURN n",
+            "a nonempty delimited identifier without a doubled backtick",
+        ),
+        (
+            "MATCH (`MATCH`) RETURN n",
+            "a delimited identifier that is not a keyword",
+        ),
+        (
+            "MATCH (n) WHERE n.p = `true` RETURN n",
+            "a delimited identifier that is not a keyword",
+        ),
+        (
+            "MATCH (n) RETURN n AS `return`",
+            "a delimited identifier that is not a keyword",
+        ),
+    ] {
+        let mut calls = 0;
+        let error = PreparedGraphText::prepare(statement, |kind: GraphSymbolKind, name: &str| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphPatternTextErrorKind::Expected(expected),
+            "{statement}"
+        );
+        assert_eq!(calls, 0, "{statement}");
     }
 }
 
@@ -278,7 +439,10 @@ fn malformed_or_oversized_literals_refuse_before_catalog_calls() {
         "MATCH (n) WHERE n.p = 'a' 'b' RETURN n",
         "MATCH (n) WHERE n.p = 'x'; RETURN n",
         "MATCH (n) WHERE n.p = 'x' OR RETURN n",
-        "MATCH (n) WHERE n.p = \"x\" RETURN n",
+        // Double quotes delimit text (fgdb-285i2); these stay malformed.
+        "MATCH (n) WHERE n.p = \"unterminated RETURN n",
+        "MATCH (n) WHERE n.p = \"x\"' RETURN n",
+        "MATCH (n) /* unclosed WHERE n.p = 'x' RETURN n",
         "MATCH (n) WHERE n.p IS NOT RETURN n",
     ] {
         let mut calls = 0;

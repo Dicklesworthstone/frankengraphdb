@@ -7,7 +7,7 @@
 
 mod aggregate;
 mod boolean;
-mod literal;
+pub(crate) mod literal;
 mod ordering;
 mod parameters;
 mod scoped;
@@ -254,12 +254,7 @@ struct Lexer<'a> {
 }
 impl<'a> Lexer<'a> {
     fn next(&mut self) -> Result<Token<'a>, GraphPatternTextError> {
-        while let Some(ch) = self.text[self.at..].chars().next() {
-            if !ch.is_whitespace() {
-                break;
-            }
-            self.at += ch.len_utf8();
-        }
+        self.skip_trivia()?;
         let at = self.at;
         let bytes = self.text.as_bytes();
         if at == bytes.len() {
@@ -273,7 +268,7 @@ impl<'a> Lexer<'a> {
         }
         self.tokens += 1;
         let ch = bytes[at];
-        if ch == b'\'' {
+        if matches!(ch, b'\'' | b'"' | b'`') {
             return self.quoted();
         }
         let parameter = ch == b'$';

@@ -41,17 +41,12 @@ fn refusal(
 }
 
 // A separator is recognized only BETWEEN native tokens. In particular a quoted
-// scalar, including doubled quotes and semicolons, is consumed by Lexer::next.
-// The single-statement lexer remains unchanged and still rejects semicolons.
+// scalar or a comment, including doubled quotes and semicolons, is consumed by
+// the shared lexer. The single-statement lexer still rejects semicolons.
 pub(in crate::graph_text) fn next_script_token<'a>(
     lexer: &mut Lexer<'a>,
 ) -> Result<Token<'a>, GraphPatternTextError> {
-    while let Some(ch) = lexer.text[lexer.at..].chars().next() {
-        if !ch.is_whitespace() {
-            break;
-        }
-        lexer.at += ch.len_utf8();
-    }
+    lexer.skip_trivia()?;
     if lexer.text.as_bytes().get(lexer.at) == Some(&b';') {
         let at = lexer.at;
         lexer.at += 1;
