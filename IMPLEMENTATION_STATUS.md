@@ -26,15 +26,26 @@ Canonical owner: `crates/fgdb/src/lib.rs`.
 
 ### Bounded deterministic GQL
 
-The live grammar is intentionally smaller than ISO GQL. It includes a deterministic subset of:
+Re-derived from the code on 2026-09-28 (fgdb-truthup-0927-6vsim). The live text surface is a bounded, deterministic subset of ISO GQL with an openCypher compatibility surface. Each item below names a test that executes it.
 
-- labeled node scans;
-- directed, incoming, and undirected one-hop patterns;
-- bounded two-hop patterns;
-- selected equality, inequality, and integer-property predicates;
-- deterministic projection, `SKIP`, and `LIMIT`.
+Reads, through `Database::query` → `PreparedNativeRead::prepare` (`crates/fgdb/src/query_explain.rs`):
 
-Parsing and binding live in `crates/fgdb-gql/src/parser.rs`. Live database reads, historical reads, and immutable read-view reads share one exact-sequence execution kernel in `crates/fgdb/src/gql_exec.rs`.
+- `MATCH` over labels, property maps, directed/incoming/undirected edges and multi-pattern joins (`crates/fgdb-gql/tests/disconnected_patterns.rs`); `WHERE` with `AND`/`OR`/`NOT`, comparisons, `IS [NOT] NULL`, `IN [...]`, `STARTS WITH`/`ENDS WITH`/`CONTAINS` and `=~` over an in-house bounded regex engine (`crates/fgdb-gql/tests/text_predicates_and_functions.rs`); `EXISTS { ... }` pattern predicates (`crates/fgdb-gql/tests/scoped_text.rs`).
+- `OPTIONAL MATCH` (`crates/fgdb-gql/tests/multipart_optional_reads.rs`).
+- Quantified paths with a mandatory upper bound (`-[:R]->{1,4}`, `-[:R*1..3]->`), `ANY SHORTEST`/`ALL SHORTEST` and `CHEAPEST` walks, and the path functions `nodes`/`relationships`/`length`/`path_length` (`crates/fgdb-gql/tests/any_shortest_walk_text.rs`, `crates/fgdb-gql/tests/shortest_walk_text.rs`, `crates/fgdb-gql/tests/restricted_path_text.rs`, `crates/fgdb/tests/weighted_path_text.rs`, `crates/fgdb-gql/tests/path_values.rs`, `crates/fgdb-gql/tests/graph_insert_return_endpoints.rs`).
+- Projections with `DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`; computed integer and text expressions, `CASE`, `COALESCE`, `NULLIF`, `toUpper`/`toLower`/`trim`/`substring`/`size`/`toString`/`toInteger`, `||` and text `+` (`crates/fgdb-gql/tests/case_expressions.rs`, `crates/fgdb-gql/tests/computed_return_text.rs`, `crates/fgdb-gql/tests/text_predicates_and_functions.rs`); list literals, indexing and `size` (`crates/fgdb-gql/tests/list_values.rs`).
+- `count`/`sum`/`avg`/`min`/`max`/`collect` with `DISTINCT`, grouping and `HAVING` (`crates/fgdb-gql/tests/aggregate_text.rs`, `crates/fgdb-gql/tests/having_text.rs`); `WITH` pipelines, `UNWIND` and a `MATCH` after `WITH`, including grouped `WITH` (`crates/fgdb-gql/tests/multipart_reads.rs`, `crates/fgdb/tests/with_grouping.rs`).
+- `UNION [ALL]`, `INTERSECT`, `EXCEPT` (`crates/fgdb-gql/tests/set_text.rs`, `crates/fgdb/tests/set_text_queries.rs`).
+- `FOR SYSTEM_TIME AS OF SEQ` (`crates/fgdb/tests/temporal_graph_text.rs`); `AT BRANCH` through a host resolver (`crates/fgdb/tests/query_branches.rs`); `CALL fnx.* ... YIELD` composed into reads, including capability-authorized reads over the masked projection (`crates/fgdb/tests/gql_call_fnx.rs`, `crates/fgdb/tests/authorized_prism.rs`); `EXPLAIN (CERTIFICATE)` (`crates/fgdb/tests/embedded_query_explain.rs`).
+- Single- and double-quoted text, `//` and `/* */` comments, and backtick-delimited identifiers, under one lexical rule for every family (`crates/fgdb-gql/tests/scalar_text.rs`).
+
+Writes, through `PreparedGraphWriteScript` (`crates/fgdb-gql/src/graph_text/scoped/mutation/script.rs`) as one atomic program per script:
+
+- `INSERT`/`CREATE`, including `MATCH`- and `UNWIND`-driven creation and `RETURN` of what was created (`crates/fgdb-gql/tests/graph_insert_text.rs`, `crates/fgdb-gql/tests/graph_insert_query_text.rs`); `MERGE` with `ON CREATE SET`/`ON MATCH SET` (`crates/fgdb-gql/tests/vertex_upsert_text.rs`, `crates/fgdb-gql/tests/edge_merge_text.rs`); `SET`/`REMOVE` (`crates/fgdb-gql/tests/mutation_queries.rs`); `DELETE`/`DETACH DELETE` (`crates/fgdb-gql/tests/delete_write_scripts.rs`); multi-statement scripts end to end (`crates/fgdb/tests/write_script_execution.rs`); CSV-bound scripts (`crates/fgdb-gql/tests/csv_write_scripts.rs`).
+
+Typed refusals today (CLI probe, 2026-09-28): list comprehensions, `range`/`reduce`/`any`/`all`/`none`/`single`/`head`/`last`/`tail` (fgdb-20foe); map values (`keys`, `properties`, map projection, `UNWIND` of maps); float arithmetic and `toFloat`/`round`; `CALL { }` and `COUNT { }` subqueries and pattern comprehensions; `MERGE ... RETURN` and `MERGE` of a pattern with an unbound endpoint (fgdb-2277w); unaliased `RETURN a.name, b.name`, which refuses as a duplicate column (fgdb-aw8lm); `id()`/`elementId()` (fgdb-j687q); `CREATE GRAPH` and branch DDL (`CREATE BRANCH`, `MERGE BRANCH`). One gap is silent rather than typed: an Int value compared with a Float value is UNKNOWN, so the row is dropped (fgdb-qnqrj part b).
+
+Seven statement parsers still race and the furthest-reaching one wins, so a refusal's position and wording can come from a parser the statement was not meant for (fgdb-one-lexer-one-dispatch-285i2). The legacy `crates/fgdb-gql/src/parser.rs` (`BoundPlan`) is one of the seven. Live database reads, historical reads, and immutable read-view reads share one exact-sequence execution kernel in `crates/fgdb/src/gql_exec.rs`.
 
 Typed statement parameters have landed in `crates/fgdb-gql/src/parameters.rs` as structural parser operands, and the engine execution spine consumes them (see the 2026-09-08 → 2026-09-22 reality check below).
 

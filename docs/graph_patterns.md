@@ -64,6 +64,16 @@ automatic schema discovery, authorization token, or session-generation lease.
 The legacy RelationBind maps and their artifact transcript are not decoded or
 reinterpreted to simulate name resolution.
 
+> **Scope of this section (re-checked 2026-09-29, fgdb-truthup-0927-6vsim).**
+> The profile below is the first `PreparedGraphText` slice, kept as that
+> slice's original contract. The same text surface has since grown well past
+> it: property maps, `OR`/`NOT`, `OPTIONAL MATCH`, edge variables, quantified
+> and shortest paths, computed `RETURN` expressions and general `ORDER BY`
+> prepare through it, and aggregates, `WITH` pipelines and
+> set composition have their own prepared types. `IMPLEMENTATION_STATUS.md`
+> ("Bounded deterministic GQL") lists the executed surface, with the test that
+> runs each item, and the current typed refusals.
+
 The accepted profile includes named node patterns, multiple positive labels
 with colon notation, fixed-length paths, comma-connected path components,
 per-edge outgoing/incoming/undirected direction, and repeated node variables.
@@ -94,10 +104,11 @@ whitespace, `//` line comments and non-nesting `/* */` block comments are
 trivia, and errors carry byte offsets. Text literals take single or double
 quotes; a doubled delimiter is the only escape and a backslash is an ordinary
 byte. A delimited identifier that spells a keyword refuses (fgdb-285i2).
-Semicolon terminators, multiple statements, edge variables, property maps, OR/NOT, optional matches, variable-length paths,
-aggregates, arbitrary projection expressions and general ORDER BY are outside
-this profile and refuse rather than being silently ignored. This is not full
-GQL/openCypher conformance or the complete registered LanguageContract.
+The native read facade (`PreparedNativeRead`) strips one trailing semicolon,
+and multiple statements are `PreparedGraphWriteScript`'s. Anything outside
+the executed surface refuses with a typed error rather than being silently
+ignored. This is not full GQL/openCypher conformance or the complete
+registered LanguageContract.
 
 Numeric `$name` operands are structural syntax. `parameter_schema()` exposes
 the existing GqlParameterSpec objects, including type and occurrence count.
@@ -419,8 +430,8 @@ and 4,355 interrupted prefixes; the earlier single-column pattern model had
 15,147 projection comparisons and an explicitly reported large mixed-direction
 fixture timeout. None becomes acceptance evidence for this Rust integration.
 
-Remaining: full text language/profile and CLI/wire integration,
-optional/edge/path columns, arbitrary projection expressions,
+Remaining (the executed surface and today's typed refusals are listed in
+`IMPLEMENTATION_STATUS.md`): full text language/profile and wire integration,
 complete GQL bag/path semantics, pattern evidence and catalog/session contracts,
-registered FreeJoin/authorized-Strata access, variable-length paths, spill and
-byte-accurate whole-operation governance.
+registered FreeJoin/authorized-Strata access, spill and byte-accurate
+whole-operation governance.

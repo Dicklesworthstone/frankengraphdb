@@ -91,6 +91,8 @@ CALL hybrid.search(
 EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 ```
 
+> **Target state.** Checked 2026-09-28 by running each statement through the `fgdb` CLI on a fresh database: 4 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained) and `EXPLAIN (CERTIFICATE)`. `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (branches are not implemented), naming a graph in `CALL` (fgdb-luq0b), `CALL hybrid.search` (no `hybrid` procedure namespace exists), and `SUBSCRIBE TO` from the CLI; the library's `Database::subscribe_native` registers a `SUBSCRIBE TO` over a native read that has a `RETURN`, in process.
+
 ---
 
 ## The six bets
