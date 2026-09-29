@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
         self.word("RETURN")?;
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let quantifier = if distinct {
             GraphSetQuantifier::Distinct
@@ -413,7 +413,7 @@ impl<'a> Parser<'a> {
             self.word("WITH")?;
             let distinct = self.take_word("DISTINCT")?;
             if !distinct {
-                self.take_word("ALL")?;
+                self.take_all_quantifier()?;
             }
             let quantifier = if distinct {
                 GraphSetQuantifier::Distinct

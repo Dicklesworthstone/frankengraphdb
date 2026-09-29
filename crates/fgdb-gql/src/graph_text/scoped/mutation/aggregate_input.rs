@@ -200,6 +200,28 @@ impl PreparedGraphAggregateText {
                 value: Box::new(Self::bind_input_value(value, values)?),
                 list: Box::new(Self::bind_input_value(list, values)?),
             }),
+            ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
+            ReadValueTemplate::Comprehension { list, filter, map } => {
+                let part = |part: &Option<Box<ReadValueTemplate>>| {
+                    part.as_deref()
+                        .map(|part| Self::bind_input_value(part, values).map(Box::new))
+                        .transpose()
+                };
+                Ok(GraphSetValue::Comprehension {
+                    list: Box::new(Self::bind_input_value(list, values)?),
+                    filter: part(filter)?,
+                    map: part(map)?,
+                })
+            }
+            ReadValueTemplate::Quantifier {
+                kind,
+                list,
+                predicate,
+            } => Ok(GraphSetValue::Quantifier {
+                kind: *kind,
+                list: Box::new(Self::bind_input_value(list, values)?),
+                predicate: Box::new(Self::bind_input_value(predicate, values)?),
+            }),
         }
     }
 }

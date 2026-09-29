@@ -370,7 +370,7 @@ impl<'a> Parser<'a> {
         self.word("WITH")?;
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
@@ -486,7 +486,7 @@ impl<'a> Parser<'a> {
         }
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let mut inputs = Vec::<Projection<'a>>::new();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
@@ -674,7 +674,40 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::IntegerNesting { limit: 64 },
             });
         }
-        let mut value = if self.take(b'[')? {
+        let comprehension = self.is_punct(b'[') && {
+            let mut lexer = self.lexer.clone();
+            matches!(lexer.next()?.kind, TokenKind::Word(_))
+                && matches!(lexer.next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
+        };
+        let mut value = if comprehension {
+            // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
+            self.advance()?;
+            let (list, filter, map) =
+                self.element_scope(inputs.as_deref_mut(), schema, resolve, depth, true)?;
+            self.punct(b']', "]")?;
+            ReadValueTemplate::Comprehension {
+                list: Box::new(list),
+                filter: filter.map(Box::new),
+                map: map.map(Box::new),
+            }
+        } else if let Some(kind) = self.list_quantifier()? {
+            // any/all/none/single(x IN list WHERE p) (fgdb-20foe).
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let (list, predicate, _) =
+                self.element_scope(inputs.as_deref_mut(), schema, resolve, depth, false)?;
+            let predicate = predicate.ok_or(GraphSetTextError {
+                offset: self.current.at,
+                kind: GraphSetTextErrorKind::Expected("WHERE predicate of a list quantifier"),
+            })?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::Quantifier {
+                kind,
+                list: Box::new(list),
+                predicate: Box::new(predicate),
+            }
+        } else if self.take(b'[')? {
             let mut items = Vec::new();
             if !self.take(b']')? {
                 loop {
@@ -712,13 +745,14 @@ impl<'a> Parser<'a> {
             self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word)
-                if self.syntax.variables.iter().any(|name| name.text == word)
+                if !self.elements.contains(&word)
+                    && (self.syntax.variables.iter().any(|name| name.text == word)
                     || self.syntax.path.is_some_and(|path| path.text == word)
                     || self
                         .syntax
                         .edges
                         .iter()
-                        .any(|edge| edge.variable.is_some_and(|name| name.text == word)))
+                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))))
                 && !matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'.' | b'(')
@@ -736,6 +770,14 @@ impl<'a> Parser<'a> {
             let operand = self.row_expression(schema).map_err(expression_error)?;
             self.read_value_template(operand, at)?
         };
+        // A lone element is the element's whole value, not a scalar program,
+        // so a list, vertex or path element passes through intact.
+        if let ReadValueTemplate::Integer { program, .. } = &value
+            && let [MutationIntegerTemplateOp::Bound(crate::GraphIntegerOp::Local(offset))] =
+                program.as_slice()
+        {
+            value = ReadValueTemplate::Local(*offset);
+        }
         while self.take(b'[')? {
             let index =
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
@@ -746,6 +788,93 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(value)
+    }
+
+    /// `x IN list (WHERE p)? (| e)?`, with `x` in scope only for `p` and `e`
+    /// (fgdb-20foe). The scope is popped on every exit, errors included.
+    #[allow(clippy::type_complexity)]
+    fn element_scope(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<
+            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        >,
+        depth: usize,
+        projection: bool,
+    ) -> Result<
+        (
+            ReadValueTemplate,
+            Option<ReadValueTemplate>,
+            Option<ReadValueTemplate>,
+        ),
+        GraphSetTextError,
+    > {
+        let element = self.name()?;
+        self.word("IN")?;
+        let list = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+        self.elements.push(element.text);
+        let parts = self.element_parts(inputs, schema, resolve, depth, projection);
+        self.elements.pop();
+        let (filter, map) = parts?;
+        Ok((list, filter, map))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn element_parts(
+        &mut self,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<
+            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        >,
+        depth: usize,
+        projection: bool,
+    ) -> Result<(Option<ReadValueTemplate>, Option<ReadValueTemplate>), GraphSetTextError> {
+        let filter = if self.take_word("WHERE")? {
+            // A predicate parses the whole Boolean expression in every scope,
+            // including the operand-only aggregate-resolution scope.
+            let at = self.current.at;
+            let operand = if let Some(resolve) = resolve.as_deref_mut() {
+                self.resolved_predicate(resolve)
+            } else if let Some(columns) = inputs.as_deref_mut() {
+                self.mutation_expression(columns)
+            } else {
+                self.row_expression(schema)
+            }
+            .map_err(expression_error)?;
+            Some(self.read_value_template(operand, at)?)
+        } else {
+            None
+        };
+        let map = if projection && self.take(b'|')? {
+            Some(self.read_recursive_value(inputs, schema, resolve, depth + 1)?)
+        } else {
+            None
+        };
+        Ok((filter, map))
+    }
+
+    /// `ANY`, `ALL`, `NONE` or `SINGLE` opening `(x IN ...`: the same
+    /// lookahead that keeps RETURN/WITH from reading `all(` as `ALL`.
+    fn list_quantifier(&self) -> Result<Option<crate::GraphListQuantifier>, GraphPatternTextError> {
+        use crate::GraphListQuantifier as Quantifier;
+        if !self.starts_list_quantifier()? {
+            return Ok(None);
+        }
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let kind = [
+            ("ANY", Quantifier::Any),
+            ("ALL", Quantifier::All),
+            ("NONE", Quantifier::None),
+            ("SINGLE", Quantifier::Single),
+        ]
+        .into_iter()
+        .find(|(name, _)| word.eq_ignore_ascii_case(name))
+        .map(|(_, kind)| kind);
+        Ok(kind)
     }
 }
 
@@ -963,6 +1092,28 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Size(value) => {
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))
         }
+        ReadValueTemplate::Local(offset) => GraphSetValue::Local(*offset),
+        ReadValueTemplate::Comprehension { list, filter, map } => {
+            let part = |part: &Option<Box<ReadValueTemplate>>| {
+                part.as_deref()
+                    .map(|part| bind_read_value(part, values).map(Box::new))
+                    .transpose()
+            };
+            GraphSetValue::Comprehension {
+                list: Box::new(bind_read_value(list, values)?),
+                filter: part(filter)?,
+                map: part(map)?,
+            }
+        }
+        ReadValueTemplate::Quantifier {
+            kind,
+            list,
+            predicate,
+        } => GraphSetValue::Quantifier {
+            kind: *kind,
+            list: Box::new(bind_read_value(list, values)?),
+            predicate: Box::new(bind_read_value(predicate, values)?),
+        },
     })
 }
 

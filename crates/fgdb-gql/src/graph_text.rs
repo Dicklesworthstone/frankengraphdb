@@ -447,6 +447,9 @@ struct Parser<'a> {
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Name<'a>, usize)>,
     boundary_reads: Option<BoundaryReads<'a>>,
+    /// List-comprehension element bindings in scope, innermost last
+    /// (fgdb-20foe). An element name shadows every row or graph name.
+    elements: Vec<&'a str>,
 }
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
@@ -495,6 +498,7 @@ impl<'a> Parser<'a> {
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
             boundary_reads: None,
+            elements: Vec::new(),
             syntax: Syntax {
                 variables: Vec::new(),
                 path: None,
@@ -537,6 +541,28 @@ impl<'a> Parser<'a> {
         }
         self.advance()?;
         Ok(true)
+    }
+    /// The RETURN/WITH set quantifier `ALL`, unless this `ALL` opens the
+    /// openCypher list quantifier `all(x IN list WHERE p)` (fgdb-20foe).
+    fn take_all_quantifier(&mut self) -> Result<bool, GraphPatternTextError> {
+        if self.starts_list_quantifier()? {
+            return Ok(false);
+        }
+        self.take_word("ALL")
+    }
+    /// `ANY`, `ALL`, `NONE` or `SINGLE`, then `(`, an element name and `IN`.
+    fn starts_list_quantifier(&self) -> Result<bool, GraphPatternTextError> {
+        if !["ANY", "ALL", "NONE", "SINGLE"]
+            .iter()
+            .any(|word| self.is_word(word))
+        {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+            && matches!(lexer.next()?.kind, TokenKind::Word(_))
+            && matches!(lexer.next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
     }
     fn is_punct(&self, ch: u8) -> bool {
         matches!(self.current.kind, TokenKind::Punct(actual) if actual == ch)
@@ -972,7 +998,7 @@ impl<'a> Parser<'a> {
         use crate::algebra::PatternLimitDimension;
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         if self.take(b'*')? {
             self.syntax.columns.extend(

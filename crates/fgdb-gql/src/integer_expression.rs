@@ -44,6 +44,11 @@ pub enum GraphIntegerOp {
     Literal(Option<i64>),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    /// A list-comprehension element (fgdb-20foe): the scalar `k` positions
+    /// before the END of the input row. An element scope evaluates over its
+    /// row followed by one value per enclosing element binding, innermost
+    /// last, so the address needs no final row width at preparation.
+    Local(usize),
     Upper,
     Lower,
     Trim,
@@ -174,6 +179,10 @@ impl GraphIntegerOp {
                 bytes.push(29);
                 bytes.extend_from_slice(&(*alternatives as u64).to_be_bytes());
             }
+            Self::Local(offset) => {
+                bytes.push(33);
+                bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
+            }
         }
     }
 }
@@ -184,6 +193,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Literal(_) => f.write_str("Literal([REDACTED])"),
             Self::Scalar(_) => f.write_str("Scalar([REDACTED])"),
             Self::ScalarColumn(_) => f.write_str("ScalarColumn([REDACTED])"),
+            Self::Local(_) => f.write_str("Local([REDACTED])"),
             Self::Upper => f.write_str("Upper"),
             Self::Lower => f.write_str("Lower"),
             Self::Trim => f.write_str("Trim"),
@@ -370,6 +380,7 @@ enum Instruction {
     Unary(GraphIntegerUnary),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    Local(usize),
     Upper,
     Lower,
     Trim,
@@ -442,6 +453,15 @@ impl GraphIntegerExpression {
         }
     }
 
+    /// The element offsets (Local) this program reads; each must lie within
+    /// the element scopes enclosing it (fgdb-20foe).
+    pub fn referenced_locals(&self) -> impl Iterator<Item = usize> + '_ {
+        self.code.iter().filter_map(|op| match op {
+            Instruction::Local(offset) => Some(*offset),
+            _ => None,
+        })
+    }
+
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
             Instruction::Column(column) | Instruction::ScalarColumn(column) => Some(*column),
@@ -475,6 +495,7 @@ impl GraphIntegerExpression {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
         let value = self.evaluate_loaded_with_control(
+            values.len(),
             |column| match values.get(column) {
                 Some(GraphValue::Scalar(value)) => Ok(ExpressionCell::Scalar(Cow::Borrowed(value))),
                 Some(_) => Err(GraphIntegerErrorKind::NonScalar),
@@ -494,9 +515,11 @@ impl GraphIntegerExpression {
     /// Execute the same bytecode over scalar-compatible loaded cells. Exact
     /// operands widen arithmetic to checked i128; scalar-only arithmetic still
     /// checks i64 bounds. Returned payloads remain borrowed until their caller
-    /// reserves storage for an owned output.
+    /// reserves storage for an owned output. `width` is the loaded row's
+    /// width: a Local(k) element loads column `width - 1 - k`.
     pub(crate) fn evaluate_loaded_with_control<'a, E>(
         &'a self,
+        width: usize,
         mut load: impl FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
@@ -531,6 +554,12 @@ impl GraphIntegerExpression {
                         value.integer().map_err(failure)?;
                     }
                     stack.push(value);
+                }
+                Instruction::Local(offset) => {
+                    let column = width
+                        .checked_sub(offset + 1)
+                        .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
+                    stack.push(load(column).map_err(failure)?);
                 }
                 Instruction::Scalar(value) => {
                     stack.push(ExpressionCell::Scalar(Cow::Borrowed(value.value())));
@@ -921,6 +950,10 @@ impl GraphIntegerExpression {
                 Instruction::InList { members } => {
                     bytes.push(26);
                     bytes.extend_from_slice(&(*members as u64).to_be_bytes());
+                }
+                Instruction::Local(offset) => {
+                    bytes.push(30);
+                    bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
                 }
             }
         }

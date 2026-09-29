@@ -456,7 +456,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let distinct = self.take_word("DISTINCT")?;
             if !distinct {
-                self.take_word("ALL")?;
+                self.take_all_quantifier()?;
             }
             let (projection, schema) = self.row_projection(&next)?;
             // The terminal RETURN is the last reader of any hidden boundary read.
@@ -530,7 +530,7 @@ impl<'a> Parser<'a> {
         }
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let width = incoming.len();
         let mut outputs = Vec::new();

@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
             GraphSetQuantifier::All
         };
         let mut returning = ParsedReturn {

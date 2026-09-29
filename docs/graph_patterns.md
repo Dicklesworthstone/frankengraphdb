@@ -68,8 +68,8 @@ reinterpreted to simulate name resolution.
 > The profile below is the first `PreparedGraphText` slice, kept as that
 > slice's original contract. The same text surface has since grown well past
 > it: property maps, `OR`/`NOT`, `OPTIONAL MATCH`, edge variables, quantified
-> and shortest paths, computed `RETURN` expressions and general `ORDER BY`
-> prepare through it, and aggregates, `WITH` pipelines and
+> and shortest paths, computed `RETURN` expressions, list comprehensions and
+> general `ORDER BY` prepare through it, and aggregates, `WITH` pipelines and
 > set composition have their own prepared types. `IMPLEMENTATION_STATUS.md`
 > ("Bounded deterministic GQL") lists the executed surface, with the test that
 > runs each item, and the current typed refusals.

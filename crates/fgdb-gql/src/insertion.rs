@@ -645,6 +645,9 @@ impl Properties {
                 | GraphSetValue::Index { .. }
                 | GraphSetValue::Size(_)
                 | GraphSetValue::In { .. }
+                | GraphSetValue::Local(_)
+                | GraphSetValue::Comprehension { .. }
+                | GraphSetValue::Quantifier { .. }
                 | GraphSetValue::Value(_) => {
                     bytes.push(3);
                     let mut encoded = Vec::new();

@@ -229,7 +229,7 @@ impl PreparedGraphPipelineAggregateText {
         parser.word("RETURN")?;
         let output_distinct = parser.take_word("DISTINCT")?;
         if !output_distinct {
-            parser.take_word("ALL")?;
+            parser.take_all_quantifier()?;
         }
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();

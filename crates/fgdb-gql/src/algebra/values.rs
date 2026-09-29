@@ -478,6 +478,25 @@ impl GraphValueRow {
         }
     }
 
+    /// A list-comprehension element scope (fgdb-20foe): this row's values,
+    /// already copied under the caller's reservations, followed by one
+    /// element slot. Element scopes may exceed the pattern column bound by
+    /// their nesting depth, which the expression-nesting limit bounds.
+    pub(crate) fn element_scope(values: Vec<GraphValue>) -> Self {
+        let mut values = values;
+        values.push(GraphValue::Scalar(fgdb_types::CanonicalScalar::Null));
+        Self {
+            values: values.into_boxed_slice(),
+        }
+    }
+
+    /// Bind the element slot of a scope made by `element_scope`.
+    pub(crate) fn set_element(&mut self, value: GraphValue) {
+        if let Some(slot) = self.values.last_mut() {
+            *slot = value;
+        }
+    }
+
     /// Zero-column identity tuple used by the relational singleton source.
     pub(crate) fn unit() -> Self {
         Self {

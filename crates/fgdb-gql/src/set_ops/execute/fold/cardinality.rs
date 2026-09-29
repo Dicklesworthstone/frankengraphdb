@@ -23,6 +23,16 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Index { list, index } => constant(list) && constant(index),
         GraphSetValue::Size(list) => constant(list),
         GraphSetValue::In { value, list } => constant(value) && constant(list),
+        // An element is fixed by its comprehension's list (fgdb-20foe).
+        GraphSetValue::Local(_) => true,
+        GraphSetValue::Comprehension { list, filter, map } => {
+            constant(list)
+                && filter.as_deref().is_none_or(constant)
+                && map.as_deref().is_none_or(constant)
+        }
+        GraphSetValue::Quantifier {
+            list, predicate, ..
+        } => constant(list) && constant(predicate),
     }
 }
 

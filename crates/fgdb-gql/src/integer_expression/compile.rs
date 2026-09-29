@@ -69,9 +69,12 @@ fn prepare_root(
         let missing = || GraphIntegerBuildError::MissingOperand { instruction: at };
         let wrong = || GraphIntegerBuildError::OperandType { instruction: at };
         let arity = match op {
-            Op::Column(_) | Op::Literal(_) | Op::Truth(_) | Op::Scalar(_) | Op::ScalarColumn(_) => {
-                0
-            }
+            Op::Column(_)
+            | Op::Literal(_)
+            | Op::Truth(_)
+            | Op::Scalar(_)
+            | Op::ScalarColumn(_)
+            | Op::Local(_) => 0,
             Op::Unary(_)
             | Op::IsNull(_)
             | Op::Not
@@ -160,7 +163,7 @@ fn prepare_root(
                 CanonicalScalar::Text(_) => Kind::Text,
                 _ => return Err(wrong()),
             },
-            Op::ScalarColumn(_) => Kind::Dynamic,
+            Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
             Op::Coalesce => merge_positions(&[0, 1])?,
             Op::Case => merge_positions(&[1, 2])?,
             Op::Compare(_) => {
@@ -332,6 +335,7 @@ fn prepare_root(
                 match &node.op {
                     Op::Column(column) => code.push(Instruction::Column(*column)),
                     Op::ScalarColumn(column) => code.push(Instruction::ScalarColumn(*column)),
+                    Op::Local(offset) => code.push(Instruction::Local(*offset)),
                     Op::Scalar(value) => code.push(Instruction::Scalar(value.clone())),
                     Op::Literal(value) => code.push(Instruction::Literal(*value)),
                     Op::Truth(value) => code.push(Instruction::Truth(*value)),

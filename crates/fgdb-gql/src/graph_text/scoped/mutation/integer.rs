@@ -172,6 +172,15 @@ impl<'a> Parser<'a> {
         self.checked_expression(&mut ExpressionColumns::Row(columns), true)
     }
 
+    /// A whole Boolean predicate over resolved leaves: a list-comprehension
+    /// WHERE in the aggregate-resolution scope (fgdb-20foe).
+    pub(super) fn resolved_predicate(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+    ) -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression(&mut ExpressionColumns::Resolved(resolve), true)
+    }
+
     pub(super) fn resolved_expression(
         &mut self,
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
@@ -210,7 +219,8 @@ impl<'a> Parser<'a> {
             // HAVING owns comparisons and Boolean operators around each operand.
             ExpressionBoundary::Operand => self.scalar_concat(columns, 0, &mut parsed)?,
         }
-        if parsed.len() == 1 {
+        // A lone list element is a one-instruction program, not an atom.
+        if parsed.len() == 1 && matches!(parsed[0], ParsedOp::Atom(..)) {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
                 unreachable!("operators and CASE also contain their operands")
             };
@@ -505,7 +515,12 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
         self.integer_sum(columns, depth, program)?;
-        while self.take(b'|')? {
+        // Only `||` continues an expression. A lone `|` ends it: it separates
+        // a list comprehension's predicate from its projection (fgdb-20foe).
+        while self.is_punct(b'|')
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'|'))
+        {
+            self.advance()?;
             let at = self.current.at;
             self.punct(b'|', "||")?;
             self.integer_sum(columns, depth, program)?;
@@ -676,6 +691,30 @@ impl<'a> Parser<'a> {
             }
             self.punct(b')', ")")?;
             return Ok(());
+        }
+        // A list-comprehension element (fgdb-20foe) shadows every row and graph
+        // name. Reading a property of one would need storage access inside
+        // the element scope, so `x.p` refuses rather than falling through to
+        // a same-named pattern variable.
+        if let TokenKind::Word(word) = self.current.kind
+            && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
+        {
+            match self.lexer.clone().next()?.kind {
+                TokenKind::Punct(b'.') => {
+                    return Err(failure(
+                        at,
+                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                            "a list element used as a value, not a property read",
+                        )),
+                    ));
+                }
+                TokenKind::Punct(b'(') => {}
+                _ => {
+                    self.advance()?;
+                    let offset = self.elements.len() - 1 - binding;
+                    return emit(program, ParsedOp::Bound(GraphIntegerOp::Local(offset)), at);
+                }
+            }
         }
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,

@@ -187,9 +187,9 @@ pub use prepared::{
 };
 pub use set_ops::row_filter;
 pub use set_ops::{
-    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
-    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
-    GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
+    GraphListQuantifier, GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError,
+    GraphSetFilterError, GraphSetOperand, GraphSetOperation, GraphSetPredicateOp,
+    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
     MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
     PreparedProcedureCall, WithProcedures,
 };

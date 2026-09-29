@@ -20,7 +20,9 @@ pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub(crate) use projection::evaluate_membership;
-pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
+pub use projection::{
+    GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
+};
 
 use crate::algebra::{
     GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGraphPattern, ValueProjection,

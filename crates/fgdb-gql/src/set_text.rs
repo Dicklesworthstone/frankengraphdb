@@ -92,8 +92,34 @@ pub(crate) enum ReadValueTemplate {
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
         at: usize,
     },
+    /// A list-comprehension element, `k` bindings out (fgdb-20foe).
+    Local(usize),
+    Comprehension {
+        list: Box<ReadValueTemplate>,
+        filter: Option<Box<ReadValueTemplate>>,
+        map: Option<Box<ReadValueTemplate>>,
+    },
+    Quantifier {
+        kind: crate::GraphListQuantifier,
+        list: Box<ReadValueTemplate>,
+        predicate: Box<ReadValueTemplate>,
+    },
 }
 impl ReadValueTemplate {
+    /// Whether this value binds a list-comprehension element anywhere.
+    pub(crate) fn binds_elements(&self) -> bool {
+        match self {
+            Self::Local(_) | Self::Comprehension { .. } | Self::Quantifier { .. } => true,
+            Self::List(items) => items.iter().any(Self::binds_elements),
+            Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
+            Self::Size(inner) => inner.binds_elements(),
+            Self::In { value, list } => value.binds_elements() || list.binds_elements(),
+            Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
+                false
+            }
+        }
+    }
+
     pub(crate) fn column_type(
         &self,
         input: &[GraphSetColumnType],
@@ -101,7 +127,8 @@ impl ReadValueTemplate {
     ) -> GraphSetColumnType {
         match self {
             Self::Column(index) => input[*index],
-            Self::List(_) => GraphSetColumnType::List,
+            Self::List(_) | Self::Comprehension { .. } => GraphSetColumnType::List,
+            Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. }
                 if parameters[*index].parameter_type == GqlParameterType::List =>
@@ -172,6 +199,32 @@ impl ReadValueTemplate {
                 bytes.push(7);
                 value.append_template_transcript(bytes);
                 list.append_template_transcript(bytes);
+            }
+            Self::Local(offset) => {
+                bytes.push(8);
+                ordinal(bytes, *offset);
+            }
+            Self::Comprehension { list, filter, map } => {
+                bytes.push(9);
+                list.append_template_transcript(bytes);
+                for part in [filter, map] {
+                    match part {
+                        Some(part) => {
+                            bytes.push(1);
+                            part.append_template_transcript(bytes);
+                        }
+                        None => bytes.push(0),
+                    }
+                }
+            }
+            Self::Quantifier {
+                kind,
+                list,
+                predicate,
+            } => {
+                bytes.extend_from_slice(&[10, kind.tag()]);
+                list.append_template_transcript(bytes);
+                predicate.append_template_transcript(bytes);
             }
         }
     }

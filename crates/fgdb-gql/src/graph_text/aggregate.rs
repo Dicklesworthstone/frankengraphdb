@@ -167,7 +167,7 @@ impl PreparedGraphAggregateText {
         parser.parse_head()?;
         let distinct = parser.take_word("DISTINCT")?;
         if !distinct {
-            parser.take_word("ALL")?;
+            parser.take_all_quantifier()?;
         }
         let mut returned = Vec::new();
         loop {
@@ -957,7 +957,21 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
                 }
             }
         }
-        ReadValueTemplate::Literal(_) | ReadValueTemplate::Parameter { .. } => {}
+        ReadValueTemplate::Comprehension { list, filter, map } => {
+            remap_output_columns(list, columns);
+            for part in [filter, map].into_iter().flatten() {
+                remap_output_columns(part, columns);
+            }
+        }
+        ReadValueTemplate::Quantifier {
+            list, predicate, ..
+        } => {
+            remap_output_columns(list, columns);
+            remap_output_columns(predicate, columns);
+        }
+        ReadValueTemplate::Literal(_)
+        | ReadValueTemplate::Parameter { .. }
+        | ReadValueTemplate::Local(_) => {}
     }
 }
 
@@ -1033,6 +1047,7 @@ impl<'a> Parser<'a> {
         computed: &mut ComputedInputs<'a>,
         leaves: &mut Vec<OutputLeaf<'a>>,
     ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
+        let at = self.current.at;
         let value = self
             .read_resolved_value(
                 &mut |parser| {
@@ -1084,6 +1099,16 @@ impl<'a> Parser<'a> {
                 };
                 error(source.offset, kind)
             })?;
+        // The aggregate-output evaluator binds no element scope (fgdb-20foe):
+        // collect first with WITH, then comprehend the collected list.
+        if value.binds_elements() {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "a list comprehension over a WITH-carried list, not an aggregate output",
+                ),
+            ));
+        }
         self.word("AS")?;
         let alias = self.name()?;
         Ok(ReturnItem {
@@ -1186,7 +1211,7 @@ impl<'a> Parser<'a> {
         };
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
-            self.take_word("ALL")?;
+            self.take_all_quantifier()?;
         }
         let result = if self.take(b'*')? {
             if function != GraphAggregateFunction::Count || distinct {

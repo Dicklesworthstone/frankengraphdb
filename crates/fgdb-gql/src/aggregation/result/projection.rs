@@ -116,7 +116,9 @@ fn expression<'g, E, C>(
         GraphSetValue::Value(value) => OutputValue::Borrowed(Cell::Value(value_ref(value))),
         GraphSetValue::Integer(expression) => {
             let value = expression
-                .evaluate_loaded_with_control(|at| input(at).and_then(load_cell), control)
+                // Aggregate outputs bind no element scope (fgdb-20foe), so a
+                // width of 0 makes any Local a MissingColumn, never a cell.
+                .evaluate_loaded_with_control(0, |at| input(at).and_then(load_cell), control)
                 .map_err(|error| match error {
                     GraphIntegerEvaluationError::Control(error) => error,
                     GraphIntegerEvaluationError::Value(error) => {
@@ -203,6 +205,14 @@ fn expression<'g, E, C>(
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
+        }
+        // Aggregate outputs bind no element scope (fgdb-20foe): the text
+        // compilers refuse a comprehension there before binding, so this is
+        // a typed failure for a hand-built plan, never a guessed element.
+        GraphSetValue::Local(_)
+        | GraphSetValue::Comprehension { .. }
+        | GraphSetValue::Quantifier { .. } => {
+            return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
         }
         GraphSetValue::Index { list, index } => {
             let list = expression(list, input, column, control)?;

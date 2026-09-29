@@ -246,6 +246,9 @@ impl<'a> Parser<'a> {
                         | ReadValueTemplate::Index { .. }
                         | ReadValueTemplate::Size(_)
                         | ReadValueTemplate::In { .. }
+                        | ReadValueTemplate::Local(_)
+                        | ReadValueTemplate::Comprehension { .. }
+                        | ReadValueTemplate::Quantifier { .. }
                 ) {
                     return Err(expected(at, "scalar CREATE property expression"));
                 }
@@ -525,7 +528,10 @@ fn bind_fields(
             ReadValueTemplate::List(_)
             | ReadValueTemplate::Index { .. }
             | ReadValueTemplate::Size(_)
-            | ReadValueTemplate::In { .. } => {
+            | ReadValueTemplate::In { .. }
+            | ReadValueTemplate::Local(_)
+            | ReadValueTemplate::Comprehension { .. }
+            | ReadValueTemplate::Quantifier { .. } => {
                 // Scalar properties only: list construction is a read-surface
                 // capability, not a stored property encoding.
                 return Err(GraphInsertTextError {

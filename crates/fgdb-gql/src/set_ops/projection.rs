@@ -41,6 +41,69 @@ pub enum GraphSetValue {
         list: Box<GraphSetValue>,
     },
     Value(GraphValue),
+    /// A list-comprehension element (fgdb-20foe): the value `k` positions
+    /// before the END of an element-scope row, which is the enclosing row
+    /// followed by one element per enclosing binding, innermost last.
+    Local(usize),
+    /// `[x IN list WHERE filter | map]`. `filter` and `map` evaluate over the
+    /// row extended by the element; only a TRUE filter keeps an element.
+    /// Without `map` the element itself is kept. A NULL list is NULL.
+    Comprehension {
+        list: Box<GraphSetValue>,
+        filter: Option<Box<GraphSetValue>>,
+        map: Option<Box<GraphSetValue>>,
+    },
+    /// `any/all/none/single(x IN list WHERE predicate)`, three-valued over
+    /// the predicate's per-element results. A NULL list is NULL.
+    Quantifier {
+        kind: GraphListQuantifier,
+        list: Box<GraphSetValue>,
+        predicate: Box<GraphSetValue>,
+    },
+}
+
+/// The openCypher list predicate functions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphListQuantifier {
+    Any,
+    All,
+    None,
+    Single,
+}
+impl GraphListQuantifier {
+    /// The one transcript tag shared by bound values and unbound templates.
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::Any => 0,
+            Self::All => 1,
+            Self::None => 2,
+            Self::Single => 3,
+        }
+    }
+    /// Combine per-element predicate results (Some(true), Some(false) or
+    /// None for UNKNOWN) as openCypher does: a decisive element wins, then
+    /// any UNKNOWN makes the answer UNKNOWN.
+    #[must_use]
+    pub fn combine(self, results: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+        let (mut trues, mut falses, mut unknowns) = (0_usize, 0_usize, 0_usize);
+        for result in results {
+            match result {
+                Some(true) => trues += 1,
+                Some(false) => falses += 1,
+                None => unknowns += 1,
+            }
+        }
+        match self {
+            Self::Any if trues > 0 => Some(true),
+            Self::None if trues > 0 => Some(false),
+            Self::All if falses > 0 => Some(false),
+            Self::Single if trues > 1 => Some(false),
+            _ if unknowns > 0 => None,
+            Self::Any => Some(false),
+            Self::None | Self::All => Some(true),
+            Self::Single => Some(trues == 1),
+        }
+    }
 }
 impl GraphSetValue {
     pub(crate) fn append_canonical_bytes(&self, bytes: &mut Vec<u8>) {
@@ -190,7 +253,7 @@ impl PreparedGraphSet {
                 return Err(Error::DuplicateName { column });
             }
             let mut nodes = 0;
-            types.push(admit(&output.value, &self.types, column, 0, &mut nodes)?);
+            types.push(admit(&output.value, &self.types, column, 0, &mut nodes, 0)?);
         }
         Ok(Self {
             columns: projection
@@ -217,7 +280,7 @@ pub(super) fn value_type(
     types: &[GraphSetColumnType],
     column: usize,
 ) -> Result<GraphSetColumnType, GraphSetProjectionError> {
-    admit(value, types, column, 0, &mut 0)
+    admit(value, types, column, 0, &mut 0, 0)
 }
 
 pub(super) fn validate_name(name: &str, column: usize) -> Result<(), GraphSetProjectionError> {
@@ -240,6 +303,7 @@ fn admit(
     column: usize,
     depth: usize,
     nodes: &mut usize,
+    locals: usize,
 ) -> Result<GraphSetColumnType, GraphSetProjectionError> {
     use GraphSetProjectionError as Error;
     *nodes += 1;
@@ -261,6 +325,12 @@ fn admit(
                     return Err(Error::IntegerInput { column, input });
                 }
             }
+            if let Some(input) = expression
+                .referenced_locals()
+                .find(|offset| *offset >= locals)
+            {
+                return Err(Error::UnknownInput { column, input });
+            }
             GraphSetColumnType::Scalar
         }
         GraphSetValue::Value(value) => {
@@ -279,14 +349,14 @@ fn admit(
         }
         GraphSetValue::List(values) => {
             for value in values {
-                admit(value, types, column, depth + 1, nodes)?;
+                admit(value, types, column, depth + 1, nodes, locals)?;
             }
             GraphSetColumnType::List
         }
         GraphSetValue::Index { list, index } => {
-            admit_list(list, types, column, depth + 1, nodes)?;
+            admit_list(list, types, column, depth + 1, nodes, locals)?;
             if !matches!(
-                admit(index, types, column, depth + 1, nodes)?,
+                admit(index, types, column, depth + 1, nodes, locals)?,
                 GraphSetColumnType::Scalar | GraphSetColumnType::Any
             ) {
                 return Err(Error::ListInput { column });
@@ -294,8 +364,8 @@ fn admit(
             GraphSetColumnType::Any
         }
         GraphSetValue::In { value, list } => {
-            admit(value, types, column, depth + 1, nodes)?;
-            let kind = admit(list, types, column, depth + 1, nodes)?;
+            admit(value, types, column, depth + 1, nodes, locals)?;
+            let kind = admit(list, types, column, depth + 1, nodes, locals)?;
             let nonnull_literal = match list.as_ref() {
                 GraphSetValue::Literal(value) => !matches!(value.value(), CanonicalScalar::Null),
                 GraphSetValue::Value(GraphValue::Scalar(value)) => {
@@ -323,12 +393,39 @@ fn admit(
                 if !matches!(scalar.value(), CanonicalScalar::Null | CanonicalScalar::Text(_)));
             if literal
                 || !matches!(
-                    admit(value, types, column, depth + 1, nodes)?,
+                    admit(value, types, column, depth + 1, nodes, locals)?,
                     GraphSetColumnType::List | GraphSetColumnType::Any | GraphSetColumnType::Scalar
                 )
             {
                 return Err(Error::ListInput { column });
             }
+            GraphSetColumnType::Scalar
+        }
+        // An element reference exists only inside its binding's scope.
+        GraphSetValue::Local(offset) => {
+            if *offset >= locals {
+                return Err(Error::UnknownInput {
+                    column,
+                    input: *offset,
+                });
+            }
+            GraphSetColumnType::Any
+        }
+        GraphSetValue::Comprehension { list, filter, map } => {
+            admit_list(list, types, column, depth + 1, nodes, locals)?;
+            if let Some(filter) = filter {
+                admit(filter, types, column, depth + 1, nodes, locals + 1)?;
+            }
+            if let Some(map) = map {
+                admit(map, types, column, depth + 1, nodes, locals + 1)?;
+            }
+            GraphSetColumnType::List
+        }
+        GraphSetValue::Quantifier {
+            list, predicate, ..
+        } => {
+            admit_list(list, types, column, depth + 1, nodes, locals)?;
+            admit(predicate, types, column, depth + 1, nodes, locals + 1)?;
             GraphSetColumnType::Scalar
         }
     })
@@ -340,8 +437,9 @@ fn admit_list(
     column: usize,
     depth: usize,
     nodes: &mut usize,
+    locals: usize,
 ) -> Result<(), GraphSetProjectionError> {
-    let kind = admit(value, types, column, depth, nodes)?;
+    let kind = admit(value, types, column, depth, nodes, locals)?;
     let null = matches!(value, GraphSetValue::Literal(v) if matches!(v.value(), CanonicalScalar::Null))
         || matches!(value, GraphSetValue::Value(v) if v.is_null());
     if !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any) && !null {
@@ -395,6 +493,32 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             bytes.push(7);
             append_value_transcript(value, bytes);
             append_value_transcript(list, bytes);
+        }
+        GraphSetValue::Local(offset) => {
+            bytes.push(8);
+            bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
+        }
+        GraphSetValue::Comprehension { list, filter, map } => {
+            bytes.push(9);
+            append_value_transcript(list, bytes);
+            for part in [filter, map] {
+                match part {
+                    Some(part) => {
+                        bytes.push(1);
+                        append_value_transcript(part, bytes);
+                    }
+                    None => bytes.push(0),
+                }
+            }
+        }
+        GraphSetValue::Quantifier {
+            kind,
+            list,
+            predicate,
+        } => {
+            bytes.extend_from_slice(&[10, kind.tag()]);
+            append_value_transcript(list, bytes);
+            append_value_transcript(predicate, bytes);
         }
     }
 }
@@ -624,6 +748,114 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(scalar)
         }
+        GraphSetValue::Local(offset) => {
+            let value = row
+                .len()
+                .checked_sub(offset + 1)
+                .and_then(|at| row.values().get(at))
+                .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
+            copy_value(value, control).map_err(ProjectionFailure::Control)?
+        }
+        GraphSetValue::Comprehension { list, filter, map } => {
+            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            if list.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else {
+                let members = list
+                    .as_list()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                let mut scope = element_scope(row, control)?;
+                let mut kept = Vec::new();
+                for member in members {
+                    scope.set_element(
+                        copy_value(member, control).map_err(ProjectionFailure::Control)?,
+                    );
+                    if let Some(filter) = filter
+                        && !element_truth(filter, &scope, column, control, depth)?.unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    kept.push(match map {
+                        // Each element evaluation is bounded like a whole
+                        // expression; total work is charged through control.
+                        Some(map) => {
+                            evaluate_value_at(map, &scope, column, control, depth + 1, &mut 0)?
+                        }
+                        None => copy_value(member, control).map_err(ProjectionFailure::Control)?,
+                    });
+                }
+                let value = GraphValue::List(kept.into_boxed_slice());
+                if !value.validate_bounds() {
+                    return Err(failure(GraphIntegerErrorKind::Overflow));
+                }
+                value
+            }
+        }
+        GraphSetValue::Quantifier {
+            kind,
+            list,
+            predicate,
+        } => {
+            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let truth = if list.is_null() {
+                None
+            } else {
+                let members = list
+                    .as_list()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                let mut scope = element_scope(row, control)?;
+                let mut results = Vec::new();
+                for member in members {
+                    scope.set_element(
+                        copy_value(member, control).map_err(ProjectionFailure::Control)?,
+                    );
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    results.push(element_truth(predicate, &scope, column, control, depth)?);
+                }
+                kind.combine(results)
+            };
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+        }
     };
     Ok(result)
+}
+
+/// Copy `row` into a list-comprehension element scope, under the same
+/// per-value reservations as any other row copy.
+fn element_scope<E>(
+    row: &GraphValueRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValueRow, ProjectionFailure<E>> {
+    let mut values = Vec::new();
+    for value in row.values() {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        values.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    Ok(GraphValueRow::element_scope(values))
+}
+
+/// A per-element predicate's three-valued result: TRUE, FALSE or UNKNOWN
+/// (NULL). Any other value is a typed expression error, never a filter.
+fn element_truth<E>(
+    predicate: &GraphSetValue,
+    scope: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    depth: usize,
+) -> Result<Option<bool>, ProjectionFailure<E>> {
+    match evaluate_value_at(predicate, scope, column, control, depth + 1, &mut 0)? {
+        GraphValue::Scalar(CanonicalScalar::Bool(truth)) => Ok(Some(truth)),
+        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
+        _ => Err(ProjectionFailure::Arithmetic {
+            column,
+            error: GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::NonBoolean,
+            },
+        }),
+    }
 }
