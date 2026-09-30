@@ -1,4 +1,6 @@
-//! Native CREATE RETURN with private output admission before ordinary commit.
+//! Pre-open preparation for CREATE RETURN and bounded native UNWIND writes.
+
+mod unwind;
 
 use super::{
     Failure, Options, emit, execution_failure, human_value, policy, render_row_body, value_cell,
@@ -6,7 +8,7 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{PreparedGraphInsertQuery, PreparedGraphInsertQueryText};
+use fgdb_gql::{BoundGraphWriteScriptBatch, PreparedGraphInsertQuery, PreparedGraphInsertQueryText};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
 use std::io::{self, Write};
 
@@ -15,9 +17,14 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 // bounded integer encodings plus the fixed terminal frame fit this reservation.
 const TERMINAL_RESERVATION: usize = 256;
 
-pub(super) fn prepare(options: &Options) -> Result<Option<PreparedGraphInsertQuery>, Failure> {
+pub(super) enum PreparedWrite {
+    Returning(PreparedGraphInsertQuery),
+    Unwind(BoundGraphWriteScriptBatch),
+}
+
+pub(super) fn prepare(options: &Options) -> Result<Option<PreparedWrite>, Failure> {
     if !PreparedGraphInsertQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
-        return Ok(None);
+        return unwind::prepare(options).map(|batch| batch.map(PreparedWrite::Unwind));
     }
     let declarations: Vec<_> = options.params.parameter_types().collect();
     let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
@@ -29,7 +36,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<PreparedGraphInsertQue
     .map_err(Failure::query)?;
     template
         .bind_parameters(&options.params)
-        .map(Some)
+        .map(|query| Some(PreparedWrite::Returning(query)))
         .map_err(Failure::query)
 }
 
@@ -58,10 +65,16 @@ impl Write for BufferedRows {
 pub(super) async fn run<V: Vfs + Clone>(
     database: &mut Database<V>,
     contexts: &PurposeContexts,
-    query: PreparedGraphInsertQuery,
+    query: PreparedWrite,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
+    let query = match query {
+        PreparedWrite::Returning(query) => query,
+        PreparedWrite::Unwind(batch) => {
+            return unwind::run(database, contexts, batch, robot, out).await;
+        }
+    };
     let cx = contexts.query();
     let mut transaction = database.begin(&contexts.txn()).map_err(execution_failure)?;
     let prepared = (|| {
