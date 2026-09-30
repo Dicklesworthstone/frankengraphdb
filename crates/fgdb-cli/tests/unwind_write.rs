@@ -171,7 +171,13 @@ fn invalid_late_rows_are_refused_before_opening_the_database() {
 #[test]
 fn a_late_arithmetic_failure_publishes_no_prefix() {
     let fixture = Fixture::new(true);
-    let text = "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) \
+    success(&fixture.write(
+        r#"[{"id":1,"name":"A"},{"id":2,"name":"B"},{"id":3,"name":"C"}]"#,
+        UPSERT,
+    ));
+    // A MERGE's SET takes literal or parameter values only, so the computed
+    // value is set through the adapter's MATCH mutation form.
+    let text = "UNWIND $rows AS row MATCH (n:Entity {id:row.id}) \
         SET n.score=10 / row.divisor";
     // Positive control: the same expression and binding shape really execute.
     success(&fixture.write(r#"[{"id":1,"divisor":2}]"#, text));

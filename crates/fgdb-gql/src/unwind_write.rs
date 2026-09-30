@@ -313,6 +313,9 @@ mod tests {
             (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
             (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            (GraphSymbolKind::Property, "greeting") => {
+                Some(GraphSymbol::Property(PropertyKeyId(3)))
+            }
             _ => None,
         }
     }
@@ -469,7 +472,7 @@ mod tests {
     fn lowering_preserves_literals_comments_and_utf8_byte_offsets() {
         let query = "UNWIND /* é */ $rows AS row\nMERGE (n:Entity {id:row /* gap */ . id}) \
             SET n.name='row.name; $aa é'";
-        let parsed = GraphUnwindWriteText::parse(&query).unwrap();
+        let parsed = GraphUnwindWriteText::parse(query).unwrap();
         assert_eq!(parsed.lowered.len(), query.len());
         let literal = "'row.name; $aa é'";
         let start = query.find(literal).unwrap();
@@ -484,7 +487,11 @@ mod tests {
 
     #[test]
     fn synthetic_parameters_do_not_capture_user_parameters_or_repeat_fields() {
-        let query = "UNWIND $rows AS r MERGE (n:Entity {id:r.id}) SET n.name=$aa + r.name + r.name";
+        // A MERGE's SET takes literal or parameter values (a computed value
+        // such as `$aa + r.name` refuses typed), so the repeated field and the
+        // user parameter each appear as a whole value here.
+        let query = "UNWIND $rows AS r MERGE (n:Entity {id:r.id}) \
+            ON CREATE SET n.name=r.name ON MATCH SET n.name=r.name SET n.greeting=$aa";
         let parsed = GraphUnwindWriteText::parse(query).unwrap();
         assert_eq!(parsed.fields.len(), 2);
         assert!(parsed.fields.iter().all(|field| field.parameter != "aa"));
@@ -494,7 +501,7 @@ mod tests {
         ])])
         .with_text("aa", "Hello ")
         .unwrap();
-        assert!(parsed.bind(&arguments, RelationId(1), resolve).is_ok());
+        parsed.bind(&arguments, RelationId(1), resolve).unwrap();
     }
 
     #[test]

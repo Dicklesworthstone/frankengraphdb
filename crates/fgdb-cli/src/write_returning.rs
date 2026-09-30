@@ -20,7 +20,7 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const TERMINAL_RESERVATION: usize = 256;
 
 pub(super) enum PreparedWrite {
-    Returning(PreparedGraphInsertQuery),
+    Returning(Box<PreparedGraphInsertQuery>),
     Unwind(BoundGraphWriteScriptBatch),
 }
 
@@ -38,7 +38,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<PreparedWrite>, Failur
     .map_err(Failure::query)?;
     template
         .bind_parameters(&options.params)
-        .map(|query| Some(PreparedWrite::Returning(query)))
+        .map(|query| Some(PreparedWrite::Returning(Box::new(query))))
         .map_err(Failure::query)
 }
 
@@ -72,7 +72,7 @@ pub(super) async fn run<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let query = match query {
-        PreparedWrite::Returning(query) => query,
+        PreparedWrite::Returning(query) => *query,
         PreparedWrite::Unwind(batch) => {
             return unwind::run(database, contexts, batch, robot, out).await;
         }

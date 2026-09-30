@@ -159,6 +159,20 @@ impl GraphUnwindWriteText {
         let mut lowered = text.as_bytes().to_vec();
         blank(&mut lowered[..tokens[0].0.at]);
 
+        // Outside a property map a ':' before a word names a label or a
+        // relationship type. Inside one it introduces a value: `{id: row.id}`
+        // is a row field use and must be lowered or refused like any other.
+        let mut in_map = Vec::with_capacity(tokens.len());
+        let mut braces = 0_usize;
+        for (token, _) in &tokens {
+            in_map.push(braces > 0);
+            match token.kind {
+                TokenKind::Punct(b'{') => braces += 1,
+                TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+        }
+
         let mut index = 0;
         while index < tokens.len() {
             let current = &tokens[index].0;
@@ -173,7 +187,7 @@ impl GraphUnwindWriteText {
                 continue;
             }
             let previous = index.checked_sub(1).and_then(|i| tokens.get(i));
-            if is_punct(previous, b'.') || is_punct(previous, b':') {
+            if is_punct(previous, b'.') || (is_punct(previous, b':') && !in_map[index]) {
                 index += 1;
                 continue;
             }
