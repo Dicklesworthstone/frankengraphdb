@@ -236,7 +236,7 @@ mod query_source {
         /// Run one scalar or correlated binding projection over the original
         /// basis plus canonical staged effects. All shapes retain the same
         /// source, witnesses and one shared source/evaluator allowance.
-        /// Single-vertex conjunctions retain exact insertion/membership witnesses
+        /// Single-vertex selections retain insertion/membership witnesses
         /// plus full reads of matching and staged vertices. Other logical shapes
         /// retain conservative scans. Refusals keep a broad vertex-domain witness;
         /// no prior getter, failed scan or savepoint observation is narrowed.
@@ -342,10 +342,7 @@ mod query_source {
             let scan_observation = if let Some(predicates) = predicates {
                 // Charge the bounded definition copy before allocation or graph
                 // reads. A failure here has learned nothing from the database.
-                control(SourceEvent::ScratchEntry)?;
-                for _ in predicates {
-                    control(SourceEvent::ScratchEntry)?;
-                }
+                super::VertexScanRead::charge_definition(predicates, control)?;
                 let index = self.point_reads.borrow_mut().begin_vertex_scan(predicates);
                 Some((self, index))
             } else {
@@ -447,17 +444,12 @@ mod query_source {
             if !edge_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
                     let view = VertexView::new(&row.labels, &row.props);
-                    let mut selected =
-                        witness_label.is_none_or(|label| row.labels.contains(&label));
-                    if let Some(predicates) = predicates {
-                        for predicate in predicates {
-                            control(SourceEvent::Work)?;
-                            if !view.matches(predicate) {
-                                selected = false;
-                                break;
-                            }
+                    let selected = match predicates {
+                        Some(predicates) => {
+                            super::VertexScanRead::may_match(predicates, row, control)?
                         }
-                    }
+                        None => witness_label.is_none_or(|label| row.labels.contains(&label)),
+                    };
                     if selected {
                         self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
                     }
