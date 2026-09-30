@@ -42,7 +42,10 @@ impl VertexScanRead {
         let count = body
             .iter()
             .take_while(|operator| {
-                matches!(operator, GlaOperator::Select { .. } | GlaOperator::SelectBoolean { .. })
+                matches!(
+                    operator,
+                    GlaOperator::Select { .. } | GlaOperator::SelectBoolean { .. }
+                )
             })
             .count();
         if count == 0 {
@@ -59,9 +62,7 @@ impl VertexScanRead {
         }
         let terminal = tail.iter().all(|operator| match operator {
             GlaOperator::Project { slot } => slot.ordinal() == 0,
-            GlaOperator::ProjectBindings { slots } => {
-                slots.iter().all(|slot| slot.ordinal() == 0)
-            }
+            GlaOperator::ProjectBindings { slots } => slots.iter().all(|slot| slot.ordinal() == 0),
             GlaOperator::ProjectValues { .. }
             | GlaOperator::Distinct
             | GlaOperator::OrderByVertexId
@@ -115,7 +116,10 @@ impl VertexScanRead {
     ) -> Result<bool, WriteTxnError> {
         use fgdb_delta_types::DeltaRow;
         use fgdb_gql::algebra::{GlaOperator, VertexPredicate};
-        if matches!(row, DeltaRow::CreateVertex { .. } | DeltaRow::DeleteVertex { .. }) {
+        if matches!(
+            row,
+            DeltaRow::CreateVertex { .. } | DeltaRow::DeleteVertex { .. }
+        ) {
             return Ok(true);
         }
         for selection in &self.selections {
@@ -199,7 +203,9 @@ impl VertexScanRead {
                         &mut |_, key| Ok::<_, VertexScanEvaluation<E>>(property(key)),
                         &mut |event| {
                             let event = match event {
-                                fgdb_gql::GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                                fgdb_gql::GlaExecutionEvent::ScratchEntry => {
+                                    SourceEvent::ScratchEntry
+                                }
                                 _ => SourceEvent::Work,
                             };
                             control(event).map_err(VertexScanEvaluation::Control)
@@ -255,10 +261,7 @@ impl VertexScanRead {
 }
 
 impl PointReads {
-    fn begin_vertex_scan(
-        &mut self,
-        predicates: &[fgdb_gql::algebra::GlaOperator],
-    ) -> usize {
+    fn begin_vertex_scan(&mut self, predicates: &[fgdb_gql::algebra::GlaOperator]) -> usize {
         let index = self.2.len();
         self.2.push(VertexScanRead {
             selections: predicates.to_vec(),

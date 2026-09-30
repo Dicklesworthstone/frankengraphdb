@@ -72,7 +72,10 @@ fn text_or_allows_nonmembers_but_detects_membership_through_either_property() {
                     assert!(is_read_conflict(result));
                     assert_eq!(database.frontier().unwrap(), frontier);
                 }
-                assert_eq!(database.vertex(VId(90)).unwrap().is_some(), write && case == 0);
+                assert_eq!(
+                    database.vertex(VId(90)).unwrap().is_some(),
+                    write && case == 0
+                );
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
         }
@@ -110,7 +113,10 @@ fn text_not_keeps_missing_null_and_incompatible_values_unknown() {
             if enters {
                 assert!(is_read_conflict(result));
             } else {
-                assert!(matches!(result, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+                assert!(matches!(
+                    result,
+                    Ok(EmbeddedTxnCompletion::ReadClosed { .. })
+                ));
             }
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -136,7 +142,12 @@ fn boolean_property_pair_entry_then_restoration_validates_every_commit() {
             .execute_graph_pattern_governed(&database, &qcx, &query, policy())
             .unwrap();
         assert_eq!(boolean_ids(&result.value), vec![VId(1)]);
-        assert!(!transaction.read_set.borrow().contains(&ElementId::Vertex(VId(2))));
+        assert!(
+            !transaction
+                .read_set
+                .borrow()
+                .contains(&ElementId::Vertex(VId(2)))
+        );
         for value in [2, 3] {
             let mut winner = WriteBatch::new(RelationId(1));
             winner.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(value)));
@@ -145,12 +156,16 @@ fn boolean_property_pair_entry_then_restoration_validates_every_commit() {
         // Both validation modes used by completion and refresh/rebase must see
         // the earlier membership entry, despite equality with the current head.
         for scope in [ConflictScope::Reads, ConflictScope::ReadsAndWrites] {
-            assert!(transaction
-                .transaction_conflict_in(&database, scope, &mut || Ok(()))
-                .unwrap()
-                .is_some());
+            assert!(
+                transaction
+                    .transaction_conflict_in(&database, scope, &mut || Ok(()))
+                    .unwrap()
+                    .is_some()
+            );
         }
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -174,7 +189,11 @@ fn text_boolean_zero_count_distinguishes_disjoint_and_same_domain_inserts() {
                 ))
                 .with_duplicates();
                 let aggregate = PreparedGraphAggregate::prepare(
-                    input, &[], &[GraphAggregate::count_rows("count")], 0, None,
+                    input,
+                    &[],
+                    &[GraphAggregate::count_rows("count")],
+                    0,
+                    None,
                 )
                 .unwrap();
                 let result = transaction
@@ -188,14 +207,21 @@ fn text_boolean_zero_count_distinguishes_disjoint_and_same_domain_inserts() {
             a.create_vertex(VId(50), vec![LABEL], vec![(Q, CanonicalScalar::Int(42))]);
             first.write(&mut database, a).unwrap();
             let mut b = WriteBatch::new(RelationId(1));
-            b.create_vertex(VId(51), vec![LABEL], vec![(P, CanonicalScalar::Int(other_key))]);
+            b.create_vertex(
+                VId(51),
+                vec![LABEL],
+                vec![(P, CanonicalScalar::Int(other_key))],
+            );
             second.write(&mut database, b).unwrap();
             first.commit(&mut database, &cx).await.unwrap();
             let result = second.finish(&mut database, &cx).await;
             if same {
                 assert!(is_read_conflict(result));
             } else {
-                assert!(matches!(result, Ok(EmbeddedTxnCompletion::WriteCommitted { .. })));
+                assert!(matches!(
+                    result,
+                    Ok(EmbeddedTxnCompletion::WriteCommitted { .. })
+                ));
             }
             assert_eq!(database.vertex(VId(51)).unwrap().is_some(), !same);
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -220,21 +246,35 @@ fn eager_boolean_data_refusal_survives_retry_and_savepoint_rollback() {
         let failing = boolean_plan("MATCH (n:L) WHERE n.p = 7 OR 1 / n.q > 0 RETURN n");
         assert!(VertexScanRead::predicates(failing.plan()).is_some());
         // OR is eager: a TRUE first leaf must not suppress division by zero.
-        assert!(transaction
-            .execute_graph_pattern_governed(&database, &qcx, &failing, policy())
-            .is_err());
+        assert!(
+            transaction
+                .execute_graph_pattern_governed(&database, &qcx, &failing, policy())
+                .is_err()
+        );
         assert!(!transaction.point_reads.borrow().2[0].complete);
         let succeeding = boolean_plan("MATCH (n:L) WHERE n.p = 7 OR n.q = 9 RETURN n");
         transaction
             .execute_graph_pattern_governed(&database, &qcx, &succeeding, policy())
             .unwrap();
-        assert_eq!(transaction.point_reads.borrow().2.iter().map(|scan| scan.complete)
-            .collect::<Vec<_>>(), vec![false, true]);
-        transaction.rollback_to_savepoint(&database, "before-boolean").unwrap();
+        assert_eq!(
+            transaction
+                .point_reads
+                .borrow()
+                .2
+                .iter()
+                .map(|scan| scan.complete)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        transaction
+            .rollback_to_savepoint(&database, "before-boolean")
+            .unwrap();
         let mut winner = WriteBatch::new(RelationId(1));
         winner.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(3)));
         database.write(&cx, winner).await.unwrap();
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -254,11 +294,18 @@ fn a_new_arithmetic_refusal_is_a_conflict_not_a_false_predicate() {
             .execute_graph_pattern_governed(&database, &qcx, &query, policy())
             .unwrap();
         assert_eq!(boolean_ids(&result.value), vec![VId(2)]);
-        assert!(!transaction.read_set.borrow().contains(&ElementId::Vertex(VId(1))));
+        assert!(
+            !transaction
+                .read_set
+                .borrow()
+                .contains(&ElementId::Vertex(VId(1)))
+        );
         let mut winner = WriteBatch::new(RelationId(1));
         winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(0)));
         database.write(&cx, winner).await.unwrap();
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -274,11 +321,17 @@ fn boolean_witness_propagates_every_control_failure_even_after_true_or() {
         let selections = VertexScanRead::predicates(query.plan()).unwrap();
         let row = database.vertex(VId(1)).unwrap().unwrap();
         let mut count = 0usize;
-        assert!(VertexScanRead::may_match(selections, &row, &mut |_| {
-            count += 1;
-            Ok::<_, usize>(())
-        }).unwrap());
-        assert!(count > 5, "exercise native Boolean admission and eager property reads");
+        assert!(
+            VertexScanRead::may_match(selections, &row, &mut |_| {
+                count += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+        );
+        assert!(
+            count > 5,
+            "exercise native Boolean admission and eager property reads"
+        );
         for stop in 1..=count {
             let mut seen = 0;
             let result = VertexScanRead::may_match(selections, &row, &mut |_| {
@@ -303,16 +356,31 @@ fn boolean_output_refusal_never_completes_its_witness_on_later_success() {
         let mut transaction = database.begin(&txcx).unwrap();
         let query = boolean_plan("MATCH (n:L) WHERE n.p = 7 OR n.q = 9 RETURN n");
         let refused = transaction.execute_graph_pattern_governed(
-            &database, &qcx, &query, GqlQueryPolicy::new(100, 0, 1_000_000, 1_000_000),
+            &database,
+            &qcx,
+            &query,
+            GqlQueryPolicy::new(100, 0, 1_000_000, 1_000_000),
         );
         assert!(matches!(refused, Err(GqlQueryError::Rows(_))));
-        transaction.execute_graph_pattern_governed(&database, &qcx, &query, policy()).unwrap();
-        assert_eq!(transaction.point_reads.borrow().2.iter().map(|scan| scan.complete)
-            .collect::<Vec<_>>(), vec![false, true]);
+        transaction
+            .execute_graph_pattern_governed(&database, &qcx, &query, policy())
+            .unwrap();
+        assert_eq!(
+            transaction
+                .point_reads
+                .borrow()
+                .2
+                .iter()
+                .map(|scan| scan.complete)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
         let mut winner = WriteBatch::new(RelationId(1));
         winner.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(3)));
         database.write(&cx, winner).await.unwrap();
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -336,13 +404,22 @@ fn boolean_overlay_read_keeps_full_staged_identity_after_rollback() {
             .execute_graph_pattern_governed(&database, &qcx, &query, policy())
             .unwrap();
         assert_eq!(boolean_ids(&result.value), vec![VId(1), VId(2)]);
-        transaction.rollback_to_savepoint(&database, "before-overlay").unwrap();
+        transaction
+            .rollback_to_savepoint(&database, "before-overlay")
+            .unwrap();
         assert!(transaction.prepared.is_none());
-        assert!(transaction.read_set.borrow().contains(&ElementId::Vertex(VId(2))));
+        assert!(
+            transaction
+                .read_set
+                .borrow()
+                .contains(&ElementId::Vertex(VId(2)))
+        );
         let mut winner = WriteBatch::new(RelationId(1));
         winner.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(3)));
         database.write(&cx, winner).await.unwrap();
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -359,13 +436,17 @@ fn boolean_queries_with_other_binding_slots_still_use_broad_witnesses() {
         let mut transaction = database.begin(&txcx).unwrap();
         let query = boolean_plan("MATCH (n:L), (m) WHERE n.p = 7 OR m.q = 9 RETURN n");
         assert!(VertexScanRead::predicates(query.plan()).is_none());
-        transaction.execute_graph_pattern_governed(&database, &qcx, &query, policy()).unwrap();
+        transaction
+            .execute_graph_pattern_governed(&database, &qcx, &query, policy())
+            .unwrap();
         assert!(transaction.point_reads.borrow().2.is_empty());
         assert!(transaction.scanned_vertices.get());
         let mut winner = WriteBatch::new(RelationId(1));
         winner.create_vertex(VId(9), vec![OTHER], vec![]);
         database.write(&cx, winner).await.unwrap();
-        assert!(is_read_conflict(transaction.finish(&mut database, &cx).await));
+        assert!(is_read_conflict(
+            transaction.finish(&mut database, &cx).await
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -389,9 +470,7 @@ fn refused_boolean_scans_keep_label_domains_and_detect_domain_entry() {
                     GqlQueryPolicy::new(100, 0, 1_000_000, 1_000_000)
                 };
                 assert!(matches!(
-                    transaction.execute_graph_pattern_governed(
-                        &database, &qcx, &query, limits,
-                    ),
+                    transaction.execute_graph_pattern_governed(&database, &qcx, &query, limits,),
                     Err(GqlQueryError::Rows(_))
                 ));
                 assert!(!transaction.point_reads.borrow().2[0].complete);
@@ -406,7 +485,10 @@ fn refused_boolean_scans_keep_label_domains_and_detect_domain_entry() {
                 if enters {
                     assert!(is_read_conflict(result));
                 } else {
-                    assert!(matches!(result, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+                    assert!(matches!(
+                        result,
+                        Ok(EmbeddedTxnCompletion::ReadClosed { .. })
+                    ));
                 }
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }

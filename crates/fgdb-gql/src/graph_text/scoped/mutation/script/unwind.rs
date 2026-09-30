@@ -47,7 +47,8 @@ fn fresh_parameter(reserved: &mut BTreeSet<String>, cursor: &mut usize) -> Optio
         let name = String::from_utf8(vec![
             LETTERS[index / LETTERS.len()],
             LETTERS[index % LETTERS.len()],
-        ]).expect("ASCII parameter name");
+        ])
+        .expect("ASCII parameter name");
         if reserved.insert(name.clone()) {
             return Some(name);
         }
@@ -68,7 +69,8 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
                 return false;
             }
             if ["MERGE", "SET", "REMOVE", "DELETE", "DETACH"]
-                .iter().any(|word| is_word(token, word))
+                .iter()
+                .any(|word| is_word(token, word))
             {
                 return true;
             }
@@ -87,17 +89,23 @@ impl GraphUnwindWriteText {
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter. Ordinary CREATE forms are
     /// intentionally handled by their existing native compiler, not this path.
     pub fn parse(text: &str) -> Result<Self, GraphUnwindWriteError> {
-        Self::parse_if_supported(text)?.ok_or_else(|| syntax(
-            0,
-            "UNWIND $rows AS row followed by MERGE or a MATCH mutation",
-        ))
+        Self::parse_if_supported(text)?.ok_or_else(|| {
+            syntax(
+                0,
+                "UNWIND $rows AS row followed by MERGE or a MATCH mutation",
+            )
+        })
     }
 
     /// Recognize only the additional bounded write surface. None means use the
     /// existing native compiler; malformed recognized text is a typed refusal.
     /// No values, catalog callbacks or graph state are inspected at this stage.
     pub fn parse_if_supported(text: &str) -> Result<Option<Self>, GraphUnwindWriteError> {
-        let mut lexer = Lexer { text, at: 0, tokens: 0 };
+        let mut lexer = Lexer {
+            text,
+            at: 0,
+            tokens: 0,
+        };
         let first = token(&mut lexer)?;
         if !is_word(&first.0, "UNWIND") {
             return Ok(None);
@@ -134,12 +142,17 @@ impl GraphUnwindWriteText {
         if !mutating_tail(&tokens) {
             return Ok(None);
         }
-        let external_parameters: Vec<String> = statements[0].parameters.iter()
+        let external_parameters: Vec<String> = statements[0]
+            .parameters
+            .iter()
             .filter(|name| **name != source_name)
             .map(|name| (*name).to_owned())
             .collect();
-        let mut reserved: BTreeSet<String> = statements[0].parameters.iter()
-            .map(|name| (*name).to_owned()).collect();
+        let mut reserved: BTreeSet<String> = statements[0]
+            .parameters
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
         let mut cursor = 0;
         let mut fields: Vec<UnwindField> = Vec::new();
         let mut field_index = BTreeMap::new();
@@ -150,7 +163,10 @@ impl GraphUnwindWriteText {
         while index < tokens.len() {
             let current = &tokens[index].0;
             if matches!(current.kind, TokenKind::Parameter(name) if name == source_name) {
-                return Err(syntax(current.at, "the UNWIND source parameter only in its prefix"));
+                return Err(syntax(
+                    current.at,
+                    "the UNWIND source parameter only in its prefix",
+                ));
             }
             if !matches!(current.kind, TokenKind::Word(name) if name == alias) {
                 index += 1;
@@ -169,7 +185,10 @@ impl GraphUnwindWriteText {
                 continue;
             }
             if !is_punct(tokens.get(index + 1), b'.') {
-                return Err(syntax(current.at, "scalar row.field access without alias rebinding"));
+                return Err(syntax(
+                    current.at,
+                    "scalar row.field access without alias rebinding",
+                ));
             }
             let Some((key_token, end)) = tokens.get(index + 2) else {
                 return Err(syntax(current.at, "a row field name"));
@@ -191,7 +210,11 @@ impl GraphUnwindWriteText {
                 let parameter = fresh_parameter(&mut reserved, &mut cursor)
                     .ok_or_else(|| syntax(current.at, "an available bounded parameter name"))?;
                 let field = fields.len();
-                fields.push(UnwindField { key: key.to_owned(), parameter, offset: current.at });
+                fields.push(UnwindField {
+                    key: key.to_owned(),
+                    parameter,
+                    offset: current.at,
+                });
                 field_index.insert(key.to_owned(), field);
                 field
             };

@@ -13,8 +13,8 @@
 use crate::algebra::GraphValue;
 use crate::{
     BoundGraphWriteScriptBatch, GqlParameterError, GqlParameterType, GqlParameterValue,
-    GqlParameters, GraphSymbol, GraphSymbolKind, GraphWriteScriptBatchError,
-    GraphWriteScriptError, PreparedGraphWriteScript,
+    GqlParameters, GraphSymbol, GraphSymbolKind, GraphWriteScriptBatchError, GraphWriteScriptError,
+    PreparedGraphWriteScript,
 };
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -143,7 +143,12 @@ impl GraphUnwindWriteText {
         relation: RelationId,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
-        self.bind_with_limit(arguments, relation, crate::MAX_GRAPH_MUTATION_STATEMENTS, resolve)
+        self.bind_with_limit(
+            arguments,
+            relation,
+            crate::MAX_GRAPH_MUTATION_STATEMENTS,
+            resolve,
+        )
     }
 
     /// Bind a finite batch without per-row transactions, quota refreshes or
@@ -180,7 +185,10 @@ impl GraphUnwindWriteText {
             });
         }
         if arguments.len() != self.external_parameters.len() + 1
-            || self.external_parameters.iter().any(|name| arguments.get(name).is_none())
+            || self
+                .external_parameters
+                .iter()
+                .any(|name| arguments.get(name).is_none())
         {
             return Err(GraphUnwindWriteError::ArgumentNames);
         }
@@ -188,7 +196,10 @@ impl GraphUnwindWriteText {
         // First inspect all shapes and exact kinds, without cloning field data.
         let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];
         for (row_index, row) in rows.iter().enumerate() {
-            if !matches!(row, GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)) {
+            if !matches!(
+                row,
+                GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)
+            ) {
                 return Err(GraphUnwindWriteError::Row {
                     row: row_index,
                     offset: self.source_offset,
@@ -215,15 +226,20 @@ impl GraphUnwindWriteText {
 
         let mut globals = GqlParameters::new();
         for name in self.external_parameters.iter() {
-            let value = arguments.get(name).ok_or(GraphUnwindWriteError::ArgumentNames)?;
-            globals.insert(name.clone(), value).map_err(|source| {
-                GraphUnwindWriteError::Parameter { row: 0, source }
-            })?;
+            let value = arguments
+                .get(name)
+                .ok_or(GraphUnwindWriteError::ArgumentNames)?;
+            globals
+                .insert(name.clone(), value)
+                .map_err(|source| GraphUnwindWriteError::Parameter { row: 0, source })?;
         }
         let mut declarations: Vec<_> = globals.parameter_types().collect();
-        declarations.extend(self.fields.iter().zip(&kinds).map(|(field, kind)| {
-            (field.parameter.as_str(), GqlParameterType::Scalar(*kind))
-        }));
+        declarations.extend(
+            self.fields
+                .iter()
+                .zip(&kinds)
+                .map(|(field, kind)| (field.parameter.as_str(), GqlParameterType::Scalar(*kind))),
+        );
 
         let mut sets = Vec::with_capacity(rows.len());
         let mut expanded_bytes = 0_u128;
@@ -233,9 +249,12 @@ impl GraphUnwindWriteText {
                 let value = scalar_field(row, field, row_index)?
                     .cloned()
                     .unwrap_or(CanonicalScalar::Null);
-                values = values.with_scalar(field.parameter.clone(), value).map_err(|source| {
-                    GraphUnwindWriteError::Parameter { row: row_index, source }
-                })?;
+                values = values
+                    .with_scalar(field.parameter.clone(), value)
+                    .map_err(|source| GraphUnwindWriteError::Parameter {
+                        row: row_index,
+                        source,
+                    })?;
             }
             expanded_bytes += values.canonical_byte_len() as u128;
             if expanded_bytes > MAX_UNWIND_BOUND_PARAMETER_BYTES as u128 {
@@ -253,7 +272,8 @@ impl GraphUnwindWriteText {
             resolve,
         )
         .map_err(GraphUnwindWriteError::Definition)?;
-        prepared.bind_parameter_sets_with_limit(&sets, limit)
+        prepared
+            .bind_parameter_sets_with_limit(&sets, limit)
             .map_err(GraphUnwindWriteError::Binding)
     }
 }
@@ -286,8 +306,7 @@ mod tests {
     use crate::{GraphPatternTextErrorKind, GraphWriteScriptErrorKind};
     use fgdb_delta_types::{LabelId, PropertyKeyId};
 
-    const QUERY: &str =
-        "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) SET n.name=row.name";
+    const QUERY: &str = "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) SET n.name=row.name";
 
     fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -298,9 +317,13 @@ mod tests {
         }
     }
     fn map(fields: &[(&str, CanonicalScalar)]) -> GraphValue {
-        GraphValue::map(fields.iter().map(|(name, value)| {
-            ((*name).into(), GraphValue::Scalar(value.clone()))
-        }).collect()).unwrap()
+        GraphValue::map(
+            fields
+                .iter()
+                .map(|(name, value)| ((*name).into(), GraphValue::Scalar(value.clone())))
+                .collect(),
+        )
+        .unwrap()
     }
     fn text(value: &str) -> CanonicalScalar {
         CanonicalScalar::ucs_basic_text(value).unwrap()
@@ -334,9 +357,18 @@ mod tests {
         let arguments = rows(vec![
             map(&[("id", CanonicalScalar::Int(1))]),
             map(&[("id", CanonicalScalar::Int(2)), ("name", text("Ada"))]),
-            map(&[("id", CanonicalScalar::Int(3)), ("name", CanonicalScalar::Null)]),
+            map(&[
+                ("id", CanonicalScalar::Int(3)),
+                ("name", CanonicalScalar::Null),
+            ]),
         ]);
-        assert_eq!(parsed.bind(&arguments, RelationId(1), resolve).unwrap().argument_sets(), 3);
+        assert_eq!(
+            parsed
+                .bind(&arguments, RelationId(1), resolve)
+                .unwrap()
+                .argument_sets(),
+            3
+        );
     }
 
     #[test]
@@ -344,16 +376,24 @@ mod tests {
         let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
         let arguments = rows(vec![
             map(&[("id", CanonicalScalar::Int(1)), ("name", text("Ada"))]),
-            map(&[("id", CanonicalScalar::Int(2)), ("name", CanonicalScalar::Bool(true))]),
+            map(&[
+                ("id", CanonicalScalar::Int(2)),
+                ("name", CanonicalScalar::Bool(true)),
+            ]),
         ]);
         let mut calls = 0;
         let result = parsed.bind(&arguments, RelationId(1), |kind, name| {
             calls += 1;
             resolve(kind, name)
         });
-        assert!(matches!(result, Err(GraphUnwindWriteError::Row {
-            row: 1, kind: GraphUnwindRowError::IncompatibleFieldTypes, ..
-        })));
+        assert!(matches!(
+            result,
+            Err(GraphUnwindWriteError::Row {
+                row: 1,
+                kind: GraphUnwindRowError::IncompatibleFieldTypes,
+                ..
+            })
+        ));
         assert_eq!(calls, 0);
     }
 
@@ -362,11 +402,24 @@ mod tests {
         let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
         let arguments = rows(vec![GraphValue::Scalar(CanonicalScalar::Int(1))]);
         let mut calls = 0;
-        let mut catalog = |kind, name: &str| { calls += 1; resolve(kind, name) };
-        assert!(matches!(parsed.bind_with_limit(&arguments, RelationId(1), 0, &mut catalog),
-            Err(GraphUnwindWriteError::TooManyRows { limit: 0, observed: 1 })));
-        assert!(matches!(parsed.bind(&arguments, RelationId(1), &mut catalog),
-            Err(GraphUnwindWriteError::Row { kind: GraphUnwindRowError::ExpectedMap, .. })));
+        let mut catalog = |kind, name: &str| {
+            calls += 1;
+            resolve(kind, name)
+        };
+        assert!(matches!(
+            parsed.bind_with_limit(&arguments, RelationId(1), 0, &mut catalog),
+            Err(GraphUnwindWriteError::TooManyRows {
+                limit: 0,
+                observed: 1
+            })
+        ));
+        assert!(matches!(
+            parsed.bind(&arguments, RelationId(1), &mut catalog),
+            Err(GraphUnwindWriteError::Row {
+                kind: GraphUnwindRowError::ExpectedMap,
+                ..
+            })
+        ));
         assert_eq!(calls, 0);
     }
 
@@ -375,23 +428,41 @@ mod tests {
         let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
         let composite = GraphValue::map(vec![
             ("id".into(), GraphValue::Scalar(CanonicalScalar::Int(1))),
-            ("name".into(), GraphValue::List(Vec::new().into_boxed_slice())),
-        ]).unwrap();
-        assert!(matches!(parsed.bind(&rows(vec![composite]), RelationId(1), |_, _| panic!("catalog")),
-            Err(GraphUnwindWriteError::Row { kind: GraphUnwindRowError::ExpectedScalarField, .. })));
+            (
+                "name".into(),
+                GraphValue::List(Vec::new().into_boxed_slice()),
+            ),
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.bind(&rows(vec![composite]), RelationId(1), |_, _| panic!(
+                "catalog"
+            )),
+            Err(GraphUnwindWriteError::Row {
+                kind: GraphUnwindRowError::ExpectedScalarField,
+                ..
+            })
+        ));
         let arguments = rows(vec![map(&[("id", CanonicalScalar::Int(1))])])
-            .with_int64("unused", 9).unwrap();
-        assert!(matches!(parsed.bind(&arguments, RelationId(1), |_, _| panic!("catalog")),
-            Err(GraphUnwindWriteError::ArgumentNames)));
+            .with_int64("unused", 9)
+            .unwrap();
+        assert!(matches!(
+            parsed.bind(&arguments, RelationId(1), |_, _| panic!("catalog")),
+            Err(GraphUnwindWriteError::ArgumentNames)
+        ));
     }
 
     #[test]
     fn missing_source_and_empty_batches_are_explicit_refusals() {
         let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
-        assert!(matches!(parsed.bind(&GqlParameters::new(), RelationId(1), resolve),
-            Err(GraphUnwindWriteError::SourceParameter)));
-        assert!(matches!(parsed.bind(&rows(vec![]), RelationId(1), resolve),
-            Err(GraphUnwindWriteError::Empty)));
+        assert!(matches!(
+            parsed.bind(&GqlParameters::new(), RelationId(1), resolve),
+            Err(GraphUnwindWriteError::SourceParameter)
+        ));
+        assert!(matches!(
+            parsed.bind(&rows(vec![]), RelationId(1), resolve),
+            Err(GraphUnwindWriteError::Empty)
+        ));
     }
 
     #[test]
@@ -405,8 +476,10 @@ mod tests {
         assert_eq!(&parsed.lowered[start..start + literal.len()], literal);
         let merge = query.find("MERGE").unwrap();
         assert_eq!(&parsed.lowered[merge..merge + 5], "MERGE");
-        assert_eq!(parsed.lowered.bytes().filter(|byte| *byte == b'\n').count(),
-            query.bytes().filter(|byte| *byte == b'\n').count());
+        assert_eq!(
+            parsed.lowered.bytes().filter(|byte| *byte == b'\n').count(),
+            query.bytes().filter(|byte| *byte == b'\n').count()
+        );
     }
 
     #[test]
@@ -415,8 +488,12 @@ mod tests {
         let parsed = GraphUnwindWriteText::parse(query).unwrap();
         assert_eq!(parsed.fields.len(), 2);
         assert!(parsed.fields.iter().all(|field| field.parameter != "aa"));
-        let arguments = rows(vec![map(&[("id", CanonicalScalar::Int(1)), ("name", text("Ada"))])])
-            .with_text("aa", "Hello ").unwrap();
+        let arguments = rows(vec![map(&[
+            ("id", CanonicalScalar::Int(1)),
+            ("name", text("Ada")),
+        ])])
+        .with_text("aa", "Hello ")
+        .unwrap();
         assert!(parsed.bind(&arguments, RelationId(1), resolve).is_ok());
     }
 
@@ -429,7 +506,12 @@ mod tests {
             "CREATE (n)",
             "UNWIND [1,2] AS id CREATE (n {id:id})",
         ] {
-            assert!(GraphUnwindWriteText::parse_if_supported(query).unwrap().is_none(), "{query}");
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(query)
+                    .unwrap()
+                    .is_none(),
+                "{query}"
+            );
         }
     }
 
@@ -441,7 +523,10 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:Entity {id:row})",
             "UNWIND $rows AS row MERGE (n:Entity {id:row.id.part})",
         ] {
-            assert!(matches!(GraphUnwindWriteText::parse(query), Err(GraphUnwindWriteError::Syntax(_))));
+            assert!(matches!(
+                GraphUnwindWriteText::parse(query),
+                Err(GraphUnwindWriteError::Syntax(_))
+            ));
         }
     }
 
@@ -449,12 +534,23 @@ mod tests {
     fn native_preparation_errors_still_point_into_the_original_text() {
         let query = "UNWIND $rows AS row MERGE (n:Missing {id:row.id})";
         let parsed = GraphUnwindWriteText::parse(query).unwrap();
-        let error = parsed.bind(&rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
-            RelationId(1), resolve).unwrap_err();
-        let GraphUnwindWriteError::Definition(source) = error else { panic!("{error}") };
+        let error = parsed
+            .bind(
+                &rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
+                RelationId(1),
+                resolve,
+            )
+            .unwrap_err();
+        let GraphUnwindWriteError::Definition(source) = error else {
+            panic!("{error}")
+        };
         assert!(source.offset >= query.find("MERGE").unwrap());
         assert!(source.offset < query.len());
-        assert!(!matches!(source.kind, GraphWriteScriptErrorKind::Syntax(
-            GraphPatternTextErrorKind::Expected("a supported graph write statement"))));
+        assert!(!matches!(
+            source.kind,
+            GraphWriteScriptErrorKind::Syntax(GraphPatternTextErrorKind::Expected(
+                "a supported graph write statement"
+            ))
+        ));
     }
 }

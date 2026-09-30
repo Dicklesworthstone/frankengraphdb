@@ -11,8 +11,8 @@ use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
 use std::io::Write;
 
 pub(super) fn prepare(options: &Options) -> Result<Option<BoundGraphWriteScriptBatch>, Failure> {
-    let Some(text) = GraphUnwindWriteText::parse_if_supported(&options.text)
-        .map_err(Failure::query)?
+    let Some(text) =
+        GraphUnwindWriteText::parse_if_supported(&options.text).map_err(Failure::query)?
     else {
         return Ok(None);
     };
@@ -52,12 +52,16 @@ pub(super) async fn run<V: Vfs + Clone>(
     if robot {
         // Retain the existing written-result schema. These are input records,
         // not returned query rows; do not invent a count of output rows.
-        emit(out, &format!(
-            r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements}}}"#
-        ))
+        emit(
+            out,
+            &format!(
+                r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements}}}"#
+            ),
+        )
     } else {
-        emit(out, &format!(
-            "{records} input row(s), {statements} statement(s), completed at seq {seq}"
-        ))
+        emit(
+            out,
+            &format!("{records} input row(s), {statements} statement(s), completed at seq {seq}"),
+        )
     }
 }

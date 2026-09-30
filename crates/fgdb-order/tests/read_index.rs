@@ -1,6 +1,6 @@
 use fgdb_order::{
-    Configuration, Domain, Envelope, Error, Event, Limits, MemberId, Output, Raft,
-    ReadIndexError, ReadIndexRound, Role,
+    Configuration, Domain, Envelope, Error, Event, Limits, MemberId, Output, Raft, ReadIndexError,
+    ReadIndexRound, Role,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -32,9 +32,17 @@ impl Cluster {
         let nodes = config
             .voters()
             .iter()
-            .map(|id| (*id, Raft::new(*id, config.clone(), Limits::default()).unwrap()))
+            .map(|id| {
+                (
+                    *id,
+                    Raft::new(*id, config.clone(), Limits::default()).unwrap(),
+                )
+            })
             .collect();
-        Self { nodes, messages: VecDeque::new() }
+        Self {
+            nodes,
+            messages: VecDeque::new(),
+        }
     }
 
     fn node(&self, id: MemberId) -> &Raft<u64> {

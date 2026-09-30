@@ -8,7 +8,9 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{BoundGraphWriteScriptBatch, PreparedGraphInsertQuery, PreparedGraphInsertQueryText};
+use fgdb_gql::{
+    BoundGraphWriteScriptBatch, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
 use std::io::{self, Write};
 

@@ -8,8 +8,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-const UPSERT: &str =
-    "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) SET n.name=row.name";
+const UPSERT: &str = "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) SET n.name=row.name";
 
 struct Fixture {
     root: PathBuf,
@@ -33,10 +32,20 @@ impl Fixture {
             options.mode(0o600);
         }
         let mut keys = options.open(&key_file).unwrap();
-        writeln!(keys, "{}\n{}\n{}", "11".repeat(32), "22".repeat(32), "33".repeat(32))
-            .unwrap();
+        writeln!(
+            keys,
+            "{}\n{}\n{}",
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32)
+        )
+        .unwrap();
         drop(keys);
-        let fixture = Self { db: root.join("database"), root, key_file };
+        let fixture = Self {
+            db: root.join("database"),
+            root,
+            key_file,
+        };
         if create {
             success(&fixture.run("create", &[]));
         }
@@ -45,17 +54,27 @@ impl Fixture {
 
     fn run(&self, verb: &str, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fgdb"));
-        command.arg("--robot").arg(verb)
-            .arg("--db").arg(&self.db)
-            .arg("--key-file").arg(&self.key_file);
+        command
+            .arg("--robot")
+            .arg(verb)
+            .arg("--db")
+            .arg(&self.db)
+            .arg("--key-file")
+            .arg(&self.key_file);
         if verb != "create" {
             command.args([
-                "--label", "Entity=1",
-                "--relation", "LINK=1",
-                "--property", "id=1",
-                "--property", "name=2",
-                "--property", "score=3",
-                "--property", "weight=4",
+                "--label",
+                "Entity=1",
+                "--relation",
+                "LINK=1",
+                "--property",
+                "id=1",
+                "--property",
+                "name=2",
+                "--property",
+                "score=3",
+                "--property",
+                "weight=4",
             ]);
         }
         command.args(args).output().unwrap()
@@ -80,13 +99,23 @@ impl Drop for Fixture {
 }
 
 fn output(result: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    )
 }
 fn success(result: &Output) {
-    assert!(result.status.success(), "{}: {}", result.status, output(result));
+    assert!(
+        result.status.success(),
+        "{}: {}",
+        result.status,
+        output(result)
+    );
 }
 fn row_count(result: &Output) -> usize {
-    String::from_utf8_lossy(&result.stdout).lines()
+    String::from_utf8_lossy(&result.stdout)
+        .lines()
         .filter(|line| line.contains("\"event\":\"row\""))
         .count()
 }
@@ -151,7 +180,10 @@ fn a_late_arithmetic_failure_publishes_no_prefix() {
     assert!(!refused.status.success(), "{}", output(&refused));
     assert!(!output(&refused).contains("\"kind\":\"written\""));
     let after = fixture.query("MATCH (n:Entity) RETURN n.id, n.score");
-    assert_eq!(before.stdout, after.stdout, "failed batch changed durable rows or frontier");
+    assert_eq!(
+        before.stdout, after.stdout,
+        "failed batch changed durable rows or frontier"
+    );
 }
 
 #[test]
@@ -167,21 +199,22 @@ fn relationship_merge_reads_the_prior_row_overlay() {
     ));
     let result = fixture.query("MATCH (a:Entity)-[e:LINK]->(b:Entity) RETURN e.weight");
     assert_eq!(row_count(&result), 1);
-    let selected = fixture.query(
-        "MATCH (a:Entity)-[e:LINK]->(b:Entity) WHERE e.weight=3 RETURN e.weight",
-    );
+    let selected =
+        fixture.query("MATCH (a:Entity)-[e:LINK]->(b:Entity) WHERE e.weight=3 RETURN e.weight");
     assert_eq!(row_count(&selected), 1);
 }
 
 #[test]
 fn existing_native_create_and_create_return_paths_are_preserved() {
     let fixture = Fixture::new(true);
-    success(&fixture.run("write", &[
-        "UNWIND [1,2] AS id CREATE (n:Entity {id:id, name:'Native'})",
-    ]));
-    let returning = fixture.run("write", &[
-        "CREATE (n:Entity {id:3, name:'Returned'}) RETURN n.name",
-    ]);
+    success(&fixture.run(
+        "write",
+        &["UNWIND [1,2] AS id CREATE (n:Entity {id:id, name:'Native'})"],
+    ));
+    let returning = fixture.run(
+        "write",
+        &["CREATE (n:Entity {id:3, name:'Returned'}) RETURN n.name"],
+    );
     success(&returning);
     assert_eq!(row_count(&returning), 1);
     assert!(output(&returning).contains("Returned"));

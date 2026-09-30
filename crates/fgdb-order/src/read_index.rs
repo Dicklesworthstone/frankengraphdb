@@ -183,8 +183,7 @@ impl<C: Clone + Eq> Raft<C> {
         if self.handoff.is_some() {
             return Err(Error::LeadershipTransferInProgress.into());
         }
-        if self.state.term == 0 || self.term_at(self.state.commit_index) != Some(self.state.term)
-        {
+        if self.state.term == 0 || self.term_at(self.state.commit_index) != Some(self.state.term) {
             return Err(ReadIndexError::CurrentTermNotCommitted);
         }
         let round = self.request.checked_add(1).ok_or(Error::CounterExhausted)?;
