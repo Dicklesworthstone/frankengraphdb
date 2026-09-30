@@ -559,7 +559,28 @@ impl<'a> Parser<'a> {
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
-        let search = self.path_search()?;
+        // openCypher shortestPath(...) / allShortestPaths(...) (fgdb-20foe)
+        // are the GQL ANY SHORTEST / ALL SHORTEST selectors around the same
+        // one-atom pattern, with the same laws.
+        let function = if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
+            if self.is_word("shortestPath") {
+                Some(GraphWalkSearch::AnyShortest)
+            } else if self.is_word("allShortestPaths") {
+                Some(GraphWalkSearch::AllShortest)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let search = match function {
+            Some(search) => {
+                self.advance()?;
+                self.punct(b'(', "(")?;
+                search
+            }
+            None => self.path_search()?,
+        };
         let shortest = matches!(
             search,
             GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
@@ -659,6 +680,9 @@ impl<'a> Parser<'a> {
                 selector_at,
                 GraphPatternTextErrorKind::Expected(expected_atom),
             ));
+        }
+        if function.is_some() {
+            self.punct(b')', ")")?;
         }
         Ok(())
     }

@@ -305,3 +305,46 @@ fn single_path_selector_spellings_have_the_same_public_compiled_plan() {
         assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
     }
 }
+
+/// openCypher's shortestPath(...) and allShortestPaths(...) (fgdb-20foe) are
+/// the GQL ANY SHORTEST and ALL SHORTEST selectors: the same compiled plan,
+/// byte for byte, with or without a path binding, in any letter case.
+#[test]
+fn opencypher_shortest_path_functions_compile_to_the_gql_selectors() {
+    for (function, selector) in [
+        ("shortestPath", "ANY SHORTEST"),
+        ("SHORTESTPATH", "ANY SHORTEST"),
+        ("allShortestPaths", "ALL SHORTEST"),
+    ] {
+        for (pattern, tail) in [
+            ("(a)-[:R*1..3]->(b)", "RETURN ALL a,b"),
+            ("(a)<-[:R*0..2]-(b)", "WHERE a.p = 1 RETURN ALL a,b"),
+        ] {
+            for binding in ["", "p = "] {
+                let expected = prepare(&format!("MATCH {binding}{selector} {pattern} {tail}"));
+                let actual = prepare(&format!("MATCH {binding}{function}({pattern}) {tail}"));
+                assert_eq!(actual, expected, "{binding}{function}({pattern})");
+                assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
+            }
+        }
+    }
+    for text in [
+        "MATCH p = shortestPath((a)-[:R*1..3]->(b) RETURN a",
+        "MATCH p = shortestPath((a)-[:R]->(b)) RETURN a",
+        "MATCH p = shortestPath((a)-[:R*]->(b)) RETURN a",
+        "MATCH p = shortestPath((a)-[:R*1..3]->(b), (c)) RETURN a",
+        "MATCH p = shortestPath((a)-[:R*1..3]->(b)-[:R*1..2]->(c)) RETURN a",
+        "MATCH p = shortestPath ANY SHORTEST (a)-[:R*1..3]->(b) RETURN a",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
