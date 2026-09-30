@@ -156,7 +156,7 @@ impl<'a> Parser<'a> {
         if !matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
             return super::scoped::pattern_predicate_follows(token.kind, &mut lexer);
         }
-        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')))
+        super::scoped::exists_introducer_follows(&mut lexer)
     }
 
     // Preserve preexisting variables called not/true/false/null when followed

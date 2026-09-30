@@ -740,17 +740,18 @@ impl<'a> Parser<'a> {
 
     // Look ahead through the SAME lexer, without consuming its token budget.
     // Existing identifiers named `exists` or `not` remain identifiers unless
-    // the complete EXISTS { / NOT EXISTS { introducer, or an openCypher
-    // pattern predicate `[NOT] (n)-[...]-(...)`, is present.
+    // the complete EXISTS { / NOT EXISTS { introducer, an openCypher pattern
+    // predicate `[NOT] (n)-[...]-(...)`, or its `[NOT] exists(<pattern>)`
+    // spelling is present.
     pub(super) fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
         let mut lookahead = self.lexer.clone();
         if self.is_word("EXISTS") {
-            return Ok(matches!(lookahead.next()?.kind, TokenKind::Punct(b'{')));
+            return exists_introducer_follows(&mut lookahead);
         }
         if self.is_word("NOT") {
             let next = lookahead.next()?;
             if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
-                return Ok(matches!(lookahead.next()?.kind, TokenKind::Punct(b'{')));
+                return exists_introducer_follows(&mut lookahead);
             }
             return pattern_predicate_follows(next.kind, &mut lookahead);
         }
@@ -784,8 +785,15 @@ impl<'a> Parser<'a> {
                     ScopeKind::Exists
                 };
                 if self.take_word("EXISTS")? {
-                    self.punct(b'{', "{")?;
-                    self.match_scope(kind)?;
+                    if self.take(b'(')? {
+                        // openCypher `exists((n)-[:R]->())` is the pattern
+                        // predicate itself (fgdb-20foe).
+                        self.scope(kind, ScopeForm::Pattern)?;
+                        self.punct(b')', ")")?;
+                    } else {
+                        self.punct(b'{', "{")?;
+                        self.match_scope(kind)?;
+                    }
                 } else {
                     // `(n)-[:R]->()` is `EXISTS { MATCH (n)-[:R]->() }`, and
                     // `NOT (n)-[:R]->()` its anti form (fgdb-44d8n).
@@ -1042,6 +1050,22 @@ impl<'a> Parser<'a> {
 enum ScopeForm {
     Clause,
     Pattern,
+}
+
+/// After an `EXISTS` word: `{` (a subquery), or `(` whose content is a
+/// pattern predicate (openCypher's `exists((n)-[...]->(...))`). A property
+/// test such as `exists(n.p)` is neither.
+pub(super) fn exists_introducer_follows(
+    lookahead: &mut Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    match lookahead.next()?.kind {
+        TokenKind::Punct(b'{') => Ok(true),
+        TokenKind::Punct(b'(') => {
+            let first = lookahead.next()?;
+            pattern_predicate_follows(first.kind, lookahead)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Whether `first` and the tokens after it spell an openCypher pattern

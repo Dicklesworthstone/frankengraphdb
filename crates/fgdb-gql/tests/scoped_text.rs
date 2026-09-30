@@ -655,3 +655,36 @@ fn scoped_text_retains_all_limits_and_errors_never_become_null_extension() {
         Err(GqlQueryError::Source("late optional predicate"))
     ));
 }
+
+/// openCypher's `exists(<pattern>)` (fgdb-20foe) IS the pattern predicate:
+/// identical plan bytes to the EXISTS { MATCH ... } spelling, bare, under
+/// NOT, and as an AND conjunct. `exists(n.p)` (a property test) is not a
+/// pattern and keeps its refusal, and a variable named exists stays one.
+#[test]
+fn exists_function_on_a_pattern_is_the_pattern_predicate() {
+    for (function, exists) in [
+        (
+            "MATCH (a) WHERE exists((a)-[:R]->()) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE NOT exists((a)<-[:S]-(src:L)) RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE a.n > 1 AND EXISTS((a)-[:R]->()) RETURN a",
+            "MATCH (a) WHERE a.n > 1 AND EXISTS { MATCH (a)-[:R]->() } RETURN a",
+        ),
+    ] {
+        assert_eq!(
+            query(function).canonical_bytes(),
+            query(exists).canonical_bytes(),
+            "{function}"
+        );
+    }
+    assert!(PreparedGraphText::prepare("MATCH (a) WHERE exists(a.n) RETURN a", symbols).is_err());
+    assert_eq!(
+        query("MATCH (exists)-[:R]->(b) WHERE exists.n = 1 RETURN b").columns(),
+        &["b"]
+    );
+}
