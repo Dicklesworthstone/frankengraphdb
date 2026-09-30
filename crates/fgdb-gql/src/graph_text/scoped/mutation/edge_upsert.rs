@@ -23,6 +23,65 @@ fn merge_error(error: GraphEdgeMergeTextError) -> GraphEdgeUpsertTextError {
 }
 
 impl<'a> Parser<'a> {
+    /// One `SET` assignment list of a relationship MERGE branch, appended to
+    /// `target` under the branch's action limit.
+    fn edge_upsert_assignments(
+        &mut self,
+        relationship: Name<'a>,
+        target: &mut Vec<(Name<'a>, EdgeUpsertValueTemplate)>,
+        branch: GraphEdgeUpsertBranch,
+    ) -> Result<(), GraphEdgeUpsertTextError> {
+        loop {
+            if target.len() >= crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
+                return Err(GraphEdgeUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphEdgeUpsertBuildError::TooManyActions {
+                            branch,
+                            limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+                            observed: target.len() + 1,
+                        },
+                    ),
+                });
+            }
+            let actual = self.name()?;
+            if actual.text != relationship.text {
+                return Err(error(
+                    actual.at,
+                    GraphPatternTextErrorKind::Expected("the MERGE relationship variable"),
+                )
+                .into());
+            }
+            self.punct(b'.', "relationship property assignment")?;
+            let key = self.name()?;
+            self.punct(b'=', "=")?;
+            let at = self.current.at;
+            let value = match self.mutation_operand(&mut Vec::new())? {
+                Operand::Literal(value) => EdgeUpsertValueTemplate::Bound(value),
+                Operand::Number(Number::Literal(value)) => {
+                    EdgeUpsertValueTemplate::Bound(scalar(value, at)?)
+                }
+                Operand::Number(Number::Parameter(index)) => {
+                    EdgeUpsertValueTemplate::Parameter { index, at }
+                }
+                Operand::Column(_) | Operand::Integer { .. } => {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "scalar literal or parameter relationship assignment",
+                        ),
+                    )
+                    .into());
+                }
+            };
+            target.push((key, value));
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn edge_upsert_pattern(&mut self) -> Result<ParsedEdgeUpsert<'a>, GraphEdgeUpsertTextError> {
         self.word("MERGE")?;
         self.punct(b'(', "(")?;
@@ -94,64 +153,50 @@ impl<'a> Parser<'a> {
                 .into());
             };
             self.word("SET")?;
-            let target = if create {
-                &mut on_create
+            let (target, branch) = if create {
+                (&mut on_create, GraphEdgeUpsertBranch::Create)
             } else {
-                &mut on_match
+                (&mut on_match, GraphEdgeUpsertBranch::Match)
             };
-            loop {
-                if target.len() >= crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
-                    return Err(GraphEdgeUpsertTextError {
-                        offset: self.current.at,
-                        kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
-                            crate::GraphEdgeUpsertBuildError::TooManyActions {
-                                branch: if create {
-                                    GraphEdgeUpsertBranch::Create
-                                } else {
-                                    GraphEdgeUpsertBranch::Match
-                                },
-                                limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
-                                observed: target.len() + 1,
-                            },
-                        ),
-                    });
-                }
-                let actual = self.name()?;
-                if actual.text != relationship.text {
-                    return Err(error(
-                        actual.at,
-                        GraphPatternTextErrorKind::Expected("the MERGE relationship variable"),
-                    )
-                    .into());
-                }
-                self.punct(b'.', "relationship property assignment")?;
-                let key = self.name()?;
-                self.punct(b'=', "=")?;
-                let at = self.current.at;
-                let value = match self.mutation_operand(&mut Vec::new())? {
-                    Operand::Literal(value) => EdgeUpsertValueTemplate::Bound(value),
-                    Operand::Number(Number::Literal(value)) => {
-                        EdgeUpsertValueTemplate::Bound(scalar(value, at)?)
-                    }
-                    Operand::Number(Number::Parameter(index)) => {
-                        EdgeUpsertValueTemplate::Parameter { index, at }
-                    }
-                    Operand::Column(_) | Operand::Integer { .. } => {
-                        return Err(error(
-                            at,
-                            GraphPatternTextErrorKind::Expected(
-                                "scalar literal or parameter relationship assignment",
-                            ),
-                        )
-                        .into());
-                    }
-                };
-                target.push((key, value));
-                if !self.take(b',')? {
-                    break;
-                }
-            }
+            self.edge_upsert_assignments(relationship, target, branch)?;
         }
+        // openCypher `MERGE ... SET ...` applies to the merged relationship
+        // whether it was matched or created, after any ON clause.
+        if self.take_word("SET")? {
+            let mut added = Vec::new();
+            self.edge_upsert_assignments(relationship, &mut added, GraphEdgeUpsertBranch::Match)?;
+            // It runs after the ON clause, so it wins: an earlier assignment
+            // to the same property (literal values only) is dropped.
+            on_match.retain(|(key, _)| !added.iter().any(|(later, _)| later.text == key.text));
+            on_create.retain(|(key, _)| !added.iter().any(|(later, _)| later.text == key.text));
+            if on_match.len() + added.len() > crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
+                return Err(GraphEdgeUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphEdgeUpsertBuildError::TooManyActions {
+                            branch: GraphEdgeUpsertBranch::Match,
+                            limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+                            observed: on_match.len() + added.len(),
+                        },
+                    ),
+                });
+            }
+            on_create.extend(added.iter().cloned());
+            if on_create.len() > crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
+                return Err(GraphEdgeUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphEdgeUpsertBuildError::TooManyActions {
+                            branch: GraphEdgeUpsertBranch::Create,
+                            limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+                            observed: on_create.len(),
+                        },
+                    ),
+                });
+            }
+            on_match.extend(added);
+        }
+
         if on_match.is_empty() && on_create.is_empty() {
             return Err(error(
                 self.current.at,

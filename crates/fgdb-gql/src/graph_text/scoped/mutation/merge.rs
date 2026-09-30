@@ -17,6 +17,7 @@ struct MergeProperty<'a> {
     value: VertexMergeValueTemplate,
 }
 
+#[derive(Clone)]
 enum ParsedUpsertAction<'a> {
     Property {
         key: Name<'a>,
@@ -208,72 +209,127 @@ impl<'a> Parser<'a> {
                 .into());
             };
             self.word("SET")?;
-            let target = if create {
-                &mut on_create
+            let (target, branch) = if create {
+                (&mut on_create, GraphVertexUpsertBranch::Create)
             } else {
-                &mut on_match
+                (&mut on_match, GraphVertexUpsertBranch::Match)
             };
-            loop {
-                if target.len() >= crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
-                    return Err(GraphVertexUpsertTextError {
-                        offset: self.current.at,
-                        kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
-                            crate::GraphVertexUpsertBuildError::TooManyActions {
-                                branch: if create {
-                                    GraphVertexUpsertBranch::Create
-                                } else {
-                                    GraphVertexUpsertBranch::Match
-                                },
-                                limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
-                                observed: target.len() + 1,
-                            },
-                        ),
-                    });
-                }
-                let actual = self.name()?;
-                if actual.text != variable.text {
-                    return Err(error(
-                        actual.at,
-                        GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
-                    )
-                    .into());
-                }
-                let action = if self.take(b':')? {
-                    ParsedUpsertAction::Label {
-                        label: self.name()?,
-                    }
-                } else {
-                    self.punct(b'.', "property or label assignment")?;
-                    let key = self.name()?;
-                    self.punct(b'=', "=")?;
-                    let at = self.current.at;
-                    let value = match self.mutation_operand(&mut Vec::new())? {
-                        Operand::Literal(value) => VertexUpsertValueTemplate::Bound(value),
-                        Operand::Number(Number::Literal(value)) => {
-                            VertexUpsertValueTemplate::Bound(scalar(value, at)?)
-                        }
-                        Operand::Number(Number::Parameter(index)) => {
-                            VertexUpsertValueTemplate::Parameter { index, at }
-                        }
-                        Operand::Column(_) | Operand::Integer { .. } => {
-                            return Err(error(
-                                at,
-                                GraphPatternTextErrorKind::Expected(
-                                    "scalar literal or parameter branch assignment",
-                                ),
-                            )
-                            .into());
-                        }
-                    };
-                    ParsedUpsertAction::Property { key, value }
-                };
-                target.push(action);
-                if !self.take(b',')? {
-                    break;
-                }
+            self.upsert_assignments(variable, target, branch)?;
+        }
+        // openCypher `MERGE ... SET ...` applies to the merged vertex whether it
+        // was matched or created, after any ON clause: it ends both branches.
+        if self.take_word("SET")? {
+            let mut added = Vec::new();
+            self.upsert_assignments(variable, &mut added, GraphVertexUpsertBranch::Match)?;
+            // It runs after the ON clause, so it wins: an earlier assignment
+            // to the same property or label (literal values only) is dropped.
+            let same = |a: &ParsedUpsertAction<'_>, b: &ParsedUpsertAction<'_>| match (a, b) {
+                (
+                    ParsedUpsertAction::Property { key: a, .. },
+                    ParsedUpsertAction::Property { key: b, .. },
+                ) => a.text == b.text,
+                (
+                    ParsedUpsertAction::Label { label: a },
+                    ParsedUpsertAction::Label { label: b },
+                ) => a.text == b.text,
+                _ => false,
+            };
+            on_match.retain(|action| !added.iter().any(|later| same(action, later)));
+            on_create.retain(|action| !added.iter().any(|later| same(action, later)));
+            if on_match.len() + added.len() > crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
+                return Err(GraphVertexUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphVertexUpsertBuildError::TooManyActions {
+                            branch: GraphVertexUpsertBranch::Match,
+                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+                            observed: on_match.len() + added.len(),
+                        },
+                    ),
+                });
             }
+            on_create.extend(added.iter().cloned());
+            if on_create.len() > crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
+                return Err(GraphVertexUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphVertexUpsertBuildError::TooManyActions {
+                            branch: GraphVertexUpsertBranch::Create,
+                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+                            observed: on_create.len(),
+                        },
+                    ),
+                });
+            }
+            on_match.extend(added);
         }
         Ok((on_match, on_create))
+    }
+
+    /// One `SET` assignment list of a vertex MERGE branch, appended to
+    /// `target` under the branch's action limit.
+    fn upsert_assignments(
+        &mut self,
+        variable: Name<'a>,
+        target: &mut Vec<ParsedUpsertAction<'a>>,
+        branch: GraphVertexUpsertBranch,
+    ) -> Result<(), GraphVertexUpsertTextError> {
+        loop {
+            if target.len() >= crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
+                return Err(GraphVertexUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphVertexUpsertBuildError::TooManyActions {
+                            branch,
+                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+                            observed: target.len() + 1,
+                        },
+                    ),
+                });
+            }
+            let actual = self.name()?;
+            if actual.text != variable.text {
+                return Err(error(
+                    actual.at,
+                    GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                )
+                .into());
+            }
+            let action = if self.take(b':')? {
+                ParsedUpsertAction::Label {
+                    label: self.name()?,
+                }
+            } else {
+                self.punct(b'.', "property or label assignment")?;
+                let key = self.name()?;
+                self.punct(b'=', "=")?;
+                let at = self.current.at;
+                let value = match self.mutation_operand(&mut Vec::new())? {
+                    Operand::Literal(value) => VertexUpsertValueTemplate::Bound(value),
+                    Operand::Number(Number::Literal(value)) => {
+                        VertexUpsertValueTemplate::Bound(scalar(value, at)?)
+                    }
+                    Operand::Number(Number::Parameter(index)) => {
+                        VertexUpsertValueTemplate::Parameter { index, at }
+                    }
+                    Operand::Column(_) | Operand::Integer { .. } => {
+                        return Err(error(
+                            at,
+                            GraphPatternTextErrorKind::Expected(
+                                "scalar literal or parameter branch assignment",
+                            ),
+                        )
+                        .into());
+                    }
+                };
+                ParsedUpsertAction::Property { key, value }
+            };
+            target.push(action);
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 

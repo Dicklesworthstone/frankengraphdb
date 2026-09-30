@@ -16,6 +16,8 @@ struct Statement<'a> {
     span: Range<usize>,
     parameters: BTreeSet<&'a str>,
     last_on: Option<usize>,
+    /// The last top-level SET: after MERGE it is openCypher MERGE ... SET.
+    last_set: Option<usize>,
 }
 #[derive(Clone, Copy)]
 enum Kind {
@@ -80,6 +82,7 @@ fn scan(script: &str) -> Result<Vec<Statement<'_>>, GraphWriteScriptError> {
     let mut nesting = Vec::new();
     let mut parameters = BTreeSet::new();
     let mut last_on = None;
+    let mut last_set = None;
     let mut previous_dot = false;
     loop {
         let statement = result.len();
@@ -132,6 +135,7 @@ fn scan(script: &str) -> Result<Vec<Statement<'_>>, GraphWriteScriptError> {
                 span: start..token.at,
                 parameters: core::mem::take(&mut parameters),
                 last_on: last_on.take(),
+                last_set: last_set.take(),
             });
             if end {
                 break;
@@ -178,6 +182,11 @@ fn scan(script: &str) -> Result<Vec<Statement<'_>>, GraphWriteScriptError> {
                 if nesting.is_empty() && !previous_dot && word.eq_ignore_ascii_case("ON") =>
             {
                 last_on = Some(token.at);
+            }
+            TokenKind::Word(word)
+                if nesting.is_empty() && !previous_dot && word.eq_ignore_ascii_case("SET") =>
+            {
+                last_set = Some(token.at);
             }
             _ => {}
         }
@@ -227,9 +236,10 @@ fn classify(
         return Ok(Kind::Mutation);
     }
     if parser.is_word("MERGE") {
-        let branch = statement
-            .last_on
-            .is_some_and(|at| at > statement.span.start + parser.current.at);
+        // ON MATCH/ON CREATE, or a plain SET, after MERGE selects the upsert.
+        let merge_at = statement.span.start + parser.current.at;
+        let branch = statement.last_on.is_some_and(|at| at > merge_at)
+            || statement.last_set.is_some_and(|at| at > merge_at);
         return Ok(match (matched, branch) {
             (false, false) => Kind::VertexMerge,
             (false, true) => Kind::VertexUpsert,

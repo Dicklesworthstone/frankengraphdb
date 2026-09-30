@@ -151,3 +151,32 @@ fn quoted_parameter_payload_is_a_value_not_additional_write_syntax() {
     );
     assert!(!format!("{template:?} {bound:?}").contains(payload));
 }
+
+/// openCypher `MERGE (a)-[e:R]->(b) SET e.w = ...` is both branches, and wins
+/// over an ON clause's assignment to the same property.
+#[test]
+fn trailing_set_is_both_branches_and_wins_over_an_on_clause() {
+    let args = arguments();
+    let bytes = |text: &str| {
+        PreparedGraphEdgeUpsertText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&args)
+            .unwrap()
+            .canonical_bytes()
+    };
+    let head = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[e:R]->(b)";
+    assert_eq!(
+        bytes(&format!("{head} SET e.w=$seen, e.p=$fresh")),
+        bytes(&format!(
+            "{head} ON CREATE SET e.w=$seen, e.p=$fresh ON MATCH SET e.w=$seen, e.p=$fresh"
+        ))
+    );
+    assert_eq!(
+        bytes(&format!(
+            "{head} ON CREATE SET e.w=$fresh SET e.w=$seen, e.p=$fresh"
+        )),
+        bytes(&format!(
+            "{head} ON CREATE SET e.w=$seen, e.p=$fresh ON MATCH SET e.w=$seen, e.p=$fresh"
+        ))
+    );
+}

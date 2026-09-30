@@ -134,3 +134,57 @@ fn missing_and_wrong_action_arguments_retain_original_offsets() {
         )
     ));
 }
+
+/// openCypher `MERGE ... SET ...`: the assignments apply whether the vertex
+/// was matched or created, after any ON clause, so they compile to exactly
+/// the explicit two-branch upsert, and a later SET wins over an ON clause's
+/// assignment to the same property or label.
+#[test]
+fn trailing_set_is_both_branches_and_wins_over_an_on_clause() {
+    // Bind exactly the parameters each statement declares.
+    let bytes = |text: &str| {
+        let template = PreparedGraphVertexUpsertText::prepare(text, R, symbols).unwrap();
+        let mut args = GqlParameters::new();
+        for spec in template.parameter_schema() {
+            let value = match spec.name.as_str() {
+                "p" => 7,
+                "v" => 1,
+                _ => 2,
+            };
+            args = args.with_int64(spec.name.as_str(), value).unwrap();
+        }
+        template.bind_parameters(&args).unwrap().canonical_bytes()
+    };
+    for (spelled, explicit) in [
+        (
+            "MERGE (n:Person {p:$p}) SET n.q=$v,n:Seen",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n.q=$v,n:Seen ON CREATE SET n.q=$v,n:Seen",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) ON CREATE SET n.q=$c,n:Created SET n.q=$v",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n.q=$v ON CREATE SET n:Created,n.q=$v",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen ON CREATE SET n.q=$c SET n:Seen",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen ON CREATE SET n.q=$c,n:Seen",
+        ),
+    ] {
+        assert_eq!(bytes(spelled), bytes(explicit), "{spelled}");
+    }
+    // A repeat inside the one SET list still refuses when the typed
+    // definition is built, as it does inside an ON clause.
+    let repeated = PreparedGraphVertexUpsertText::prepare(
+        "MERGE (n:Person {p:$p}) SET n.q=$v,n.q=$c",
+        R,
+        symbols,
+    )
+    .unwrap();
+    let args = GqlParameters::new()
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("v", 1)
+        .unwrap()
+        .with_int64("c", 2)
+        .unwrap();
+    assert!(repeated.bind_parameters(&args).is_err());
+}

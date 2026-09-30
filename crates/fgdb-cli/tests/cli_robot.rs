@@ -2969,8 +2969,8 @@ fn json_list_parameters_drive_unwind_creation_and_keep_every_value_type() {
 fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
     let db = TestDb::new("json-rows");
     db.create();
-    let upsert =
-        "MERGE (p:Person {team: $team}) ON CREATE SET p.name = $name ON MATCH SET p.name = $name";
+    // openCypher MERGE ... SET: the assignment applies matched or created.
+    let upsert = "MERGE (p:Person {team: $team}) SET p.name = $name";
     let written = db.command(
         "write",
         &[
