@@ -10,13 +10,18 @@
 //! interval and step down if it is absent. The runtime still owns every timer.
 //! Neither suspicion nor pre-votes change configuration or grant read authority.
 //!
-//! Every transition yields a [`Persistence`] view. If it requires a write,
+//! Every `step` transition yields a [`Persistence`] view. If it requires a write,
 //! publish that exact state through Chronicle's immutable root closure and
 //! sync the root before calling [`Raft::persisted`]. Otherwise the existing
 //! published root already covers the transition. Only `persisted` releases
-//! messages and committed entries. An unknown/failed publication requires
+//! consensus messages and committed entries. An unknown/failed publication requires
 //! recovery; cancellation leaves the node blocked, never able to vote or
 //! reply from speculative state.
+//!
+//! [`Raft::begin_read_index`] separately obtains a request-scoped quorum barrier
+//! using already-published state. Its typed read probes do not change durable
+//! state or reuse liveness replies. A [`ReadIndex`] still requires application,
+//! audit-visible snapshot and authorization admission before observing data.
 //!
 //! Snapshot offers are not installations. [`SnapshotTransfer`] asks the runtime
 //! to acquire and verify the exact snapshot closure using ATP. Only after that
@@ -40,8 +45,10 @@ use std::sync::Arc;
 mod leadership;
 mod liveness;
 mod pipeline;
+mod read_index;
 
 pub use leadership::{LeadershipTransfer, LeadershipTransferId, LeadershipTransferPhase};
+pub use read_index::{ReadIndex, ReadIndexAck, ReadIndexError, ReadIndexProbe, ReadIndexRound};
 
 /// A member coordinate resolved inside the authenticated consensus domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
