@@ -119,10 +119,12 @@ pub(crate) enum ReadValueTemplate {
         list: Box<ReadValueTemplate>,
         expr: Box<ReadValueTemplate>,
     },
-    /// `{k: e, ...}`, keys sorted and unique (fgdb-2jw3z).
+    /// `{k: e, ...}`, keys sorted and unique (fgdb-2jw3z). A map projection
+    /// `n{.a, ...}` carries its source as `guard` (NULL source, NULL map).
     MapLiteral {
         keys: Box<[Box<str>]>,
         values: Vec<ReadValueTemplate>,
+        guard: Option<Box<ReadValueTemplate>>,
     },
     MapGet {
         map: Box<ReadValueTemplate>,
@@ -150,7 +152,10 @@ impl ReadValueTemplate {
                     || end.binds_elements()
                     || step.as_deref().is_some_and(Self::binds_elements)
             }
-            Self::MapLiteral { values, .. } => values.iter().any(Self::binds_elements),
+            Self::MapLiteral { values, guard, .. } => {
+                values.iter().any(Self::binds_elements)
+                    || guard.as_deref().is_some_and(Self::binds_elements)
+            }
             Self::MapGet { map, .. } | Self::Keys(map) => map.binds_elements(),
             Self::List(items) => items.iter().any(Self::binds_elements),
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
@@ -303,8 +308,18 @@ impl ReadValueTemplate {
                 list.append_template_transcript(bytes);
                 expr.append_template_transcript(bytes);
             }
-            Self::MapLiteral { keys, values } => {
-                bytes.push(14);
+            Self::MapLiteral {
+                keys,
+                values,
+                guard,
+            } => {
+                // An unguarded literal keeps its original bytes.
+                if let Some(guard) = guard {
+                    bytes.push(17);
+                    guard.append_template_transcript(bytes);
+                } else {
+                    bytes.push(14);
+                }
                 ordinal(bytes, keys.len());
                 for (key, value) in keys.iter().zip(values) {
                     ordinal(bytes, key.len());

@@ -666,6 +666,93 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// openCypher map projection over a graph row (fgdb-20foe): `n{.a}` reads
+    /// n's property a, `k: e` is any value, and `v` is the binding v itself.
+    /// Keys are sorted and must be unique, as in a map literal. The source is
+    /// the map's guard: a NULL n (an OPTIONAL MATCH without a witness) makes
+    /// the whole projection NULL, never `{a: NULL}`. `.*` needs the complete
+    /// property catalog and refuses.
+    #[allow(clippy::type_complexity)]
+    fn map_projection(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<
+            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        >,
+        depth: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let source = self.any_variable()?;
+        self.punct(b'{', "{")?;
+        let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
+        if !self.take(b'}')? {
+            loop {
+                self.capacity(
+                    entries.len(),
+                    crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                let entry = if self.take(b'.')? {
+                    if self.is_punct(b'*') {
+                        return Err(GraphSetTextError {
+                            offset: self.current.at,
+                            kind: GraphSetTextErrorKind::Expected(
+                                "explicit property keys in a map projection (.* needs the property catalog)",
+                            ),
+                        });
+                    }
+                    let key = self.name()?;
+                    let column = self.mutation_projection(columns, source, Some(key))?;
+                    (key.text.into(), ReadValueTemplate::Column(column))
+                } else {
+                    let key = self.name()?;
+                    if self.take(b':')? {
+                        let value = self.read_recursive_value(
+                            Some(&mut *columns),
+                            schema,
+                            resolve,
+                            depth + 1,
+                        )?;
+                        (key.text.into(), value)
+                    } else if self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|name| name.text == key.text)
+                        || self.syntax.visible_edge(key.text).is_some()
+                    {
+                        let column = self.mutation_projection(columns, key, None)?;
+                        (key.text.into(), ReadValueTemplate::Column(column))
+                    } else {
+                        return Err(
+                            error(key.at, GraphPatternTextErrorKind::UnknownVariable).into()
+                        );
+                    }
+                };
+                entries.push(entry);
+                if self.take(b'}')? {
+                    break;
+                }
+                self.punct(b',', ", or }")?;
+            }
+        }
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(GraphSetTextError {
+                offset: at,
+                kind: GraphSetTextErrorKind::Expected("unique keys in a map projection"),
+            });
+        }
+        let guard = self.mutation_projection(columns, source, None)?;
+        let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        Ok(ReadValueTemplate::MapLiteral {
+            keys: keys.into_boxed_slice(),
+            values,
+            guard: Some(Box::new(ReadValueTemplate::Column(guard))),
+        })
+    }
+
     fn read_graph_value(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
@@ -800,6 +887,7 @@ impl<'a> Parser<'a> {
             ReadValueTemplate::MapLiteral {
                 keys: keys.into_boxed_slice(),
                 values,
+                guard: None,
             }
         } else if self.is_word("KEYS")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
@@ -838,6 +926,14 @@ impl<'a> Parser<'a> {
                 .resolved_expression(resolve)
                 .map_err(expression_error)?;
             self.read_value_template(operand, at)?
+        } else if let Some(columns) = inputs.as_deref_mut()
+            && matches!(self.current.kind, TokenKind::Word(word)
+                if !self.elements.contains(&word)
+                    && (self.syntax.variables.iter().any(|name| name.text == word)
+                        || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
+        {
+            self.map_projection(columns, schema, resolve, depth, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
@@ -1396,12 +1492,17 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::MapLiteral {
             keys,
             values: entries,
+            guard,
         } => GraphSetValue::MapLiteral {
             keys: keys.clone(),
             values: entries
                 .iter()
                 .map(|value| bind_read_value(value, values))
                 .collect::<Result<_, _>>()?,
+            guard: guard
+                .as_deref()
+                .map(|guard| bind_read_value(guard, values).map(Box::new))
+                .transpose()?,
         },
         ReadValueTemplate::MapGet { map, key } => GraphSetValue::MapGet {
             map: Box::new(bind_read_value(map, values)?),

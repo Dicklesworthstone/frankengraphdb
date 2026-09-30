@@ -379,3 +379,84 @@ fn map_rows_drive_create_properties() {
         assert_eq!(query(&db, people), expected);
     });
 }
+
+/// openCypher map projection (fgdb-20foe): `n{.a}` reads a property (NULL
+/// when absent), `k: e` is any value, `v` is a binding. The source guards
+/// the map: a NULL n from OPTIONAL MATCH projects NULL, never `{a: NULL}`.
+#[test]
+fn map_projection_reads_properties_and_is_null_for_a_null_source() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut batch = graph();
+        // A fourth person with a name and no p, and one R edge 1 -> 2.
+        batch.create_vertex(
+            VId(4),
+            vec![PERSON],
+            vec![(NAME, CanonicalScalar::ucs_basic_text("d").unwrap())],
+        );
+        batch.add_edge(
+            fgdb_types::EId(11),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(5))],
+        );
+        db.write(commit, batch).await.unwrap();
+        let params = GqlParameters::new();
+        let query = |text: &str| {
+            let mut rows = cells(db.query(cx, text, &params, symbols, policy()).expect(text));
+            rows.sort();
+            rows
+        };
+        let sorted = |mut rows: Vec<Vec<GraphValue>>| {
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            query("MATCH (n:Person) RETURN n{.name, .p} AS m"),
+            sorted(vec![
+                vec![map(&[("name", text("a")), ("p", int(10))])],
+                vec![map(&[("name", text("b")), ("p", int(20))])],
+                vec![map(&[("name", text("c")), ("p", int(30))])],
+                vec![map(&[("name", text("d")), ("p", null())])],
+            ])
+        );
+        assert_eq!(
+            query(
+                "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) \
+                 RETURN a.name AS a, b{.name} AS b, r{.p} AS r"
+            ),
+            sorted(vec![
+                vec![
+                    text("a"),
+                    map(&[("name", text("b"))]),
+                    map(&[("p", int(5))])
+                ],
+                vec![text("b"), null(), null()],
+                vec![text("c"), null(), null()],
+                vec![text("d"), null(), null()],
+            ])
+        );
+        assert_eq!(
+            query("MATCH (a:Person)-[r:R]->(b) RETURN a{.name, target: b.name, r} AS m"),
+            vec![vec![map(&[
+                ("name", text("a")),
+                ("r", GraphValue::Edge(fgdb_types::EId(11))),
+                ("target", text("b")),
+            ])]]
+        );
+        for statement in [
+            // `.*` needs the complete property catalog.
+            "MATCH (n:Person) RETURN n{.*} AS m",
+            // Keys are unique, as in a map literal.
+            "MATCH (n:Person) RETURN n{.name, .name} AS m",
+            // A shorthand entry names a binding.
+            "MATCH (n:Person) RETURN n{nope} AS m",
+        ] {
+            let result = db.query(cx, statement, &params, symbols, policy());
+            assert!(
+                matches!(result, Err(QueryError::Refused { .. })),
+                "{statement}: {result:?}"
+            );
+        }
+    });
+}

@@ -44,7 +44,9 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Reduce { init, list, expr } => {
             constant(init) && constant(list) && constant(expr)
         }
-        GraphSetValue::MapLiteral { values, .. } => values.iter().all(constant),
+        GraphSetValue::MapLiteral { values, guard, .. } => {
+            values.iter().all(constant) && guard.as_deref().is_none_or(constant)
+        }
         GraphSetValue::MapGet { map, .. } | GraphSetValue::Keys(map) => constant(map),
     }
 }

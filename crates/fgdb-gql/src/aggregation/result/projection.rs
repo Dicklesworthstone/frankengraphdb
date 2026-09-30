@@ -219,7 +219,16 @@ fn expression<'g, E, C>(
         // Map values over aggregate cells (fgdb-2jw3z), with the row
         // evaluator's laws: keys sorted at preparation, NULL for a NULL map or
         // an absent key, and a typed error for a non-map.
-        GraphSetValue::MapLiteral { keys, values } => {
+        GraphSetValue::MapLiteral {
+            keys,
+            values,
+            guard,
+        } => {
+            if let Some(guard) = guard
+                && expression(guard, input, column, control)?.cell().is_null()
+            {
+                return Ok(OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))));
+            }
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut entries = Vec::new();
             for value in values {

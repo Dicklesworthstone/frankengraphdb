@@ -82,10 +82,13 @@ pub enum GraphSetValue {
         expr: Box<GraphSetValue>,
     },
     /// `{k: e, ...}` (fgdb-2jw3z): keys unique and ascending by UTF-8 bytes,
-    /// `values[i]` for `keys[i]`, so evaluation builds a canonical map.
+    /// `values[i]` for `keys[i]`, so evaluation builds a canonical map. A map
+    /// projection `n{.a, ...}` carries its source as `guard`: a NULL source
+    /// makes the whole map NULL, as openCypher requires.
     MapLiteral {
         keys: Box<[Box<str>]>,
         values: Vec<GraphSetValue>,
+        guard: Option<Box<GraphSetValue>>,
     },
     /// `m.key`: NULL for a NULL map or an absent key; a non-map is a typed
     /// error.
@@ -487,13 +490,20 @@ fn admit(
             admit(expr, types, column, depth + 1, nodes, locals + 2)?;
             GraphSetColumnType::Any
         }
-        GraphSetValue::MapLiteral { keys, values } => {
+        GraphSetValue::MapLiteral {
+            keys,
+            values,
+            guard,
+        } => {
             if keys.len() != values.len()
                 || keys
                     .windows(2)
                     .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
             {
                 return Err(Error::InvalidValue { column });
+            }
+            if let Some(guard) = guard {
+                admit(guard, types, column, depth + 1, nodes, locals)?;
             }
             for value in values {
                 admit(value, types, column, depth + 1, nodes, locals)?;
@@ -637,8 +647,18 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             append_value_transcript(list, bytes);
             append_value_transcript(expr, bytes);
         }
-        GraphSetValue::MapLiteral { keys, values } => {
-            bytes.push(14);
+        GraphSetValue::MapLiteral {
+            keys,
+            values,
+            guard,
+        } => {
+            // An unguarded literal keeps its original bytes.
+            if let Some(guard) = guard {
+                bytes.push(17);
+                append_value_transcript(guard, bytes);
+            } else {
+                bytes.push(14);
+            }
             bytes.extend_from_slice(&(keys.len() as u64).to_be_bytes());
             for (key, value) in keys.iter().zip(values) {
                 bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
@@ -1039,7 +1059,17 @@ fn evaluate_value_at<E>(
                 accumulator
             }
         }
-        GraphSetValue::MapLiteral { keys, values } => {
+        GraphSetValue::MapLiteral {
+            keys,
+            values,
+            guard,
+        } => {
+            if let Some(guard) = guard
+                && operand(guard, row, column, control, depth + 1, nodes)?.is_null()
+            {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+            }
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             let mut entries = Vec::new();
             for value in values {
