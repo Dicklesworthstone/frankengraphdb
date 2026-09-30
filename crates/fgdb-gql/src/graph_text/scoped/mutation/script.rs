@@ -1,6 +1,8 @@
 //! Script framing and dispatch use the SAME native lexer and MATCH-prefix parser.
 //! Existing statement compilers own all statement semantics and lowering.
 
+mod unwind;
+
 use super::*;
 use crate::{
     GraphMutationProgramTemplateError, GraphWriteProgramTemplateError, GraphWriteScriptError,

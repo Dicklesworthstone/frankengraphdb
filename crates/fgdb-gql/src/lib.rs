@@ -54,6 +54,7 @@ mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
 mod trail;
+pub mod unwind_write;
 mod vertex_merge;
 mod vertex_upsert;
 mod vertex_upsert_text;
