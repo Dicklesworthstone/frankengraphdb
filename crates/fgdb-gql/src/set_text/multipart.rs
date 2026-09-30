@@ -24,6 +24,11 @@ pub(crate) struct BoundReadInput {
 pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     let mut depth = 0_usize;
     let mut with = false;
+    // A leading UNWIND joins a MATCH as the correlated root, an inner join
+    // only. OPTIONAL MATCH directly after the unwound rows is instead a Left
+    // continuation of them: one NULL-extended row per unmatched value.
+    let leading_unwind = tokens.first().is_some_and(|token| token.word("UNWIND"));
+    let mut matched = false;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
             TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -32,6 +37,17 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
                 let name =
                     previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS"));
+                if !name && token.word("MATCH") && !previous.is_some_and(|p| p.word("OPTIONAL")) {
+                    matched = true;
+                }
+                if leading_unwind
+                    && !matched
+                    && !name
+                    && token.word("OPTIONAL")
+                    && tokens.get(index + 1).is_some_and(|next| next.word("MATCH"))
+                {
+                    return true;
+                }
                 if !name
                     && token.word("WITH")
                     && !previous

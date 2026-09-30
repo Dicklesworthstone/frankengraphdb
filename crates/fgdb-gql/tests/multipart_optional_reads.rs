@@ -486,3 +486,38 @@ fn exact_quotas_and_every_cancellation_checkpoint_cover_optional_join_and_delive
         assert_eq!(seen.get(), stop);
     }
 }
+
+/// `UNWIND ... OPTIONAL MATCH` with no WITH between is a Left continuation of
+/// the unwound rows: every value keeps its multiplicity, and a value with no
+/// witness is one NULL-extended row. Expectations come from EDGES by hand:
+/// score s is vertex s/10, R runs 1->2 twice, 2->3 and 3->3.
+#[test]
+fn optional_match_directly_after_unwind_null_extends_each_unwound_value() {
+    assert_eq!(
+        rows(
+            "UNWIND [10, 30, 40] AS s OPTIONAL MATCH (a {score: s})-[:R]->(b) \
+             RETURN s, b ORDER BY s, b"
+        ),
+        vec![
+            scalar_vertex(Some(10), Some(2)),
+            scalar_vertex(Some(10), Some(2)),
+            scalar_vertex(Some(30), Some(3)),
+            scalar_vertex(Some(40), None),
+        ]
+    );
+    assert_eq!(
+        rows(
+            "UNWIND [10, 50, 10] AS s OPTIONAL MATCH (a) WHERE a.score = s RETURN s, a ORDER BY s, a"
+        ),
+        vec![
+            scalar_vertex(Some(10), Some(1)),
+            scalar_vertex(Some(10), Some(1)),
+            scalar_vertex(Some(50), None),
+        ]
+    );
+    // An inner UNWIND ... MATCH keeps its existing correlated-root route.
+    assert_eq!(
+        rows("UNWIND [10, 50] AS s MATCH (a {score: s}) RETURN s, a"),
+        vec![scalar_vertex(Some(10), Some(1))]
+    );
+}
