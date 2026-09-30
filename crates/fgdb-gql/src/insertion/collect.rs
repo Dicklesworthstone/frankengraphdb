@@ -119,7 +119,7 @@ fn copy_scalar<E, A, C>(
 
 fn fields<E, A, C>(
     properties: &Properties,
-    row: &[GraphValue],
+    row: &GraphValueRow,
     row_at: usize,
     declaration: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
@@ -135,12 +135,14 @@ fn fields<E, A, C>(
         // Use the same scalar/CASE VM as mutation, RETURN and aggregation.
         // Computed values already own their charged payload; move, never copy.
         let value = match expression.value() {
-            GraphSetValue::Column(column) => row[*column].as_scalar().ok_or(
-                GqlQueryError::Source(GraphInsertError::InputSchema {
-                    row: row_at,
-                    column: *column,
-                }),
-            )?,
+            GraphSetValue::Column(column) => {
+                row.values()[*column]
+                    .as_scalar()
+                    .ok_or(GqlQueryError::Source(GraphInsertError::InputSchema {
+                        row: row_at,
+                        column: *column,
+                    }))?
+            }
             GraphSetValue::Literal(value) => value.value(),
             GraphSetValue::Value(value) => match value.as_scalar() {
                 Some(scalar) => scalar,
@@ -154,8 +156,11 @@ fn fields<E, A, C>(
                     }));
                 }
             },
-            // Composite set expressions cannot name one property field.
-            GraphSetValue::List(_)
+            // A composite value (a list index, a map entry, size(), IN, a
+            // quantifier, reduce()) runs on the shared row evaluator. Only a
+            // scalar result is a property field; a list, map or graph element
+            // is an input-schema refusal, never a silent truncation.
+            composite @ (GraphSetValue::List(_)
             | GraphSetValue::Index { .. }
             | GraphSetValue::Size(_)
             | GraphSetValue::In { .. }
@@ -167,15 +172,33 @@ fn fields<E, A, C>(
             | GraphSetValue::Reduce { .. }
             | GraphSetValue::MapLiteral { .. }
             | GraphSetValue::MapGet { .. }
-            | GraphSetValue::Keys(_) => {
-                return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
-                    row: row_at,
-                    column: property,
-                }));
+            | GraphSetValue::Keys(_)) => {
+                let value = crate::set_ops::evaluate_value(composite, row, property, control)
+                    .map_err(|failure| match failure {
+                        crate::set_ops::ProjectionFailure::Control(error) => error,
+                        crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                            GqlQueryError::Source(GraphInsertError::Arithmetic {
+                                row: row_at,
+                                declaration,
+                                property,
+                                error,
+                            })
+                        }
+                    })?;
+                let GraphValue::Scalar(value) = value else {
+                    return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
+                        row: row_at,
+                        column: property,
+                    }));
+                };
+                // Computed values already own their charged payload.
+                control(GlaExecutionEvent::ScratchEntry)?;
+                result.push((*key, value));
+                continue;
             }
             GraphSetValue::Integer(expression) => {
                 let value = expression
-                    .evaluate_scalar_with_control(row, control)
+                    .evaluate_scalar_with_control(row.values(), control)
                     .map_err(|error| match error {
                         GraphIntegerEvaluationError::Control(error) => error,
                         GraphIntegerEvaluationError::Value(error) => {
@@ -382,8 +405,10 @@ pub(super) fn execute<E, A, C>(
     // their existing order and are freed as their draft is completed. Neither
     // path duplicates graph matching or property evaluation.
     let unit = insertion.is_standalone().then_some(None);
-    for (row_at, row) in selected_rows.into_iter().map(Some).chain(unit).enumerate() {
-        let row = row.as_ref().map_or(&[][..], GraphValueRow::values);
+    for (row_at, input) in selected_rows.into_iter().map(Some).chain(unit).enumerate() {
+        // The unit occurrence is an empty row: no allocation, no columns.
+        let input = input.unwrap_or_else(|| GraphValueRow::from_owned_values(Vec::new()));
+        let row = input.values();
         meter.event(GlaExecutionEvent::Work)?;
         if row.len() != columns.len() {
             return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
@@ -406,7 +431,7 @@ pub(super) fn execute<E, A, C>(
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vertices.push(fields(
                 &vertex.properties,
-                row,
+                &input,
                 row_at,
                 declaration,
                 &mut |event| meter.event(event),
@@ -419,7 +444,7 @@ pub(super) fn execute<E, A, C>(
             let destination = endpoint(edge.destination, row, row_at, edge_at)?;
             let properties = fields(
                 &edge.properties,
-                row,
+                &input,
                 row_at,
                 insertion.vertices.len() + edge_at,
                 &mut |event| meter.event(event),

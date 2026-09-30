@@ -256,6 +256,34 @@ pub(super) fn execute<E, C>(
                                 })?;
                             Value::Computed(value)
                         }
+                        GraphMutationValue::Composite(value) => {
+                            let value = crate::set_ops::evaluate_value(
+                                value,
+                                row,
+                                action_at,
+                                &mut |event| meter.event(event),
+                            )
+                            .map_err(|failure| match failure {
+                                crate::set_ops::ProjectionFailure::Control(error) => error,
+                                crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                                    GqlQueryError::Source(GraphMutationError::Arithmetic {
+                                        row: row_at,
+                                        action: action_at,
+                                        error,
+                                    })
+                                }
+                            })?;
+                            // Computed values already own their charged payload.
+                            let crate::algebra::GraphValue::Scalar(value) = value else {
+                                return Err(GqlQueryError::Source(
+                                    GraphMutationError::NonScalarValue {
+                                        row: row_at,
+                                        action: action_at,
+                                    },
+                                ));
+                            };
+                            Value::Computed(value)
+                        }
                     };
                     (Field::Property(*key), value)
                 }
@@ -380,7 +408,14 @@ mod tests {
         values: &[CanonicalScalar],
         policy: GraphMutationPolicy,
     ) -> ResultOf<GraphMutationBatch, (), ()> {
-        mutation().execute_governed(
+        run_with(&mutation(), values, policy)
+    }
+    fn run_with(
+        mutation: &PreparedGraphMutation,
+        values: &[CanonicalScalar],
+        policy: GraphMutationPolicy,
+    ) -> ResultOf<GraphMutationBatch, (), ()> {
+        mutation.execute_governed(
             policy,
             |plan, policy| {
                 plan.plan().execute_governed_with_properties(
@@ -398,6 +433,71 @@ mod tests {
     }
     fn policy() -> GraphMutationPolicy {
         GraphMutationPolicy::new(GqlQueryPolicy::new(100, 100, 100_000, 100_000), 100)
+    }
+    /// fgdb-2jw3z: a composite value runs on the shared row evaluator per
+    /// row. A scalar result is assigned; a list result is a typed refusal; a
+    /// value that is never scalar, or reads a column the selection lacks,
+    /// refuses at build.
+    #[test]
+    fn composite_values_assign_scalars_and_refuse_everything_else() {
+        use crate::GraphSetValue;
+        use crate::algebra::GraphValue;
+        let composite = |value| {
+            PreparedGraphMutation::prepare(
+                query(),
+                RelationId(1),
+                vec![GraphMutationAction::SetProperty {
+                    target: 0,
+                    key: PropertyKeyId(2),
+                    value: GraphMutationValue::Composite(value),
+                }],
+            )
+        };
+        let int = |value| GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        // SET a.q = b.p IN [7]: one row per b, and every b of a agrees.
+        let member = composite(GraphSetValue::In {
+            value: Box::new(GraphSetValue::Column(1)),
+            list: Box::new(GraphSetValue::List(vec![int(7)])),
+        })
+        .unwrap();
+        for (p, expected) in [(7, true), (8, false)] {
+            let values = [CanonicalScalar::Int(p)];
+            assert_eq!(
+                run_with(&member, &values, policy()).unwrap().intents(),
+                &[GraphMutationIntent::Property {
+                    vertex: VId(1),
+                    key: PropertyKeyId(2),
+                    value: Some(CanonicalScalar::Bool(expected)),
+                }]
+            );
+        }
+        // [[1]][0] is a list, known only when it runs.
+        let nested = composite(GraphSetValue::Index {
+            list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
+            index: Box::new(int(0)),
+        })
+        .unwrap();
+        assert!(matches!(
+            run_with(&nested, &[CanonicalScalar::Int(7)], policy()),
+            Err(GqlQueryError::Source(GraphMutationError::NonScalarValue {
+                row: 0,
+                action: 0
+            }))
+        ));
+        assert!(matches!(
+            composite(GraphSetValue::List(vec![int(1)])),
+            Err(GraphMutationBuildError::ValueExpression {
+                action: 0,
+                kind: None
+            })
+        ));
+        assert!(matches!(
+            composite(GraphSetValue::Size(Box::new(GraphSetValue::Column(9)))),
+            Err(GraphMutationBuildError::ValueExpression {
+                action: 0,
+                kind: Some(_)
+            })
+        ));
     }
     #[test]
     fn repeated_assignments_collapse_but_disagreement_never_selects_a_last_writer() {

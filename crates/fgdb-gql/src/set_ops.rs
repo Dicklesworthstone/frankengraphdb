@@ -22,7 +22,9 @@ pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
 };
-pub(crate) use projection::{evaluate_membership, map_keys, range_values, slice_bounds};
+pub(crate) use projection::{
+    ProjectionFailure, evaluate_membership, evaluate_value, map_keys, range_values, slice_bounds,
+};
 
 use crate::algebra::{
     GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGraphPattern, ValueProjection,

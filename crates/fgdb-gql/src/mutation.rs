@@ -28,6 +28,11 @@ pub enum GraphMutationValue {
     /// Checked canonical scalar bytecode over the same frozen selection row.
     /// All column references are validated before storage execution begins.
     Expression(GraphIntegerExpression),
+    /// A composite read value over the same row: a list index, a map entry
+    /// (`row.name`), size(), IN, a list quantifier or reduce(). The shared
+    /// row evaluator computes it; only a scalar result is a property value,
+    /// and any other result is a typed refusal, never a truncation.
+    Composite(crate::GraphSetValue),
 }
 impl core::fmt::Debug for GraphMutationValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -79,9 +84,24 @@ pub enum GraphMutationBuildError {
     RequiresSingleGraphSource,
     RelationalInput(crate::GraphSetBuildError),
     EmptyActions,
-    TooManyActions { limit: usize, observed: usize },
-    TargetColumn { action: usize, column: usize },
-    ValueColumn { action: usize, column: usize },
+    TooManyActions {
+        limit: usize,
+        observed: usize,
+    },
+    TargetColumn {
+        action: usize,
+        column: usize,
+    },
+    ValueColumn {
+        action: usize,
+        column: usize,
+    },
+    /// A composite value that does not fit the selection schema or can never
+    /// be a scalar property value.
+    ValueExpression {
+        action: usize,
+        kind: Option<crate::GraphSetProjectionError>,
+    },
     MixedDeletionAndUpdates,
 }
 impl core::fmt::Display for GraphMutationBuildError {
@@ -105,6 +125,11 @@ pub enum GraphMutationError<E> {
         row: usize,
         action: usize,
         error: GraphIntegerError,
+    },
+    /// A composite value produced a list, map or graph element for a property.
+    NonScalarValue {
+        row: usize,
+        action: usize,
     },
     ConflictingAssignment {
         first_row: usize,
@@ -130,6 +155,12 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             }
             Self::Arithmetic { row, action, error } => {
                 write!(f, "mutation row {row} action {action}: {error}")
+            }
+            Self::NonScalarValue { row, action } => {
+                write!(
+                    f,
+                    "mutation row {row} action {action}: not a scalar property value"
+                )
             }
             Self::ConflictingAssignment {
                 first_row,
@@ -320,6 +351,15 @@ impl PreparedGraphMutation {
                         }
                     }
                     GraphMutationValue::Literal(_) => {}
+                    GraphMutationValue::Composite(value) => {
+                        let refused =
+                            |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
+                        let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
+                            .map_err(|kind| refused(Some(kind)))?;
+                        if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                            return Err(refused(None));
+                        }
+                    }
                 }
             }
             if deleting != matches!(action, GraphMutationAction::DetachDelete { .. }) {
@@ -398,6 +438,13 @@ impl PreparedGraphMutation {
                             let expression = expression.canonical_bytes();
                             bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                             bytes.extend_from_slice(&expression);
+                        }
+                        GraphMutationValue::Composite(value) => {
+                            bytes.push(3);
+                            let mut encoded = Vec::new();
+                            value.append_canonical_bytes(&mut encoded);
+                            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(&encoded);
                         }
                     }
                 }

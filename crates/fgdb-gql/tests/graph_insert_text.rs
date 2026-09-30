@@ -878,7 +878,10 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         "UNWIND [1] AS x UNWIND [2] AS x CREATE (:Copy {p:x})",
         "UNWIND [1] AS x CREATE (x:Copy)",
         "UNWIND [1] AS x CREATE (:Copy {p:y})",
-        "UNWIND [1] AS x CREATE (:Copy {p:x.name})",
+        // `x.name` is a map entry since fgdb-2jw3z slice 3, checked per row
+        // at execution (crates/fgdb/tests/map_values.rs); a map or list
+        // literal is never a property value.
+        "UNWIND [1] AS x CREATE (:Copy {p:{name: x}})",
         "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
         "UNWIND $items AS x CREATE (:Copy {p:$items})",
         // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its

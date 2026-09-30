@@ -235,20 +235,17 @@ impl<'a> Parser<'a> {
                 ) {
                     return Err(expected(at, "scalar CREATE property expression"));
                 }
+                // A list or map is never a stored property. A list index, a
+                // map entry (`row.name`), size(), IN, a quantifier or reduce()
+                // may be scalar and is checked per row at execution.
                 if matches!(
                     value,
                     ReadValueTemplate::List(_)
-                        | ReadValueTemplate::Index { .. }
-                        | ReadValueTemplate::Size(_)
-                        | ReadValueTemplate::In { .. }
                         | ReadValueTemplate::Local(_)
                         | ReadValueTemplate::Comprehension { .. }
-                        | ReadValueTemplate::Quantifier { .. }
                         | ReadValueTemplate::Slice { .. }
                         | ReadValueTemplate::Range { .. }
-                        | ReadValueTemplate::Reduce { .. }
                         | ReadValueTemplate::MapLiteral { .. }
-                        | ReadValueTemplate::MapGet { .. }
                         | ReadValueTemplate::Keys(_)
                 ) {
                     return Err(expected(at, "scalar CREATE property expression"));
@@ -486,9 +483,11 @@ fn resolve_properties<'a>(
 
 // None instantiates only checked shape: parameters become nullable placeholders
 // and no arithmetic is evaluated. Some binds the exact validated argument row.
+// A composite value binds against `shape` (placeholder arguments) when None.
 fn bind_fields(
     fields: &[(PropertyKeyId, ReadValueTemplate)],
     values: Option<&[GqlParameterValue]>,
+    shape: &[GqlParameterValue],
 ) -> Result<Vec<(PropertyKeyId, GraphMutationValue)>, GraphInsertTextError> {
     let mut properties = Vec::new();
     for (key, value) in fields {
@@ -526,18 +525,20 @@ fn bind_fields(
                 };
                 GraphMutationValue::Expression(expression)
             }
-            ReadValueTemplate::List(_)
-            | ReadValueTemplate::Index { .. }
+            ReadValueTemplate::Index { .. }
             | ReadValueTemplate::Size(_)
             | ReadValueTemplate::In { .. }
+            | ReadValueTemplate::Quantifier { .. }
+            | ReadValueTemplate::Reduce { .. }
+            | ReadValueTemplate::MapGet { .. } => GraphMutationValue::Composite(
+                return_projection::bind_read_value(value, values.unwrap_or(shape))?,
+            ),
+            ReadValueTemplate::List(_)
             | ReadValueTemplate::Local(_)
             | ReadValueTemplate::Comprehension { .. }
-            | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Slice { .. }
             | ReadValueTemplate::Range { .. }
-            | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapLiteral { .. }
-            | ReadValueTemplate::MapGet { .. }
             | ReadValueTemplate::Keys(_) => {
                 // Scalar properties only: list construction is a read-surface
                 // capability, not a stored property encoding.
@@ -940,11 +941,16 @@ impl PreparedGraphInsertText {
         selection: Option<PreparedGraphPattern<GraphValueRow>>,
         values: Option<&[GqlParameterValue]>,
     ) -> Result<PreparedGraphInsert, GraphInsertTextError> {
+        let shape = if values.is_none() {
+            shape_arguments(self.parameter_schema())
+        } else {
+            Vec::new()
+        };
         let mut vertices = Vec::new();
         for vertex in &self.vertices {
             vertices.push(GraphInsertVertex {
                 labels: vertex.labels.clone(),
-                properties: bind_fields(&vertex.properties, values)?,
+                properties: bind_fields(&vertex.properties, values, &shape)?,
             });
         }
         let mut edges = Vec::new();
@@ -953,7 +959,7 @@ impl PreparedGraphInsertText {
                 source: edge.source,
                 destination: edge.destination,
                 relation: edge.relation,
-                properties: bind_fields(&edge.properties, values)?,
+                properties: bind_fields(&edge.properties, values, &shape)?,
             });
         }
         if let InsertTextInput::Relation { input, .. } = &self.input {

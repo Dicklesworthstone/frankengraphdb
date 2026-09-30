@@ -1,18 +1,25 @@
 //! openCypher map values through `Database::query` (fgdb-2jw3z): map
-//! literals, `m.key`, `keys(m)`, maps over aggregate outputs, and the map's
-//! place in value order. Every expectation is written out by hand.
+//! literals, `m.key`, `keys(m)`, maps over aggregate outputs, the map's place
+//! in value order, and map rows driving CREATE (`UNWIND $rows AS row CREATE
+//! (:Person {name: row.name})`). Every expectation is written out by hand.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, QueryError, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, QueryCx, VId};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
+    PreparedGraphWriteScript,
+};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts, QueryCx, TxnCx, VId,
+};
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const NAME: PropertyKeyId = PropertyKeyId(2);
+const FIRST: PropertyKeyId = PropertyKeyId(3);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -25,8 +32,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
+        (GraphSymbolKind::Label, "Tag") => Some(GraphSymbol::Label(LabelId(2))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
+        (GraphSymbolKind::Property, "first") => Some(GraphSymbol::Property(FIRST)),
         _ => None,
     }
 }
@@ -224,5 +233,149 @@ fn malformed_map_forms_refuse_typed() {
             let result = db.query(cx, statement, &params, symbols, policy());
             assert!(result.is_err(), "{statement}: {result:?}");
         }
+    });
+}
+
+/// Run one GQL write program through the engine write path, as the CLI does.
+async fn write(
+    db: &mut Database<fgdb::MemVfs>,
+    (commit, cx, txn): (&CommitCx, &QueryCx, &TxnCx),
+    statement: &str,
+    params: &GqlParameters,
+) -> Result<(), String> {
+    let program = PreparedGraphWriteScript::prepare(statement, R, symbols)
+        .map_err(|error| format!("prepare: {error:?}"))?
+        .bind_parameters(params)
+        .map_err(|error| format!("bind: {error:?}"))?;
+    db.execute_graph_write_program_returning_autocommit_engine_governed(
+        txn,
+        cx,
+        commit,
+        &program,
+        GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("execute: {error:?}"))
+}
+
+/// The openCypher bulk idiom: each map row of a list parameter creates one
+/// vertex whose properties are entries of that row. An absent entry reads
+/// NULL, which stores no property. A list index, size() and IN over a row
+/// are scalar property values too. A row whose entry is a list or map is a
+/// typed refusal that commits nothing.
+#[test]
+fn map_rows_drive_create_properties() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let rows = vec![
+            map(&[("name", text("x")), ("p", int(1))]),
+            map(&[("name", text("y"))]),
+            map(&[
+                ("name", text("z")),
+                ("p", int(3)),
+                ("tags", list([text("t")])),
+            ]),
+        ];
+        let params = GqlParameters::new().with_list("rows", rows).unwrap();
+        write(
+            &mut db,
+            cxs,
+            "UNWIND $rows AS row CREATE (:Person {name: row.name, p: row.p})",
+            &params,
+        )
+        .await
+        .unwrap();
+        let empty = GqlParameters::new();
+        let query = |db: &Database<fgdb::MemVfs>, text: &str| {
+            let mut rows = cells(db.query(&cx, text, &empty, symbols, policy()).expect(text));
+            rows.sort();
+            rows
+        };
+        let people = "MATCH (n:Person) RETURN n.name AS name, n.p AS p";
+        let mut expected = vec![
+            vec![text("x"), int(1)],
+            vec![text("y"), null()],
+            vec![text("z"), int(3)],
+        ];
+        expected.sort();
+        assert_eq!(query(&db, people), expected);
+        // A list index, size() and IN read a row's list entry.
+        write(
+            &mut db,
+            cxs,
+            "UNWIND [{name: 'w', tags: ['a', 'b']}, {name: 'v', tags: []}] AS row \
+             CREATE (:Person {name: row.name, p: size(row.tags), first: row.tags[0]})",
+            &empty,
+        )
+        .await
+        .unwrap();
+        let mut expected = vec![
+            vec![text("v"), int(0)],
+            vec![text("w"), int(2)],
+            vec![text("x"), int(1)],
+            vec![text("y"), null()],
+            vec![text("z"), int(3)],
+        ];
+        expected.sort();
+        assert_eq!(query(&db, people), expected);
+        // A parameter inside a composite value binds to the argument row.
+        let k = GqlParameters::new().with_int64("k", 42).unwrap();
+        write(
+            &mut db,
+            cxs,
+            "UNWIND [{name: 'u'}] AS row CREATE (:Tag {name: row.name, first: [$k, 0][0]})",
+            &k,
+        )
+        .await
+        .unwrap();
+        // tags[0] of an empty list is NULL, which stores no property.
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n) WHERE n.first IS NOT NULL RETURN n.name AS name, n.first AS first"
+            ),
+            vec![vec![text("u"), int(42)], vec![text("w"), text("a")]]
+        );
+        // A list or map entry is not a property value, and a non-map row has
+        // no entries: each refuses typed, and the whole program commits
+        // nothing, including its earlier rows.
+        for (statement, phase) in [
+            // Per row, at execution: the value is known only then.
+            (
+                "UNWIND [{name: 'ok'}, {name: ['a']}] AS row CREATE (:Person {name: row.name})",
+                "execute:",
+            ),
+            (
+                "UNWIND [{name: 'ok'}, {name: {a: 1}}] AS row CREATE (:Person {name: row.name})",
+                "execute:",
+            ),
+            (
+                "UNWIND [{name: 'ok'}, 3] AS row CREATE (:Person {name: row.name})",
+                "execute:",
+            ),
+            (
+                "UNWIND [{name: 'ok'}] AS row CREATE (:Person {name: row})",
+                "execute:",
+            ),
+            // At preparation: a map or a key list is never scalar.
+            ("CREATE (:Person {name: {a: 1}})", "prepare:"),
+            (
+                "UNWIND [{name: 'ok'}] AS row CREATE (:Person {name: keys(row)})",
+                "prepare:",
+            ),
+        ] {
+            let result = write(&mut db, cxs, statement, &empty).await;
+            assert!(
+                result.as_ref().is_err_and(|error| error.starts_with(phase)),
+                "{statement}: {result:?}"
+            );
+        }
+        assert_eq!(query(&db, people), expected);
     });
 }

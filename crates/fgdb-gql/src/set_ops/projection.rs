@@ -676,7 +676,7 @@ pub(super) fn append_transcript(projection: &[GraphSetProjection], bytes: &mut V
     }
 }
 
-pub(super) enum ProjectionFailure<E> {
+pub(crate) enum ProjectionFailure<E> {
     Control(E),
     Arithmetic {
         column: usize,
@@ -708,7 +708,7 @@ pub(super) fn evaluate<E>(
     Ok(GraphValueRow::from_owned_values(values))
 }
 
-pub(super) fn evaluate_value<E>(
+pub(crate) fn evaluate_value<E>(
     value: &GraphSetValue,
     row: &GraphValueRow,
     column: usize,

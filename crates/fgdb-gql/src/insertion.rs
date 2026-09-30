@@ -58,13 +58,39 @@ impl core::fmt::Debug for GraphInsertEdge {
 pub enum GraphInsertBuildError {
     RelationalInput(crate::GraphSetBuildError),
     Empty,
-    TooManyDeclarations { limit: usize, observed: usize },
-    TooManyFields { limit: usize, observed: usize },
-    DuplicateLabel { vertex: usize },
-    DuplicateProperty { declaration: usize },
-    ValueColumn { declaration: usize, column: usize },
-    EndpointColumn { edge: usize, column: usize },
-    CreatedEndpoint { edge: usize, vertex: usize },
+    TooManyDeclarations {
+        limit: usize,
+        observed: usize,
+    },
+    TooManyFields {
+        limit: usize,
+        observed: usize,
+    },
+    DuplicateLabel {
+        vertex: usize,
+    },
+    DuplicateProperty {
+        declaration: usize,
+    },
+    ValueColumn {
+        declaration: usize,
+        column: usize,
+    },
+    /// A composite value that does not fit the input schema or can never be a
+    /// scalar property value.
+    ValueExpression {
+        declaration: usize,
+        property: usize,
+        kind: Option<crate::GraphSetProjectionError>,
+    },
+    EndpointColumn {
+        edge: usize,
+        column: usize,
+    },
+    CreatedEndpoint {
+        edge: usize,
+        vertex: usize,
+    },
 }
 impl core::fmt::Display for GraphInsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -612,6 +638,19 @@ impl Properties {
                         check(column)?;
                     }
                     GraphSetValue::Integer(expression)
+                }
+                GraphMutationValue::Composite(value) => {
+                    let refused = |kind| GraphInsertBuildError::ValueExpression {
+                        declaration,
+                        property: at,
+                        kind,
+                    };
+                    let kind = crate::GraphSetProjection::admit_output(&value, columns, at)
+                        .map_err(|kind| refused(Some(kind)))?;
+                    if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                        return Err(refused(None));
+                    }
+                    value
                 }
             };
             keys.push(key);
