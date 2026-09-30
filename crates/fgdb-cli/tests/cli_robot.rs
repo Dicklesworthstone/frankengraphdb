@@ -2908,3 +2908,54 @@ fn a_composed_prism_call_certifies_and_replays_across_processes() {
         "replay reruns the analytics at the certified sequence"
     );
 }
+
+/// `--param name=json:<array>` (fgdb-2jw3z) binds a list parameter, so the
+/// openCypher bulk idiom `UNWIND $rows AS row CREATE ...` runs from the CLI.
+/// Every JSON kind maps to one native cell type, and a malformed or
+/// out-of-range document is a usage error that never opens the database.
+#[test]
+fn json_list_parameters_drive_unwind_creation_and_keep_every_value_type() {
+    let db = TestDb::new("json-parameters");
+    db.create();
+    db.write(&[
+        "--param",
+        r#"rows=json:[{"name":"x","born":1},{"name":"y"},{"name":"z","born":3}]"#,
+        "UNWIND $rows AS row CREATE (:Person {name: row.name, born: row.born})",
+    ]);
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (p:Person) RETURN p.name AS name, p.born AS born ORDER BY name"],
+        ),
+        r#"[[{"type":"text","value":"x"},{"type":"int","value":"1"}],
+            [{"type":"text","value":"y"},{"type":"null"}],
+            [{"type":"text","value":"z"},{"type":"int","value":"3"}]]"#,
+    );
+    assert_rows(
+        &db.command(
+            "query",
+            &[
+                "--param",
+                r#"xs=json:[-7, 2.5, "t", true, null, [1, "a"], {"k": {"n": false}}]"#,
+                "UNWIND $xs AS x RETURN x",
+            ],
+        ),
+        r#"[[{"type":"int","value":"-7"}],
+            [{"type":"float","value":"2.5"}],
+            [{"type":"text","value":"t"}],
+            [{"type":"bool","value":true}],
+            [{"type":"null"}],
+            [{"type":"list","value":[{"type":"int","value":"1"},{"type":"text","value":"a"}]}],
+            [{"type":"map","value":{"k":{"type":"map","value":{"n":{"type":"bool","value":false}}}}}]]"#,
+    );
+    for bad in [
+        r#"xs=json:{"a":1}"#,
+        "xs=json:[1,",
+        "xs=json:[1e999]",
+        "xs=json:[99999999999999999999]",
+        r#"xs=json:[{"a":1,"a":2}]"#,
+    ] {
+        db.command("query", &["--param", bad, "UNWIND $xs AS x RETURN x"])
+            .failure(2, "usage");
+    }
+}

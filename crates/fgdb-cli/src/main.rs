@@ -55,7 +55,8 @@ Usage: fgdb [--robot] <command>
   robot schema
   help
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
-timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>.
+timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
+json:<array> (a list: objects are maps, integers int, other numbers float).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
@@ -539,6 +540,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
+    if let Some(value) = raw.strip_prefix("json:") {
+        return json_list(value);
+    }
     if let Some(value) = raw.strip_prefix("int:") {
         return value
             .parse()
@@ -600,6 +604,66 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
         .map(GqlParameterValue::Scalar)
         .map_err(Failure::query)
 }
+/// Bounds on one `json:` parameter document, before the list parameter's own
+/// canonical-size cap.
+const MAX_JSON_PARAMETER_VALUES: usize = 65_536;
+const MAX_JSON_PARAMETER_TOKEN_BYTES: usize = 65_536;
+
+/// `json:<array>` binds a list parameter, e.g. the rows of
+/// `UNWIND $rows AS row CREATE (:Person {name: row.name})`. Objects are maps,
+/// strings text, integers int, other finite numbers float, true/false bool,
+/// null null. Anything else, including a top-level non-array, is a usage error.
+fn json_list(text: &str) -> Result<GqlParameterValue, Failure> {
+    let json = load::parse_json(
+        text,
+        MAX_JSON_PARAMETER_VALUES,
+        MAX_JSON_PARAMETER_TOKEN_BYTES,
+    )
+    .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")))?;
+    let load::Json::Array(items) = json else {
+        return Err(Failure::usage(
+            "invalid json parameter: expected a JSON array",
+        ));
+    };
+    let values = items
+        .iter()
+        .map(json_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    fgdb_gql::GqlListParameter::new(values)
+        .map(GqlParameterValue::List)
+        .map_err(Failure::usage)
+}
+fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
+    let bad = |detail: &str| Failure::usage(format!("invalid json parameter: {detail}"));
+    Ok(match json {
+        load::Json::Null => GraphValue::Scalar(CanonicalScalar::Null),
+        load::Json::Bool(value) => GraphValue::Scalar(CanonicalScalar::Bool(*value)),
+        load::Json::Number(text) if text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) => {
+            let value: f64 = text.parse().map_err(|_| bad("number"))?;
+            if !value.is_finite() {
+                return Err(bad("float out of range"));
+            }
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        }
+        load::Json::Number(text) => GraphValue::Scalar(CanonicalScalar::Int(
+            text.parse().map_err(|_| bad("integer out of range"))?,
+        )),
+        load::Json::String(text) => {
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).map_err(Failure::usage)?)
+        }
+        load::Json::Array(items) => {
+            GraphValue::List(items.iter().map(json_value).collect::<Result<_, _>>()?)
+        }
+        load::Json::Object(fields) => GraphValue::map(
+            fields
+                .iter()
+                .map(|(key, value)| Ok((key.as_str().into(), json_value(value)?)))
+                .collect::<Result<Vec<_>, Failure>>()?,
+        )
+        .ok_or_else(|| bad("duplicate key"))?,
+    })
+}
+
 /// Three 64-hex lines plus comments; anything larger is not a key file.
 const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
 async fn read_keys(

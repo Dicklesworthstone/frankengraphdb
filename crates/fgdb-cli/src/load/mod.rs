@@ -689,13 +689,18 @@ fn field<'a>(fields: &'a BTreeMap<String, Json>, name: &str) -> Result<&'a Json,
 // Same strict, dependency-free JSON grammar as cli_robot's contract reader;
 // production input additionally caps nesting before recursive descent.
 #[derive(Debug)]
-enum Json {
+pub(crate) enum Json {
     Null,
-    Bool,
+    Bool(bool),
     Number(String),
     String(String),
     Array(Vec<Json>),
     Object(BTreeMap<String, Json>),
+}
+/// One bounded JSON document: at most `values` values and `token_bytes`
+/// bytes per string or number token, nested at most 32 deep.
+pub(crate) fn parse_json(input: &str, values: usize, token_bytes: usize) -> Result<Json, String> {
+    JsonParser::parse_limited(input, values, token_bytes)
 }
 struct JsonParser<'a> {
     input: &'a str,
@@ -764,8 +769,8 @@ impl<'a> JsonParser<'a> {
             Some(b'"') => self.string().map(Json::String),
             Some(b'{') => self.object(),
             Some(b'[') => self.array(),
-            Some(b't') => self.literal("true", Json::Bool),
-            Some(b'f') => self.literal("false", Json::Bool),
+            Some(b't') => self.literal("true", Json::Bool(true)),
+            Some(b'f') => self.literal("false", Json::Bool(false)),
             Some(b'n') => self.literal("null", Json::Null),
             Some(b'-' | b'0'..=b'9') => self.number(),
             _ => Err(format!("expected JSON value at {}", self.offset)),

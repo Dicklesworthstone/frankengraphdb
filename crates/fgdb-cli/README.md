@@ -50,9 +50,13 @@ bindings when you reopen. The CLI never guesses or hashes names, and `labels()`
 
 ### Parameters: typed, never interpolated
 
-`--param name=int:42`, `uint:42`, `text:Ada`, `bool:true`, `null`, or
+`--param name=int:42`, `uint:42`, `text:Ada`, `bool:true`, `null`,
 `timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>` (with
-`--tzdb-file`). A parameter is a value. It is never spliced into GQL text.
+`--tzdb-file`), or `json:<array>` for a list: objects are maps, strings
+text, integers int, other numbers float, so
+`--param 'rows=json:[{"name":"Ada"}]'` feeds
+`UNWIND $rows AS row CREATE (:Person {name: row.name})`. A parameter is a
+value. It is never spliced into GQL text.
 
 ## `import-csv`
 
