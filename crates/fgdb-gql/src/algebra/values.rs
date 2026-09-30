@@ -192,6 +192,14 @@ pub enum GraphValue {
     Edges(Box<[EId]>),
     Edge(EId),
     List(Box<[GraphValue]>),
+    /// An openCypher map (fgdb-2jw3z). `keys` are unique and ascending by
+    /// UTF-8 bytes, and `values[i]` belongs to `keys[i]`. Build one only
+    /// through `GraphValue::map`, which enforces that; validate_bounds
+    /// refuses any other shape.
+    Map {
+        keys: Box<[Box<str>]>,
+        values: Box<[GraphValue]>,
+    },
 }
 
 impl GraphValue {
@@ -206,6 +214,31 @@ impl GraphValue {
         }
     }
 
+    /// A map from entries in any order. `None` when a key repeats: a map
+    /// literal with a duplicate key is refused, never silently resolved.
+    #[must_use]
+    pub fn map(entries: Vec<(Box<str>, GraphValue)>) -> Option<Self> {
+        let mut entries = entries;
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return None;
+        }
+        let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        Some(Self::Map {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        })
+    }
+
+    /// The keys and their values, keys ascending.
+    #[must_use]
+    pub fn as_map(&self) -> Option<(&[Box<str>], &[GraphValue])> {
+        match self {
+            Self::Map { keys, values } => Some((keys, values)),
+            _ => None,
+        }
+    }
+
     /// Bound recursive definitions before compilation or parameter admission.
     #[must_use]
     pub fn validate_bounds(&self) -> bool {
@@ -216,6 +249,13 @@ impl GraphValue {
             *remaining -= 1;
             match value {
                 GraphValue::List(values) => values.iter().all(|v| visit(v, depth + 1, remaining)),
+                GraphValue::Map { keys, values } => {
+                    keys.len() == values.len()
+                        && keys
+                            .windows(2)
+                            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+                        && values.iter().all(|v| visit(v, depth + 1, remaining))
+                }
                 _ => true,
             }
         }
@@ -228,6 +268,7 @@ impl GraphValue {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {
         enum Task<'a> {
             Value(&'a GraphValue),
+            Key(&'a str),
             End(usize),
         }
         let mut bytes = b"fgdb:graph-value:v1\0".to_vec();
@@ -237,6 +278,11 @@ impl GraphValue {
                 Task::End(at) => {
                     let len = (bytes.len() - at - 8) as u64;
                     bytes[at..at + 8].copy_from_slice(&len.to_be_bytes());
+                    continue;
+                }
+                Task::Key(key) => {
+                    bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(key.as_bytes());
                     continue;
                 }
                 Task::Value(value) => value,
@@ -291,6 +337,17 @@ impl GraphValue {
                     }
                     continue;
                 }
+                // Each key's bytes precede its value; values carry their own
+                // length prefix exactly as list children do.
+                Self::Map { keys, values } => {
+                    bytes.push(7);
+                    bytes.extend_from_slice(&(values.len() as u64).to_be_bytes());
+                    for (key, value) in keys.iter().zip(values.iter()).rev() {
+                        pending.push(Task::Value(value));
+                        pending.push(Task::Key(key));
+                    }
+                    continue;
+                }
             }
         }
         Ok(bytes)
@@ -311,7 +368,19 @@ impl GraphValue {
             match frame {
                 Frame::Root(value) => {
                     total = total.saturating_add(1);
-                    if let Self::List(values) = value {
+                    let children = match value {
+                        Self::List(values) => Some(values),
+                        Self::Map { keys, values } => {
+                            for key in keys.iter() {
+                                total = total.saturating_add(
+                                    key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                                );
+                            }
+                            Some(values)
+                        }
+                        _ => None,
+                    };
+                    if let Some(values) = children {
                         if let Some(first) = values.first() {
                             pending.push(Frame::Rest(values, 1));
                             pending.push(Frame::Root(first));
@@ -361,6 +430,7 @@ impl GraphValue {
         enum Task<'a> {
             Value(&'a GraphValue),
             Finish(usize),
+            FinishMap(usize, &'a [Box<str>]),
         }
         control(GlaExecutionEvent::ScratchEntry)?;
         let mut pending = vec![Task::Value(self)];
@@ -372,6 +442,27 @@ impl GraphValue {
                     control(GlaExecutionEvent::ScratchEntry)?;
                     let children = output.split_off(start).into_boxed_slice();
                     output.push(Self::List(children));
+                }
+                Task::FinishMap(start, keys) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    for key in keys {
+                        for _ in 0..=key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                        }
+                    }
+                    let values = output.split_off(start).into_boxed_slice();
+                    output.push(Self::Map {
+                        keys: keys.into(),
+                        values,
+                    });
+                }
+                Task::Value(Self::Map { keys, values }) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    pending.push(Task::FinishMap(output.len(), keys));
+                    for value in values.iter().rev() {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        pending.push(Task::Value(value));
+                    }
                 }
                 Task::Value(Self::List(values)) => {
                     control(GlaExecutionEvent::ScratchEntry)?;
@@ -438,6 +529,7 @@ impl core::fmt::Debug for GraphValue {
             Self::Edges(_) => "Edges",
             Self::Edge(_) => "Edge",
             Self::List(_) => "List",
+            Self::Map { .. } => "Map",
         };
         f.debug_tuple(kind).field(&"[REDACTED]").finish()
     }
@@ -552,6 +644,10 @@ pub(crate) enum ValueRef<'a> {
     Edges(&'a [EId]),
     Edge(EId),
     List(&'a [GraphValue]),
+    Map {
+        keys: &'a [Box<str>],
+        values: &'a [GraphValue],
+    },
 }
 
 impl ValueRef<'_> {
@@ -564,6 +660,14 @@ impl ValueRef<'_> {
                 return values
                     .iter()
                     .fold(0usize, |n, v| n.saturating_add(v.payload_units()));
+            }
+            Self::Map { keys, values } => {
+                let keys = keys.iter().fold(0usize, |n, key| {
+                    n.saturating_add(key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES))
+                });
+                return values
+                    .iter()
+                    .fold(keys, |n, v| n.saturating_add(v.payload_units()));
             }
             _ => {}
         }
@@ -591,6 +695,10 @@ impl ValueRef<'_> {
             Self::Edges(value) => GraphValue::Edges(value.into()),
             Self::Edge(value) => GraphValue::Edge(value),
             Self::List(values) => GraphValue::List(values.into()),
+            Self::Map { keys, values } => GraphValue::Map {
+                keys: keys.into(),
+                values: values.into(),
+            },
         }
     }
 }
@@ -625,6 +733,7 @@ impl RowKey for GraphValueRow {
             GraphValue::Edges(value) => ValueRef::Edges(value),
             GraphValue::Edge(value) => ValueRef::Edge(*value),
             GraphValue::List(value) => ValueRef::List(value),
+            GraphValue::Map { keys, values } => ValueRef::Map { keys, values },
         }
     }
 }

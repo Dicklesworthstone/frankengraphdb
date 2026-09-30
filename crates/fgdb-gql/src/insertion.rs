@@ -651,6 +651,9 @@ impl Properties {
                 | GraphSetValue::Slice { .. }
                 | GraphSetValue::Range { .. }
                 | GraphSetValue::Reduce { .. }
+                | GraphSetValue::MapLiteral { .. }
+                | GraphSetValue::MapGet { .. }
+                | GraphSetValue::Keys(_)
                 | GraphSetValue::Value(_) => {
                     bytes.push(3);
                     let mut encoded = Vec::new();

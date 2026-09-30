@@ -102,6 +102,7 @@ impl<'a> GroupCells<'a> for MaintainedGroup<'a> {
             GraphValue::Vertices(value) => Cell::Value(ValueRef::Vertices(value)),
             GraphValue::Edges(value) => Cell::Value(ValueRef::Edges(value)),
             GraphValue::List(value) => Cell::Value(ValueRef::List(value)),
+            GraphValue::Map { keys, values } => Cell::Value(ValueRef::Map { keys, values }),
         };
         match column {
             GraphAggregateColumn::GroupKey(at) => value(&self.0.keys[at]),

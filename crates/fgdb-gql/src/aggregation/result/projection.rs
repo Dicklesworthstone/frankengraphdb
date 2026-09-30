@@ -22,6 +22,7 @@ fn value_ref(value: &GraphValue) -> ValueRef<'_> {
         GraphValue::Vertices(value) => ValueRef::Vertices(value),
         GraphValue::Edges(value) => ValueRef::Edges(value),
         GraphValue::List(value) => ValueRef::List(value),
+        GraphValue::Map { keys, values } => ValueRef::Map { keys, values },
     }
 }
 
@@ -214,6 +215,60 @@ fn expression<'g, E, C>(
         | GraphSetValue::Quantifier { .. }
         | GraphSetValue::Reduce { .. } => {
             return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+        }
+        // Map values over aggregate cells (fgdb-2jw3z), with the row
+        // evaluator's laws: keys sorted at preparation, NULL for a NULL map or
+        // an absent key, and a typed error for a non-map.
+        GraphSetValue::MapLiteral { keys, values } => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let mut entries = Vec::new();
+            for value in values {
+                let value = expression(value, input, column, control)?.into_owned(control)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                entries.push(graph_value(value, column)?);
+            }
+            let value = GraphValue::Map {
+                keys: keys.clone(),
+                values: entries.into_boxed_slice(),
+            };
+            if !value.validate_bounds() {
+                return Err(failure(column, GraphIntegerErrorKind::Overflow));
+            }
+            OutputValue::Owned(GraphAggregateValue::Value(value))
+        }
+        GraphSetValue::MapGet { map, key } => {
+            let map = expression(map, input, column, control)?;
+            match map.cell() {
+                cell if cell.is_null() => {
+                    OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+                }
+                Cell::Value(ValueRef::Map { keys, values }) => {
+                    match keys.binary_search_by(|probe| probe.as_bytes().cmp(key.as_bytes())) {
+                        Ok(at) => OutputValue::Owned(GraphAggregateValue::Value(
+                            values[at].copy_with_control(control)?,
+                        )),
+                        Err(_) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
+                    }
+                }
+                _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
+            }
+        }
+        GraphSetValue::Keys(map) => {
+            let map = expression(map, input, column, control)?;
+            match map.cell() {
+                cell if cell.is_null() => {
+                    OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+                }
+                Cell::Value(ValueRef::Map { keys, .. }) => {
+                    let texts = crate::set_ops::map_keys(keys, control).map_err(|error| {
+                        error.unwrap_or_else(|| {
+                            failure(column, GraphIntegerErrorKind::TextConstruction)
+                        })
+                    })?;
+                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::List(texts)))
+                }
+                _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
+            }
         }
         // The row evaluator's slice and range laws (set_ops slice_bounds and
         // range_values), over the aggregate cells.

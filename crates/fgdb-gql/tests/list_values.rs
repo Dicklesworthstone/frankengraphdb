@@ -153,3 +153,49 @@ fn list_growth_and_unwind_fanout_cannot_hide_behind_limit_zero() {
         if error.dimension == GlaLimitDimension::ScratchEntries)
     );
 }
+
+/// fgdb-2jw3z: a map's identity is its canonical (sorted) entries. Maps
+/// never share an encoding with lists or with a map that splits or fuses
+/// keys differently, and malformed shapes are refused.
+#[test]
+fn map_encoding_is_canonical_and_never_collides() {
+    let map = |entries: Vec<(&str, GraphValue)>| {
+        GraphValue::map(entries.into_iter().map(|(k, v)| (k.into(), v)).collect()).unwrap()
+    };
+    let ab = map(vec![("a", int(1)), ("b", int(2))]);
+    let ba = map(vec![("b", int(2)), ("a", int(1))]);
+    assert_eq!(ab, ba);
+    assert_eq!(ab.canonical_bytes().unwrap(), ba.canonical_bytes().unwrap());
+    let listed = GraphValue::List(vec![int(1), int(2)].into_boxed_slice());
+    let values = [
+        ab.clone(),
+        map(vec![("ab", int(1))]),
+        map(vec![("a", int(12))]),
+        map(vec![("a", listed.clone())]),
+        listed,
+        map(vec![]),
+        GraphValue::List(Box::new([])),
+    ];
+    let encoded: Vec<_> = values
+        .iter()
+        .map(|v| v.canonical_bytes().unwrap())
+        .collect();
+    for i in 0..encoded.len() {
+        for j in i + 1..encoded.len() {
+            assert_ne!(encoded[i], encoded[j], "{i} vs {j}");
+        }
+    }
+    assert!(GraphValue::map(vec![("a".into(), int(1)), ("a".into(), int(2))]).is_none());
+    let unsorted = GraphValue::Map {
+        keys: vec!["b".into(), "a".into()].into_boxed_slice(),
+        values: vec![int(1), int(2)].into_boxed_slice(),
+    };
+    assert!(!unsorted.validate_bounds());
+    let nested = map(vec![("a", map(vec![("z", int(3))])), ("b", int(2))]);
+    let copied = nested.copy_with_control(&mut |_| Ok::<(), ()>(())).unwrap();
+    assert_eq!(copied, nested);
+    assert_eq!(
+        copied.canonical_bytes().unwrap(),
+        nested.canonical_bytes().unwrap()
+    );
+}

@@ -1017,6 +1017,10 @@ enum ValueRef<'a> {
     Edges(&'a [EId]),
     Edge(EId),
     List(&'a [GraphValue]),
+    Map {
+        keys: &'a [Box<str>],
+        values: &'a [GraphValue],
+    },
 }
 impl ValueRef<'_> {
     fn is_null(self) -> bool {
@@ -1025,6 +1029,14 @@ impl ValueRef<'_> {
     fn payload_units(self) -> usize {
         if let Self::List(values) = self {
             return values.iter().fold(values.len(), |units, value| {
+                units.saturating_add(value.payload_units())
+            });
+        }
+        if let Self::Map { keys, values } = self {
+            let keys = keys.iter().fold(values.len(), |units, key| {
+                units.saturating_add(key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES))
+            });
+            return values.iter().fold(keys, |units, value| {
                 units.saturating_add(value.payload_units())
             });
         }
@@ -1056,6 +1068,23 @@ impl ValueRef<'_> {
             }
             return Ok(GraphValue::List(owned.into_boxed_slice()));
         }
+        if let Self::Map { keys, values } = self {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for key in keys {
+                for _ in 0..=key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+            }
+            let mut owned = Vec::new();
+            for value in values {
+                owned.push(value.copy_with_control(control)?);
+            }
+            return Ok(GraphValue::Map {
+                keys: keys.into(),
+                values: owned.into_boxed_slice(),
+            });
+        }
         control(GlaExecutionEvent::ScratchEntry)?;
         for _ in 0..self.payload_units() {
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -1067,7 +1096,9 @@ impl ValueRef<'_> {
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
             Self::Edge(value) => GraphValue::Edge(value),
-            Self::List(_) => unreachable!("list copying is recursively governed above"),
+            Self::List(_) | Self::Map { .. } => {
+                unreachable!("list and map copying is recursively governed above")
+            }
         })
     }
 }

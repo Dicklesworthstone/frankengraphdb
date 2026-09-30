@@ -337,6 +337,13 @@ fn check_cell(cell: &Json, schema: &Json) {
                 check_cell(item, schema);
             }
         }
+        // A map's keys are its JSON member names, each value a cell.
+        "map" => {
+            for (key, item) in value.object() {
+                assert!(!key.is_empty());
+                check_cell(item, schema);
+            }
+        }
         "int" => assert_eq!(
             value.string().parse::<i64>().unwrap().to_string(),
             value.string()
@@ -1065,6 +1072,13 @@ fn merge_branches_and_typed_parameters_round_trip_without_interpolation() {
             r#"{"type":"list","value":[{"type":"bool","value":false},{"type":"null"},{"type":"list","value":[{"type":"int","value":"7"},{"type":"text","value":"nested"}]}]}"#
         )
     );
+    // A map cell (fgdb-2jw3z): keys are JSON member names in the value's
+    // canonical ascending order, whatever order the literal wrote them in.
+    let mapped = db.command("query", &["--param", &format!("name=text:{text}"), "MATCH (p:Person) WHERE p.name=$name RETURN {z: [1], born: p.born, a: {inner: true}} AS m"]);
+    mapped.success();
+    let map_cell = r#"{"type":"map","value":{"a":{"type":"map","value":{"inner":{"type":"bool","value":true}}},"born":{"type":"int","value":"1901"},"z":{"type":"list","value":[{"type":"int","value":"1"}]}}}"#;
+    assert_eq!(mapped.events[2].get("cells").array()[0], json(map_cell));
+    assert!(mapped.stdout.contains(map_cell), "{}", mapped.stdout);
 
     db.write(&["MATCH (p:Person) SET p.born=9223372036854775807"]);
     db.write(&["INSERT (p:Person {team:8,born:9223372036854775807})"]);

@@ -53,6 +53,27 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
     }
 }
 
+/// Whether a value can statically hold a map, so `.key` may read it
+/// (fgdb-2jw3z). A row column qualifies only when its type is dynamic
+/// (`schema` is the row scope; graph and resolved scopes pass None, and
+/// their columns are graph values or aggregates, never maps).
+fn map_capable(
+    value: &ReadValueTemplate,
+    schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
+) -> bool {
+    match value {
+        ReadValueTemplate::MapLiteral { .. }
+        | ReadValueTemplate::MapGet { .. }
+        | ReadValueTemplate::Local(_)
+        | ReadValueTemplate::Index { .. }
+        | ReadValueTemplate::Reduce { .. } => true,
+        ReadValueTemplate::Column(at) => schema
+            .and_then(|schema| schema.get(*at))
+            .is_some_and(|(_, kind)| *kind == GraphSetColumnType::Any),
+        _ => false,
+    }
+}
+
 /// The openCypher list functions parsed as values (fgdb-20foe).
 #[derive(Clone, Copy)]
 enum ListFunction {
@@ -739,6 +760,52 @@ impl<'a> Parser<'a> {
                 }
             }
             ReadValueTemplate::List(items)
+        } else if self.take(b'{')? {
+            // A map literal {k: e, ...} (fgdb-2jw3z), keys sorted and unique.
+            let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
+            if !self.take(b'}')? {
+                loop {
+                    self.capacity(
+                        entries.len(),
+                        crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    let key = self.name()?;
+                    self.punct(b':', ":")?;
+                    let value = self.read_recursive_value(
+                        inputs.as_deref_mut(),
+                        schema,
+                        resolve,
+                        depth + 1,
+                    )?;
+                    entries.push((key.text.into(), value));
+                    if self.take(b'}')? {
+                        break;
+                    }
+                    self.punct(b',', ", or }")?;
+                }
+            }
+            entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected("unique keys in a map literal"),
+                });
+            }
+            let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+            ReadValueTemplate::MapLiteral {
+                keys: keys.into_boxed_slice(),
+                values,
+            }
+        } else if self.is_word("KEYS")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let map =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::Keys(Box::new(map))
         } else if let Some(function) = self.list_function()? {
             // head/last/tail/range/reduce (fgdb-20foe).
             self.advance()?;
@@ -802,7 +869,30 @@ impl<'a> Parser<'a> {
         {
             value = ReadValueTemplate::Local(*offset);
         }
-        while self.take(b'[')? {
+        loop {
+            // `.key` reads a map entry (fgdb-2jw3z), only on a value that can
+            // statically be a map. A graph property read or a WITH-carried
+            // vertex's hidden read never reaches this postfix, and on any
+            // other value the `.` stays unconsumed, so a vertex column's `.p`
+            // past its readable scope still refuses at preparation.
+            if self.is_punct(b'.')
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Word(_))
+                && map_capable(
+                    &value,
+                    (inputs.is_none() && resolve.is_none()).then_some(schema),
+                )
+            {
+                self.advance()?;
+                let key = self.name()?;
+                value = ReadValueTemplate::MapGet {
+                    map: Box::new(value),
+                    key: key.text.into(),
+                };
+                continue;
+            }
+            if !self.take(b'[')? {
+                break;
+            }
             // `[i]` indexes; `[a..b]`, `[a..]` and `[..b]` slice (fgdb-20foe).
             let from = if self.starts_range_dots()? {
                 None
@@ -1303,6 +1393,23 @@ pub(in crate::graph_text) fn bind_read_value(
             list: Box::new(bind_read_value(list, values)?),
             expr: Box::new(bind_read_value(expr, values)?),
         },
+        ReadValueTemplate::MapLiteral {
+            keys,
+            values: entries,
+        } => GraphSetValue::MapLiteral {
+            keys: keys.clone(),
+            values: entries
+                .iter()
+                .map(|value| bind_read_value(value, values))
+                .collect::<Result<_, _>>()?,
+        },
+        ReadValueTemplate::MapGet { map, key } => GraphSetValue::MapGet {
+            map: Box::new(bind_read_value(map, values)?),
+            key: key.clone(),
+        },
+        ReadValueTemplate::Keys(map) => {
+            GraphSetValue::Keys(Box::new(bind_read_value(map, values)?))
+        }
     })
 }
 

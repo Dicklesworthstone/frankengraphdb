@@ -247,6 +247,23 @@ impl PreparedGraphAggregateText {
                 list: Box::new(Self::bind_input_value(list, values)?),
                 expr: Box::new(Self::bind_input_value(expr, values)?),
             }),
+            ReadValueTemplate::MapLiteral {
+                keys,
+                values: entries,
+            } => Ok(GraphSetValue::MapLiteral {
+                keys: keys.clone(),
+                values: entries
+                    .iter()
+                    .map(|value| Self::bind_input_value(value, values))
+                    .collect::<Result<_, _>>()?,
+            }),
+            ReadValueTemplate::MapGet { map, key } => Ok(GraphSetValue::MapGet {
+                map: Box::new(Self::bind_input_value(map, values)?),
+                key: key.clone(),
+            }),
+            ReadValueTemplate::Keys(map) => Ok(GraphSetValue::Keys(Box::new(
+                Self::bind_input_value(map, values)?,
+            ))),
         }
     }
 }

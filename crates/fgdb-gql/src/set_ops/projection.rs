@@ -81,6 +81,20 @@ pub enum GraphSetValue {
         list: Box<GraphSetValue>,
         expr: Box<GraphSetValue>,
     },
+    /// `{k: e, ...}` (fgdb-2jw3z): keys unique and ascending by UTF-8 bytes,
+    /// `values[i]` for `keys[i]`, so evaluation builds a canonical map.
+    MapLiteral {
+        keys: Box<[Box<str>]>,
+        values: Vec<GraphSetValue>,
+    },
+    /// `m.key`: NULL for a NULL map or an absent key; a non-map is a typed
+    /// error.
+    MapGet {
+        map: Box<GraphSetValue>,
+        key: Box<str>,
+    },
+    /// `keys(m)`: the map's keys as text, ascending; NULL for a NULL map.
+    Keys(Box<GraphSetValue>),
 }
 
 /// The openCypher list predicate functions.
@@ -366,6 +380,8 @@ fn admit(
                 GraphValue::Vertices(_) => GraphSetColumnType::Vertices,
                 GraphValue::Edges(_) => GraphSetColumnType::Edges,
                 GraphValue::List(_) => GraphSetColumnType::List,
+                // A map is read by key at run time (fgdb-2jw3z).
+                GraphValue::Map { .. } => GraphSetColumnType::Any,
             }
         }
         GraphSetValue::List(values) => {
@@ -470,6 +486,27 @@ fn admit(
             admit_list(list, types, column, depth + 1, nodes, locals)?;
             admit(expr, types, column, depth + 1, nodes, locals + 2)?;
             GraphSetColumnType::Any
+        }
+        GraphSetValue::MapLiteral { keys, values } => {
+            if keys.len() != values.len()
+                || keys
+                    .windows(2)
+                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+            {
+                return Err(Error::InvalidValue { column });
+            }
+            for value in values {
+                admit(value, types, column, depth + 1, nodes, locals)?;
+            }
+            GraphSetColumnType::Any
+        }
+        GraphSetValue::MapGet { map, .. } => {
+            admit(map, types, column, depth + 1, nodes, locals)?;
+            GraphSetColumnType::Any
+        }
+        GraphSetValue::Keys(map) => {
+            admit(map, types, column, depth + 1, nodes, locals)?;
+            GraphSetColumnType::List
         }
     })
 }
@@ -599,6 +636,25 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             append_value_transcript(init, bytes);
             append_value_transcript(list, bytes);
             append_value_transcript(expr, bytes);
+        }
+        GraphSetValue::MapLiteral { keys, values } => {
+            bytes.push(14);
+            bytes.extend_from_slice(&(keys.len() as u64).to_be_bytes());
+            for (key, value) in keys.iter().zip(values) {
+                bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+                append_value_transcript(value, bytes);
+            }
+        }
+        GraphSetValue::MapGet { map, key } => {
+            bytes.push(15);
+            append_value_transcript(map, bytes);
+            bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+        }
+        GraphSetValue::Keys(map) => {
+            bytes.push(16);
+            append_value_transcript(map, bytes);
         }
     }
 }
@@ -983,8 +1039,92 @@ fn evaluate_value_at<E>(
                 accumulator
             }
         }
+        GraphSetValue::MapLiteral { keys, values } => {
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            let mut entries = Vec::new();
+            for value in values {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                entries.push(evaluate_value_at(
+                    value,
+                    row,
+                    column,
+                    control,
+                    depth + 1,
+                    nodes,
+                )?);
+            }
+            for key in keys.iter() {
+                for _ in 0..key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                }
+            }
+            // Keys were sorted and deduplicated at preparation.
+            let value = GraphValue::Map {
+                keys: keys.clone(),
+                values: entries.into_boxed_slice(),
+            };
+            if !value.validate_bounds() {
+                return Err(failure(GraphIntegerErrorKind::Overflow));
+            }
+            value
+        }
+        GraphSetValue::MapGet { map, key } => {
+            let map = operand(map, row, column, control, depth + 1, nodes)?;
+            if map.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else {
+                let (keys, values) = map
+                    .as_map()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                match keys.binary_search_by(|probe| probe.as_bytes().cmp(key.as_bytes())) {
+                    Ok(at) => {
+                        copy_value(&values[at], control).map_err(ProjectionFailure::Control)?
+                    }
+                    Err(_) => {
+                        control(GlaExecutionEvent::ScratchEntry)
+                            .map_err(ProjectionFailure::Control)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                }
+            }
+        }
+        GraphSetValue::Keys(map) => {
+            let map = operand(map, row, column, control, depth + 1, nodes)?;
+            if map.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else {
+                let (keys, _) = map
+                    .as_map()
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                GraphValue::List(map_keys(keys, control).map_err(|error| match error {
+                    Some(error) => ProjectionFailure::Control(error),
+                    None => failure(GraphIntegerErrorKind::TextConstruction),
+                })?)
+            }
+        }
     };
     Ok(result)
+}
+
+/// A map's keys as UCS_BASIC text values, ascending, each reserved before it
+/// is built. Err(None) is a key that is not canonical text.
+pub(crate) fn map_keys<E>(
+    keys: &[Box<str>],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Box<[GraphValue]>, Option<E>> {
+    let mut texts = Vec::new();
+    for key in keys {
+        control(GlaExecutionEvent::ScratchEntry).map_err(Some)?;
+        for _ in 0..key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry).map_err(Some)?;
+        }
+        texts.push(GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text(key).map_err(|_| None)?,
+        ));
+    }
+    Ok(texts.into_boxed_slice())
 }
 
 /// An integer bound, step or range endpoint: Some(value), None for NULL, and

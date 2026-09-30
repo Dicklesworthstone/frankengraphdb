@@ -119,6 +119,16 @@ pub(crate) enum ReadValueTemplate {
         list: Box<ReadValueTemplate>,
         expr: Box<ReadValueTemplate>,
     },
+    /// `{k: e, ...}`, keys sorted and unique (fgdb-2jw3z).
+    MapLiteral {
+        keys: Box<[Box<str>]>,
+        values: Vec<ReadValueTemplate>,
+    },
+    MapGet {
+        map: Box<ReadValueTemplate>,
+        key: Box<str>,
+    },
+    Keys(Box<ReadValueTemplate>),
 }
 impl ReadValueTemplate {
     /// Whether this value binds a list-comprehension element anywhere.
@@ -140,6 +150,8 @@ impl ReadValueTemplate {
                     || end.binds_elements()
                     || step.as_deref().is_some_and(Self::binds_elements)
             }
+            Self::MapLiteral { values, .. } => values.iter().any(Self::binds_elements),
+            Self::MapGet { map, .. } | Self::Keys(map) => map.binds_elements(),
             Self::List(items) => items.iter().any(Self::binds_elements),
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
             Self::Size(inner) => inner.binds_elements(),
@@ -161,7 +173,10 @@ impl ReadValueTemplate {
             | Self::Comprehension { .. }
             | Self::Slice { .. }
             | Self::Range { .. } => GraphSetColumnType::List,
-            Self::Reduce { .. } => GraphSetColumnType::Any,
+            Self::Reduce { .. } | Self::MapLiteral { .. } | Self::MapGet { .. } => {
+                GraphSetColumnType::Any
+            }
+            Self::Keys(_) => GraphSetColumnType::List,
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. }
@@ -287,6 +302,25 @@ impl ReadValueTemplate {
                 init.append_template_transcript(bytes);
                 list.append_template_transcript(bytes);
                 expr.append_template_transcript(bytes);
+            }
+            Self::MapLiteral { keys, values } => {
+                bytes.push(14);
+                ordinal(bytes, keys.len());
+                for (key, value) in keys.iter().zip(values) {
+                    ordinal(bytes, key.len());
+                    bytes.extend_from_slice(key.as_bytes());
+                    value.append_template_transcript(bytes);
+                }
+            }
+            Self::MapGet { map, key } => {
+                bytes.push(15);
+                map.append_template_transcript(bytes);
+                ordinal(bytes, key.len());
+                bytes.extend_from_slice(key.as_bytes());
+            }
+            Self::Keys(map) => {
+                bytes.push(16);
+                map.append_template_transcript(bytes);
             }
         }
     }

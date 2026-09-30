@@ -164,7 +164,10 @@ fn fields<E, A, C>(
             | GraphSetValue::Quantifier { .. }
             | GraphSetValue::Slice { .. }
             | GraphSetValue::Range { .. }
-            | GraphSetValue::Reduce { .. } => {
+            | GraphSetValue::Reduce { .. }
+            | GraphSetValue::MapLiteral { .. }
+            | GraphSetValue::MapGet { .. }
+            | GraphSetValue::Keys(_) => {
                 return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
                     row: row_at,
                     column: property,

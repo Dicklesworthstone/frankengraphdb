@@ -987,6 +987,14 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
                 remap_output_columns(part, columns);
             }
         }
+        ReadValueTemplate::MapLiteral { values, .. } => {
+            for value in values {
+                remap_output_columns(value, columns);
+            }
+        }
+        ReadValueTemplate::MapGet { map, .. } | ReadValueTemplate::Keys(map) => {
+            remap_output_columns(map, columns);
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
         | ReadValueTemplate::Local(_) => {}

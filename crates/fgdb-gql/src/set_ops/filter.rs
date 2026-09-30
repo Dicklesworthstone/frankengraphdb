@@ -360,7 +360,8 @@ fn resolve<'a, E>(
                 | GraphValue::Vertices(_)
                 | GraphValue::Edges(_)
                 | GraphValue::Edge(_)
-                | GraphValue::List(_) => Cell::Incompatible,
+                | GraphValue::List(_)
+                | GraphValue::Map { .. } => Cell::Incompatible,
             }
         }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),

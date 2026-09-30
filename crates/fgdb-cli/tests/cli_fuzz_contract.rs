@@ -411,6 +411,13 @@ fn check_cell(cell: &Json, schema: &Json) {
                 check_cell(item, schema);
             }
         }
+        // A map's keys are its JSON member names, each value a cell.
+        "map" => {
+            for (key, item) in value.object() {
+                assert!(!key.is_empty());
+                check_cell(item, schema);
+            }
+        }
         "int" => assert_eq!(
             value.string().parse::<i64>().unwrap().to_string(),
             value.string()

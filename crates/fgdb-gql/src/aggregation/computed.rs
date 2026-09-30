@@ -353,6 +353,7 @@ impl PreparedGraphAggregate {
                     GraphValue::Edges(edges) => ValueRef::Edges(edges),
                     GraphValue::Edge(edge) => ValueRef::Edge(*edge),
                     GraphValue::List(values) => ValueRef::List(values),
+                    GraphValue::Map { keys, values } => ValueRef::Map { keys, values },
                 };
                 for _ in 0..values[at].payload_units() {
                     control(GlaExecutionEvent::Work)?;
