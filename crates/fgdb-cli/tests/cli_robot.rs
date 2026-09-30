@@ -2959,3 +2959,81 @@ fn json_list_parameters_drive_unwind_creation_and_keep_every_value_type() {
             .failure(2, "usage");
     }
 }
+
+/// `write --rows json:[{...},...]` binds the statement's parameters once per
+/// object and commits every row as ONE atomic program: a later row's MERGE
+/// sees an earlier row's node, a sparse integer key binds NULL, a failing
+/// row commits nothing, and malformed batches are usage errors that never
+/// open the database.
+#[test]
+fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
+    let db = TestDb::new("json-rows");
+    db.create();
+    let upsert =
+        "MERGE (p:Person {team: $team}) ON CREATE SET p.name = $name ON MATCH SET p.name = $name";
+    let written = db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"team":1,"name":"a"},{"team":2,"name":"b"},{"team":1,"name":"a2"}]"#,
+            upsert,
+        ],
+    );
+    written.success();
+    // One statement instance per row.
+    assert_eq!(written.terminal().get("statements").unsigned(), 3);
+    let people =
+        "MATCH (p:Person) RETURN p.team AS team, p.name AS name, p.born AS born ORDER BY team";
+    assert_rows(
+        &db.command("query", &[people]),
+        r#"[[{"type":"int","value":"1"},{"type":"text","value":"a2"},{"type":"null"}],
+            [{"type":"int","value":"2"},{"type":"text","value":"b"},{"type":"null"}]]"#,
+    );
+    // An integer key absent from some row binds NULL there.
+    db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"team":1,"born":1901},{"team":3}]"#,
+            "MERGE (p:Person {team: $team}) ON CREATE SET p.born = $born ON MATCH SET p.born = $born",
+        ],
+    )
+    .success();
+    // Row 2 divides by zero, so row 1's team 5 is not committed either.
+    db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"team":5,"d":1},{"team":6,"d":0}]"#,
+            "MERGE (p:Person {team: $team}) ON CREATE SET p.born = 10 / $d",
+        ],
+    )
+    .failure(3, "query");
+    assert_rows(
+        &db.command("query", &[people]),
+        r#"[[{"type":"int","value":"1"},{"type":"text","value":"a2"},{"type":"int","value":"1901"}],
+            [{"type":"int","value":"2"},{"type":"text","value":"b"},{"type":"null"}],
+            [{"type":"int","value":"3"},{"type":"null"},{"type":"null"}]]"#,
+    );
+    for rows in [
+        "json:[]",
+        "json:[1]",
+        r#"json:{"team":1}"#,
+        r#"json:[{"team":1,"extra":2}]"#,
+        r#"json:[{"team":1},{"team":"x"}]"#,
+        r#"json:[{"team":{"a":1}}]"#,
+        r#"[{"team":1}]"#,
+    ] {
+        db.command("write", &["--rows", rows, "MERGE (p:Person {team: $team})"])
+            .failure(2, "usage");
+    }
+    db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"team":9}]"#,
+            "CREATE (p:Person {team: $team}) RETURN p.team AS team",
+        ],
+    )
+    .failure(3, "query");
+}

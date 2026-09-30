@@ -58,6 +58,15 @@ text, integers int, other numbers float, so
 `UNWIND $rows AS row CREATE (:Person {name: row.name})`. A parameter is a
 value. It is never spliced into GQL text.
 
+`write --rows 'json:[{"id":1,"name":"Ada"},...]' 'MERGE (p:Person {id: $id})
+ON CREATE SET p.name = $name ON MATCH SET p.name = $name'` binds the
+statement's parameters once per object and commits every row as ONE atomic
+program, as `import-csv` does for CSV records. A later row's `MERGE` sees an
+earlier row's node, so a repeated key upserts instead of duplicating. A
+failing row commits nothing. Integers bind like `int:` (nullable when a row
+omits them), and other scalars and arrays as in `json:`. A key that is not a
+parameter of the statement is a usage error, never silently ignored.
+
 ## `import-csv`
 
 The CSV header names the statement's parameters, and each record binds the

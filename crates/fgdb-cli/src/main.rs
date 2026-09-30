@@ -40,7 +40,7 @@ Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
   compact --db <dir> --key-file <file>
   scrub --db <dir> --key-file <file>
-  write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
+  write --db <dir> --key-file <file> [bindings] [--param name=value]... [--rows json:<objects>] <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... [--stream] <gql>
   query --db <dir> --key-file <file> [bindings] [projection] [--param name=value]...
         'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...'
@@ -57,6 +57,8 @@ Usage: fgdb [--robot] <command>
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array> (a list: objects are maps, integers int, other numbers float).
+write --rows json:[{...},...] binds the statement's parameters once per object
+and commits every row as ONE atomic program (MERGE sees earlier rows).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
@@ -223,6 +225,8 @@ struct Options {
     text: String,
     params: GqlParameters,
     raw_params: Vec<(String, String)>,
+    /// `write --rows json:[...]`: one parameter set per object.
+    rows: Option<String>,
     tzdb_file: Option<PathBuf>,
     labels: BTreeMap<String, u32>,
     relations: BTreeMap<String, u32>,
@@ -316,6 +320,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut text = None;
     let params = GqlParameters::new();
     let mut raw_params = Vec::new();
+    let mut rows = None;
     let mut tzdb_file = None;
     let mut labels = BTreeMap::new();
     let mut relations = BTreeMap::new();
@@ -384,6 +389,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                         return Err(Failure::usage("rows-per-chunk must be positive"));
                     }
                     rows_per_chunk = Some(rows);
+                }
+                "--rows" if command == "write" && rows.is_none() => {
+                    rows = Some(value.clone());
                 }
                 "--certify-to" if command == "query" && certify_to.is_none() => {
                     certify_to = Some(PathBuf::from(value));
@@ -519,6 +527,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         },
         params,
         raw_params,
+        rows,
         tzdb_file,
         labels,
         relations,
@@ -662,6 +671,169 @@ fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
         )
         .ok_or_else(|| bad("duplicate key"))?,
     })
+}
+
+/// `write --rows json:[{...}, ...]` binds the statement's parameters once per
+/// object and runs every row in ONE atomic program: the same record-major
+/// batch import-csv builds, so a later row's MERGE sees an earlier row's
+/// effects and a refused row commits nothing. A JSON integer binds like
+/// `int:`, unless the key is null or absent in some row: then it binds as a
+/// nullable integer scalar. A float, string or boolean binds as that scalar
+/// kind, and an array as a `json:` list. A key's kind is its first non-null
+/// value's, and every row must agree. A null or absent scalar key is NULL; a
+/// list key cannot be NULL. A key that is not a parameter of the statement,
+/// or that repeats a --param, is a usage error, and so is an empty batch.
+fn prepare_rows(
+    options: &Options,
+) -> Result<(fgdb_gql::PreparedGraphWriteProgram, usize), Failure> {
+    let bad = |detail: String| Failure::usage(format!("invalid --rows: {detail}"));
+    let text = options.rows.as_deref().unwrap_or_default();
+    let text = text
+        .strip_prefix("json:")
+        .ok_or_else(|| bad("expected json:<array of objects>".into()))?;
+    let json = load::parse_json(
+        text,
+        MAX_JSON_PARAMETER_VALUES,
+        MAX_JSON_PARAMETER_TOKEN_BYTES,
+    )
+    .map_err(bad)?;
+    let load::Json::Array(items) = json else {
+        return Err(bad("expected a JSON array of objects".into()));
+    };
+    if items.is_empty() {
+        return Err(bad("expected at least one row".into()));
+    }
+    let mut rows = Vec::new();
+    let mut kinds: BTreeMap<String, Option<GqlParameterType>> = BTreeMap::new();
+    for (at, item) in items.iter().enumerate() {
+        let load::Json::Object(fields) = item else {
+            return Err(bad(format!("row {at} is not an object")));
+        };
+        let mut row = BTreeMap::new();
+        for (key, value) in fields {
+            if options.params.get(key).is_some() {
+                return Err(bad(format!("key {key} repeats a --param")));
+            }
+            let value = match value {
+                load::Json::Null => None,
+                load::Json::Object(_) => {
+                    return Err(bad(format!("row {at} key {key}: a map is not a parameter")));
+                }
+                load::Json::Number(text)
+                    if !text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) =>
+                {
+                    Some(GqlParameterValue::Int64(text.parse().map_err(|_| {
+                        bad(format!("row {at} key {key}: integer out of range"))
+                    })?))
+                }
+                other => Some(match json_value(other)? {
+                    GraphValue::List(values) => GqlParameterValue::List(
+                        fgdb_gql::GqlListParameter::new(values.into_vec())
+                            .map_err(Failure::usage)?,
+                    ),
+                    GraphValue::Scalar(scalar) => GqlParameterValue::Scalar(
+                        GqlScalarParameter::new(scalar).map_err(Failure::usage)?,
+                    ),
+                    _ => return Err(bad(format!("row {at} key {key}: unsupported value"))),
+                }),
+            };
+            let kind = kinds.entry(key.clone()).or_insert(None);
+            if let Some(value) = &value {
+                match kind {
+                    Some(existing) if *existing != value.parameter_type() => {
+                        return Err(bad(format!("key {key} mixes kinds across rows")));
+                    }
+                    _ => *kind = Some(value.parameter_type()),
+                }
+            }
+            row.insert(key.clone(), value);
+        }
+        rows.push(row);
+    }
+    // A key that is NULL in every row has no kind to learn: bind it as NULL.
+    // An integer key that is NULL or absent in some row binds as a nullable
+    // integer scalar in every row, since an int: parameter cannot be NULL.
+    let null_kind = GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Null);
+    let int_kind = GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Int);
+    let kinds: BTreeMap<String, GqlParameterType> = kinds
+        .into_iter()
+        .map(|(key, kind)| {
+            let sparse = rows
+                .iter()
+                .any(|row| !matches!(row.get(&key), Some(Some(_))));
+            let kind = match kind {
+                Some(GqlParameterType::Int64) if sparse => int_kind,
+                Some(kind) => kind,
+                None => null_kind,
+            };
+            (key, kind)
+        })
+        .collect();
+    for row in &mut rows {
+        for (key, value) in row.iter_mut() {
+            if kinds.get(key) == Some(&int_kind)
+                && let Some(GqlParameterValue::Int64(int)) = value
+            {
+                *value = Some(GqlParameterValue::Scalar(
+                    GqlScalarParameter::new(CanonicalScalar::Int(*int)).map_err(Failure::usage)?,
+                ));
+            }
+        }
+    }
+    // The write path's convention: scalar kinds are declared; integers and
+    // lists keep the statement's own parameter types.
+    let mut declarations: Vec<(&str, GqlParameterType)> = options
+        .params
+        .parameter_types()
+        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+        .collect();
+    declarations.extend(
+        kinds
+            .iter()
+            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+            .map(|(key, kind)| (key.as_str(), *kind)),
+    );
+    let script = PreparedGraphWriteScript::prepare_with_parameter_types(
+        &options.text,
+        options.coordinate,
+        &declarations,
+        |kind, name| options.resolve(kind, name),
+    )
+    .map_err(Failure::query)?;
+    if let Some(key) = kinds.keys().find(|key| {
+        !script
+            .parameter_schema()
+            .iter()
+            .any(|spec| spec.name == **key)
+    }) {
+        return Err(bad(format!(
+            "key {key} is not a parameter of the statement"
+        )));
+    }
+    let null = GqlParameterValue::Scalar(
+        GqlScalarParameter::new(CanonicalScalar::Null).map_err(Failure::query)?,
+    );
+    let mut sets = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        let mut set = options.params.clone();
+        for (key, kind) in &kinds {
+            let value = match (row.get(key), kind) {
+                (Some(Some(value)), _) => value.clone(),
+                (_, GqlParameterType::Scalar(_)) => null.clone(),
+                _ => {
+                    return Err(bad(format!(
+                        "row {at} key {key} is null or absent; a list parameter cannot be NULL"
+                    )));
+                }
+            };
+            set.insert(key, value).map_err(Failure::query)?;
+        }
+        sets.push(set);
+    }
+    let batch = script
+        .bind_parameter_sets_with_limit(&sets, PreparedGraphWriteScript::MAX_BATCH_STATEMENTS)
+        .map_err(Failure::query)?;
+    Ok((batch.into_program(), rows.len()))
 }
 
 /// Three 64-hex lines plus comments; anything larger is not a key file.
@@ -832,7 +1004,14 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
                 // And a search's lanes, symbols and corpus.
                 let retrieval = if command == "search" { Some(search::prepare(&options)?) } else { None };
-                let returning = if command == "write" { write_returning::prepare(&options)? } else { None };
+                // A --rows batch is parsed, typed and bound before storage opens,
+                // like CSV, so a refused row leaves no trace in the database.
+                let batch = if command == "write" && options.rows.is_some() {
+                    Some(prepare_rows(&options)?)
+                } else {
+                    None
+                };
+                let returning = if command == "write" && batch.is_none() { write_returning::prepare(&options)? } else { None };
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
@@ -862,12 +1041,24 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     if let Some(prepared) = returning {
                         return write_returning::run(&mut db, &contexts, prepared, robot, out).await;
                     }
-                    let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
-                    let script = PreparedGraphWriteScript::prepare_with_parameter_types(&options.text, options.coordinate, &declarations, |kind, name| options.resolve(kind, name)).map_err(Failure::query)?;
-                    let program = script.bind_parameters(&options.params).map_err(Failure::query)?;
+                    let (program, records) = match batch {
+                        Some((program, records)) => (program, Some(records)),
+                        None => {
+                            let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
+                            let script = PreparedGraphWriteScript::prepare_with_parameter_types(&options.text, options.coordinate, &declarations, |kind, name| options.resolve(kind, name)).map_err(Failure::query)?;
+                            (script.bind_parameters(&options.params).map_err(Failure::query)?, None)
+                        }
+                    };
                     let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), &program, GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.map_err(execution_failure)?;
                     let seq = match completion { EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq.0, EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq.0 };
-                    return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{}}}"#, receipt.stats().completed_statements)) } else { writeln!(out, "completed at seq {seq}").map_err(Failure::io) };
+                    let statements = receipt.stats().completed_statements;
+                    // The robot record is the plain write's (the caller sent the
+                    // rows); only the human line counts them.
+                    return match (robot, records) {
+                        (true, _) => emit(out, &format!(r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{statements}}}"#)),
+                        (false, Some(records)) => writeln!(out, "wrote {records} row(s) at seq {seq}").map_err(Failure::io),
+                        (false, None) => writeln!(out, "completed at seq {seq}").map_err(Failure::io),
+                    };
                 }
                 if let Some(prepared) = analytics {
                     return fnx::run(&db, &contexts.query(), &options.text, prepared, robot, out);
