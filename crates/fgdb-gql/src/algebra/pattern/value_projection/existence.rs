@@ -38,10 +38,12 @@ impl GraphPatternBuilder {
     /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
     /// Later positive patterns cannot rebind a null. Explicit outer_vertex
     /// operands instead capture the original nullable value for predicates.
-    /// EXISTS may bind fixed relationship identities for local edge-property
-    /// predicates. Such identities are neither exported nor correlated with
-    /// an outer relationship alias. Full scoped path values remain unsupported.
-    /// EXISTS locals stay private. A complete optional witness remains a witness
+    /// Every clause may bind fixed relationship identities. Required and
+    /// OPTIONAL clauses export them as projection captures; an OPTIONAL clause
+    /// without a witness leaves its captures null, like its vertices. EXISTS
+    /// identities serve local edge-property predicates only. No clause
+    /// correlates with an outer relationship alias. Full scoped path values
+    /// remain unsupported. EXISTS locals stay private. A complete optional witness remains a witness
     /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
@@ -73,18 +75,14 @@ impl GraphPatternBuilder {
         let mut identities = self.identities.len();
         let mut path_captures = self.path_captures.len();
         for clause in clauses {
-            // Existential relationship bindings are private predicate operands,
-            // not exported path values. Required/optional captures and full
-            // path predicates still need their own scoped output contract.
-            let existential = matches!(
-                clause.kind,
-                GraphMatchKind::Exists | GraphMatchKind::NotExists
-            );
+            // A scoped clause may bind single relationships (exported by
+            // required/optional clauses, private to probes). Full path values
+            // and path predicates still need their own scoped output contract.
             if clause
                 .pattern
                 .path_captures
                 .iter()
-                .any(|capture| !existential || !capture.edge_identity)
+                .any(|capture| !capture.edge_identity)
                 || !clause.pattern.path_predicates.is_empty()
             {
                 return Err(PatternBuildError::InvalidPathCapture);
@@ -140,6 +138,11 @@ impl GraphPatternBuilder {
                         .path_captures
                         .iter()
                         .any(|outer| outer.name == capture.name)
+            }) || inner.variables.iter().any(|variable| {
+                scope
+                    .path_captures
+                    .iter()
+                    .any(|capture| capture.name == variable.name)
             }) {
                 return Err(PatternBuildError::DuplicateVariable);
             }
@@ -237,10 +240,13 @@ impl GraphPatternBuilder {
             // a preceding OPTIONAL would change which rows are null-extended.
             let base = width;
             let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
-            // A probe's captures cannot replace a visible outer relationship.
-            // Sequential probes reuse these private slots: the native capture
-            // continuation restores them on success, absence and refusal.
-            let capture_base = self.path_captures.len() as u32;
+            // A clause's captures follow every capture exported so far, so a
+            // probe cannot replace a visible relationship. Sequential probes
+            // reuse their private slots: the native capture continuation
+            // restores them on success, absence and refusal. An OPTIONAL
+            // clause's slots are written only inside its scope, so absence
+            // leaves them null.
+            let capture_base = scope.path_captures.len() as u32;
             let map_capture = |capture| capture_base + capture;
             let mut available = 0_u32;
             if let Some(outer_at) = outer_at {
@@ -409,6 +415,11 @@ impl GraphPatternBuilder {
                         scope_slots.push(map(inner_slots[at]));
                     }
                 }
+                // Exported in declaration order at capture_base + i, the
+                // numbering map_capture gave this clause's CapturePath.
+                scope
+                    .path_captures
+                    .extend(inner.path_captures.iter().cloned());
                 // Count actual producers, including independent scan roots and
                 // copied correlations. The definition-wide cap bounds all such
                 // frames, including transient probes, before execution begins.

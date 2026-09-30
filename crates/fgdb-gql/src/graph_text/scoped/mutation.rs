@@ -91,12 +91,7 @@ impl<'a> Parser<'a> {
             .is_some_and(|path| path.text == variable.text)
         {
             Some(GraphPathFunction::Value)
-        } else if self
-            .syntax
-            .edges
-            .iter()
-            .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
-        {
+        } else if self.syntax.visible_edge(variable.text).is_some() {
             Some(GraphPathFunction::Edge)
         } else {
             None

@@ -89,6 +89,20 @@ impl BoundScope {
 }
 
 impl<'a> ScopeSyntax<'a> {
+    /// Relationship patterns visible after this clause closes, each with
+    /// whether it can be NULL. A required clause exports its edges; an
+    /// OPTIONAL clause's edges read NULL where it has no witness. Existential
+    /// locals stay private.
+    pub(super) fn exported_edges(&self) -> impl Iterator<Item = (&Edge<'a>, bool)> {
+        let exported = if self.kind.exports_bindings() {
+            &self.body.edges[..]
+        } else {
+            &[]
+        };
+        let nullable = matches!(self.kind, ScopeKind::Optional);
+        exported.iter().map(move |edge| (edge, nullable))
+    }
+
     pub(super) fn resolve(
         self,
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,

@@ -31,11 +31,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             let variable = self.name()?;
-            let edge = self
-                .syntax
-                .edges
-                .iter()
-                .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text));
+            let edge = self.syntax.visible_edge(variable.text).is_some();
             if !edge
                 && !self
                     .syntax

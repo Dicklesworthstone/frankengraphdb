@@ -245,6 +245,64 @@ fn optional_and_negative_existence_observe_the_visible_graph() {
             ),
             vec![row(vec![vertex(1), null()]), row(vec![vertex(3), null()])]
         );
+        // A named OPTIONAL relationship (fgdb-o4uen) is masked before
+        // matching: edge 10 ends at hidden vertex 2, the ungranted property
+        // reads NULL, and with no relation granted every row is NULL-extended.
+        let named = "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) RETURN a, r, r.p AS p, r.hidden AS h";
+        let mut visible = read(&db, &cx, &issuer, &token, named);
+        visible.sort_by(|left, right| left.values().cmp(right.values()));
+        assert_eq!(
+            visible,
+            [(1, 12), (1, 13), (3, 14)]
+                .into_iter()
+                .map(|(a, r)| row(vec![vertex(a), GraphValue::Edge(EId(r)), scalar(5), null()]))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read(&db, &cx, &issuer, &none, named),
+            vec![
+                row(vec![vertex(1), null(), null(), null()]),
+                row(vec![vertex(3), null(), null(), null()])
+            ]
+        );
+        // The text surface agrees with the prepared pattern.
+        let text = db.query_authorized(
+            &cx,
+            &issuer,
+            &token,
+            BRANCH,
+            named,
+            &GqlParameters::new(),
+            symbols,
+            policy(),
+            || 100,
+        );
+        assert!(
+            matches!(text, Ok(fgdb::QueryResult::Rows { .. })),
+            "{text:?}"
+        );
+        let Ok(fgdb::QueryResult::Rows { rows, .. }) = text else {
+            return;
+        };
+        let mut text_rows: Vec<Vec<GraphValue>> = rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| match cell {
+                        GraphAggregateValue::Value(value) => value,
+                        _ => null(),
+                    })
+                    .collect()
+            })
+            .collect();
+        text_rows.sort();
+        assert_eq!(
+            text_rows,
+            visible
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             read(
                 &db,

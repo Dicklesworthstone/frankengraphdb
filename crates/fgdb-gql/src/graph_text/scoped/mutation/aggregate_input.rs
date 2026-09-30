@@ -70,12 +70,7 @@ impl<'a> Parser<'a> {
                     .is_some_and(|path| path.text == variable.text)
                 {
                     Some(GraphPathFunction::Value)
-                } else if self
-                    .syntax
-                    .edges
-                    .iter()
-                    .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
-                {
+                } else if self.syntax.visible_edge(variable.text).is_some() {
                     Some(GraphPathFunction::Edge)
                 } else {
                     None
@@ -91,11 +86,7 @@ impl<'a> Parser<'a> {
             !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
                     || self.syntax.path.is_some_and(|path| path.text == word)
-                    || self
-                        .syntax
-                        .edges
-                        .iter()
-                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))
+                    || self.syntax.visible_edge(word).is_some()
                     || !(word.eq_ignore_ascii_case("TRUE")
                         || word.eq_ignore_ascii_case("FALSE")
                         || word.eq_ignore_ascii_case("NULL")))

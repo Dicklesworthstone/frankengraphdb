@@ -383,11 +383,7 @@ impl<'a> Parser<'a> {
                 keys.push((left, right));
             }
             if self.syntax.path.is_some_and(|path| path.text == name.text)
-                || self
-                    .syntax
-                    .edges
-                    .iter()
-                    .any(|edge| edge.variable.is_some_and(|edge| edge.text == name.text))
+                || self.syntax.visible_edge(name.text).is_some()
             {
                 return Err(expected(
                     name.at,

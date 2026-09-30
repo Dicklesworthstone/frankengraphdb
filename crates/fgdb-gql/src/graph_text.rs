@@ -436,6 +436,22 @@ struct Syntax<'a> {
     return_at: usize,
 }
 
+impl<'a> Syntax<'a> {
+    /// The root's relationship patterns, then those exported by each required
+    /// or OPTIONAL clause, each with whether it can be NULL (OPTIONAL).
+    fn visible_edges(&self) -> impl Iterator<Item = (&Edge<'a>, bool)> {
+        self.edges
+            .iter()
+            .map(|edge| (edge, false))
+            .chain(self.scopes.iter().flat_map(ScopeSyntax::exported_edges))
+    }
+
+    fn visible_edge(&self, name: &str) -> Option<(&Edge<'a>, bool)> {
+        self.visible_edges()
+            .find(|(edge, _)| edge.variable.is_some_and(|variable| variable.text == name))
+    }
+}
+
 struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token<'a>,
@@ -636,20 +652,15 @@ impl<'a> Parser<'a> {
             .variables
             .iter()
             .any(|variable| variable.text == name.text)
-            || self.syntax.edges.iter().any(|edge| {
-                edge.walk.is_none()
-                    && edge
-                        .variable
-                        .is_some_and(|variable| variable.text == name.text)
-            })
+            || self
+                .syntax
+                .visible_edge(name.text)
+                .is_some_and(|(edge, _)| edge.walk.is_none())
         {
             return Ok(());
         }
         if self.syntax.path.is_some_and(|path| path.text == name.text)
-            || self.syntax.edges.iter().any(|edge| {
-                edge.variable
-                    .is_some_and(|variable| variable.text == name.text)
-            })
+            || self.syntax.visible_edge(name.text).is_some()
         {
             return Err(error(
                 name.at,
@@ -1027,20 +1038,23 @@ impl<'a> Parser<'a> {
                     alias: name,
                 });
             }
-            for edge in &self.syntax.edges {
-                if let Some(name) = edge.variable {
-                    self.capacity(
-                        self.syntax.columns.len(),
-                        MAX_PATTERN_VERTICES,
-                        PatternLimitDimension::Columns,
-                    )?;
-                    self.syntax.columns.push(Column {
-                        variable: name,
-                        property: None,
-                        path: Some(GraphPathFunction::Edge),
-                        alias: name,
-                    });
-                }
+            let edges: Vec<_> = self
+                .syntax
+                .visible_edges()
+                .filter_map(|(edge, _)| edge.variable)
+                .collect();
+            for name in edges {
+                self.capacity(
+                    self.syntax.columns.len(),
+                    MAX_PATTERN_VERTICES,
+                    PatternLimitDimension::Columns,
+                )?;
+                self.syntax.columns.push(Column {
+                    variable: name,
+                    property: None,
+                    path: Some(GraphPathFunction::Edge),
+                    alias: name,
+                });
             }
         } else {
             loop {
@@ -1075,10 +1089,7 @@ impl<'a> Parser<'a> {
                     .is_some_and(|path| path.text == expression.text)
                 {
                     (expression, None, Some(GraphPathFunction::Value))
-                } else if self.syntax.edges.iter().any(|edge| {
-                    edge.variable
-                        .is_some_and(|name| name.text == expression.text)
-                }) {
+                } else if self.syntax.visible_edge(expression.text).is_some() {
                     let property = if self.take(b'.')? {
                         self.require_property_variable(expression)?;
                         Some(self.name()?)
@@ -1169,12 +1180,7 @@ impl<'a> Parser<'a> {
 
     fn edge_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
-        if !self
-            .syntax
-            .edges
-            .iter()
-            .any(|e| e.variable.is_some_and(|v| v.text == name.text))
-        {
+        if self.syntax.visible_edge(name.text).is_none() {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
         Ok(name)
@@ -1182,18 +1188,26 @@ impl<'a> Parser<'a> {
 
     /// The vertex a directed single-hop pattern edge starts (`start`) or ends
     /// at. `(a)-[r]->(b)` starts at `a`; `(a)<-[r]-(b)` starts at `b`. An
-    /// undirected or quantified edge has no statically known endpoint.
+    /// undirected or quantified edge has no statically known endpoint. Nor
+    /// does an OPTIONAL edge: where it is NULL its endpoint vertex may still
+    /// be bound, and startNode(NULL) is NULL.
     fn edge_endpoint(
         &self,
         edge: Name<'a>,
         start: bool,
     ) -> Result<Name<'a>, GraphPatternTextError> {
-        let found = self
+        let (found, nullable) = self
             .syntax
-            .edges
-            .iter()
-            .find(|e| e.variable.is_some_and(|v| v.text == edge.text))
+            .visible_edge(edge.text)
             .ok_or_else(|| error(edge.at, GraphPatternTextErrorKind::UnknownVariable))?;
+        if nullable {
+            return Err(error(
+                edge.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a relationship outside OPTIONAL MATCH for startNode/endNode",
+                ),
+            ));
+        }
         match (found.direction, found.walk) {
             (GlaDirection::Forward, None) => Ok(if start {
                 found.source
@@ -1228,11 +1242,7 @@ impl<'a> Parser<'a> {
         let name = self.name()?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text)
             && !self.syntax.path.is_some_and(|path| path.text == name.text)
-            && !self
-                .syntax
-                .edges
-                .iter()
-                .any(|e| e.variable.is_some_and(|v| v.text == name.text))
+            && self.syntax.visible_edge(name.text).is_none()
         {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1420,6 +1430,10 @@ impl PreparedGraphText {
             cache.insert(key, value);
             Ok(value)
         };
+        let edge_variables: Vec<&str> = syntax
+            .visible_edges()
+            .filter_map(|(edge, _)| edge.variable.map(|name| name.text))
+            .collect();
         let (builder, filters) = scoped::resolve_pattern(
             &syntax.variables[..syntax.root_variables],
             &syntax.labels,
@@ -1460,11 +1474,7 @@ impl PreparedGraphText {
                 },
                 variable: column.variable.text.to_owned(),
                 key,
-                path: if key.is_some()
-                    && syntax.edges.iter().any(|edge| {
-                        edge.variable
-                            .is_some_and(|name| name.text == column.variable.text)
-                    }) {
+                path: if key.is_some() && edge_variables.contains(&column.variable.text) {
                     Some(GraphPathFunction::Edge)
                 } else {
                     column.path

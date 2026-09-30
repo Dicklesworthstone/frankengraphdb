@@ -54,12 +54,7 @@ impl<'a> Parser<'a> {
     fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
         if self.syntax.path.is_some_and(|path| path.text == name) {
             Some(GraphSetColumnType::Path)
-        } else if self
-            .syntax
-            .edges
-            .iter()
-            .any(|edge| edge.variable.is_some_and(|variable| variable.text == name))
-        {
+        } else if self.syntax.visible_edge(name).is_some() {
             Some(GraphSetColumnType::Edge)
         } else if self
             .syntax

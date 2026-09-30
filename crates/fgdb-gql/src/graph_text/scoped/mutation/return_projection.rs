@@ -193,7 +193,11 @@ impl<'a> Parser<'a> {
                 .syntax
                 .path
                 .into_iter()
-                .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+                .chain(
+                    self.syntax
+                        .visible_edges()
+                        .filter_map(|(edge, _)| edge.variable),
+                )
                 .find(|name| {
                     self.read_row_bindings
                         .iter()
@@ -374,7 +378,11 @@ impl<'a> Parser<'a> {
             .copied()
             .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
             .chain(self.syntax.path)
-            .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+            .chain(
+                self.syntax
+                    .visible_edges()
+                    .filter_map(|(edge, _)| edge.variable),
+            )
     }
 
     /// The first WITH after `UNWIND ... MATCH`: each item may read a leading
@@ -439,11 +447,7 @@ impl<'a> Parser<'a> {
                     }
                     let graph = parser.syntax.variables.iter().any(|v| v.text == word)
                         || parser.syntax.path.is_some_and(|path| path.text == word)
-                        || parser
-                            .syntax
-                            .edges
-                            .iter()
-                            .any(|edge| edge.variable.is_some_and(|v| v.text == word));
+                        || parser.syntax.visible_edge(word).is_some();
                     if graph {
                         let variable = parser.any_variable()?;
                         let property = if parser.take(b'.')? {
@@ -839,11 +843,7 @@ impl<'a> Parser<'a> {
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
                     || self.syntax.path.is_some_and(|path| path.text == word)
-                    || self
-                        .syntax
-                        .edges
-                        .iter()
-                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))))
+                    || self.syntax.visible_edge(word).is_some()))
                 && !matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'.' | b'(')

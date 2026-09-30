@@ -25,11 +25,7 @@ pub enum GraphAggregateTextSlot {
 fn column_path(syntax: &Syntax<'_>, variable: Name<'_>) -> Option<GraphPathFunction> {
     if syntax.path.is_some_and(|path| path.text == variable.text) {
         Some(GraphPathFunction::Value)
-    } else if syntax
-        .edges
-        .iter()
-        .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
-    {
+    } else if syntax.visible_edge(variable.text).is_some() {
         Some(GraphPathFunction::Edge)
     } else {
         None

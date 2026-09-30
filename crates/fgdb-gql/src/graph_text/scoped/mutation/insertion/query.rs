@@ -325,7 +325,11 @@ impl<'a> Parser<'a> {
                 .variables
                 .iter()
                 .copied()
-                .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+                .chain(
+                    self.syntax
+                        .visible_edges()
+                        .filter_map(|(edge, _)| edge.variable),
+                )
                 .chain(self.syntax.path)
                 .collect();
             for name in matched {

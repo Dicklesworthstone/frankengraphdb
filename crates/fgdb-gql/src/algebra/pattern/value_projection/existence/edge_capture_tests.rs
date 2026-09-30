@@ -207,19 +207,101 @@ fn local_edges_do_not_silently_rebind_outer_names_or_export_from_probes() {
         } else {
             assert!(matches!(result, Err(PatternBuildError::DuplicateVariable)));
         }
+        // Required and OPTIONAL clauses export their relationships (fgdb-o4uen),
+        // so a fresh name projects while a visible name still refuses.
         for clause in [
             GraphMatchClause::optional(&inner),
             GraphMatchClause::required(&inner),
         ] {
-            assert!(matches!(
-                outer.prepare_values_with_clauses(
-                    &[clause],
-                    &[GraphColumn::vertex("a", "a")],
-                    0,
-                    Some(0)
-                ),
-                Err(PatternBuildError::InvalidPathCapture)
-            ));
+            let result = outer.prepare_values_with_clauses(
+                &[clause],
+                &[GraphColumn::vertex("a", "a")],
+                0,
+                Some(0),
+            );
+            if name == "private_edge" {
+                assert!(result.is_ok());
+                assert!(
+                    outer
+                        .prepare_values_with_clauses(
+                            &[clause],
+                            &[GraphColumn::edge_property("p", name, P)],
+                            0,
+                            None
+                        )
+                        .is_ok()
+                );
+            } else {
+                assert!(matches!(result, Err(PatternBuildError::DuplicateVariable)));
+            }
         }
     }
+}
+
+/// Every expected row below is enumerated by hand from `edges()`: parallel
+/// 11/12 from 1 to 2, a self-loop at 4 with the largest identity, and vertex
+/// 5 with no R edge. An OPTIONAL clause without a witness leaves its
+/// relationship NULL, and two exported clauses never share a capture slot.
+#[test]
+fn optional_and_required_clauses_export_relationships_with_null_absence() {
+    let edge = |id| GraphValue::Edge(EId(id));
+    let vertex = |id| GraphValue::Vertex(VId(id));
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let sorted = |mut rows: Vec<Vec<GraphValue>>| {
+        rows.sort();
+        rows
+    };
+    assert_eq!(
+        sorted(run(
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[s:R]->(c) RETURN a, r, s, r.p"
+        )),
+        sorted(vec![
+            vec![vertex(1), edge(11), edge(13), int(0)],
+            vec![vertex(1), edge(12), edge(13), int(10)],
+            vec![vertex(2), edge(13), edge(14), null.clone()],
+            vec![vertex(3), edge(14), edge(u128::MAX), null.clone()],
+            vec![vertex(4), edge(u128::MAX), edge(u128::MAX), int(9)],
+            vec![vertex(5), null.clone(), null.clone(), null.clone()],
+        ])
+    );
+    // The clause's own predicate selects its witness; absence is per row.
+    assert_eq!(
+        sorted(run(
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) WHERE r.p > 5 RETURN a, r"
+        )),
+        sorted(vec![
+            vec![vertex(1), edge(12)],
+            vec![vertex(2), null.clone()],
+            vec![vertex(3), null.clone()],
+            vec![vertex(4), edge(u128::MAX)],
+            vec![vertex(5), null.clone()],
+        ])
+    );
+    // A required clause exports its relationship and never null-extends.
+    assert_eq!(
+        sorted(run(
+            "MATCH (a) MATCH (a)-[r:R]->(b) WHERE a <> b RETURN a, r"
+        )),
+        sorted(vec![
+            vec![vertex(1), edge(11)],
+            vec![vertex(1), edge(12)],
+            vec![vertex(2), edge(13)],
+            vec![vertex(3), edge(14)],
+        ])
+    );
+    // Exported captures take distinct slots after the root's.
+    let prepared = prepare(
+        "MATCH (a)-[q:S]->(d) OPTIONAL MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[s:R]->(c) RETURN q, r, s",
+    );
+    let captures = prepared
+        .plan()
+        .operators()
+        .iter()
+        .filter_map(|op| match op {
+            GlaOperator::CapturePath { capture, .. } => Some(*capture),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(captures, vec![0, 1, 2]);
 }
