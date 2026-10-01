@@ -16,7 +16,8 @@ use fgdb_types::{CommitSeq, QueryCx, StorageReadCx};
 /// allocator-byte quota or an external-memory implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootReadLimits {
-    /// Encoded root bytes. Enforced by the bounded file reader before decode.
+    /// Encoded root bytes, including every segment a V4 root names. Enforced
+    /// by the bounded file reader before each decode.
     pub max_root_bytes: usize,
     /// Sum of encoded block, hosted-property and vertex-patch bytes, excluding
     /// the separately bounded root. A single format-bounded object is in hand
@@ -33,7 +34,7 @@ pub struct RootReadLimits {
 impl Default for RootReadLimits {
     fn default() -> Self {
         Self {
-            max_root_bytes: crate::root::MAX_ENCODED_ROOT_BYTES,
+            max_root_bytes: crate::root::MAX_ROOT_READ_BYTES,
             max_source_bytes: 256 * 1024 * 1024,
             max_blocks: 1_000_000,
             max_vertex_patches: 1_000_000,
@@ -213,10 +214,70 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::PartitionRootVersion,
         maximum: usize,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
-        let maximum = maximum.min(crate::root::MAX_ENCODED_ROOT_BYTES) as u64;
-        let bytes = self.read_object_bytes(cx, id.0, maximum).await?;
-        crate::root::read_root(self.k_oid.expose(), self.namespace, &bytes, id.0)
-            .map_err(StoreError::MalformedRoot)
+        let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
+        let bytes = self
+            .read_object_bytes(
+                cx,
+                id.0,
+                maximum.min(crate::root::MAX_ENCODED_ROOT_BYTES as u64),
+            )
+            .await?;
+        let actual = crate::root::root_id(self.k_oid.expose(), self.namespace, &bytes);
+        if actual != id.0 {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::IdentityMismatch {
+                    expected: id.0,
+                    actual,
+                },
+            ));
+        }
+        let frame =
+            match crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)? {
+                crate::root::RootFrame::V3(root) => return Ok(root),
+                crate::root::RootFrame::V4(frame) => frame,
+            };
+        // A V4 root's segments share the caller's byte ceiling with the root
+        // itself, so a two-level root reads no more than a flat one could.
+        let mut remaining = maximum.saturating_sub(bytes.len() as u64);
+        let coordinate = frame.coordinate();
+        let mut lists = [Vec::new(), Vec::new()];
+        for ((class, named), list) in [
+            (
+                crate::root_segment::SegmentClass::Blocks,
+                &frame.block_segments,
+            ),
+            (
+                crate::root_segment::SegmentClass::VertexPatches,
+                &frame.patch_segments,
+            ),
+        ]
+        .into_iter()
+        .zip(&mut lists)
+        {
+            for (at, reference) in named.iter().enumerate() {
+                let limit = remaining.min(crate::root_segment::SEGMENT_BYTES as u64);
+                let segment = self
+                    .read_object_bytes(cx, reference.segment_id, limit)
+                    .await?;
+                remaining = remaining.saturating_sub(segment.len() as u64);
+                list.push(
+                    crate::root_segment::read_segment(
+                        self.k_oid.expose(),
+                        self.namespace,
+                        &segment,
+                        reference,
+                        at,
+                        coordinate,
+                        class,
+                    )
+                    .map_err(|error| {
+                        StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                    })?,
+                );
+            }
+        }
+        let [blocks, patches] = lists;
+        crate::root::assemble_root(frame, blocks, patches).map_err(StoreError::MalformedRoot)
     }
 
     /// Authenticate a whole root under explicit source ceilings, retaining only

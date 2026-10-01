@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 73
+registry_epoch = 74
 
 [[kind]]
 object_kind = 0x0001
@@ -5470,3 +5470,12 @@ construction_order = 60
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_key_physical_destruction_completion_spec/"
+
+[[kind]]
+object_kind = 0x058b
+name = "DeltaRootSegment"
+status = "active"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/delta_root_segment/"

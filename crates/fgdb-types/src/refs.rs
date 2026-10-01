@@ -162,6 +162,7 @@ active_logical_object_kinds! {
     EdgePropertyPatch = 0x0580 => "EdgePropertyPatch",
     PartitionManifest = 0x0581 => "PartitionManifest",
     DecisionPolicyEpoch = 0x0582 => "DecisionPolicyEpoch",
+    DeltaRootSegment = 0x058b => "DeltaRootSegment",
 }
 
 /// Implemented by every durable logical object type that references can

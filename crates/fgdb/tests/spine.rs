@@ -2376,6 +2376,104 @@ fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
     });
 }
 
+/// **A TWO-LEVEL ROOT SURVIVES EVERY FAULT AROUND ITS PUBLICATION
+/// (fgdb-d5vo4).** Each commit adds 300 single-edge source families, so the
+/// faulted commit's root seals a NEW full segment. A fault before the root is
+/// verified, before its segment + root + manifest batch, after that batch but
+/// before the slot, and after the slot all fence the handle. Authoritative
+/// recovery rebuilds from the stream with a cold segment cache, re-emitting
+/// segments that may already be durable, and the next commit seals another.
+/// A reopen then serves every edge, and the store resolves the root through
+/// its segments.
+#[test]
+fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
+    const FAMILIES: u128 = 300;
+    fn families(commit: u128) -> WriteBatch {
+        let mut batch = WriteBatch::new(KNOWS);
+        if commit == 0 {
+            batch.create_vertex(VId(1), vec![], vec![]);
+        }
+        for k in 0..FAMILIES {
+            let src = 1_000 * (commit + 1) + k;
+            batch.create_vertex(VId(src), vec![], vec![]);
+            batch.add_edge(EId(src), VId(src), VId(1), vec![]);
+        }
+        batch
+    }
+    for (ordinal, stage) in [
+        fgdb::DerivedPublicationStage::PublishPartitionRoot,
+        fgdb::DerivedPublicationStage::PublishManifest,
+        fgdb::DerivedPublicationStage::PublishRootSlot,
+        fgdb::DerivedPublicationStage::RefreshEdgeSnapshot,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        under_lab(0xd500 + ordinal as u64, move |cx| async move {
+            let cx = &cx;
+            let vfs = fgdb::MemVfs::new().expect("memory vfs");
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(cx, vfs.clone(), &path, keys())
+                .await
+                .expect("creates");
+            db.write(cx, families(0))
+                .await
+                .expect("first commit publishes");
+            let error = db
+                .write_with_publication_failure(cx, families(1), stage)
+                .await
+                .expect_err("the named stage fails after D2");
+            assert!(
+                matches!(&error, WriteError::CommittedNeedsRecovery { recovery, .. }
+                    if recovery.failed_stage == stage),
+                "{stage:?}: {error:?}"
+            );
+            let mut db = db
+                .recover_authoritatively(cx)
+                .await
+                .expect("recovery rebuilds the durable commit");
+            db.write(cx, families(2))
+                .await
+                .expect("the next commit seals another segment");
+            let root_id = db.partition_root().expect("healthy root");
+            drop(db);
+
+            let db = Database::open_with_vfs(cx, vfs.clone(), &path, keys())
+                .await
+                .expect("reopens");
+            assert_eq!(
+                db.partition_root().expect("healthy root"),
+                root_id,
+                "{stage:?}"
+            );
+            for commit in 0..3 {
+                for k in 0..FAMILIES {
+                    let src = VId(1_000 * (commit + 1) + k);
+                    assert_eq!(
+                        db.neighbours(src, KNOWS).expect("reads"),
+                        vec![VId(1)],
+                        "{stage:?}: {src:?}"
+                    );
+                }
+            }
+            drop(db);
+            let store =
+                fgdb_strata::store::BlockStore::open_with_vfs(cx, vfs, &path, K_OID, NAMESPACE)
+                    .await
+                    .expect("store opens");
+            let root = store
+                .get_root(cx, root_id)
+                .await
+                .expect("the root resolves through its segments");
+            assert!(
+                root.blocks.len() >= 3 * FAMILIES as usize,
+                "{stage:?}: {} blocks is fewer than the fixture's families",
+                root.blocks.len()
+            );
+        });
+    }
+}
+
 /// Once Chronicle has started appending the marker, an I/O error cannot say
 /// whether the commit is absent or durable. The coordinator already poisons
 /// itself at that instant; the integrated handle must propagate that fence to
@@ -2800,7 +2898,16 @@ fn every_publish_leaves_a_resolvable_manifest() {
             .await
             .expect("the manifest resolves");
         assert_eq!(resolved.len(), 1, "one partition in the spine");
-        let root_bytes = fgdb_strata::root::encode_root(&resolved[0].1).expect("re-encodes");
+        // Roots publish as format V4 (fgdb-d5vo4); a cold re-encode derives
+        // the same identity the warm, segment-cached writer published.
+        let root_bytes = fgdb_strata::root::encode_root_v4(
+            &resolved[0].1,
+            &K_OID,
+            NAMESPACE,
+            &mut fgdb_strata::root::SegmentCache::default(),
+        )
+        .expect("re-encodes")
+        .bytes;
         assert_eq!(
             fgdb_strata::root::root_id(&K_OID, NAMESPACE, &root_bytes),
             root_after_writes.0,

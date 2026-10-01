@@ -23,6 +23,10 @@
 //! bound, not an ownership claim over an exclusive slice of the commit stream.
 
 use crate::BlockError;
+use crate::root_segment::{
+    SEGMENT_BYTES, SEGMENT_REFS, SegmentClass, SegmentEntry, SegmentError, SegmentRef,
+    encode_segment, segment_id, segment_span,
+};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalarResolver, CommitSeq, EId, GraphId, VId};
 
@@ -341,6 +345,9 @@ pub enum RootError {
         declared: Option<ObjectId>,
         expected: Option<ObjectId>,
     },
+    /// A V4 root's segment could not be encoded, decoded or bound to the root
+    /// that names it (fgdb-d5vo4).
+    Segment(SegmentError),
 }
 
 impl core::fmt::Display for RootError {
@@ -502,6 +509,7 @@ impl core::fmt::Display for RootError {
                 "block {at} links predecessor {declared:?}, but its family's chain \
                  expects {expected:?}"
             ),
+            Self::Segment(error) => write!(f, "root segment: {error}"),
         }
     }
 }
@@ -734,6 +742,437 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
             recomputed,
         });
     }
+    Ok(root)
+}
+
+/// Format V4 (fgdb-d5vo4): two-level. The header is V3's, with the TOTAL
+/// block and patch counts. After it come, per list, the full
+/// [`SEGMENT_REFS`]-reference segments named by [`SegmentRef`], then that
+/// list's remaining tail inline. A commit therefore writes and hashes the root
+/// (N / 256 segment references plus a tail under 256) and only the segment it
+/// fills, not every reference ever published. Additive over V3 (§16.6
+/// additive-minor): V3 roots still decode, and writers emit V4.
+pub const ROOT_FORMAT_V4: u16 = 4;
+/// Domain separator for the V4 logical digest, which binds each full
+/// segment through that segment's own logical digest.
+pub const ROOT_LOGICAL_DIGEST_DOMAIN_V4: &[u8] = b"fgdb.strata.root-logical-digest.v4";
+/// segment_id(32) + segment logical digest(32) + first_seq(8) + last_seq(8).
+const SEGMENT_REF_LEN: usize = 32 + 32 + 8 + 8;
+/// The largest canonical V4 root: every full segment of both lists at their
+/// ceilings, plus two tails just short of a segment.
+pub const MAX_ENCODED_ROOT_V4_BYTES: usize = HEADER_LEN
+    + (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
+        * SEGMENT_REF_LEN
+    + 2 * (SEGMENT_REFS - 1) * REF_LEN;
+
+/// The most bytes one whole root read may consume: a V4 root together with
+/// every segment it names, or a flat V3 root, whichever ceiling is larger.
+///
+/// Each full segment costs its own header and the root's reference to it on
+/// top of the flat references it carries, so a V4 root at its count ceilings
+/// reads about 1.3% more bytes than [`MAX_ENCODED_ROOT_BYTES`]. A read budget
+/// clamped to the flat ceiling would refuse a lawful root.
+pub const MAX_ROOT_READ_BYTES: usize = {
+    let segmented = MAX_ENCODED_ROOT_V4_BYTES
+        + (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
+            * SEGMENT_BYTES;
+    if segmented > MAX_ENCODED_ROOT_BYTES {
+        segmented
+    } else {
+        MAX_ENCODED_ROOT_BYTES
+    }
+};
+
+/// The full segments sealed so far for each of one root's lists, in list
+/// order: `blocks[i]` chunks references `256 * i .. 256 * (i + 1)`.
+///
+/// The CALLER owns validity: every cached segment must chunk the prefix of
+/// the list being encoded, under the same identity keys. The store keeps the
+/// cache inside its root memo and discards both whenever a new root does not
+/// extend the verified prefix, as a compaction's does not. An empty cache
+/// encodes from scratch.
+///
+/// The cache owns the rest: every segment binds its root's graph, branch and
+/// partition, so a root at any other coordinate re-seals from scratch rather
+/// than naming segments its reader must refuse.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SegmentCache {
+    coordinate: Option<(GraphId, BranchId, u64)>,
+    blocks: Vec<SegmentRef>,
+    patches: Vec<SegmentRef>,
+}
+
+/// A V4 root's own content, before its segments are read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootFrameV4 {
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub block_segments: Vec<SegmentRef>,
+    pub tail_blocks: Vec<BlockRef>,
+    pub patch_segments: Vec<SegmentRef>,
+    pub tail_patches: Vec<PatchRef>,
+}
+
+impl RootFrameV4 {
+    /// The coordinate every named segment must carry.
+    pub fn coordinate(&self) -> (GraphId, BranchId, u64) {
+        (self.graph, self.branch, self.partition)
+    }
+}
+
+/// A decoded root frame: a V3 root is complete in itself, and a V4 root still
+/// needs its segments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootFrame {
+    V3(PartitionRoot),
+    V4(RootFrameV4),
+}
+
+/// An encoded V4 root and the segments it names that the cache did not
+/// already hold. Those must be published, before the root, in the same batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedRoot {
+    pub bytes: Vec<u8>,
+    pub new_segments: Vec<(ObjectId, Vec<u8>)>,
+}
+
+/// One list of a V4 root as its logical digest sees it: the total count, the
+/// full segments, and the inline tail.
+struct ListDigest<'a> {
+    count: usize,
+    segments: &'a [SegmentRef],
+    tail: &'a [SegmentEntry],
+}
+
+/// The V4 logical digest: UNKEYED, domain-separated, over the coordinate,
+/// publication, and per list its total count, each full segment's logical
+/// digest and span, and the tail references. Each segment digest binds that
+/// segment's entries, so this binds the root's complete logical content.
+fn root_logical_digest_v4(
+    coordinate: (GraphId, BranchId, u64),
+    published_at: CommitSeq,
+    lists: [ListDigest<'_>; 2],
+) -> [u8; 32] {
+    let (graph, branch, partition) = coordinate;
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(ROOT_LOGICAL_DIGEST_DOMAIN_V4);
+    hasher.update(&graph.0.to_be_bytes());
+    hasher.update(&branch.0.to_be_bytes());
+    hasher.update(&partition.to_be_bytes());
+    hasher.update(&published_at.0.to_be_bytes());
+    for list in lists {
+        hasher.update(&(list.count as u32).to_be_bytes());
+        for segment in list.segments {
+            hasher.update(&segment.digest);
+            hasher.update(&segment.first_seq.0.to_be_bytes());
+            hasher.update(&segment.last_seq.0.to_be_bytes());
+        }
+        for entry in list.tail {
+            hasher.update(&entry.id.0);
+            hasher.update(&entry.first_seq.0.to_be_bytes());
+            hasher.update(&entry.last_seq.0.to_be_bytes());
+        }
+    }
+    hasher.finalize().0
+}
+
+/// Seal every full segment of `refs` the cache does not hold yet.
+fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
+    refs: &[R],
+    cache: &mut Vec<SegmentRef>,
+    coordinate: (GraphId, BranchId, u64),
+    class: SegmentClass,
+    identity: (&[u8; 32], DatabaseSecurityNamespaceId),
+    new_segments: &mut Vec<(ObjectId, Vec<u8>)>,
+) -> Result<(), RootError> {
+    let full = refs.len() / SEGMENT_REFS;
+    if cache.len() > full {
+        // The list shrank, so it was rewritten: nothing cached still chunks it.
+        cache.clear();
+    }
+    for index in cache.len()..full {
+        let entries: Vec<SegmentEntry> = refs[index * SEGMENT_REFS..(index + 1) * SEGMENT_REFS]
+            .iter()
+            .map(|reference| (*reference).into())
+            .collect();
+        let (graph, branch, partition) = coordinate;
+        let (bytes, digest) = encode_segment(graph, branch, partition, class, &entries)
+            .map_err(RootError::Segment)?;
+        let segment_id = segment_id(identity.0, identity.1, &bytes);
+        let (first_seq, last_seq) = segment_span(&entries);
+        cache.push(SegmentRef {
+            segment_id,
+            digest,
+            first_seq,
+            last_seq,
+        });
+        new_segments.push((segment_id, bytes));
+    }
+    Ok(())
+}
+
+/// Encode a root in format V4, sealing only the full segments `cache` does
+/// not already hold. See [`SegmentCache`] for the caller's validity duty.
+pub fn encode_root_v4(
+    root: &PartitionRoot,
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    cache: &mut SegmentCache,
+) -> Result<EncodedRoot, RootError> {
+    validate_root(root)?;
+    let coordinate = (root.graph, root.branch, root.partition);
+    if cache.coordinate != Some(coordinate) {
+        *cache = SegmentCache {
+            coordinate: Some(coordinate),
+            ..SegmentCache::default()
+        };
+    }
+    let mut new_segments = Vec::new();
+    seal_full_segments(
+        &root.blocks,
+        &mut cache.blocks,
+        coordinate,
+        SegmentClass::Blocks,
+        (k_oid, namespace),
+        &mut new_segments,
+    )?;
+    seal_full_segments(
+        &root.vertex_patches,
+        &mut cache.patches,
+        coordinate,
+        SegmentClass::VertexPatches,
+        (k_oid, namespace),
+        &mut new_segments,
+    )?;
+    let tails = [
+        root.blocks[cache.blocks.len() * SEGMENT_REFS..]
+            .iter()
+            .map(|block| SegmentEntry::from(*block))
+            .collect::<Vec<_>>(),
+        root.vertex_patches[cache.patches.len() * SEGMENT_REFS..]
+            .iter()
+            .map(|patch| SegmentEntry::from(*patch))
+            .collect::<Vec<_>>(),
+    ];
+    let digest = root_logical_digest_v4(
+        coordinate,
+        root.published_at,
+        [
+            ListDigest {
+                count: root.blocks.len(),
+                segments: &cache.blocks,
+                tail: &tails[0],
+            },
+            ListDigest {
+                count: root.vertex_patches.len(),
+                segments: &cache.patches,
+                tail: &tails[1],
+            },
+        ],
+    );
+    let mut out = Vec::with_capacity(
+        HEADER_LEN
+            + (cache.blocks.len() + cache.patches.len()) * SEGMENT_REF_LEN
+            + (tails[0].len() + tails[1].len()) * REF_LEN,
+    );
+    out.extend_from_slice(&ROOT_MAGIC);
+    out.extend_from_slice(&ROOT_FORMAT_V4.to_be_bytes());
+    out.extend_from_slice(&root.graph.0.to_be_bytes());
+    out.extend_from_slice(&root.branch.0.to_be_bytes());
+    out.extend_from_slice(&root.partition.to_be_bytes());
+    out.extend_from_slice(&root.published_at.0.to_be_bytes());
+    out.extend_from_slice(&(root.blocks.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(root.vertex_patches.len() as u32).to_be_bytes());
+    out.extend_from_slice(&digest);
+    for (segments, tail) in [&cache.blocks, &cache.patches].into_iter().zip(&tails) {
+        for segment in segments {
+            out.extend_from_slice(&segment.segment_id.0);
+            out.extend_from_slice(&segment.digest);
+            out.extend_from_slice(&segment.first_seq.0.to_be_bytes());
+            out.extend_from_slice(&segment.last_seq.0.to_be_bytes());
+        }
+        for entry in tail {
+            out.extend_from_slice(&entry.id.0);
+            out.extend_from_slice(&entry.first_seq.0.to_be_bytes());
+            out.extend_from_slice(&entry.last_seq.0.to_be_bytes());
+        }
+    }
+    Ok(EncodedRoot {
+        bytes: out,
+        new_segments,
+    })
+}
+
+/// Decode a root frame of either live format. A V3 root is fully decoded; a
+/// V4 frame is checked against its own digest, and its segments are the
+/// caller's to read and [`assemble_root`].
+pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
+    if bytes.len() < HEADER_LEN || bytes[..4] != ROOT_MAGIC {
+        return Err(RootError::NotARoot);
+    }
+    let format = u16::from_be_bytes([bytes[4], bytes[5]]);
+    if format == ROOT_FORMAT_V3 {
+        return decode_root(bytes).map(RootFrame::V3);
+    }
+    if format != ROOT_FORMAT_V4 {
+        return Err(RootError::UnsupportedFormat { format });
+    }
+    let u128_at = |at: usize| -> u128 {
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&bytes[at..at + 16]);
+        u128::from_be_bytes(buf)
+    };
+    let u64_at = |at: usize| -> u64 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_be_bytes(buf)
+    };
+    let u32_at = |at: usize| -> u32 {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    let bytes32_at = |at: usize| -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&bytes[at..at + 32]);
+        buf
+    };
+    let count = u32_at(OFF_BLOCK_COUNT);
+    if count > MAX_ROOT_BLOCKS {
+        return Err(RootError::ImplausibleBlockCount { declared: count });
+    }
+    let patch_count = u32_at(OFF_PATCH_COUNT);
+    if patch_count > MAX_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount {
+            declared: patch_count,
+        });
+    }
+    let (count, patch_count) = (count as usize, patch_count as usize);
+    let lists = [
+        (count / SEGMENT_REFS, count % SEGMENT_REFS),
+        (patch_count / SEGMENT_REFS, patch_count % SEGMENT_REFS),
+    ];
+    let expected = HEADER_LEN
+        + lists
+            .iter()
+            .map(|(segments, tail)| segments * SEGMENT_REF_LEN + tail * REF_LEN)
+            .sum::<usize>();
+    if bytes.len() < expected {
+        return Err(RootError::Truncated {
+            expected,
+            found: bytes.len(),
+        });
+    }
+    if bytes.len() > expected {
+        return Err(RootError::TrailingBytes {
+            extra: bytes.len() - expected,
+        });
+    }
+    // Each list is its full segments' references, then its inline tail.
+    let list_at = |at: usize, (segments, tail): (usize, usize)| {
+        let named: Vec<SegmentRef> = (0..segments)
+            .map(|index| {
+                let at = at + index * SEGMENT_REF_LEN;
+                SegmentRef {
+                    segment_id: ObjectId(bytes32_at(at)),
+                    digest: bytes32_at(at + 32),
+                    first_seq: CommitSeq(u64_at(at + 64)),
+                    last_seq: CommitSeq(u64_at(at + 72)),
+                }
+            })
+            .collect();
+        let tail_base = at + segments * SEGMENT_REF_LEN;
+        let inline: Vec<SegmentEntry> = (0..tail)
+            .map(|index| {
+                let at = tail_base + index * REF_LEN;
+                SegmentEntry {
+                    id: ObjectId(bytes32_at(at)),
+                    first_seq: CommitSeq(u64_at(at + 32)),
+                    last_seq: CommitSeq(u64_at(at + 40)),
+                }
+            })
+            .collect();
+        (named, inline)
+    };
+    let [blocks_shape, patches_shape] = lists;
+    let (block_segments, tail_blocks) = list_at(HEADER_LEN, blocks_shape);
+    let (patch_segments, tail_patches) = list_at(
+        HEADER_LEN + blocks_shape.0 * SEGMENT_REF_LEN + blocks_shape.1 * REF_LEN,
+        patches_shape,
+    );
+    let coordinate = (
+        GraphId(u128_at(OFF_GRAPH)),
+        BranchId(u128_at(OFF_BRANCH)),
+        u64_at(OFF_PARTITION),
+    );
+    let published_at = CommitSeq(u64_at(OFF_PUBLISHED));
+    // The digest binds counts, segment digests and spans, and the tails: a
+    // frame whose segments later resolve still cannot have been edited.
+    let declared = bytes32_at(OFF_DIGEST);
+    let recomputed = root_logical_digest_v4(
+        coordinate,
+        published_at,
+        [
+            ListDigest {
+                count,
+                segments: &block_segments,
+                tail: &tail_blocks,
+            },
+            ListDigest {
+                count: patch_count,
+                segments: &patch_segments,
+                tail: &tail_patches,
+            },
+        ],
+    );
+    if declared != recomputed {
+        return Err(RootError::DigestMismatch {
+            declared,
+            recomputed,
+        });
+    }
+    let (graph, branch, partition) = coordinate;
+    Ok(RootFrame::V4(RootFrameV4 {
+        graph,
+        branch,
+        partition,
+        published_at,
+        block_segments,
+        tail_blocks: tail_blocks.into_iter().map(BlockRef::from).collect(),
+        patch_segments,
+        tail_patches: tail_patches.into_iter().map(PatchRef::from).collect(),
+    }))
+}
+
+/// Rebuild a V4 root's flat lists from its frame and the entries of its
+/// segments, each already proven by [`read_segment`] to be the one the frame
+/// names, then check the whole root under every V3 law.
+pub fn assemble_root(
+    frame: RootFrameV4,
+    block_segments: Vec<Vec<SegmentEntry>>,
+    patch_segments: Vec<Vec<SegmentEntry>>,
+) -> Result<PartitionRoot, RootError> {
+    let blocks = block_segments
+        .into_iter()
+        .flatten()
+        .map(BlockRef::from)
+        .chain(frame.tail_blocks)
+        .collect();
+    let vertex_patches = patch_segments
+        .into_iter()
+        .flatten()
+        .map(PatchRef::from)
+        .chain(frame.tail_patches)
+        .collect();
+    let root = PartitionRoot {
+        graph: frame.graph,
+        branch: frame.branch,
+        partition: frame.partition,
+        published_at: frame.published_at,
+        blocks,
+        vertex_patches,
+    };
+    validate_root(&root)?;
     Ok(root)
 }
 

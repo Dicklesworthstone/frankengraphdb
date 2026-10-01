@@ -39,9 +39,9 @@ occurrence_count = 2456
 occurrence_transcript_sha256 = "f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822"
 
 [target_manifest]
-target_count = 4172
-projection_fallback_count = 444
-target_source_assignment_sha256 = "4724502dc001e54ee8d801cc23b01277e05b6346189d2f3cf9a44a6b82b3d5b1"
+target_count = 4182
+projection_fallback_count = 454
+target_source_assignment_sha256 = "9abd750c06cadfeef16a46447e285706965f9be7292b45a60449cbdda112de9e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a7
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 73
+registry_epoch = 74
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 50
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 102
+registry_epoch = 103
 
 [[logical_kind]]
 slice_id = "a03"
@@ -122471,6 +122471,17 @@ golden_corpus = "corpus/logical/delta_partition_root/"
 
 [[logical_kind]]
 slice_id = "a09"
+row_id = "a09:logical-kind:delta-root-segment"
+object_kind = 0x058b
+name = "DeltaRootSegment"
+status = "active"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/delta_root_segment/"
+
+[[logical_kind]]
+slice_id = "a09"
 row_id = "a09:logical-kind:partition-manifest"
 object_kind = 0x0581
 name = "PartitionManifest"
@@ -125686,11 +125697,170 @@ identity_class = "logical"
 reference_semantics = "weak_digest"
 construction_order = 30
 role_predicate = "true"
-retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1, fgdb-6lyc): comparison only, verified on decode, never a reachability edge"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1 in format V3, .v4 in format V4; fgdb-6lyc, fgdb-d5vo4): comparison only, verified on decode, never a reachability edge"
 version_status = "active"
 max_size_bytes = 32
 digest_class = "transcript"
-transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc)"
+transcript_recipe = "V3: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc). V4: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v4 over graph, branch, partition, published_at, then per list (blocks, then vertex patches) its total count, each full segment's (canonical_segment_digest, first_seq, last_seq) and the inline tail's (id, first_seq, last_seq), big-endian (root_logical_digest_v4, fgdb-d5vo4)"
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-block-segments"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0008
+stable_name = "block_segments"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaRootSegment"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the block list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. blocks then holds only the tail after them"
+version_status = "active"
+max_size_bytes = 80
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-partition-root-patch-segments"
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x0009
+stable_name = "patch_segments"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaRootSegment"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the vertex-patch list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. vertex_patches then holds only the tail after them"
+version_status = "active"
+max_size_bytes = 80
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-graph"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this segment binds, equal to its root's; lives/dies with the segment"
+version_status = "active"
+max_size_bytes = 16
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-branch"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this segment binds, equal to its root's; lives/dies with the segment"
+version_status = "active"
+max_size_bytes = 16
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-partition"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0003
+stable_name = "partition"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this segment binds, equal to its root's; lives/dies with the segment"
+version_status = "active"
+max_size_bytes = 8
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-class"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0004
+stable_name = "class"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "which root list this segment chunks: 0 blocks, 1 vertex patches; exactly the matching refs field is populated"
+version_status = "active"
+max_size_bytes = 1
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-block-refs"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0005
+stable_name = "block_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaBlockVersion"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "class 0: exactly 256 block refs in root publication order, each with the block's own first_seq/last_seq bounds; strong while a published or retained root names this segment"
+version_status = "active"
+max_size_bytes = 48
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-vertex-patch-refs"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0006
+stable_name = "vertex_patch_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "VertexRowPatch"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "class 1: exactly 256 vertex-patch refs in root publication order, each with the patch's own first_seq/last_seq bounds; strong while a published or retained root names this segment"
+version_status = "active"
+max_size_bytes = 48
+
+
+[[field]]
+slice_id = "a09"
+row_id = "a09:field:delta-root-segment-canonical-segment-digest"
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0007
+stable_name = "canonical_segment_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the segment's logical content (fgdb.strata.root-segment-logical-digest.v1, fgdb-d5vo4): the root binds it; verified on decode, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-segment-logical-digest.v1 over graph, branch, partition, class, entry count then ordered (id, first_seq, last_seq), big-endian (segment_logical_digest, fgdb-d5vo4)"
 
 
 [[field]]
@@ -125735,6 +125905,15 @@ row_id = "a09:target:logical-kind-delta-partition-root"
 target_row_id = "a09:logical-kind:delta-partition-root"
 slice_id = "a09"
 source_key = "projection|logical_object_kinds|DeltaPartitionRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:logical-kind-delta-root-segment"
+target_row_id = "a09:logical-kind:delta-root-segment"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|DeltaRootSegment"
 target_kind = "logical-kind"
 definition_status = "declared"
 
@@ -126050,6 +126229,87 @@ row_id = "a09:target:field-delta-partition-root-canonical-partition-digest"
 target_row_id = "a09:field:delta-partition-root-canonical-partition-digest"
 slice_id = "a09"
 source_key = "projection|durable_fields|DeltaPartitionRoot.canonical_partition_digest"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-block-segments"
+target_row_id = "a09:field:delta-partition-root-block-segments"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.block_segments"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-partition-root-patch-segments"
+target_row_id = "a09:field:delta-partition-root-patch-segments"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaPartitionRoot.patch_segments"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-graph"
+target_row_id = "a09:field:delta-root-segment-graph"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.graph"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-branch"
+target_row_id = "a09:field:delta-root-segment-branch"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.branch"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-partition"
+target_row_id = "a09:field:delta-root-segment-partition"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.partition"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-class"
+target_row_id = "a09:field:delta-root-segment-class"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.class"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-block-refs"
+target_row_id = "a09:field:delta-root-segment-block-refs"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.block_refs"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-vertex-patch-refs"
+target_row_id = "a09:field:delta-root-segment-vertex-patch-refs"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.vertex_patch_refs"
+target_kind = "field"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a09:target:field-delta-root-segment-canonical-segment-digest"
+target_row_id = "a09:field:delta-root-segment-canonical-segment-digest"
+slice_id = "a09"
+source_key = "projection|durable_fields|DeltaRootSegment.canonical_segment_digest"
 target_kind = "field"
 definition_status = "declared"
 

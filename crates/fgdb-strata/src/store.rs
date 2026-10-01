@@ -241,6 +241,8 @@ struct ObjectPublicationPermit {
 enum StoredObjectKind {
     Block,
     Root,
+    /// A V4 root's full reference segment (fgdb-d5vo4).
+    Segment,
     VertexPatch,
     EdgePropertyPatch,
     Manifest,
@@ -256,6 +258,7 @@ impl StoredObjectKind {
         match self {
             Self::Block => block_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
+            Self::Segment => crate::root_segment::segment_id(k_oid, namespace, bytes),
             Self::VertexPatch => crate::vertex::vertex_patch_id(k_oid, namespace, bytes),
             Self::EdgePropertyPatch => {
                 crate::edge_props::property_patch_id(k_oid, namespace, bytes)
@@ -276,6 +279,7 @@ impl StoredObjectKind {
     fn stored_limit(self) -> u64 {
         match self {
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+            Self::Segment => crate::root_segment::SEGMENT_BYTES as u64,
             _ => MAX_STORED_OBJECT_BYTES,
         }
     }
@@ -1647,12 +1651,31 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<PartitionRootVersion, StoreError> {
-        let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
+        // Encoded from scratch: every full segment this root names is sealed.
+        // Re-putting a segment an earlier root already named is idempotent.
+        let encoded = crate::root::encode_root_v4(
+            root,
+            self.k_oid.expose(),
+            self.namespace,
+            &mut crate::root::SegmentCache::default(),
+        )
+        .map_err(StoreError::MalformedRoot)?;
         self.inspect_root_blocks(cx, root, |_, _| false).await?;
         self.inspect_root_patches(cx, root, |_, _| false).await?;
-        self.put_object_with_steps(StoredObjectKind::Root, cx, &bytes, None, || {}, || {})
-            .await
-            .map(PartitionRootVersion)
+        for (_, segment) in &encoded.new_segments {
+            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
+                .await?;
+        }
+        self.put_object_with_steps(
+            StoredObjectKind::Root,
+            cx,
+            &encoded.bytes,
+            None,
+            || {},
+            || {},
+        )
+        .await
+        .map(PartitionRootVersion)
     }
 
     /// [`BlockStore::put_patch`], memoised under `receipts` — the patch
@@ -1829,6 +1852,10 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
         let verified = self.verify_root(cx, root, receipts).await?;
+        for (_, segment) in &verified.segments {
+            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
+                .await?;
+        }
         let published = self
             .put_object_with_steps(
                 StoredObjectKind::Root,
@@ -1854,7 +1881,6 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         receipts: &mut PublishReceipts,
     ) -> Result<VerifiedRoot, StoreError> {
-        let bytes = crate::root::encode_root(root).map_err(StoreError::MalformedRoot)?;
         // Resume after the prefix this handle already verified, if this root
         // extends it exactly; otherwise verify from the first reference.
         let memo = receipts.root_memo.take().filter(|memo| {
@@ -1866,8 +1892,15 @@ impl<V: Vfs> BlockStore<V> {
             blocks: mut verified_blocks,
             mut chain_heads,
             patches: mut verified_patches,
+            mut segments,
             ..
         } = memo.unwrap_or_default();
+        // The memo's segments chunk the prefix it just proved this root
+        // extends, so only segments this root newly fills are sealed and
+        // hashed (fgdb-d5vo4).
+        let encoded =
+            crate::root::encode_root_v4(root, self.k_oid.expose(), self.namespace, &mut segments)
+                .map_err(StoreError::MalformedRoot)?;
         let (block_start, patch_start) = (verified_blocks.len(), verified_patches.len());
         for (at, reference) in root.blocks.iter().enumerate().skip(block_start) {
             let receipted = receipts.spans.get(&reference.block_id)
@@ -1930,15 +1963,18 @@ impl<V: Vfs> BlockStore<V> {
             }
             verified_patches.push(*reference);
         }
-        let id = StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &bytes);
+        let id =
+            StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &encoded.bytes);
         Ok(VerifiedRoot {
             id: PartitionRootVersion(id),
-            bytes,
+            bytes: encoded.bytes,
+            segments: encoded.new_segments,
             memo: RootMemo {
                 partition: root.partition,
                 blocks: verified_blocks,
                 chain_heads,
                 patches: verified_patches,
+                segments,
             },
         })
     }
@@ -1965,8 +2001,20 @@ impl<V: Vfs> BlockStore<V> {
             crate::manifest::encode_manifest(records).map_err(StoreError::MalformedManifest)?;
         let manifest_id =
             StoredObjectKind::Manifest.identity(self.k_oid.expose(), self.namespace, &manifest);
-        let VerifiedRoot { id, bytes, memo } = root;
+        let VerifiedRoot {
+            id,
+            bytes,
+            segments,
+            memo,
+        } = root;
         let mut batch = self.publication_batch(cx, receipts, None)?;
+        // A root's new segments ride its batch, staged before it: nothing
+        // names them until the root slot names this manifest.
+        for (segment_id, segment) in &segments {
+            batch
+                .put_object(cx, StoredObjectKind::Segment, *segment_id, segment)
+                .await?;
+        }
         batch
             .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
             .await?;
@@ -1983,12 +2031,14 @@ impl<V: Vfs> BlockStore<V> {
 
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
+    /// A V4 root's segments are read, authenticated and flattened back into
+    /// the one [`crate::root::PartitionRoot`] every reader sees.
     pub async fn get_root(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
-        self.get_root_with_byte_limit(cx, id, crate::root::MAX_ENCODED_ROOT_BYTES)
+        self.get_root_with_byte_limit(cx, id, crate::root::MAX_ROOT_READ_BYTES)
             .await
     }
 
@@ -2182,6 +2232,9 @@ pub struct PublishReceipts {
 pub struct VerifiedRoot {
     id: PartitionRootVersion,
     bytes: Vec<u8>,
+    /// Full segments this root names that were never published before; they
+    /// are written, before the root, in the same publication.
+    segments: Vec<(ObjectId, Vec<u8>)>,
     memo: RootMemo,
 }
 
@@ -2199,6 +2252,9 @@ struct RootMemo {
     blocks: Vec<crate::root::BlockRef>,
     chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
     patches: Vec<crate::root::PatchRef>,
+    /// The full V4 segments chunking the verified prefix. Valid exactly as
+    /// long as the memo is: a root that does not extend the prefix drops both.
+    segments: crate::root::SegmentCache,
 }
 
 impl PublishReceipts {
@@ -2599,6 +2655,65 @@ mod durability_tests {
                     observed
                 }) if observed == MAX_STORED_OBJECT_BYTES + 1
             ));
+        });
+    }
+
+    /// fgdb-a7sz, pinned where the seam lives: a lawful root larger than the
+    /// block-derived bound is admitted under the root family's own ceiling.
+    /// A stored V4 root (fgdb-d5vo4) outgrows 16 KiB only at 51 full
+    /// segments plus a full tail -- 13,311 references, which end to end costs
+    /// as many synced blocks -- so the root object here names no stored ones.
+    #[test]
+    fn a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling() {
+        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v4};
+        use crate::root_segment::SEGMENT_REFS;
+        use fgdb_types::{BranchId, CommitSeq, GraphId};
+
+        let refs = 51 * SEGMENT_REFS + (SEGMENT_REFS - 1);
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: (0..refs)
+                .map(|k| {
+                    let mut id = [0; 32];
+                    id[..8].copy_from_slice(&(k as u64).to_be_bytes());
+                    BlockRef {
+                        block_id: ObjectId(id),
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }
+                })
+                .collect(),
+            vertex_patches: vec![],
+        };
+        let bytes = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            .expect("a lawful root")
+            .bytes;
+        assert!(
+            bytes.len() as u64 > MAX_STORED_OBJECT_BYTES,
+            "{}",
+            bytes.len()
+        );
+
+        let dir = scratch_dir("root-family-ceiling");
+        under_lab(52, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            let id = store
+                .put_object_with_steps(
+                    super::StoredObjectKind::Root,
+                    &cx,
+                    &bytes,
+                    None,
+                    || {},
+                    || {},
+                )
+                .await
+                .expect("admitted under the root family's ceiling");
+            assert_eq!(std::fs::read(store.path(id)).expect("stored"), bytes);
         });
     }
 

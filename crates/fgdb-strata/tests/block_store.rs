@@ -830,10 +830,18 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
             }
             store.put_root(&cx, &root).await.expect("stores the root")
         };
-        let encoded_root = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        // Publication writes format V4 (fgdb-d5vo4); its identity is the V4
+        // encoding's, whatever cache produced it.
+        let encoded_root = fgdb_strata::root::encode_root_v4(
+            &root,
+            &K_OID,
+            NAMESPACE,
+            &mut fgdb_strata::root::SegmentCache::default(),
+        )
+        .expect("encodes root");
         assert_eq!(
             root_id.0,
-            derive_root_id(&K_OID, NAMESPACE, &encoded_root),
+            derive_root_id(&K_OID, NAMESPACE, &encoded_root.bytes),
             "root publication and root verification share one authoritative transcript"
         );
 
@@ -2372,6 +2380,12 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
 /// used to be refused at publication AFTER its commit marker was durable, and
 /// rebuild re-offered the same root on every later open: the directory
 /// admitted no recovery. The store now applies each family's own ceiling.
+///
+/// Roots publish as format V4 (fgdb-d5vo4), which stores these 400 refs as
+/// one segment plus a 144-reference tail in about 7 KiB. A stored V4 root
+/// crosses 16 KiB only at 13,311 references, so the object-layer seam itself
+/// is pinned by the store's own unit law
+/// (`a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling`).
 #[test]
 fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
     let dir = scratch_dir("root-format-ceiling-admission");
@@ -2380,38 +2394,253 @@ fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
             .await
             .expect("opens");
         const REFS: usize = 400;
-        let mut refs = Vec::with_capacity(REFS);
-        for k in 0..REFS {
-            let bytes = encode_block(0, None, &[entry(1_000 + k as u128, 500_000 + k as u128, 1)])
-                .expect("encodes");
-            let stored = store.put(&cx, &bytes).await.expect("stores block");
-            refs.push(fgdb_strata::root::BlockRef {
-                block_id: stored.0,
-                first_seq: CommitSeq(1),
-                last_seq: CommitSeq(1),
-            });
-        }
-        let root = PartitionRoot {
-            graph: GraphId(1),
-            branch: BranchId(1),
-            partition: 0,
-            published_at: CommitSeq(2),
-            blocks: refs,
-            vertex_patches: vec![],
-        };
-        let encoded = fgdb_strata::root::encode_root(&root).expect("encodes root");
+        let root = batch_of_blocks(&cx, &store, REFS).await;
+        let flat = fgdb_strata::root::encode_root(&root).expect("encodes root");
         assert!(
-            encoded.len() > 16_384,
-            "fixture regressed: {} bytes no longer exercises the seam",
-            encoded.len()
+            flat.len() > 16_384,
+            "fixture regressed: {} flat bytes no longer outgrow the block bound",
+            flat.len()
         );
-        assert!(encoded.len() <= fgdb_strata::root::MAX_ENCODED_ROOT_BYTES);
+        assert!(flat.len() <= MAX_ENCODED_ROOT_BYTES);
 
         let root_id = store
             .put_root(&cx, &root)
             .await
             .expect("a format-lawful root is admitted");
         let read_back = store.get_root(&cx, root_id).await.expect("reads back");
-        assert_eq!(read_back.blocks.len(), REFS);
+        assert_eq!(read_back, root);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Two-level roots (fgdb-d5vo4)
+// ---------------------------------------------------------------------------
+
+use fgdb_strata::root::{
+    MAX_ENCODED_ROOT_V4_BYTES, MAX_ROOT_READ_BYTES, SegmentCache, encode_root_v4,
+};
+use fgdb_strata::root_segment::{SEGMENT_BYTES, SEGMENT_REFS, SegmentError};
+use fgdb_strata::store::{RootReadError, RootReadLimits};
+
+/// `count` single-entry blocks, each its own family, made durable through one
+/// publication batch, and the root naming them in order.
+async fn batch_of_blocks(cx: &CommitCx, store: &BlockStore, count: usize) -> PartitionRoot {
+    let mut receipts = PublishReceipts::new();
+    let mut batch = store
+        .publication_batch(cx, &mut receipts, None)
+        .expect("batch");
+    let mut blocks = Vec::with_capacity(count);
+    for k in 0..count as u128 {
+        let bytes = encode_block(0, None, &[entry(1_000 + k, 500_000 + k, 1)]).expect("encodes");
+        let id = batch.put_verified(cx, &bytes, None).await.expect("staged");
+        blocks.push(BlockRef {
+            block_id: id.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(1),
+        });
+    }
+    batch.finish(cx).await.expect("durable batch");
+    PartitionRoot {
+        graph: GraphId(1),
+        branch: BranchId(1),
+        partition: 0,
+        published_at: CommitSeq(2),
+        blocks,
+        vertex_patches: vec![],
+    }
+}
+
+/// **A TWO-LEVEL ROOT IS PUBLISHED AS ITS FULL SEGMENTS PLUS A SMALL ROOT, AND
+/// EVERY READER SEES THE ONE FLAT ROOT.** 600 blocks are two full segments and
+/// an 88-reference tail: the stored root holds two 80-byte segment references
+/// in place of 512 flat ones, each segment sits at its own derived identity,
+/// and a fresh handle reopens every block, in order, through them.
+#[test]
+fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
+    let dir = scratch_dir("v4-root-segments");
+    under_lab(0xd5, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let root = batch_of_blocks(&cx, &store, 2 * SEGMENT_REFS + 88).await;
+        let root_id = store.put_root(&cx, &root).await.expect("publishes");
+
+        let stored = std::fs::read(store.path(root_id.0)).expect("root object");
+        assert_eq!(
+            stored.len(),
+            94 + 2 * 80 + 88 * 48,
+            "two segment refs + the tail"
+        );
+        let cold = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            .expect("encodes");
+        assert_eq!(stored, cold.bytes);
+        assert_eq!(cold.new_segments.len(), 2);
+        for (segment_id, bytes) in &cold.new_segments {
+            assert_eq!(bytes.len(), SEGMENT_BYTES);
+            assert_eq!(
+                &std::fs::read(store.path(*segment_id)).expect("segment object"),
+                bytes
+            );
+        }
+
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        assert_eq!(reopened.get_root(&cx, root_id).await.expect("reads"), root);
+        let (read_back, blocks, _, _) = reopened
+            .reopen(&cx, root_id)
+            .await
+            .expect("reopens the whole partition");
+        assert_eq!(read_back, root);
+        for (k, entries) in blocks.iter().enumerate() {
+            let k = k as u128;
+            assert_eq!(
+                entries,
+                &vec![entry(1_000 + k, 500_000 + k, 1)],
+                "block {k}"
+            );
+        }
+        assert_eq!(
+            reopened.put_root(&cx, &root).await.expect("idempotent"),
+            root_id,
+            "republication over existing segments is idempotent"
+        );
+    });
+}
+
+/// **A SEGMENT IS AUTHENTICATED LIKE ANY OBJECT.** A byte flipped in a stored
+/// segment, or another genuine segment planted at its path, is refused by
+/// identity before its references are trusted; restoring the bytes restores
+/// the read, so the refusal is the segment's and not the fixture's.
+#[test]
+fn a_damaged_or_substituted_segment_refuses_the_root() {
+    let dir = scratch_dir("v4-root-segment-damage");
+    under_lab(0xd6, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let root = batch_of_blocks(&cx, &store, 2 * SEGMENT_REFS + 1).await;
+        let root_id = store.put_root(&cx, &root).await.expect("publishes");
+        let segments = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            .expect("encodes")
+            .new_segments;
+        let (first, genuine) = &segments[0];
+        let path = store.path(*first);
+
+        let mut flipped = genuine.clone();
+        flipped[200] ^= 1;
+        std::fs::write(&path, &flipped).expect("plant damage");
+        assert!(matches!(
+            store.get_root(&cx, root_id).await,
+            Err(StoreError::MalformedRoot(RootError::Segment(
+                SegmentError::IdentityMismatch { .. }
+            )))
+        ));
+
+        std::fs::write(&path, &segments[1].1).expect("plant a genuine other segment");
+        assert!(matches!(
+            store.get_root(&cx, root_id).await,
+            Err(StoreError::MalformedRoot(RootError::Segment(
+                SegmentError::IdentityMismatch { .. }
+            )))
+        ));
+
+        std::fs::write(&path, genuine).expect("restore");
+        assert_eq!(store.get_root(&cx, root_id).await.expect("restored"), root);
+    });
+}
+
+/// **A TWO-LEVEL ROOT'S SEGMENTS SHARE THE ROOT'S BYTE BUDGET.** A bounded
+/// read admits the root plus every segment it names at exactly their summed
+/// size and refuses one byte less. The default ceiling admits the largest
+/// lawful V4 read, which is larger than the flat format's ceiling: clamping
+/// to the flat one would refuse a lawful root.
+#[test]
+fn a_bounded_root_read_charges_every_segment_it_names() {
+    const LARGEST_V4_READ: usize =
+        MAX_ENCODED_ROOT_V4_BYTES + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+    const _: () = assert!(LARGEST_V4_READ > MAX_ENCODED_ROOT_BYTES);
+    const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V4_READ);
+    assert_eq!(
+        RootReadLimits::default().max_root_bytes,
+        MAX_ROOT_READ_BYTES
+    );
+
+    let dir = scratch_dir("v4-root-budget");
+    let (output, report) = run_async_under_lab(0xd7, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let (cx, query) = (contexts.commit(), contexts.query());
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let root = batch_of_blocks(&cx, &store, 2 * SEGMENT_REFS + 5).await;
+        let root_id = store.put_root(&cx, &root).await.expect("publishes");
+        let exact = std::fs::read(store.path(root_id.0))
+            .expect("root object")
+            .len()
+            + 2 * SEGMENT_BYTES;
+        let limits = |max_root_bytes| RootReadLimits {
+            max_root_bytes,
+            ..RootReadLimits::default()
+        };
+        let admitted = store
+            .reopen_adjacency_bounded(&query, root_id, CommitSeq(2), limits(exact))
+            .await
+            .map(|(read, _, _)| read);
+        let refused = store
+            .reopen_adjacency_bounded(&query, root_id, CommitSeq(2), limits(exact - 1))
+            .await
+            .map(|_| ());
+        (admitted, refused, root)
+    });
+    assert!(
+        report.invariant_violations.is_empty(),
+        "lab invariant violation: {report:?}"
+    );
+    let (admitted, refused, root) = output;
+    assert_eq!(admitted.expect("the exact budget admits"), root);
+    assert!(
+        matches!(&refused, Err(RootReadError::Store(error))
+            if matches!(**error, StoreError::ObjectTooLarge { .. })),
+        "{refused:?}"
+    );
+}
+
+/// **THE WRITER'S SEGMENT CACHE NEVER CHANGES WHAT IS PUBLISHED.** A warm root
+/// memo seals only the segment an extension fills; a root at another branch
+/// over the very same references extends the memo's prefix exactly, yet every
+/// cached segment binds the old coordinate, so all of them are re-sealed.
+/// Each publication is byte-identical to a cold one and reads back.
+#[test]
+fn a_warm_segment_cache_publishes_exactly_what_a_cold_one_would() {
+    let dir = scratch_dir("v4-root-warm-cache");
+    under_lab(0xd8, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let grown = batch_of_blocks(&cx, &store, 3 * SEGMENT_REFS + 88).await;
+        let mut trunk = grown.clone();
+        trunk.blocks.truncate(2 * SEGMENT_REFS + 88);
+        let forked = PartitionRoot {
+            branch: BranchId(2),
+            ..grown.clone()
+        };
+        let mut receipts = PublishReceipts::new();
+        for root in [&trunk, &grown, &forked] {
+            let warm = store
+                .put_root_verified(&cx, root, &mut receipts)
+                .await
+                .expect("publishes");
+            let cold = encode_root_v4(root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+                .expect("encodes");
+            assert_eq!(
+                warm.0,
+                derive_root_id(&K_OID, NAMESPACE, &cold.bytes),
+                "branch {:?}, {} blocks",
+                root.branch,
+                root.blocks.len()
+            );
+            assert_eq!(&store.get_root(&cx, warm).await.expect("reads back"), root);
+        }
     });
 }

@@ -16,13 +16,16 @@
 //! gaps and overlapping lower bounds are both legal.
 
 use fgdb_strata::root::{
-    BlockRef, EdgeBirth, EdgeIdentityConflict, PartitionRoot, ROOT_FORMAT_V1, RootError,
-    decode_root, encode_root, read_root, resolve_blocks, root_id, span_of,
+    BlockRef, EdgeBirth, EdgeIdentityConflict, MAX_ENCODED_ROOT_V4_BYTES, PartitionRoot, PatchRef,
+    ROOT_FORMAT_V1, RootError, RootFrame, SegmentCache, assemble_root, decode_root,
+    decode_root_frame, encode_root, encode_root_v4, read_root, resolve_blocks, root_id, span_of,
 };
+use fgdb_strata::root_segment::{SEGMENT_REFS, SegmentClass, SegmentError, read_segment};
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 
 const K_OID: [u8; 32] = [0x5a; 32];
 const GRAPH: GraphId = GraphId(1);
@@ -922,4 +925,262 @@ fn the_root_digest_refuses_content_the_range_laws_cannot_see() {
         ),
         "a lying declaration must be refused even over intact content"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Format V4: the two-level root (fgdb-d5vo4)
+// ---------------------------------------------------------------------------
+
+/// A root over `blocks` synthetic block refs and `patches` synthetic patch
+/// refs, with ascending frontiers. The codec laws never read the objects, so
+/// the identities need only be distinct.
+fn synthetic(blocks: usize, patches: usize, partition: u64) -> PartitionRoot {
+    let id = |tag: u8, n: usize| {
+        let mut bytes = [tag; 32];
+        bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        ObjectId(bytes)
+    };
+    PartitionRoot {
+        graph: GRAPH,
+        branch: BRANCH,
+        partition,
+        published_at: CommitSeq(1 + (blocks + patches) as u64),
+        blocks: (0..blocks)
+            .map(|n| BlockRef {
+                block_id: id(0xb0, n),
+                first_seq: CommitSeq(1 + n as u64 / 2),
+                last_seq: CommitSeq(1 + n as u64),
+            })
+            .collect(),
+        vertex_patches: (0..patches)
+            .map(|n| PatchRef {
+                patch_id: id(0xc0, n),
+                first_seq: CommitSeq(1 + n as u64),
+                last_seq: CommitSeq(1 + n as u64),
+            })
+            .collect(),
+    }
+}
+
+/// Resolve a V4 frame's segments from the published set and assemble it.
+fn resolve_v4(
+    bytes: &[u8],
+    published: &BTreeMap<ObjectId, Vec<u8>>,
+) -> Result<PartitionRoot, RootError> {
+    let RootFrame::V4(frame) = decode_root_frame(bytes)? else {
+        return Err(RootError::UnsupportedFormat { format: 3 });
+    };
+    let coordinate = frame.coordinate();
+    let mut lists = [Vec::new(), Vec::new()];
+    for ((class, named), list) in [
+        (SegmentClass::Blocks, &frame.block_segments),
+        (SegmentClass::VertexPatches, &frame.patch_segments),
+    ]
+    .into_iter()
+    .zip(&mut lists)
+    {
+        for (at, reference) in named.iter().enumerate() {
+            let segment = published
+                .get(&reference.segment_id)
+                .ok_or(RootError::NotARoot)?;
+            list.push(
+                read_segment(
+                    &K_OID,
+                    namespace(),
+                    segment,
+                    reference,
+                    at,
+                    coordinate,
+                    class,
+                )
+                .map_err(RootError::Segment)?,
+            );
+        }
+    }
+    let [blocks, patches] = lists;
+    assemble_root(frame, blocks, patches)
+}
+
+#[test]
+fn a_v4_root_round_trips_through_its_segments_at_every_boundary() {
+    for (blocks, patches) in [
+        (0, 0),
+        (1, 0),
+        (255, 3),
+        (256, 0),
+        (257, 256),
+        (511, 511),
+        (512, 513),
+        (1000, 40),
+    ] {
+        let root = synthetic(blocks, patches, 0);
+        let encoded =
+            encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+        assert_eq!(
+            encoded.new_segments.len(),
+            blocks / SEGMENT_REFS + patches / SEGMENT_REFS,
+            "only FULL segments exist ({blocks}, {patches})"
+        );
+        let published: BTreeMap<_, _> = encoded.new_segments.into_iter().collect();
+        assert_eq!(resolve_v4(&encoded.bytes, &published).unwrap(), root);
+    }
+}
+
+/// The commit path's cache seals only the segment a commit fills, and the
+/// result is byte-identical to encoding the same root from scratch: live
+/// publication and rebuild cannot diverge.
+#[test]
+fn an_incremental_encode_seals_only_new_segments_and_equals_a_fresh_one() {
+    let mut cache = SegmentCache::default();
+    let mut published = BTreeMap::new();
+    let mut sealed_before = 0;
+    for blocks in (0..=1300).step_by(37) {
+        let root = synthetic(blocks, blocks / 5, 0);
+        let incremental = encode_root_v4(&root, &K_OID, namespace(), &mut cache).unwrap();
+        let full = blocks / SEGMENT_REFS + (blocks / 5) / SEGMENT_REFS;
+        assert_eq!(incremental.new_segments.len(), full - sealed_before);
+        sealed_before = full;
+        published.extend(incremental.new_segments.iter().cloned());
+        let fresh =
+            encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+        assert_eq!(incremental.bytes, fresh.bytes, "at {blocks} blocks");
+        assert_eq!(resolve_v4(&incremental.bytes, &published).unwrap(), root);
+    }
+    // A shorter list was rewritten (as by compaction): the cache is dropped,
+    // never reused against content it does not chunk.
+    let compacted = synthetic(300, 0, 0);
+    let after = encode_root_v4(&compacted, &K_OID, namespace(), &mut cache).unwrap();
+    let fresh = encode_root_v4(
+        &compacted,
+        &K_OID,
+        namespace(),
+        &mut SegmentCache::default(),
+    )
+    .unwrap();
+    assert_eq!(after.bytes, fresh.bytes);
+
+    // The same references under another branch extend the cached prefix
+    // exactly, but every cached segment binds the old coordinate: the cache
+    // re-seals rather than name segments this root's reader must refuse.
+    let mut warm = SegmentCache::default();
+    let trunk = synthetic(700, 0, 0);
+    encode_root_v4(&trunk, &K_OID, namespace(), &mut warm).unwrap();
+    let forked = PartitionRoot {
+        branch: BranchId(BRANCH.0 + 1),
+        ..trunk
+    };
+    let reused = encode_root_v4(&forked, &K_OID, namespace(), &mut warm).unwrap();
+    assert_eq!(reused.new_segments.len(), 2, "both segments re-sealed");
+    let fresh = encode_root_v4(&forked, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    assert_eq!(reused.bytes, fresh.bytes);
+    let published: BTreeMap<_, _> = reused.new_segments.into_iter().collect();
+    assert_eq!(resolve_v4(&reused.bytes, &published).unwrap(), forked);
+}
+
+/// The point of V4: the root holds one 80-byte reference per 256 refs.
+#[test]
+fn a_v4_root_is_a_two_hundred_fifty_sixth_of_a_flat_one() {
+    let root = synthetic(100_000, 0, 0);
+    let flat = encode_root(&root).unwrap();
+    let two_level =
+        encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    // 94-byte header; 390 segments x 80 B; a 160-reference tail x 48 B.
+    assert_eq!(two_level.bytes.len(), 94 + 390 * 80 + 160 * 48);
+    assert_eq!(flat.len(), 94 + 100_000 * 48);
+    // HORIZON (ruling (b) obligation): at the 2^20-reference ceiling of both
+    // lists the root is still bounded by a few hundred KiB; a future third
+    // level is needed only if that ceiling is raised far beyond 2^20.
+    const _: () = assert!(MAX_ENCODED_ROOT_V4_BYTES < 700 * 1024);
+}
+
+#[test]
+fn v4_refuses_tampered_and_misbound_segments_and_frames() {
+    let root = synthetic(600, 300, 0);
+    let encoded = encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    let published: BTreeMap<_, _> = encoded.new_segments.iter().cloned().collect();
+
+    // A byte flipped inside a stored segment changes its identity.
+    let mut tampered = published.clone();
+    let (first, bytes) = encoded.new_segments[0].clone();
+    let mut flipped = bytes.clone();
+    *flipped.last_mut().unwrap() ^= 1;
+    tampered.insert(first, flipped);
+    assert!(matches!(
+        resolve_v4(&encoded.bytes, &tampered),
+        Err(RootError::Segment(SegmentError::IdentityMismatch { .. }))
+    ));
+
+    // A genuine segment named where another coordinate or class is expected.
+    let other = encode_root_v4(
+        &synthetic(600, 300, 7),
+        &K_OID,
+        namespace(),
+        &mut SegmentCache::default(),
+    )
+    .unwrap();
+    let frame = match decode_root_frame(&other.bytes) {
+        Ok(RootFrame::V4(frame)) => frame,
+        other => {
+            assert!(matches!(other, Ok(RootFrame::V4(_))), "{other:?}");
+            return;
+        }
+    };
+    let (_, foreign) = &other.new_segments[0];
+    assert_eq!(
+        read_segment(
+            &K_OID,
+            namespace(),
+            foreign,
+            &frame.block_segments[0],
+            0,
+            (GRAPH, BRANCH, 0),
+            SegmentClass::Blocks,
+        ),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "partition coordinate"
+        })
+    );
+    assert_eq!(
+        read_segment(
+            &K_OID,
+            namespace(),
+            foreign,
+            &frame.block_segments[0],
+            0,
+            frame.coordinate(),
+            SegmentClass::VertexPatches,
+        ),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "class"
+        })
+    );
+
+    // The root's digest binds each segment's digest: editing one inside the
+    // frame is refused before any segment is read.
+    let mut edited = encoded.bytes.clone();
+    edited[94 + 32] ^= 1;
+    assert!(matches!(
+        decode_root_frame(&edited),
+        Err(RootError::DigestMismatch { .. })
+    ));
+    assert!(matches!(
+        decode_root_frame(&encoded.bytes[..encoded.bytes.len() - 1]),
+        Err(RootError::Truncated { .. })
+    ));
+    let mut longer = encoded.bytes.clone();
+    longer.push(0);
+    assert!(matches!(
+        decode_root_frame(&longer),
+        Err(RootError::TrailingBytes { extra: 1 })
+    ));
+}
+
+/// Additive-minor (§16.6): a V3 root still decodes, in full, by itself.
+#[test]
+fn a_v3_root_still_decodes() {
+    let root = synthetic(700, 2, 0);
+    let v3 = encode_root(&root).unwrap();
+    assert_eq!(decode_root_frame(&v3).unwrap(), RootFrame::V3(root));
 }
