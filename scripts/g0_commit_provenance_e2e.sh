@@ -56,7 +56,8 @@ JSONL=".beads/issues.jsonl"
 # ADJUDICATED historical citations (id<TAB>real record<TAB>bead that adjudicated).
 # Rows are only consulted for commits inside the window; they retire on their own
 # once those commits age out. Add a row only with the adjudicating bead named.
-ADJUDICATED='fgdb-3w75	fgdb-gate-genesis-lce.2	fgdb-baru'
+ADJUDICATED='fgdb-3w75	fgdb-gate-genesis-lce.2	fgdb-baru
+fgdb-285i2	fgdb-one-lexer-one-dispatch-285i2	fgdb-g9cd3'
 
 gate_init "g0-commit-provenance"
 
