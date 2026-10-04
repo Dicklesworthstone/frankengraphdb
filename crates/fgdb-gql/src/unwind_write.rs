@@ -505,6 +505,21 @@ mod tests {
     }
 
     #[test]
+    fn map_values_are_field_uses_and_labels_spelled_like_the_alias_are_not() {
+        let query = "UNWIND $rows AS row MERGE (n:row {id:row.id})-[:row]->(m:Entity {id:row.to})";
+        let parsed = GraphUnwindWriteText::parse(query).unwrap();
+        let keys: Vec<&str> = parsed
+            .fields
+            .iter()
+            .map(|field| field.key.as_str())
+            .collect();
+        assert_eq!(keys, ["id", "to"]);
+        assert!(!parsed.lowered.contains("row."));
+        assert_eq!(parsed.lowered.matches(":row ").count(), 1);
+        assert_eq!(parsed.lowered.matches(":row]").count(), 1);
+    }
+
+    #[test]
     fn native_create_and_create_return_are_not_intercepted() {
         for query in [
             "UNWIND $rows AS row CREATE (n {id:row.id})",
