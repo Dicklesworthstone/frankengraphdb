@@ -97,6 +97,42 @@ impl core::error::Error for GraphUnwindWriteError {
     }
 }
 
+/// Admission failures are distinct from execution or publication failures.
+/// An execution error keeps the batch's input coordinates and the original
+/// commit outcome; this wrapper does not imply that a failed publish rolled back.
+#[derive(Debug)]
+pub enum GraphUnwindWriteExecutionError<E, A, C> {
+    /// The complete input was refused before entering the program executor.
+    Binding(GraphUnwindWriteError),
+    /// The ordinary batch executor's error, without a partial success receipt.
+    Execution(crate::GraphWriteScriptExecutionError<E, A, C>),
+}
+
+impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::fmt::Display
+    for GraphUnwindWriteExecutionError<E, A, C>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Binding(source) => source.fmt(f),
+            Self::Execution(source) => source.fmt(f),
+        }
+    }
+}
+
+impl<
+    E: core::error::Error + 'static,
+    A: core::error::Error + 'static,
+    C: core::error::Error + 'static,
+> core::error::Error for GraphUnwindWriteExecutionError<E, A, C>
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Binding(source) => Some(source),
+            Self::Execution(source) => Some(source),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct UnwindField {
     pub(crate) key: String,

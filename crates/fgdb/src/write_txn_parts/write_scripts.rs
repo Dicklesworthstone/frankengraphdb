@@ -193,3 +193,96 @@ impl<V: Vfs + Clone> Database<V> {
         .await
     }
 }
+
+impl WriteTxn {
+    /// Bind a bounded `UNWIND $rows AS row` MERGE or MATCH mutation batch and
+    /// stage it in this transaction. Every input binds before the batch enters
+    /// the ordinary program executor; no row runs in its own transaction.
+    ///
+    /// `max_rows` bounds the entire expansion, independently of the shared
+    /// execution policy. A binding failure leaves staging and observations
+    /// untouched. An execution failure restores the pre-batch staged prefix
+    /// while retaining the ordinary conservative conflict observations.
+    /// Identity allocations are not reclaimed. The receipt is transaction-local
+    /// until the caller finishes the outer transaction.
+    ///
+    /// The resolver binds symbols, not authority. Context restriction, database
+    /// health checks and cancellation remain owned by the program executor.
+    #[allow(clippy::too_many_arguments)] // purpose contexts and admission stay explicit
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
+    pub fn execute_graph_unwind_write_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        definition: &fgdb_gql::unwind_write::GraphUnwindWriteText,
+        arguments: &fgdb_gql::GqlParameters,
+        relation: fgdb_delta_types::RelationId,
+        max_rows: usize,
+        resolve: impl FnMut(fgdb_gql::GraphSymbolKind, &str) -> Option<fgdb_gql::GraphSymbol>,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        fgdb_gql::GraphWriteProgramReceipt,
+        fgdb_gql::unwind_write::GraphUnwindWriteExecutionError<
+            WriteTxnError,
+            A,
+            Box<asupersync::error::Error>,
+        >,
+    > {
+        use fgdb_gql::unwind_write::GraphUnwindWriteExecutionError as Error;
+        let batch = definition
+            .bind_with_limit(arguments, relation, max_rows, resolve)
+            .map_err(Error::Binding)?;
+        self.execute_bound_graph_write_script_batch_governed(database, cx, &batch, policy, allocate)
+            .map_err(Error::Execution)
+    }
+}
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Execute a bounded UNWIND write batch as one ordinary autocommit program.
+    /// Parsing is explicit through `GraphUnwindWriteText`; native UNWIND CREATE
+    /// and CREATE RETURN are not intercepted by this entry point.
+    ///
+    /// All rows bind before a private transaction or graph-identity allocation
+    /// begins. Rows see earlier staged effects, so repeated keys can MERGE the
+    /// same vertex. Quotas belong to the whole batch, not each row. No partial
+    /// receipt is returned on failure, and successful receipts are withheld
+    /// until the ordinary finish path returns WriteCommitted or ReadClosed.
+    ///
+    /// This method never retries or relabels publication failures as rollback.
+    /// Execution errors preserve both the input-row coordinates and the original
+    /// committed/unknown outcome. The lexical definition and arguments may be
+    /// reused; identity allocation must distinguish separate invocations.
+    #[allow(clippy::too_many_arguments)] // purpose contexts and admission stay explicit
+    #[allow(clippy::result_large_err)] // once-per-batch report (file header)
+    pub async fn execute_graph_unwind_write_autocommit_governed<A>(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        definition: &fgdb_gql::unwind_write::GraphUnwindWriteText,
+        arguments: &fgdb_gql::GqlParameters,
+        relation: fgdb_delta_types::RelationId,
+        max_rows: usize,
+        resolve: impl FnMut(fgdb_gql::GraphSymbolKind, &str) -> Option<fgdb_gql::GraphSymbol>,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (fgdb_gql::GraphWriteProgramReceipt, EmbeddedTxnCompletion),
+        fgdb_gql::unwind_write::GraphUnwindWriteExecutionError<
+            WriteTxnError,
+            A,
+            Box<asupersync::error::Error>,
+        >,
+    > {
+        use fgdb_gql::unwind_write::GraphUnwindWriteExecutionError as Error;
+        let batch = definition
+            .bind_with_limit(arguments, relation, max_rows, resolve)
+            .map_err(Error::Binding)?;
+        self.execute_bound_graph_write_script_batch_autocommit_governed(
+            txcx, query_cx, commit_cx, &batch, policy, allocate,
+        )
+        .await
+        .map_err(Error::Execution)
+    }
+}
