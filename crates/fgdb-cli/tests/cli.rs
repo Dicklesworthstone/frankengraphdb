@@ -502,3 +502,54 @@ fn a_fifo_key_file_is_refused_without_blocking() {
     refused(&output, 4, "open");
     assert!(!fixture.db().exists());
 }
+
+#[test]
+fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
+    let fixture = Fixture::new("query-limits");
+    succeeded(&fixture.robot("create", &[]), "created");
+    for id in 1..=3 {
+        let text = format!("INSERT (:Person {{id: {id}}})");
+        succeeded(&fixture.robot("write", &[&text]), "written");
+    }
+    let text = "MATCH (n:Person) RETURN n.id";
+    let default = fixture.robot("query", &[text]);
+    succeeded(&default, "rows");
+
+    let starved = fixture.robot("query", &["--max-work-units", "1", text]);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    let starved = fixture.robot("query", &["--max-snapshot-records", "1", text]);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("SnapshotRecords"));
+
+    // A sufficient explicit limit answers exactly as the defaults do.
+    let raised = fixture.robot("query", &["--max-work-units", "100000000", text]);
+    assert_eq!(raised.stdout, default.stdout);
+
+    // Replaying a certificate is governed by the same limits.
+    let certificate = fixture.dir.join("certificate");
+    let certificate = certificate.to_str().unwrap();
+    succeeded(
+        &fixture.robot("query", &["--certify-to", certificate, text]),
+        "rows",
+    );
+    succeeded(
+        &fixture.robot("replay", &["--certificate", certificate]),
+        "replayed",
+    );
+    let starved = ["--max-work-units", "1", "--certificate", certificate];
+    let starved = fixture.robot("replay", &starved);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+
+    // A repeated or malformed limit is a usage error; write takes none.
+    let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
+    refused(&fixture.robot("query", &twice), 2, "usage");
+    refused(
+        &fixture.robot("query", &["--max-work-units", "1e3", text]),
+        2,
+        "usage",
+    );
+    let write = ["--max-work-units", "1", "INSERT (:Person {id: 9})"];
+    refused(&fixture.robot("write", &write), 2, "usage");
+}
