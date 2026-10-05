@@ -412,6 +412,41 @@ pub(crate) fn recover_indexed_block(
     restore_group(encoding, block, group, protected, || {})
 }
 
+/// The indices of the records that are every original symbol of every source
+/// block, one per coordinate, when the authenticated `records`
+/// (source block, ESI, serialized bytes) hold them all and no coordinate has
+/// two different encodings. A systematic code transmits originals unchanged,
+/// so a read decodes from exactly these with no equation system. `None`
+/// leaves every record to the strict decoder, which also reports conflicts.
+pub(crate) fn complete_source_records(
+    encoding: &EncodedObject,
+    bytes: usize,
+    records: &[(u32, u32, &[u8])],
+) -> Option<Vec<usize>> {
+    let layout = Layout::new(encoding, bytes).ok()?;
+    let mut chosen = BTreeMap::<(u32, u32), usize>::new();
+    for (index, &(block, esi, raw)) in records.iter().enumerate() {
+        match chosen.entry((block, esi)) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                if records[*slot.get()].2 != raw {
+                    return None;
+                }
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    for number in 0..layout.blocks() {
+        let symbols = layout.block(number as u32).ok()?.symbols;
+        for esi in 0..symbols {
+            sources.push(*chosen.get(&(number as u32, esi as u32))?);
+        }
+    }
+    Some(sources)
+}
+
 // The batch and resumable paths share the actual source/erasure decoder, not
 // just its parameter calculations. Keep extra repair equations on this path.
 fn restore_group(
