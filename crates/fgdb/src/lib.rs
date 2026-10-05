@@ -5415,19 +5415,40 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             commit_seq: frontier.0,
             error,
         })?;
+    // The commit path's publisher: data objects are staged and synced
+    // together (BATCH_SYNCS_IN_FLIGHT at a time, one directory barrier per
+    // flush), each earning a receipt by passing decode and history admission
+    // as it is written, so root admission needs no second read of every
+    // object. Per-object puts cost a file and a directory sync each, in
+    // series, and put_root then re-read every block: a 900k-edge compaction
+    // was 798 s of wall for 108 s of CPU. Nothing is reachable until the
+    // root slot names the manifest, which the caller publishes after this.
+    let mut receipts = fgdb_strata::store::PublishReceipts::default();
+    let mut batch = store.publication_batch(cx, &mut receipts, None)?;
     for block in &blocks {
-        if let Some(patch) = &block.property_patch {
-            store.put_edge_property_patch(cx, &patch.bytes).await?;
-        }
-        store.put(cx, &block.bytes).await?;
+        batch
+            .put_verified(
+                cx,
+                &block.bytes,
+                block
+                    .property_patch
+                    .as_ref()
+                    .map(|patch| patch.bytes.as_slice()),
+            )
+            .await?;
     }
+    batch.flush(cx).await?;
     for patch in &patches {
-        store.put_patch(cx, &patch.bytes).await?;
+        batch.put_patch_verified(cx, &patch.bytes).await?;
     }
-    let root_id = store.put_root(cx, &root).await?;
+    batch.finish(cx).await?;
+    let verified_root = store.verify_root(cx, &root, &mut receipts).await?;
+    let root_id = verified_root.id();
     let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
         .expect("one root is one canonical record");
-    let manifest = store.put_manifest(cx, &manifest_records).await?;
+    let (manifest, _) = store
+        .publish_root_and_manifest(cx, verified_root, &manifest_records, &mut receipts)
+        .await?;
     let (reopened_root, decoded, decoded_props, decoded_patches) =
         store.reopen(cx, root_id).await?;
 
