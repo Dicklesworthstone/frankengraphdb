@@ -237,7 +237,6 @@ impl WriteTxn {
                         })
                 },
             )?;
-            drop(state);
             workspace.accept();
             Ok((stats, outcome))
         })
