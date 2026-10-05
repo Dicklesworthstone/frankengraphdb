@@ -111,6 +111,9 @@ pub enum GraphWriteScriptExecutionError<E, A, C> {
     Program(crate::GraphWriteProgramError<E, A, C>),
     /// The entire batch was refused before any execution began.
     BatchBinding(GraphWriteScriptBatchError),
+    /// Native UNWIND syntax, row admission or binding failed before execution.
+    /// Live authorization/cancellation failures remain native program errors.
+    UnwindBinding(crate::unwind_write::GraphUnwindWriteError),
     /// Preserve the original program/commit error plus its record coordinates.
     /// None identifies infrastructure or final whole-program acceptance, not
     /// an invented failing record. This arm alone says nothing about durability.
@@ -128,6 +131,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::
             Self::Binding(source) => source.fmt(f),
             Self::Program(source) => source.fmt(f),
             Self::BatchBinding(source) => source.fmt(f),
+            Self::UnwindBinding(source) => source.fmt(f),
             Self::BatchProgram { location, source } => {
                 if let Some(location) = location {
                     write!(
@@ -155,6 +159,7 @@ impl<
             Self::Binding(source) => Some(source),
             Self::Program(source) => Some(source),
             Self::BatchBinding(source) => Some(source),
+            Self::UnwindBinding(source) => Some(source),
             Self::BatchProgram { source, .. } => Some(source),
         }
     }
