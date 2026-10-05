@@ -4,10 +4,28 @@
 2026-09-30 17:20 −0400 on five gates: fmt, clippy, tests (8 never-run laws for
 UNWIND … MERGE, a feature that had never worked), the UBS ratchet, and commit
 provenance. The landing on top of it is another session's unpushed `e062a907`
-and `a54336f6`, plus this pass's `633df985` and `43b82bdc`. It clears the first
-four. The fifth is a tool change, not a code change: the upgraded UBS
-truncates its Rust scan (`fgdb-zww2g`). The landing's own proof is in
-[Current delta — 2026-10-04](#current-delta--2026-10-04).
+and `a54336f6`, plus this pass's `633df985` and `43b82bdc`. Its proof
+(`08be545e`, tree_stable, 47 PASS) clears the first four, with
+`cargo test --workspace` at 8,310 passed and 0 failed. Two gates stayed red,
+and neither is a code finding:
+- The UBS ratchet. The upgraded UBS truncates its Rust scan (`fgdb-zww2g`).
+- The determinism e2e. The host's disk reaper deleted the proof's target dir
+  mid-run, which is an environment failure.
+
+See [Current delta — 2026-10-04](#current-delta--2026-10-04).
+
+**After the landing (same evening).** The toolchain-less stream resumed with 5
+uncompiled commits (`f6cca5e5`..`5c21f28c`). This pass checked them at
+`5c21f28c`:
+- Clippy is clean. `fgdb-gql` lib passes 1,103/0, the new library UNWIND
+  tests 8/8, and the CLI robot and UNWIND suites 23/23 and 6/6.
+- fmt was red again on 5 of their files, so the next commit runs rustfmt over
+  them.
+- They add library entry points for atomic UNWIND writes (`fgdb-bapr6`) and
+  exact Int/Float comparison (`fgdb-qnqrj` b). That comparison is now right
+  after `WITH` and inside an expansion, but still silently empty for the
+  README's single-vertex shape `MATCH (p:Person) WHERE p.born > 1800.0`. The
+  same predicate now answers differently by query shape.
 
 **Latest verified green: 2026-09-25**, at `0b952cb2`: `scripts/local_proof.sh`
 verdict=pass (49 PASS, tree_stable). It is an ancestor of `main`, the first
@@ -151,7 +169,7 @@ shared: load ran 50–140 during the measurements.
 | fmt layers at `5df67f66` | `cargo fmt --check`: 7 files. `rustfmt --edition 2024 --check` over the 74 `include!`d files: 2 files (`vertex_scan_reads.rs`, `vertex_scan_boolean_tests.rs`). |
 | clippy layers at `5df67f66` | `needless_borrow` at `crates/fgdb-gql/src/unwind_write.rs` (lib test). With that fixed, `large_enum_variant` on `PreparedWrite` in `crates/fgdb-cli/src/write_returning.rs` (320 B vs 40 B). |
 | Landing branch `633df985` (= `5df67f66` + `e062a907` + `a54336f6` + the new law) | fmt rc 0; rustfmt over the 74 `include!`d files rc 0; `fgdb-gql` unwind 12/12; `fgdb-cli` unwind_write 6/6; workspace `clippy --all-targets --keep-going -D warnings` rc 0. Mutation controls on `a54336f6`'s condition: the old rule turns 5 tests red; removing the `:` skip turns only the new law red. |
-| `local_proof.sh` on the landed commit | Launched on the pushed landing after this section was written. The verdict is recorded on `fgdb-g9cd3`. Expected: the UBS gate stays red (`fgdb-zww2g`), and every gate red at `5df67f66` because of code is green. |
+| `local_proof.sh` on the landed commit `08be545e` (warm quiet clone; finished 2026-10-05T02:14Z) | verdict=red, tree_stable=true, **47 PASS, 2 RED**. PASS: every core gate through `cargo test --workspace` (918 blocks, **8,310 passed, 0 failed**, 3 ignored), `g0_commit_provenance_e2e.sh`, every registered binary, and the other scripts, including the Miri/unsafe tool lanes. RED, and neither is a code finding: (1) UBS, a truncated scan reading 805 against 872 (`fgdb-zww2g`; 58 below the 863 it read at `5df67f66` for a diff adding no panic site); (2) `w1_cross_crate_determinism_e2e.sh`, whose extra workspace run failed with "extern location for asupersync does not exist" after the host's disk reaper (`sbh`, 92–96% full) cut the target dir from 36 GB to 241 MB mid-run. That is an environment failure, UNRUN-class, which the gate's classifier does not recognize. |
 | `merge_train.sh audit --since b36d556a` | exit 1: proven=0, unproven=400, violations=227 |
 | Commit stream `0f91d016..5df67f66` | 114 commits. Toolchain-less: 48 (+23.2k/−0.8k lines), 31 of them saying nothing was compiled. Local: 66 (+31.2k/−6.8k). By day: 33, 53, 12, 16 (09-27..09-30), then none. |
 | README Quick example through the release CLI, fresh database, as written | **4 of 11** run: INSERT; SHORTEST with `path_length`; `FOR SYSTEM_TIME AS OF SEQ` (with a retained sequence; 41999 is refused as beyond the frontier); `EXPLAIN (CERTIFICATE)`. `CALL fnx.pagerank()` also runs without `GRAPH social`. Refused: CREATE GRAPH, the three branch statements, `CALL … (GRAPH social)`, SUBSCRIBE TO, `CALL hybrid.search`. Several refusal messages name an unrelated parser's error (`fgdb-one-lexer-one-dispatch-285i2`). |
