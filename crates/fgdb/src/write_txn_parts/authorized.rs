@@ -28,6 +28,7 @@ mod graph;
 mod insert;
 #[path = "authorized/mutation.rs"]
 mod mutation;
+pub use mutation::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 #[path = "authorized/selection.rs"]
 mod selection;
 

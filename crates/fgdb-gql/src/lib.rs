@@ -89,10 +89,10 @@ pub use write_script::{
 };
 
 pub use aggregation::{
-    GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
-    GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
-    GraphAggregateTest, GraphAggregateValue, GraphExactAverage, GraphHavingError,
-    GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
+    BoundAggregate, GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn,
+    GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
+    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
+    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
     MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
 };
 pub use algebra_exec::{

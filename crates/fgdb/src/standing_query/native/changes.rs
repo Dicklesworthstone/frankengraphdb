@@ -3,6 +3,10 @@
 
 mod statement;
 mod subscription;
+pub use statement::SubscribeError;
+pub use subscription::{
+    NativeSubscription, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+};
 
 use super::*;
 use super::{copy_group as aggregate_cells, copy_values as row_cells};

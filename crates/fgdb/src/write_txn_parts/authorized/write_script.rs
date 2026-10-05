@@ -3,6 +3,7 @@
 
 #[path = "native_write.rs"]
 mod native;
+pub use native::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, GraphWriteProgramPolicy,

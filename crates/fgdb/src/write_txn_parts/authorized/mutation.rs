@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 #[path = "mutation_program.rs"]
 mod program;
+pub use program::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 
 type Fault = GqlQueryError<GraphMutationError<WriteTxnError>, WriteTxnError>;
 type Receipt = (

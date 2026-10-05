@@ -151,6 +151,8 @@ impl std::error::Error for LatticeViolation {}
 /// [`AtLeastAsStrongAs`] relation is implemented for exactly the legal pairs,
 /// so an illegal [`justify`] call fails to *compile*.
 pub mod class {
+    // Sealed: unnameable by design, so no other crate can implement it.
+    #[allow(unnameable_types)]
     mod sealed {
         pub trait Class {}
         pub trait AtLeastAsStrongAs<Target> {}

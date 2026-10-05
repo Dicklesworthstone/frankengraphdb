@@ -10,6 +10,7 @@ use fgdb_gql::{
 
 #[path = "write_program.rs"]
 mod mixed;
+pub use mixed::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 
 type Fault = GraphMutationProgramError<WriteTxnError, WriteTxnError>;
 

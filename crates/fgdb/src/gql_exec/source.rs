@@ -2,6 +2,7 @@
 //! These helpers do not validate raw blocks or bypass snapshot admission.
 
 mod aggregation;
+pub use aggregation::{SnapshotEdgeSource, SnapshotVertexSource};
 mod numeric;
 
 use crate::Snapshot;

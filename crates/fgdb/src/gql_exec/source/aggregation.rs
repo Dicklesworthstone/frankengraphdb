@@ -2,9 +2,11 @@
 
 mod cheapest_path;
 mod edge_stream;
+pub use edge_stream::SnapshotEdgeSource;
 mod shortest_admission;
 mod shortest_any;
 mod vertex_stream;
+pub use vertex_stream::SnapshotVertexSource;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError, Snapshot};

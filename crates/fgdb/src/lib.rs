@@ -133,8 +133,10 @@ mod scrub;
 mod standing_query;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 pub use standing_query::{
-    StandingQueryError, StandingQueryFailure, StandingQueryHandle, StandingQueryStats,
-    StandingQueryView,
+    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, StandingQueryError,
+    StandingQueryFailure, StandingQueryHandle, StandingQueryStats, StandingQueryView,
+    StandingReplayBatch, StandingReplayWindow, SubscribeError, SubscriptionBatch,
+    SubscriptionError, SubscriptionReceipt,
 };
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
@@ -146,17 +148,28 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
 /// bind digests, so the same graph state, text, and bind are auditable as
 /// byte-identical.
-pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeProcedureEvidence, NativeReadClass};
-pub use query::{
-    NativeAggregateCursor, NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead,
-    ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
+pub use gql_cert::{
+    CertificateDecodeError, GqlCertificate, GqlPlanCertificate, NativeCertificatePlan,
+    NativePlanCertificate, NativeProcedureEvidence, NativeReadClass,
 };
-pub use write_txn::{WriteTxn, WriteTxnError};
+pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
+pub use query::{
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, ExplainRow,
+    NativeAggregateCursor, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
+    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedNativeRead, ProcedureError,
+    QueryError, QueryResult, QueryValue, QueryWriteError, RefreshReport, ReplayRefusal,
+    ResidentIndex, ResidentIndexError,
+};
+pub use write_txn::{
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession, WriteTxn,
+    WriteTxnError,
+};
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
 /// `":memory:` surface: RAM file content over a private sparse shadow
 /// namespace. See [`memvfs`] and [`Database::<MemVfs>::open_memory`].
-pub use memvfs::MemVfs;
+pub use memvfs::{MemVfs, MemVfsFile};
 
 /// The stable law id [`FirstCommitterWinsValidator`] rejects under, keyed on
 /// by the typed [`WriteError::FirstCommitterWins`] arm. Kept identical to the

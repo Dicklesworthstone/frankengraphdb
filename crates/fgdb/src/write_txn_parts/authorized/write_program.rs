@@ -23,6 +23,7 @@ mod edge_upsert;
 mod query;
 #[path = "write_script.rs"]
 mod script;
+pub use script::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 #[path = "vertex_merge.rs"]
 mod vertex;
 

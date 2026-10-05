@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// Private construction selects the logical terminal projection's semantics.
 /// Public visibility is required by the public-but-sealed projection trait;
 /// this type is not exported from the crate's public surface.
+#[allow(unnameable_types)]
 pub struct ProjectedRows<Row> {
     storage: Storage<Row>,
     capacity: Option<usize>,

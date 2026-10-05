@@ -17,6 +17,8 @@ use crate::{bitpack, block, delta_varint, elias_fano, identity, neighbor, roarin
 const STREAM_ACCOUNTING_MAGIC: &[u8] = b"FGDB-STREAM-ACCOUNTING-V1\0";
 const STREAM_ACCOUNTING_FENCE_FIELDS: usize = 6;
 
+// Sealed: unnameable by design, so no other crate can implement it.
+#[allow(unnameable_types)]
 mod private {
     pub trait Sealed {}
 }

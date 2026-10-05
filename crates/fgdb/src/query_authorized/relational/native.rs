@@ -4,6 +4,10 @@
 
 #[path = "native/session.rs"]
 mod session;
+pub use session::{
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+};
 
 use super::*;
 use crate::query::{aggregates, values};
