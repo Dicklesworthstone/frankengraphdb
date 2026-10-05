@@ -1,8 +1,9 @@
-//! Parse-once native relationship MERGE with ON MATCH / ON CREATE SET actions.
+//! Parse-once native relationship MERGE with computed ON and trailing SET clauses.
 
 use crate::{
     GqlScalarParameter, GraphEdgeMergeTextErrorKind, GraphEdgeUpsertBuildError,
-    GraphPatternTextError, GraphPatternTextErrorKind, PreparedGraphEdgeMergeText,
+    GraphMutationTextError, GraphMutationTextErrorKind, GraphPatternTextError,
+    GraphPatternTextErrorKind, PreparedGraphEdgeMergeText,
 };
 use fgdb_delta_types::PropertyKeyId;
 
@@ -10,6 +11,11 @@ use fgdb_delta_types::PropertyKeyId;
 pub(crate) enum EdgeUpsertValueTemplate {
     Bound(GqlScalarParameter),
     Parameter { index: usize, at: usize },
+    Expression {
+        properties: Vec<PropertyKeyId>,
+        program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
+        at: usize,
+    },
 }
 #[derive(Clone)]
 pub(crate) struct EdgeUpsertActionTemplate {
@@ -22,12 +28,14 @@ pub struct PreparedGraphEdgeUpsertText {
     pub(crate) merge: PreparedGraphEdgeMergeText,
     pub(crate) on_match: Vec<EdgeUpsertActionTemplate>,
     pub(crate) on_create: Vec<EdgeUpsertActionTemplate>,
+    pub(crate) after: Vec<EdgeUpsertActionTemplate>,
 }
 impl core::fmt::Debug for PreparedGraphEdgeUpsertText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphEdgeUpsertText")
             .field("on_match", &self.on_match.len())
             .field("on_create", &self.on_create.len())
+            .field("after", &self.after.len())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -43,6 +51,7 @@ pub enum GraphEdgeUpsertTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Merge(GraphEdgeMergeTextErrorKind),
     UpsertBuild(GraphEdgeUpsertBuildError),
+    Expression(GraphMutationTextErrorKind),
     DuplicateBranch,
 }
 impl From<GraphPatternTextError> for GraphEdgeUpsertTextError {
@@ -50,6 +59,14 @@ impl From<GraphPatternTextError> for GraphEdgeUpsertTextError {
         Self {
             offset: error.offset,
             kind: GraphEdgeUpsertTextErrorKind::Query(error.kind),
+        }
+    }
+}
+impl From<GraphMutationTextError> for GraphEdgeUpsertTextError {
+    fn from(error: GraphMutationTextError) -> Self {
+        Self {
+            offset: error.offset,
+            kind: GraphEdgeUpsertTextErrorKind::Expression(error.kind),
         }
     }
 }
