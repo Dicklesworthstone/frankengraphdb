@@ -1,10 +1,10 @@
 //! Authorized unique-vertex MERGE and its selected ON MATCH/ON CREATE actions.
-//! Reuse the native reducer and literal-action lowering, not a second matcher.
+//! Reuse the native reducer, point projection and checked scalar-action collector.
 
 use crate::write_txn::authorized::{
     Database, Execution, Vfs, WriteBatch, WriteTxn, WriteTxnError, selection, stage,
 };
-use crate::write_txn::{collect_vertex_merge, vertex_upsert_actions};
+use crate::write_txn::{collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property};
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
     GqlQueryError, GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
@@ -114,31 +114,50 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
         false,
     )
     .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
-    let (stats, batch) = cx.with_restriction(|| {
-        vertex_upsert_actions::<WriteTxnError, WriteTxnError, _>(
+    let stats = cx.with_restriction(|| {
+        let state = RefCell::new((&mut *transaction, &mut *database));
+        let controls = RefCell::new(&mut *execution);
+        vertex_upsert_actions(
             upsert,
             policy,
             merge_stats,
             outcome,
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                execution.checkpoint()
+                controls.borrow_mut().checkpoint()
+            },
+            |key, control| {
+                // Mask BEFORE lookup, not after reading a protected payload.
+                // A hidden field always supplies NULL, with no data-dependent
+                // source work, size admission, error or conflict observation.
+                // The MERGE reducer has already admitted this target's scope.
+                if !scope.allows_property(key) {
+                    control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
+                    return Ok(fgdb_types::CanonicalScalar::Null);
+                }
+                let state = state.borrow();
+                vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+            },
+            |batch| {
+                let mut state = state.borrow_mut();
+                let (transaction, database) = &mut *state;
+                let mut execution = controls.borrow_mut();
+                for row in batch.rows {
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
+                    execution.checkpoint()
+                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
+                    // Authorize EVERY original field in EVERY clause, even a
+                    // no-op or overwritten value. A scope escape refuses before
+                    // a later clause can read that vertex or erase the attempt.
+                    stage(transaction, database, batch.relation, row, &mut execution)
+                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
+                }
+                Ok(())
             },
         )
     })?;
-    for row in batch.rows {
-        cx.checkpoint()
-            .map_err(WriteTxnError::Interrupted)
-            .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
-        execution
-            .checkpoint()
-            .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
-        // Every selected original field is checked, including forbidden no-ops
-        // and label changes that would remove the vertex from the visible scope.
-        // Unselected branch actions never execute or consume action allowance.
-        stage(transaction, database, batch.relation, row, execution)
-            .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
-    }
     if returning {
         deliver(execution)
             .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
