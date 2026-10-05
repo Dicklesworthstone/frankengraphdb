@@ -316,12 +316,17 @@ impl<V: Vfs> BlockStore<V> {
             admission.observe(event)
         };
         let resolved = self
-            .inspect_root_blocks_observed(cx, &root, |_, _| true, &mut observe)
+            .inspect_root_blocks_observed(
+                cx,
+                &root,
+                |_, _, read| Some(super::decoded_block(read)),
+                &mut observe,
+            )
             .await?;
         // Still validate the complete vertex history. The validator retains its
         // existing owned version records, but no second patch collection is kept.
         drop(
-            self.inspect_root_patches_observed(cx, &root, |_, _| false, &mut observe)
+            self.inspect_root_patches_observed(cx, &root, |_, _, _| None::<()>, &mut observe)
                 .await?,
         );
         let mut blocks = Vec::new();

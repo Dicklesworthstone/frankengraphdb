@@ -4998,55 +4998,23 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     root_id: PartitionRootVersion,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
-    let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
+    // The sealed lists a retained writer holds come from the same verified
+    // reads as the decoded state.
+    let fgdb_strata::store::ReopenedPartition {
+        root,
+        blocks,
+        block_props,
+        patches,
+        sealed_blocks,
+        sealed_patches,
+    } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
-
-    // The sealed lists a retained writer would hold: bytes re-read from the
-    // store, which verifies identity on every read.
-    let mut sealed = Vec::with_capacity(root.blocks.len());
-    for (reference, decoded) in root.blocks.iter().zip(&blocks) {
-        let bytes = store
-            .get_bytes(cx, fgdb_strata::DeltaBlockVersion(reference.block_id))
-            .await?;
-        let property_patch = match fgdb_strata::decode_block_with_properties(&bytes)
-            .map_err(StoreError::Malformed)?
-            .1
-        {
-            Some((patch_id, _)) => Some(fgdb_strata::writer::SealedPropertyPatch {
-                patch_id,
-                bytes: store.get_edge_property_patch_bytes(cx, patch_id).await?,
-            }),
-            None => None,
-        };
-        let _ = decoded;
-        sealed.push(fgdb_strata::writer::SealedBlock {
-            block_id: reference.block_id,
-            bytes,
-            first_seq: reference.first_seq,
-            last_seq: reference.last_seq,
-            property_patch,
-        });
-    }
-    let mut sealed_patches = Vec::with_capacity(root.vertex_patches.len());
-    for reference in &root.vertex_patches {
-        sealed_patches.push(fgdb_strata::writer::SealedPatch {
-            patch_id: reference.patch_id,
-            bytes: store
-                .get_patch_bytes(
-                    cx,
-                    fgdb_strata::vertex::VertexPatchVersion(reference.patch_id),
-                )
-                .await?,
-            first_seq: reference.first_seq,
-            last_seq: reference.last_seq,
-        });
-    }
 
     let mut writer = BlockWriter::from_published_partition(
         GRAPH,
         BRANCH,
         PARTITION,
-        sealed,
+        sealed_blocks,
         sealed_patches,
         &blocks,
         &block_props,
