@@ -45,8 +45,12 @@ impl MixedMeter {
             GraphVertexUpsertBranch::Match => (input.on_match(), 0),
             GraphVertexUpsertBranch::Create => (input.on_create(), 1),
         };
+        // Both clauses produce original actions, even when the common SET
+        // overwrites an ON assignment. Require the exact expanded count; never
+        // accept a receipt that silently drops one clause from the allowance.
+        let expected = actions.len() as u128 + input.after().len() as u128;
         if stats.merge.created_vertices != created
-            || stats.action_effects as u128 != actions.len() as u128
+            || u128::from(stats.action_effects) != expected
         {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }

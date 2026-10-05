@@ -1,8 +1,9 @@
-//! Parse-once native vertex MERGE with bounded ON MATCH / ON CREATE actions.
+//! Parse-once native vertex MERGE with bounded ON and trailing SET clauses.
 
 use crate::{
-    GqlScalarParameter, GraphPatternTextError, GraphPatternTextErrorKind,
-    GraphVertexMergeTextErrorKind, GraphVertexUpsertBuildError, PreparedGraphVertexMergeText,
+    GqlScalarParameter, GraphMutationTextError, GraphMutationTextErrorKind,
+    GraphPatternTextError, GraphPatternTextErrorKind, GraphVertexMergeTextErrorKind,
+    GraphVertexUpsertBuildError, PreparedGraphVertexMergeText,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
@@ -18,6 +19,12 @@ pub(crate) enum VertexUpsertActionTemplate {
         key: PropertyKeyId,
         value: VertexUpsertValueTemplate,
     },
+    Expression {
+        key: PropertyKeyId,
+        properties: Vec<PropertyKeyId>,
+        program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
+        at: usize,
+    },
     Label {
         label: LabelId,
         present: bool,
@@ -29,12 +36,14 @@ pub struct PreparedGraphVertexUpsertText {
     pub(crate) merge: PreparedGraphVertexMergeText,
     pub(crate) on_match: Vec<VertexUpsertActionTemplate>,
     pub(crate) on_create: Vec<VertexUpsertActionTemplate>,
+    pub(crate) after: Vec<VertexUpsertActionTemplate>,
 }
 impl core::fmt::Debug for PreparedGraphVertexUpsertText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphVertexUpsertText")
             .field("on_match", &self.on_match.len())
             .field("on_create", &self.on_create.len())
+            .field("after", &self.after.len())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -50,6 +59,7 @@ pub enum GraphVertexUpsertTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Merge(GraphVertexMergeTextErrorKind),
     UpsertBuild(GraphVertexUpsertBuildError),
+    Expression(GraphMutationTextErrorKind),
     DuplicateBranch,
 }
 impl From<GraphPatternTextError> for GraphVertexUpsertTextError {
@@ -57,6 +67,14 @@ impl From<GraphPatternTextError> for GraphVertexUpsertTextError {
         Self {
             offset: error.offset,
             kind: GraphVertexUpsertTextErrorKind::Query(error.kind),
+        }
+    }
+}
+impl From<GraphMutationTextError> for GraphVertexUpsertTextError {
+    fn from(error: GraphMutationTextError) -> Self {
+        Self {
+            offset: error.offset,
+            kind: GraphVertexUpsertTextErrorKind::Expression(error.kind),
         }
     }
 }

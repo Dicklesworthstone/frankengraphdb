@@ -23,10 +23,22 @@ enum ParsedUpsertAction<'a> {
         key: Name<'a>,
         value: VertexUpsertValueTemplate,
     },
+    Expression {
+        key: Name<'a>,
+        properties: Vec<Name<'a>>,
+        program: Vec<MutationIntegerTemplateOp>,
+        at: usize,
+    },
     Label {
         label: Name<'a>,
     },
 }
+
+type ParsedUpsertClauses<'a> = (
+    Vec<ParsedUpsertAction<'a>>,
+    Vec<ParsedUpsertAction<'a>>,
+    Vec<ParsedUpsertAction<'a>>,
+);
 
 /// Pins the action resolver's argument to one inferred source lifetime. A bare
 /// closure parameter here has no type at its definition (E0282), and spelling it
@@ -173,12 +185,10 @@ impl<'a> Parser<'a> {
     fn upsert_branch_actions(
         &mut self,
         variable: Name<'a>,
-    ) -> Result<
-        (Vec<ParsedUpsertAction<'a>>, Vec<ParsedUpsertAction<'a>>),
-        GraphVertexUpsertTextError,
-    > {
+    ) -> Result<ParsedUpsertClauses<'a>, GraphVertexUpsertTextError> {
         let mut on_match = Vec::new();
         let mut on_create = Vec::new();
+        let mut after = Vec::new();
         let mut saw_match = false;
         let mut saw_create = false;
         while self.take_word("ON")? {
@@ -216,58 +226,35 @@ impl<'a> Parser<'a> {
             };
             self.upsert_assignments(variable, target, branch)?;
         }
-        // openCypher `MERGE ... SET ...` applies to the merged vertex whether it
-        // was matched or created, after any ON clause: it ends both branches.
+        // The common SET is a distinct clause, not a deduplicated extension
+        // of both branches. It sees prior effects and cannot erase an earlier
+        // failure or unauthorized write just by overwriting the same target.
         if self.take_word("SET")? {
-            let mut added = Vec::new();
-            self.upsert_assignments(variable, &mut added, GraphVertexUpsertBranch::Match)?;
-            // It runs after the ON clause, so it wins: an earlier assignment
-            // to the same property or label (literal values only) is dropped.
-            let same = |a: &ParsedUpsertAction<'_>, b: &ParsedUpsertAction<'_>| match (a, b) {
-                (
-                    ParsedUpsertAction::Property { key: a, .. },
-                    ParsedUpsertAction::Property { key: b, .. },
-                ) => a.text == b.text,
-                (
-                    ParsedUpsertAction::Label { label: a },
-                    ParsedUpsertAction::Label { label: b },
-                ) => a.text == b.text,
-                _ => false,
-            };
-            on_match.retain(|action| !added.iter().any(|later| same(action, later)));
-            on_create.retain(|action| !added.iter().any(|later| same(action, later)));
-            if on_match.len() + added.len() > crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
-                return Err(GraphVertexUpsertTextError {
-                    offset: self.current.at,
-                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
-                        crate::GraphVertexUpsertBuildError::TooManyActions {
-                            branch: GraphVertexUpsertBranch::Match,
-                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
-                            observed: on_match.len() + added.len(),
-                        },
-                    ),
-                });
-            }
-            on_create.extend(added.iter().cloned());
-            if on_create.len() > crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
-                return Err(GraphVertexUpsertTextError {
-                    offset: self.current.at,
-                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
-                        crate::GraphVertexUpsertBuildError::TooManyActions {
-                            branch: GraphVertexUpsertBranch::Create,
-                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
-                            observed: on_create.len(),
-                        },
-                    ),
-                });
-            }
-            on_match.extend(added);
+            self.upsert_assignments(variable, &mut after, GraphVertexUpsertBranch::Match)?;
         }
-        Ok((on_match, on_create))
+        for (branch, actions) in [
+            (GraphVertexUpsertBranch::Match, &on_match),
+            (GraphVertexUpsertBranch::Create, &on_create),
+        ] {
+            let observed = actions.len() + after.len();
+            if observed > crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
+                return Err(GraphVertexUpsertTextError {
+                    offset: self.current.at,
+                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
+                        crate::GraphVertexUpsertBuildError::TooManyActions {
+                            branch,
+                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+                            observed,
+                        },
+                    ),
+                });
+            }
+        }
+        Ok((on_match, on_create, after))
     }
 
-    /// One `SET` assignment list of a vertex MERGE branch, appended to
-    /// `target` under the branch's action limit.
+    /// One simultaneous SET clause. The native scalar compiler owns operator
+    /// precedence, lazy CASE/COALESCE, limits and parameter type admission.
     fn upsert_assignments(
         &mut self,
         variable: Name<'a>,
@@ -304,25 +291,62 @@ impl<'a> Parser<'a> {
                 let key = self.name()?;
                 self.punct(b'=', "=")?;
                 let at = self.current.at;
-                let value = match self.mutation_operand(&mut Vec::new())? {
-                    Operand::Literal(value) => VertexUpsertValueTemplate::Bound(value),
-                    Operand::Number(Number::Literal(value)) => {
-                        VertexUpsertValueTemplate::Bound(scalar(value, at)?)
+                let mut properties: Vec<Name<'a>> = Vec::new();
+                let operand = self.resolved_predicate(&mut |parser| {
+                    if !matches!(parser.current.kind, TokenKind::Word(_))
+                        || !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+                    {
+                        return Ok(None);
                     }
-                    Operand::Number(Number::Parameter(index)) => {
-                        VertexUpsertValueTemplate::Parameter { index, at }
-                    }
-                    Operand::Column(_) | Operand::Integer { .. } => {
+                    let source = parser.name()?;
+                    if source.text != variable.text {
                         return Err(error(
-                            at,
-                            GraphPatternTextErrorKind::Expected(
-                                "scalar literal or parameter branch assignment",
-                            ),
-                        )
-                        .into());
+                            source.at,
+                            GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                        ));
                     }
-                };
-                ParsedUpsertAction::Property { key, value }
+                    parser.punct(b'.', ".")?;
+                    let property = parser.name()?;
+                    if let Some(column) = properties.iter().position(|p| p.text == property.text) {
+                        return Ok(Some(column));
+                    }
+                    parser.capacity(
+                        properties.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    let column = properties.len();
+                    properties.push(property);
+                    Ok(Some(column))
+                })?;
+                match operand {
+                    Operand::Literal(value) => ParsedUpsertAction::Property {
+                        key,
+                        value: VertexUpsertValueTemplate::Bound(value),
+                    },
+                    Operand::Number(Number::Literal(value)) => ParsedUpsertAction::Property {
+                        key,
+                        value: VertexUpsertValueTemplate::Bound(scalar(value, at)?),
+                    },
+                    Operand::Number(Number::Parameter(index)) => ParsedUpsertAction::Property {
+                        key,
+                        value: VertexUpsertValueTemplate::Parameter { index, at },
+                    },
+                    Operand::Column(column) => ParsedUpsertAction::Expression {
+                        key,
+                        properties,
+                        program: vec![MutationIntegerTemplateOp::Bound(
+                            crate::GraphIntegerOp::ScalarColumn(column),
+                        )],
+                        at,
+                    },
+                    Operand::Integer { program, at } => ParsedUpsertAction::Expression {
+                        key,
+                        properties,
+                        program,
+                        at,
+                    },
+                }
             };
             target.push(action);
             if !self.take(b',')? {
@@ -532,11 +556,11 @@ impl PreparedGraphVertexUpsertText {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let (variable, labels, properties) =
             parser.vertex_merge_pattern().map_err(upsert_merge_error)?;
-        let (parsed_match, parsed_create) = parser.upsert_branch_actions(variable)?;
-        if parsed_match.is_empty() && parsed_create.is_empty() {
+        let (parsed_match, parsed_create, parsed_after) = parser.upsert_branch_actions(variable)?;
+        if parsed_match.is_empty() && parsed_create.is_empty() && parsed_after.is_empty() {
             return Err(error(
                 statement.len(),
-                GraphPatternTextErrorKind::Expected("ON MATCH SET or ON CREATE SET"),
+                GraphPatternTextErrorKind::Expected("ON MATCH SET, ON CREATE SET or SET"),
             )
             .into());
         }
@@ -575,6 +599,20 @@ impl PreparedGraphVertexUpsertText {
                             };
                             VertexUpsertActionTemplate::Property { key, value }
                         }
+                        ParsedUpsertAction::Expression { key, properties, program, at } => {
+                            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)?
+                            else {
+                                unreachable!("symbol domain checked")
+                            };
+                            let properties = properties.into_iter().map(|name| {
+                                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
+                                else {
+                                    unreachable!("symbol domain checked")
+                                };
+                                Ok(key)
+                            }).collect::<Result<Vec<_>, GraphPatternTextError>>()?;
+                            VertexUpsertActionTemplate::Expression { key, properties, program, at }
+                        }
                         ParsedUpsertAction::Label { label } => {
                             let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)?
                             else {
@@ -591,6 +629,7 @@ impl PreparedGraphVertexUpsertText {
         });
         let on_match = resolve_actions(parsed_match)?;
         let on_create = resolve_actions(parsed_create)?;
+        let after = resolve_actions(parsed_after)?;
         drop(resolve_actions);
         let merge = resolve_merge_template(
             statement,
@@ -602,11 +641,7 @@ impl PreparedGraphVertexUpsertText {
             &mut symbol,
         )
         .map_err(upsert_merge_error)?;
-        Ok(Self {
-            merge,
-            on_match,
-            on_create,
-        })
+        Ok(Self { merge, on_match, on_create, after })
     }
 
     pub fn bind_parameters(
@@ -625,17 +660,23 @@ impl PreparedGraphVertexUpsertText {
                     };
                     GraphVertexUpsertAction::SetProperty { key: *key, value }
                 }
+                VertexUpsertActionTemplate::Expression { key, properties, program, at } =>
+                    GraphVertexUpsertAction::SetExpression {
+                        key: *key,
+                        properties: properties.clone(),
+                        value: super::integer::bind_integer(program, &values, *at)?,
+                    },
                 VertexUpsertActionTemplate::Label { label, present } =>
                     GraphVertexUpsertAction::SetLabel { label: *label, present: *present },
             })).collect()
         };
         let on_match = bind_actions(&self.on_match)?;
         let on_create = bind_actions(&self.on_create)?;
-        PreparedGraphVertexUpsert::prepare(merge, on_match, on_create).map_err(|source| {
-            GraphVertexUpsertTextError {
+        let after = bind_actions(&self.after)?;
+        PreparedGraphVertexUpsert::prepare_with_trailing_actions(merge, on_match, on_create, after)
+            .map_err(|source| GraphVertexUpsertTextError {
                 offset: self.merge.selection.return_at,
                 kind: GraphVertexUpsertTextErrorKind::UpsertBuild(source),
-            }
-        })
+            })
     }
 }
