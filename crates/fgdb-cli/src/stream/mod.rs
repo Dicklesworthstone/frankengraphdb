@@ -11,9 +11,9 @@
 //! RETURN slots select keys and summaries without payload copies or narrowing.
 //! Unsupported aggregate definitions refuse during preparation, never retry.
 
-use super::{
-    Failure, Options, cell, emit, execution_failure, human_value, policy, quoted, value_cell,
-};
+#[cfg(test)]
+use super::policy;
+use super::{Failure, Options, cell, emit, execution_failure, human_value, quoted, value_cell};
 use asupersync::fs::Vfs;
 use fgdb::{Database, PreparedNativeRead, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
@@ -40,7 +40,7 @@ pub(super) fn run<V: Vfs + Clone>(
             | PreparedNativeRead::PipelineAggregate(_)
     ) {
         let mut cursor = prepared
-            .stream_aggregate(db, cx, &options.params, policy())
+            .stream_aggregate(db, cx, &options.params, options.budget.policy())
             .map_err(execution_failure)?;
         let columns = cursor.columns().to_vec();
         let slots = cursor.output_slots().to_vec();
@@ -59,7 +59,7 @@ pub(super) fn run<V: Vfs + Clone>(
         return result;
     }
     let (columns, mut cursor) = prepared
-        .stream(db, cx, &options.params, policy())
+        .stream(db, cx, &options.params, options.budget.policy())
         .map_err(execution_failure)?;
     // In particular, a temporal stream names its actual retained cut, not the
     // live writer's later frontier. No second database read supplies metadata.

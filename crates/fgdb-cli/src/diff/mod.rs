@@ -5,7 +5,9 @@
 //! compare text renderings. Delivery retains one encoded row at a time, not a
 //! second result table. Source/result state remains governed in-memory state.
 
-use super::{Failure, Options, cell, emit, execution_failure, human_value, policy, quoted};
+use super::{
+    Failure, Options, QueryBudget, cell, emit, execution_failure, human_value, quoted, set_decimal,
+};
 use asupersync::fs::Vfs;
 use fgdb::{Database, QueryValue};
 use fgdb_delta_types::ZWeight;
@@ -20,10 +22,7 @@ const DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) struct DiffOptions {
     before: Option<u64>,
     after: Option<u64>,
-    records: Option<u64>,
-    rows: Option<u64>,
-    work: Option<u64>,
-    scratch: Option<u64>,
+    budget: QueryBudget,
     output_bytes: Option<u64>,
 }
 impl DiffOptions {
@@ -31,26 +30,14 @@ impl DiffOptions {
         let target = match flag {
             "--before" => &mut self.before,
             "--after" => &mut self.after,
-            "--max-snapshot-records" => &mut self.records,
-            "--max-result-rows" => &mut self.rows,
-            "--max-work-units" => &mut self.work,
-            "--max-scratch-entries" => &mut self.scratch,
             "--max-output-bytes" => &mut self.output_bytes,
+            "--max-snapshot-records"
+            | "--max-result-rows"
+            | "--max-work-units"
+            | "--max-scratch-entries" => return self.budget.set(flag, raw),
             _ => return Err(Failure::usage("unknown diff flag")),
         };
-        if target.is_some() {
-            return Err(Failure::usage(format!("{flag} must be supplied only once")));
-        }
-        // Reject signs, whitespace, fractions and overflow, without echoing
-        // parameter/query payloads. Never parse through float or a platform usize.
-        if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(Failure::usage(format!("{flag} requires decimal u64")));
-        }
-        *target = Some(
-            raw.parse()
-                .map_err(|_| Failure::usage(format!("{flag} exceeds u64")))?,
-        );
-        Ok(())
+        set_decimal(target, flag, raw)
     }
 
     pub(super) fn validate(&self) -> Result<(), Failure> {
@@ -71,16 +58,7 @@ impl DiffOptions {
     }
 
     fn policy(&self) -> GqlQueryPolicy {
-        let defaults = policy();
-        GqlQueryPolicy::new(
-            self.records
-                .unwrap_or(defaults.rows.max_snapshot_records().unwrap_or(u64::MAX)),
-            self.rows
-                .unwrap_or(defaults.rows.max_result_rows().unwrap_or(u64::MAX)),
-            self.work.unwrap_or(defaults.evaluator.max_work_units),
-            self.scratch
-                .unwrap_or(defaults.evaluator.max_scratch_entries),
-        )
+        self.budget.policy()
     }
 }
 

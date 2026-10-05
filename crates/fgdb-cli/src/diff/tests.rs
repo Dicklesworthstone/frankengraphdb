@@ -1,4 +1,5 @@
 use super::*;
+use crate::policy;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -714,4 +715,69 @@ fn native_diff_delivery_preserves_complete_queries_and_exact_domains_after_reope
         assert_eq!(db.frontier().unwrap(), at); // Comparisons never publish a commit.
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn query_and_replay_take_the_same_exact_limits_and_write_refuses_them() {
+    let argv = |extra: &[&str]| -> Vec<String> {
+        let mut argv: Vec<String> = ["--db", "unused", "--key-file", "unused"]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect();
+        argv.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        argv.push("MATCH (n) RETURN n".into());
+        argv
+    };
+    assert_eq!(
+        okay(crate::parse(&argv(&[]), "query")).budget.policy(),
+        policy()
+    );
+    let parsed = okay(crate::parse(
+        &argv(&[
+            "--max-snapshot-records",
+            "1",
+            "--max-result-rows",
+            "2",
+            "--max-work-units",
+            "3",
+            "--max-scratch-entries",
+            "4",
+        ]),
+        "query",
+    ));
+    assert_eq!(parsed.budget.policy(), GqlQueryPolicy::new(1, 2, 3, 4));
+    for bad in [
+        &["--max-work-units", "1", "--max-work-units", "2"][..],
+        &["--max-work-units", "1e3"],
+        &["--max-work-units", "-1"],
+        &["--max-result-rows", "18446744073709551616"],
+    ] {
+        let error = crate::parse(&argv(bad), "query")
+            .err()
+            .expect("a malformed or repeated limit is refused");
+        assert_eq!(error.code, 2);
+    }
+    let replay: Vec<String> = [
+        "--db",
+        "unused",
+        "--key-file",
+        "unused",
+        "--max-work-units",
+        "7",
+        "--certificate",
+        "unused",
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    let replay = okay(crate::parse(&replay, "replay"));
+    assert_eq!(
+        replay.budget.policy(),
+        GqlQueryPolicy::new(100_000, 100_000, 7, 10_000_000)
+    );
+    okay(crate::parse(&argv(&[]), "write"));
+    let error = crate::parse(&argv(&["--max-work-units", "1"]), "write")
+        .err()
+        .expect("write takes no query limits");
+    assert_eq!(error.code, 2);
 }
