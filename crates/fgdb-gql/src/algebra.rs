@@ -168,10 +168,8 @@ impl VertexPredicate {
                 value,
             } => properties.into_iter().any(|(actual_key, scalar)| {
                 actual_key == *key
-                    && comparison.accepts_scalar_pair(
-                        Some(scalar),
-                        Some(&CanonicalScalar::Int(*value)),
-                    )
+                    && comparison
+                        .accepts_scalar_pair(Some(scalar), Some(&CanonicalScalar::Int(*value)))
             }),
             Self::ScalarProperty { key, predicate } => {
                 let actual = properties
@@ -1147,10 +1145,8 @@ mod tests {
                 };
                 assert_eq!(predicate.matches(&[], &properties), expected);
                 assert_eq!(
-                    predicate.matches_borrowed(
-                        [],
-                        properties.iter().map(|(key, value)| (*key, value)),
-                    ),
+                    predicate
+                        .matches_borrowed([], properties.iter().map(|(key, value)| (*key, value)),),
                     expected
                 );
             }
@@ -1198,9 +1194,11 @@ mod tests {
             let rows = plan
                 .execute(vertices, edges, |id, predicates| {
                     let properties = [(PropertyKeyId(4), values[id.0 as usize - 1].clone())];
-                    Ok::<_, ()>(predicates.iter().all(|predicate| {
-                        predicate.matches(&[LabelId(3)], &properties)
-                    }))
+                    Ok::<_, ()>(
+                        predicates
+                            .iter()
+                            .all(|predicate| predicate.matches(&[LabelId(3)], &properties)),
+                    )
                 })
                 .unwrap();
             assert_eq!(rows, vec![VId(2), VId(3)], "{statement}");

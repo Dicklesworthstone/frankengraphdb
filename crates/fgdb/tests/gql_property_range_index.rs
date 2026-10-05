@@ -19,6 +19,46 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const L: LabelId = LabelId(5);
 
+/// Independent exact order for an Int/Float pair, not the engine comparator:
+/// i128 arithmetic on the float's integral part, with NaN after every number
+/// as in the canonical STRICT_PORTABLE profile. Other pairs are None.
+fn numeric_order(left: &CanonicalScalar, right: &CanonicalScalar) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    fn int_float(integer: i64, float: f64) -> Ordering {
+        if float.is_nan() || float == f64::INFINITY {
+            return Ordering::Less;
+        }
+        if float == f64::NEG_INFINITY {
+            return Ordering::Greater;
+        }
+        let floor = float.floor();
+        // Saturation past 2^127 is far outside the i64 range either way.
+        match i128::from(integer).cmp(&(floor as i128)) {
+            Ordering::Equal if floor < float => Ordering::Less,
+            order => order,
+        }
+    }
+    let float_float = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).expect("non-NaN numbers order"),
+    };
+    match (left, right) {
+        (CanonicalScalar::Int(left), CanonicalScalar::Int(right)) => Some(left.cmp(right)),
+        (CanonicalScalar::Float(left), CanonicalScalar::Float(right)) => {
+            Some(float_float(left.get(), right.get()))
+        }
+        (CanonicalScalar::Int(left), CanonicalScalar::Float(right)) => {
+            Some(int_float(*left, right.get()))
+        }
+        (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
+            Some(int_float(*right, left.get()).reverse())
+        }
+        _ => None,
+    }
+}
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0xc1; 32],
@@ -65,14 +105,18 @@ impl Op {
     }
 
     // Deliberately independent of VertexPredicate and its encoded index keys.
+    // Int and Float compare exactly across kinds; other unequal kinds never.
     fn accepts(self, actual: &CanonicalScalar, bound: &CanonicalScalar) -> bool {
-        if matches!(actual, CanonicalScalar::Null)
-            || matches!(bound, CanonicalScalar::Null)
-            || std::mem::discriminant(actual) != std::mem::discriminant(bound)
-        {
+        if matches!(actual, CanonicalScalar::Null) || matches!(bound, CanonicalScalar::Null) {
             return false;
         }
-        let order = actual.cmp(bound);
+        let order = match numeric_order(actual, bound) {
+            Some(order) => order,
+            None if std::mem::discriminant(actual) == std::mem::discriminant(bound) => {
+                actual.cmp(bound)
+            }
+            None => return false,
+        };
         match self {
             Self::Lt => order == Ordering::Less,
             Self::Le => order != Ordering::Greater,

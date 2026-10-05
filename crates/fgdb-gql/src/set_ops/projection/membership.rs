@@ -51,10 +51,8 @@ fn equal<E>(
                 None
             } else {
                 match (left, right) {
-                    (GraphValue::Scalar(left), GraphValue::Scalar(right))
-                        if core::mem::discriminant(left) == core::mem::discriminant(right) =>
-                    {
-                        Some(IntegerComparison::Equal.accepts_scalar_pair(Some(left), Some(right)))
+                    (GraphValue::Scalar(left), GraphValue::Scalar(right)) => {
+                        IntegerComparison::Equal.evaluate_scalar_pair(Some(left), Some(right))
                     }
                     (GraphValue::Vertex(left), GraphValue::Vertex(right)) => Some(left == right),
                     (GraphValue::Edge(left), GraphValue::Edge(right)) => Some(left == right),

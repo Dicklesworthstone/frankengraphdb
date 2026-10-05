@@ -10,6 +10,46 @@ use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
+
+/// Independent exact order for an Int/Float pair, not the engine comparator:
+/// i128 arithmetic on the float's integral part, with NaN after every number
+/// as in the canonical STRICT_PORTABLE profile. Other pairs are None.
+fn numeric_order(left: &CanonicalScalar, right: &CanonicalScalar) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    fn int_float(integer: i64, float: f64) -> Ordering {
+        if float.is_nan() || float == f64::INFINITY {
+            return Ordering::Less;
+        }
+        if float == f64::NEG_INFINITY {
+            return Ordering::Greater;
+        }
+        let floor = float.floor();
+        // Saturation past 2^127 is far outside the i64 range either way.
+        match i128::from(integer).cmp(&(floor as i128)) {
+            Ordering::Equal if floor < float => Ordering::Less,
+            order => order,
+        }
+    }
+    let float_float = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).expect("non-NaN numbers order"),
+    };
+    match (left, right) {
+        (CanonicalScalar::Int(left), CanonicalScalar::Int(right)) => Some(left.cmp(right)),
+        (CanonicalScalar::Float(left), CanonicalScalar::Float(right)) => {
+            Some(float_float(left.get(), right.get()))
+        }
+        (CanonicalScalar::Int(left), CanonicalScalar::Float(right)) => {
+            Some(int_float(*left, right.get()))
+        }
+        (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
+            Some(int_float(*right, left.get()).reverse())
+        }
+        _ => None,
+    }
+}
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
@@ -97,11 +137,20 @@ fn scalar_bindings_match_independent_encoded_order_for_every_supported_compariso
                     let actual = actual.as_ref()?;
                     if matches!(actual, CanonicalScalar::Null)
                         || matches!(expected, CanonicalScalar::Null)
-                        || CanonicalScalarKind::of(actual) != CanonicalScalarKind::of(expected)
                     {
                         return None;
                     }
-                    let order = actual.encode().unwrap().cmp(&expected.encode().unwrap());
+                    // Int and Float compare exactly across kinds; any other
+                    // pair of unequal kinds is UNKNOWN.
+                    let order = match numeric_order(actual, expected) {
+                        Some(order) => order,
+                        None if CanonicalScalarKind::of(actual)
+                            == CanonicalScalarKind::of(expected) =>
+                        {
+                            actual.encode().unwrap().cmp(&expected.encode().unwrap())
+                        }
+                        None => return None,
+                    };
                     let accepts = if ["<>", "<=", ">="].contains(&operator) {
                         order != comparison
                     } else {
@@ -520,7 +569,7 @@ fn scalar_bindings_keep_exact_limits_and_every_interruption_boundary() {
 
 /// fgdb-qnqrj: a decimal literal is a Float operand. It selects exactly the
 /// rows a Float-typed parameter of the same value selects, for every
-/// comparison, and it never matches another kind.
+/// comparison; it compares with an Int exactly and never matches another kind.
 #[test]
 fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
     let float = |value: f64| Some(CanonicalScalar::Float(CanonicalF64::new(value)));
@@ -560,8 +609,9 @@ fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
             "{operator}"
         );
     }
-    // Independent: only 0.75 and 1.0 exceed 0.5; the Int 1 is another kind.
-    assert_eq!(run(&literal(">"), &values), [VId(2), VId(3)]);
+    // Independent: 0.75, 1.0 and the Int 1 exceed 0.5; the absent row never does.
+    assert_eq!(run(&literal(">"), &values), [VId(2), VId(3), VId(4)]);
+    assert_eq!(run(&literal("<"), &values), [VId(0)]);
     // Not decimals: a trailing or leading point, and a magnitude with no
     // finite f64, refuse.
     for text in [

@@ -20,7 +20,10 @@ impl NumericBounds {
         Self {
             key,
             ranges: [
-                PropertyRange::new(key, &CanonicalScalar::Int(0).encode().expect("integer encoding")),
+                PropertyRange::new(
+                    key,
+                    &CanonicalScalar::Int(0).encode().expect("integer encoding"),
+                ),
                 PropertyRange::new(
                     key,
                     &CanonicalScalar::Float(CanonicalF64::new(0.0))
@@ -95,9 +98,11 @@ impl NumericBounds {
 
 fn numeric_operand(predicate: &VertexPredicate) -> Option<(PropertyKeyId, C, CanonicalScalar)> {
     let (key, comparison, value) = match predicate {
-        VertexPredicate::IntegerProperty { key, comparison, value } => {
-            (*key, *comparison, CanonicalScalar::Int(*value))
-        }
+        VertexPredicate::IntegerProperty {
+            key,
+            comparison,
+            value,
+        } => (*key, *comparison, CanonicalScalar::Int(*value)),
         VertexPredicate::ScalarProperty { key, predicate } => match predicate.value() {
             value @ (CanonicalScalar::Int(_) | CanonicalScalar::Float(_)) => {
                 (*key, predicate.comparison(), value.clone())
@@ -110,10 +115,13 @@ fn numeric_operand(predicate: &VertexPredicate) -> Option<(PropertyKeyId, C, Can
 }
 
 fn predicates(operators: &[GlaOperator]) -> impl Iterator<Item = &VertexPredicate> {
-    operators.iter().filter_map(|operator| match operator {
-        GlaOperator::Select { predicates, .. } => Some(predicates.as_slice()),
-        _ => None,
-    }).flatten()
+    operators
+        .iter()
+        .filter_map(|operator| match operator {
+            GlaOperator::Select { predicates, .. } => Some(predicates.as_slice()),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// The caller admits only a single-domain root selection. This must not be
@@ -142,9 +150,11 @@ pub(super) fn bound_vertices<'a, E>(
     for vid in &candidates {
         control(SourceEvent::Work)?;
         control(SourceEvent::SnapshotRecord)?;
-        if let Some(row) = snapshot.property_index.visible_row(
-            &snapshot.patches, *vid, as_of, control,
-        )? {
+        if let Some(row) =
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, *vid, as_of, control)?
+        {
             let mut matches = true;
             for predicate in predicates(operators) {
                 control(SourceEvent::Work)?;
@@ -168,7 +178,13 @@ mod tests {
     use fgdb_strata::vertex::{VertexPatchRows, decode_patch, encode_patch};
 
     const KEY: PropertyKeyId = PropertyKeyId(1);
-    const COMPARISONS: [C; 5] = [C::Equal, C::Less, C::LessOrEqual, C::Greater, C::GreaterOrEqual];
+    const COMPARISONS: [C; 5] = [
+        C::Equal,
+        C::Less,
+        C::LessOrEqual,
+        C::Greater,
+        C::GreaterOrEqual,
+    ];
 
     fn float(value: f64) -> CanonicalScalar {
         CanonicalScalar::Float(CanonicalF64::new(value))
@@ -176,15 +192,24 @@ mod tests {
 
     fn values() -> Vec<CanonicalScalar> {
         let mut values = vec![
-            CanonicalScalar::Int(i64::MIN), CanonicalScalar::Int(i64::MIN + 1),
+            CanonicalScalar::Int(i64::MIN),
+            CanonicalScalar::Int(i64::MIN + 1),
             CanonicalScalar::Int(-9_007_199_254_740_993),
             CanonicalScalar::Int(9_007_199_254_740_993),
-            CanonicalScalar::Int(i64::MAX - 1023), CanonicalScalar::Int(i64::MAX),
-            float(f64::NEG_INFINITY), float(f64::INFINITY), float(f64::NAN),
-            float(-9_223_372_036_854_775_808.0), float(9_223_372_036_854_775_808.0),
-            float(-9_007_199_254_740_992.0), float(9_007_199_254_740_992.0),
-            float(9_007_199_254_740_994.0), float(9_223_372_036_854_774_784.0),
-            float(-f64::from_bits(1)), float(f64::from_bits(1)), float(-0.0),
+            CanonicalScalar::Int(i64::MAX - 1023),
+            CanonicalScalar::Int(i64::MAX),
+            float(f64::NEG_INFINITY),
+            float(f64::INFINITY),
+            float(f64::NAN),
+            float(-9_223_372_036_854_775_808.0),
+            float(9_223_372_036_854_775_808.0),
+            float(-9_007_199_254_740_992.0),
+            float(9_007_199_254_740_992.0),
+            float(9_007_199_254_740_994.0),
+            float(9_223_372_036_854_774_784.0),
+            float(-f64::from_bits(1)),
+            float(f64::from_bits(1)),
+            float(-0.0),
         ];
         for n in -16..=16 {
             values.push(CanonicalScalar::Int(n));
@@ -209,25 +234,41 @@ mod tests {
                 bounds.constrain(literal, comparison);
                 for actual in &values {
                     let accepted = bounds.ranges.iter().any(|range| contains(range, actual));
-                    assert_eq!(accepted,
+                    assert_eq!(
+                        accepted,
                         comparison.accepts_scalar_pair(Some(actual), Some(literal)),
-                        "literal={literal:?} actual={actual:?} comparison={comparison:?}");
+                        "literal={literal:?} actual={actual:?} comparison={comparison:?}"
+                    );
                 }
-                for unrelated in [CanonicalScalar::Null, CanonicalScalar::Bool(true),
+                for unrelated in [
+                    CanonicalScalar::Null,
+                    CanonicalScalar::Bool(true),
                     CanonicalScalar::ucs_basic_text("100").unwrap(),
-                    CanonicalScalar::bytes(vec![100]).unwrap()] {
-                    assert!(!bounds.ranges.iter().any(|range| contains(range, &unrelated)));
+                    CanonicalScalar::bytes(vec![100]).unwrap(),
+                ] {
+                    assert!(
+                        !bounds
+                            .ranges
+                            .iter()
+                            .any(|range| contains(range, &unrelated))
+                    );
                 }
             }
         }
     }
 
     fn patch(rows: &[(u128, u64, Option<u64>, CanonicalScalar)]) -> VertexPatchRows {
-        let rows: Vec<_> = rows.iter().map(|(id, created, retired, value)| VertexRow {
-            vid: VId(*id), birth_ordinal: *id as u64,
-            created_at: CommitSeq(*created), retired_at: retired.map(CommitSeq),
-            labels: vec![], props: vec![(KEY, value.clone())],
-        }).collect();
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(id, created, retired, value)| VertexRow {
+                vid: VId(*id),
+                birth_ordinal: *id as u64,
+                created_at: CommitSeq(*created),
+                retired_at: retired.map(CommitSeq),
+                labels: vec![],
+                props: vec![(KEY, value.clone())],
+            })
+            .collect();
         decode_patch(&encode_patch(&rows).unwrap()).unwrap()
     }
 
@@ -245,23 +286,34 @@ mod tests {
         let mut bounds = NumericBounds::new(KEY);
         bounds.constrain(&CanonicalScalar::Int(100), C::GreaterOrEqual);
         bounds.constrain(&float(101.0), C::Less);
-        assert_eq!(bounds.candidates(&index, &mut |_| Ok::<_, ()>(())).unwrap(),
-            BTreeSet::from([VId(1), VId(2), VId(3)]));
+        assert_eq!(
+            bounds.candidates(&index, &mut |_| Ok::<_, ()>(())).unwrap(),
+            BTreeSet::from([VId(1), VId(2), VId(3)])
+        );
         let mut exact = NumericBounds::new(KEY);
         exact.constrain(&CanonicalScalar::Int(9_007_199_254_740_993), C::Equal);
-        assert_eq!(exact.candidates(&index, &mut |_| Ok::<_, ()>(())).unwrap(),
-            BTreeSet::from([VId(5)]));
+        assert_eq!(
+            exact.candidates(&index, &mut |_| Ok::<_, ()>(())).unwrap(),
+            BTreeSet::from([VId(5)])
+        );
         let mut interval = NumericBounds::new(KEY);
         interval.constrain(&float(9_007_199_254_740_992.0), C::GreaterOrEqual);
         interval.constrain(&CanonicalScalar::Int(9_007_199_254_740_993), C::Less);
-        assert_eq!(interval.candidates(&index, &mut |_| Ok::<_, ()>(())).unwrap(),
-            BTreeSet::from([VId(6)]));
+        assert_eq!(
+            interval
+                .candidates(&index, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            BTreeSet::from([VId(6)])
+        );
     }
 
     #[test]
     fn candidate_union_deduplicates_type_changes_and_visibility_stays_authoritative() {
         let patches = vec![
-            patch(&[(1, 1, None, CanonicalScalar::Int(100)), (2, 1, None, float(100.0))]),
+            patch(&[
+                (1, 1, None, CanonicalScalar::Int(100)),
+                (2, 1, None, float(100.0)),
+            ]),
             patch(&[(1, 2, None, float(100.0)), (2, 2, None, float(99.0))]),
             patch(&[(1, 2, Some(3), float(100.0))]),
         ];
@@ -269,18 +321,30 @@ mod tests {
         let mut bounds = NumericBounds::new(KEY);
         bounds.constrain(&float(100.0), C::Equal);
         let mut allocations = 0;
-        let candidates = bounds.candidates(&index, &mut |event| {
-            allocations += usize::from(event == SourceEvent::ScratchEntry);
-            Ok::<_, ()>(())
-        }).unwrap();
+        let candidates = bounds
+            .candidates(&index, &mut |event| {
+                allocations += usize::from(event == SourceEvent::ScratchEntry);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         assert_eq!(candidates, BTreeSet::from([VId(1), VId(2)]));
-        assert_eq!(allocations, 2, "one set entry per ID, not per type or version");
+        assert_eq!(
+            allocations, 2,
+            "one set entry per ID, not per type or version"
+        );
         for (at, expected) in [(1, vec![VId(1), VId(2)]), (2, vec![VId(1)]), (3, vec![])] {
-            let actual: Vec<_> = candidates.iter().filter_map(|vid| {
-                index.visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
-                    .unwrap().filter(|row| C::Equal.accepts_scalar_pair(
-                        Some(&row.props[0].1), Some(&float(100.0)))).map(|row| row.vid)
-            }).collect();
+            let actual: Vec<_> = candidates
+                .iter()
+                .filter_map(|vid| {
+                    index
+                        .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
+                        .unwrap()
+                        .filter(|row| {
+                            C::Equal.accepts_scalar_pair(Some(&row.props[0].1), Some(&float(100.0)))
+                        })
+                        .map(|row| row.vid)
+                })
+                .collect();
             assert_eq!(actual, expected, "at={at}");
         }
     }
@@ -290,8 +354,14 @@ mod tests {
         // The same ID is in multiple historical values and BOTH type domains.
         // Even duplicate candidate visits must cross the work/cancel seam.
         let patches = vec![
-            patch(&[(1, 1, None, CanonicalScalar::Int(100)), (2, 1, None, float(100.0))]),
-            patch(&[(1, 2, None, float(101.0)), (2, 2, None, CanonicalScalar::Int(101))]),
+            patch(&[
+                (1, 1, None, CanonicalScalar::Int(100)),
+                (2, 1, None, float(100.0)),
+            ]),
+            patch(&[
+                (1, 2, None, float(101.0)),
+                (2, 2, None, CanonicalScalar::Int(101)),
+            ]),
         ];
         let index = PropertyEqualityIndex::build(&patches);
         let mut bounds = NumericBounds::new(KEY);
