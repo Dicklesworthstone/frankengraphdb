@@ -419,10 +419,11 @@ fn inactive_create_actions_need_no_quota_and_matching_can_remain_read_only() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
         let base = upsert(1, 2);
-        let prepared = PreparedGraphEdgeUpsert::prepare(
+        let prepared = PreparedGraphEdgeUpsert::prepare_with_clauses(
             base.merge().clone(),
             vec![],
             base.on_create().to_vec(),
+            vec![],
         )
         .unwrap();
         let mut limits = policy(0);
