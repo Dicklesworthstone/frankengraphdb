@@ -617,6 +617,14 @@ gate_diag() {
 #                 Sentinel: "(MODULE_TIMEOUT)" — a partial partition is never
 #                 a product verdict about the whole tracked set, whatever else
 #                 the log contains.
+#   ubs-partial-scan  UBS finished but did not scan the whole domain (bead
+#                 fgdb-zww2g: since UBS v5.4.17 the rust module's ast-grep
+#                 output over this repository exceeds a hard-coded 16 MiB cap,
+#                 is truncated, and the run ends "Partial run" with exit 2; the
+#                 same tree read 872 criticals complete and 792 truncated).
+#                 Sentinels, UBS's own words: "Partial run:" and "analysis
+#                 incomplete:". NOT "output exceeds", which UBS also prints
+#                 when only its prefilter is bypassed and the scan completes.
 #
 # Any other content — including unreadable or absent logs — prints "none" and
 # returns 1: the failure stays a product verdict. This function reads logs and
@@ -648,6 +656,12 @@ gate_env_failure_class() {
   for log in "$@"; do
     if grep -Fq '(MODULE_TIMEOUT)' "$log"; then
       printf 'ubs-module-timeout'
+      return 0
+    fi
+  done
+  for log in "$@"; do
+    if grep -Fq 'Partial run:' "$log" || grep -Fq 'analysis incomplete:' "$log"; then
+      printf 'ubs-partial-scan'
       return 0
     fi
   done

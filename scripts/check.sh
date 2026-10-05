@@ -332,7 +332,10 @@ run_core_gate() {
     else
       gate_rc=${PIPESTATUS[0]}
     fi
-    if [ "$gate_rc" -ne 0 ] && [ "$(gate_env_failure_class "$core_log")" != "none" ]; then
+    # A truncated UBS scan is a property of the tree and the tool, not of load:
+    # a retry would rescan for the same partial result (zww2g).
+    if [ "$gate_rc" -ne 0 ] && [ "$(gate_env_failure_class "$core_log")" != "none" ] \
+      && [ "$(gate_env_failure_class "$core_log")" != "ubs-partial-scan" ]; then
       printf '    core retry 1/1: attempt 1 hit %s; retrying once\n' "$(gate_env_failure_class "$core_log")"
       if "$@" 2>&1 | tee -- "$core_log"; then
         gate_rc=0
@@ -933,6 +936,17 @@ run_ubs() {
     echo "ERROR: an UBS scanner module hit its wall-clock budget; the partial" >&2
     echo "  scan is not a verdict about the tracked set. Retryable — raise" >&2
     echo "  UBS_MODULE_TIMEOUT only with measured evidence, per zoar." >&2
+    return 1
+  fi
+  # fgdb-zww2g: the same defect class through a different door. A scanner whose
+  # output UBS truncated reports a count over part of the domain, and that
+  # count is not a function of the code (same tree: 872 complete, 792
+  # truncated; trees with no panic-site change: 58 apart). run_core_gate
+  # classifies the sentinel as ubs-partial-scan: UNRUN, never RED or PASS.
+  if grep -Fq 'Partial run:' "$log" || grep -Fq 'analysis incomplete:' "$log"; then
+    echo "ERROR: UBS scanned only part of the tracked Rust set (\"Partial run\");" >&2
+    echo "  a ratchet over a truncated scan is noise, not a verdict. Do not set" >&2
+    echo "  UBS_ALLOW_PARTIAL and do not re-pin to a partial count (zww2g)." >&2
     return 1
   fi
   # The verdict is the RATCHET, not ubs's raw exit status. ubs exits 1 whenever
@@ -1643,6 +1657,34 @@ ubs_critical_ratchet() {
   echo "    critical ratchet: $total across ${#observed[@]} class(es), all at baseline"
   return 0
 }
+
+# fgdb-zww2g: a truncated Rust scan is UNRUN-retryable, never RED and never
+# PASS. The partial transcript is UBS v5.4.17's own output on this repository
+# (2026-10-04). The complete one carries only the prefilter-bypass line, which
+# UBS prints on complete scans too, and must stay a product verdict.
+ubs_partial_scan_fixture() (
+  local work="$1" class out
+  local bypass='  [ubs_core.prefilter] prefilter rg: output exceeds 16777216 bytes; bypassing prefilter'
+  printf '%s\n' "$bypass" \
+    '  ubs-rust: analysis incomplete: ast-grep: output exceeds 16777216 bytes' \
+    '✗ Partial run: rust: partial. Exit 2 — not every requested language was scanned. Set UBS_ALLOW_PARTIAL=1 to accept partial results.' \
+    >"$work/ubs-partial.log"
+  class="$(gate_env_failure_class "$work/ubs-partial.log")" || return 1
+  [ "$class" = ubs-partial-scan ] || return 1
+  printf '%s\n' "$bypass" '• fixture' '  🔥 CRITICAL (2 found)' >"$work/ubs-complete.log"
+  if gate_env_failure_class "$work/ubs-complete.log" >/dev/null; then return 1; fi
+  # End to end: a core gate whose command prints the partial run and exits
+  # nonzero is UNRUN naming the class, with no RED and no PASS.
+  out="$(
+    GATE_SCOPE_TRACKING=0
+    run_core_gate "UBS partial fixture" bash -c 'cat "$1"; exit 1' _ "$work/ubs-partial.log" 2>&1
+  )"
+  printf '%s\n' "$out" >"$work/ubs-partial.verdict"
+  grep -q '^UNRUN .*ubs-partial-scan' <<<"$out" || return 1
+  if grep -Eq '^(RED|PASS) ' <<<"$out"; then return 1; fi
+  # Deterministic, so never retried.
+  if grep -q 'core retry' <<<"$out"; then return 1; fi
+)
 
 ubs_ratchet_transcript_fixture() (
   local work="$1" mode log count
@@ -3341,6 +3383,10 @@ run_mutation_self_test() {
     echo "SELF-TEST RED: UBS transcript presentation changed the exact ratchet verdict" >&2
     return 1
   fi
+  if ! ubs_partial_scan_fixture "$work"; then
+    echo "SELF-TEST RED: a truncated UBS scan was not UNRUN, or a complete one was" >&2
+    return 1
+  fi
 
   cat >"$fixture_root/scripts/fails.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -3733,6 +3779,8 @@ EOF
   echo "  catalog test scoping: only a nonempty registry-check/catalog change set that"
   echo "    excludes the crate-bound logical-object registry skips the workspace test"
   echo "  landing guidance: main-checkout edits warn before commit; scratch remedy pinned"
+  echo "  UBS partial scan: UBS's truncation lines classify ubs-partial-scan and the"
+  echo "    core gate reports UNRUN without a retry; a prefilter bypass alone stays a verdict"
   echo "  evidence retained at $work"
 }
 
