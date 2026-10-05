@@ -43,7 +43,9 @@ pub(super) async fn run<V: Vfs + Clone>(
             GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
         )
         .await
-        .map_err(execution_failure)?;
+        // A failing executed step names its input record (argument set),
+        // statement and span, as the native write path's errors do.
+        .map_err(|error| execution_failure(batch.execution_error(error)))?;
     let seq = match completion {
         EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq.0,
         EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq.0,
