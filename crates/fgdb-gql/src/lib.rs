@@ -110,7 +110,7 @@ pub use edge_merge::{
 };
 pub use edge_upsert::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertError,
-    GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+    GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, GraphEdgeUpsertValue, MAX_GRAPH_EDGE_UPSERT_ACTIONS,
     PreparedGraphEdgeUpsert,
 };
 pub use edge_upsert_text::{

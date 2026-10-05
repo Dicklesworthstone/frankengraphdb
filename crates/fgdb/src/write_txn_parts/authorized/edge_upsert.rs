@@ -5,7 +5,8 @@ use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
 };
 use crate::write_txn::authorized::{edge_merge, stage};
-use crate::write_txn::{WriteTxn, edge_upsert_actions};
+use crate::write_txn::{WriteTxn, edge_upsert_actions, edge_upsert_property};
+use std::cell::RefCell;
 use fgdb_gql::{
     GqlQueryError, GraphEdgeMergeOutcome, GraphEdgeUpsertError, GraphEdgeUpsertPolicy,
     GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
@@ -49,7 +50,10 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         false,
     )
     .map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
-    let (stats, batch) = cx.with_restriction(|| {
+    let stats = cx.with_restriction(|| {
+        // Sequential borrows end at each callback, before the next clause.
+        let state = RefCell::new((&mut *transaction, &mut *database));
+        let controls = RefCell::new(&mut *execution);
         edge_upsert_actions::<WriteTxnError, WriteTxnError, _>(
             input,
             policy,
@@ -57,19 +61,35 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             outcome,
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                execution.checkpoint()
+                controls.borrow_mut().checkpoint()
+            },
+            |edge, key, control| {
+                // Mask BEFORE lookup: neither a hidden value, its byte length,
+                // nor its history cost can affect an expression or signed quota.
+                if !scope.allows_property(key) {
+                    control(fgdb_gql::GlaExecutionEvent::Work)?;
+                    control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
+                    return Ok(fgdb_types::CanonicalScalar::Null);
+                }
+                let state = state.borrow();
+                edge_upsert_property(state.0, state.1, edge, key, control)
+            },
+            |batch| {
+                let mut state = state.borrow_mut();
+                let (transaction, database) = &mut *state;
+                let mut execution = controls.borrow_mut();
+                for row in batch.rows {
+                    cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+                    execution.checkpoint().map_err(source)?;
+                    // Check ORIGINAL images and every field, before the next
+                    // clause can overwrite it. Hidden fields stay untouched.
+                    stage(transaction, database, batch.relation, row, &mut execution)
+                        .map_err(source)?;
+                }
+                Ok(())
             },
         )
     })?;
-    for row in batch.rows {
-        cx.checkpoint()
-            .map_err(WriteTxnError::Interrupted)
-            .map_err(source)?;
-        execution.checkpoint().map_err(source)?;
-        // The full original edge and both endpoints decide authorization, not
-        // a masked replacement. Forbidden equal-to-current fields still refuse.
-        stage(transaction, database, batch.relation, row, execution).map_err(source)?;
-    }
     if returning && outcome.edge().is_some() {
         execution
             .permit
@@ -80,12 +100,14 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Execute directed MERGE with ON MATCH/ON CREATE edge-property actions.
+    /// Execute directed MERGE with computed ON and trailing SET clauses.
+    /// Expression properties come from the chosen edge's masked native overlay;
+    /// each clause freezes its inputs and the next sees preceding checked writes.
     ///
     /// Requires ReadWrite and the requested relation before any database access,
     /// even for NoInput. The existing authorized MERGE chooses one branch from
     /// the masked canonical graph. The native action lowerer then charges ONLY
-    /// that branch against the SAME native work/scratch and signed allowances.
+    /// that branch and trailing SET against the SAME native and signed allowances.
     /// Each selected original property write is authorized, including no-ops;
     /// untouched hidden properties and both endpoints are preserved. NoInput
     /// executes neither branch, allocates no identity and costs no result row.

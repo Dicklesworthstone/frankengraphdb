@@ -48,11 +48,11 @@ fn native_selection_and_branches_share_one_frozen_parameter_contract() {
     let bound = template.bind_parameters(&args).unwrap();
     assert_eq!(bound.merge().relation(), R);
     assert_eq!(
-        bound.on_create()[0].value.value(),
+        bound.on_create()[0].value.literal().unwrap().value(),
         &CanonicalScalar::Int(200)
     );
     assert_eq!(
-        bound.on_match()[0].value.value(),
+        bound.on_match()[0].value.literal().unwrap().value(),
         &CanonicalScalar::Int(100)
     );
     assert_eq!(template.bind_parameters(&args).unwrap(), bound);
@@ -146,7 +146,7 @@ fn quoted_parameter_payload_is_a_value_not_additional_write_syntax() {
         .unwrap();
     assert_eq!(bound.on_create().len(), 1);
     assert_eq!(
-        bound.on_create()[0].value.value(),
+        bound.on_create()[0].value.literal().unwrap().value(),
         &CanonicalScalar::ucs_basic_text(payload).unwrap()
     );
     assert!(!format!("{template:?} {bound:?}").contains(payload));

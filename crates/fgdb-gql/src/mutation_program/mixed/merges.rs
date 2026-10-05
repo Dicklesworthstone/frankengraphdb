@@ -132,23 +132,34 @@ impl MixedMeter {
         input: &PreparedGraphEdgeUpsert,
         stats: GraphEdgeUpsertStats,
     ) -> Result<(), GraphWriteProgramError<E, A, C>> {
-        let (branch, actions) = if stats.merge.match_selection.result_rows == 0 {
-            (GraphEdgeUpsertBranch::NoInput, &[][..])
+        let branch = if stats.merge.match_selection.result_rows == 0 {
+            GraphEdgeUpsertBranch::NoInput
         } else if stats.merge.created_edges == 1 {
-            (GraphEdgeUpsertBranch::Create, input.on_create())
+            GraphEdgeUpsertBranch::Create
         } else {
-            (GraphEdgeUpsertBranch::Match, input.on_match())
+            GraphEdgeUpsertBranch::Match
         };
         let effects = u128::from(stats.action_effects);
-        // One owned entry/work event per action and a final acceptance event.
-        // Widen before addition; wrapped or underreported totals are invalid.
-        if stats.branch != branch
-            || effects != actions.len() as u128
-            || u128::from(stats.evaluator.work_units)
-                != u128::from(stats.merge.evaluator.work_units) + effects + 1
-            || u128::from(stats.evaluator.scratch_entries)
-                != u128::from(stats.merge.evaluator.scratch_entries) + effects
-        {
+        // Literal-only clauses have an exact cost, including copied payloads.
+        // Dynamic expressions add input/history and lazy-bytecode work, so they
+        // must at least include each proposal and the final acceptance event.
+        // All arithmetic widens before adding; neither clause can disappear.
+        let valid_usage = match input.fixed_action_usage(branch) {
+            Some(usage) => {
+                u128::from(stats.evaluator.work_units)
+                    == u128::from(stats.merge.evaluator.work_units) + u128::from(usage.work_units)
+                    && u128::from(stats.evaluator.scratch_entries)
+                        == u128::from(stats.merge.evaluator.scratch_entries)
+                            + u128::from(usage.scratch_entries)
+            }
+            None => {
+                u128::from(stats.evaluator.work_units)
+                    >= u128::from(stats.merge.evaluator.work_units) + effects + 1
+                    && u128::from(stats.evaluator.scratch_entries)
+                        >= u128::from(stats.merge.evaluator.scratch_entries) + effects
+            }
+        };
+        if stats.branch != branch || effects != input.action_count(branch) as u128 || !valid_usage {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         let effects = self.common.add(
