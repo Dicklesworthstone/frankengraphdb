@@ -422,7 +422,12 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
             .execute_graph_write_program_returning_autocommit_governed(
-                txcx, cx, commit_cx, bound.program(), budget, allocate,
+                txcx,
+                cx,
+                commit_cx,
+                bound.program(),
+                budget,
+                allocate,
             )
             .await
             .map_err(|error| QueryWriteError::Execute(bound.execution_error(error)))?;
@@ -478,7 +483,11 @@ impl WriteTxn {
             .map_err(QueryWriteError::from)?;
         let receipt = self
             .execute_graph_write_program_returning_governed(
-                database, cx, bound.program(), budget, allocate,
+                database,
+                cx,
+                bound.program(),
+                budget,
+                allocate,
             )
             .map_err(|error| QueryWriteError::Execute(bound.execution_error(error)))?;
         Ok(QueryResult::Write {

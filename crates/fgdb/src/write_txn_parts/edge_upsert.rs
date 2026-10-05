@@ -22,8 +22,8 @@ fn edge_upsert_actions<E, A, C>(
     use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::{
         GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
-        GraphEdgeMergeOutcome, GraphEdgeUpsertBranch, GraphEdgeUpsertError,
-        GraphEdgeUpsertStats, GraphEdgeUpsertValue, GraphIntegerEvaluationError,
+        GraphEdgeMergeOutcome, GraphEdgeUpsertBranch, GraphEdgeUpsertError, GraphEdgeUpsertStats,
+        GraphEdgeUpsertValue, GraphIntegerEvaluationError,
     };
     let (branch, selected) = match outcome {
         GraphEdgeMergeOutcome::NoInput => (GraphEdgeUpsertBranch::NoInput, &[][..]),
@@ -44,11 +44,23 @@ fn edge_upsert_actions<E, A, C>(
         let scratch = u128::from(evaluator.scratch_entries)
             + u128::from(event == GlaExecutionEvent::ScratchEntry);
         for (observed, limit, dimension) in [
-            (work, policy.merge.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (scratch, policy.merge.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                work,
+                policy.merge.query.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                policy.merge.query.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > u128::from(limit) {
-                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
             }
         }
         evaluator.work_units = work as u64;
@@ -80,16 +92,21 @@ fn edge_upsert_actions<E, A, C>(
                         }
                         let mut inputs = Vec::with_capacity(properties.len());
                         for key in properties {
-                            inputs.push(fgdb_gql::algebra::GraphValue::Scalar(
-                                property(edge, *key, &mut control)?,
-                            ));
+                            inputs.push(fgdb_gql::algebra::GraphValue::Scalar(property(
+                                edge,
+                                *key,
+                                &mut control,
+                            )?));
                         }
-                        value.evaluate_scalar_with_control(&inputs, &mut control)
+                        value
+                            .evaluate_scalar_with_control(&inputs, &mut control)
                             .map_err(|error| match error {
                                 GraphIntegerEvaluationError::Control(error) => error,
                                 GraphIntegerEvaluationError::Value(source) => {
                                     GqlQueryError::Source(GraphEdgeUpsertError::Expression {
-                                        clause, action, source,
+                                        clause,
+                                        action,
+                                        source,
                                     })
                                 }
                             })?
@@ -142,7 +159,10 @@ fn edge_upsert_property<V: Vfs + Clone, A, C>(
         })
     };
     let projected = transaction.point_projection_with_control(
-        database, element, field, &mut source_control,
+        database,
+        element,
+        field,
+        &mut source_control,
         &|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
     )?;
     if let Some(value) = projected.property {
@@ -174,7 +194,10 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeUpsertPolicy,
         allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
-        (fgdb_gql::GraphEdgeUpsertStats, fgdb_gql::GraphEdgeMergeOutcome),
+        (
+            fgdb_gql::GraphEdgeUpsertStats,
+            fgdb_gql::GraphEdgeMergeOutcome,
+        ),
         TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError};
@@ -182,12 +205,23 @@ impl WriteTxn {
             .map_err(|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)))?;
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let (merge_stats, outcome) = workspace.txn.execute_graph_edge_merge_governed(
-                database, cx, upsert.merge(), policy.merge, allocate,
-            ).map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
+            let (merge_stats, outcome) = workspace
+                .txn
+                .execute_graph_edge_merge_governed(
+                    database,
+                    cx,
+                    upsert.merge(),
+                    policy.merge,
+                    allocate,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertError::Merge))?;
             let state = std::cell::RefCell::new((&mut *workspace.txn, &mut *database));
             let stats = edge_upsert_actions::<WriteTxnError, A, _>(
-                upsert, policy, merge_stats, outcome, || cx.checkpoint(),
+                upsert,
+                policy,
+                merge_stats,
+                outcome,
+                || cx.checkpoint(),
                 |edge, key, control| {
                     let state = state.borrow();
                     edge_upsert_property(state.0, state.1, edge, key, control)
@@ -195,9 +229,12 @@ impl WriteTxn {
                 |batch| {
                     let mut state = state.borrow_mut();
                     let (transaction, database) = &mut *state;
-                    transaction.write(database, batch).map(|_| ()).map_err(|error| {
-                        GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
-                    })
+                    transaction
+                        .write(database, batch)
+                        .map(|_| ())
+                        .map_err(|error| {
+                            GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
+                        })
                 },
             )?;
             drop(state);

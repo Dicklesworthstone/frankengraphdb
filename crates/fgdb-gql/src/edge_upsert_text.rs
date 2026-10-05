@@ -10,7 +10,10 @@ use fgdb_delta_types::PropertyKeyId;
 #[derive(Clone)]
 pub(crate) enum EdgeUpsertValueTemplate {
     Bound(GqlScalarParameter),
-    Parameter { index: usize, at: usize },
+    Parameter {
+        index: usize,
+        at: usize,
+    },
     Expression {
         properties: Vec<PropertyKeyId>,
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,

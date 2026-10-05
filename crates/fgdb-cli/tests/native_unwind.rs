@@ -19,7 +19,10 @@ struct Fixture {
 }
 impl Fixture {
     fn unopened() -> Self {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
             "fgdb-native-unwind-{}-{nonce}-{}",
             std::process::id(),
@@ -36,8 +39,19 @@ impl Fixture {
         }
         let mut file = options.open(&key).unwrap();
         use std::io::Write as _;
-        writeln!(file, "{}\n{}\n{}", "51".repeat(32), "52".repeat(32), "53".repeat(32)).unwrap();
-        Self { db: root.join("db"), root, key }
+        writeln!(
+            file,
+            "{}\n{}\n{}",
+            "51".repeat(32),
+            "52".repeat(32),
+            "53".repeat(32)
+        )
+        .unwrap();
+        Self {
+            db: root.join("db"),
+            root,
+            key,
+        }
     }
     fn new() -> Self {
         let fixture = Self::unopened();
@@ -46,10 +60,21 @@ impl Fixture {
     }
     fn run(&self, command: &str, arguments: &[&str]) -> Output {
         let mut process = Command::new(env!("CARGO_BIN_EXE_fgdb"));
-        process.args(["--robot", command]).arg("--db").arg(&self.db)
-            .arg("--key-file").arg(&self.key);
+        process
+            .args(["--robot", command])
+            .arg("--db")
+            .arg(&self.db)
+            .arg("--key-file")
+            .arg(&self.key);
         if command != "create" {
-            process.args(["--label", "Person=1", "--property", "p=1", "--property", "q=2"]);
+            process.args([
+                "--label",
+                "Person=1",
+                "--property",
+                "p=1",
+                "--property",
+                "q=2",
+            ]);
         }
         process.args(arguments).output().unwrap()
     }
@@ -60,16 +85,25 @@ impl Drop for Fixture {
     }
 }
 fn successful(output: Output) -> String {
-    assert!(output.status.success(), "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(text.matches("\"event\":\"result\"").count(), 1, "{text}");
     assert!(!text.contains("\"event\":\"error\""), "{text}");
     text
 }
 fn failed(output: Output, code: i32) -> String {
-    assert_eq!(output.status.code(), Some(code), "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("\"event\":\"error\""), "{text}");
     assert!(!text.contains("\"event\":\"result\""), "{text}");
@@ -84,10 +118,14 @@ fn has_pair(text: &str, p: i64, q: i64) -> bool {
 #[test]
 fn cli_native_unwind_updates_and_reopens_without_rows_flag() {
     let fixture = Fixture::new();
-    let result = successful(fixture.run("write", &[
-        "--param", "rows=json:[{\"p\":1,\"q\":2},{\"p\":2,\"q\":4},{\"p\":1,\"q\":3}]",
-        COUNTER,
-    ]));
+    let result = successful(fixture.run(
+        "write",
+        &[
+            "--param",
+            "rows=json:[{\"p\":1,\"q\":2},{\"p\":2,\"q\":4},{\"p\":1,\"q\":3}]",
+            COUNTER,
+        ],
+    ));
     assert!(result.contains("\"statements\":3"), "{result}");
     let read = successful(fixture.run("query", &[READ]));
     assert_eq!(read.matches("\"event\":\"row\"").count(), 2, "{read}");
@@ -99,9 +137,17 @@ fn cli_native_unwind_updates_and_reopens_without_rows_flag() {
 fn cli_late_failure_has_input_coordinate_and_no_durable_prefix() {
     let fixture = Fixture::new();
     successful(fixture.run("write", &["CREATE (n:Person {p:9, q:9223372036854775807})"]));
-    let failure = failed(fixture.run("write", &[
-        "--param", "rows=json:[{\"p\":8,\"q\":1},{\"p\":9,\"q\":1}]", COUNTER,
-    ]), 3);
+    let failure = failed(
+        fixture.run(
+            "write",
+            &[
+                "--param",
+                "rows=json:[{\"p\":8,\"q\":1},{\"p\":9,\"q\":1}]",
+                COUNTER,
+            ],
+        ),
+        3,
+    );
     assert!(failure.contains("argument set 1"), "{failure}");
     let read = successful(fixture.run("query", &[READ]));
     assert_eq!(read.matches("\"event\":\"row\"").count(), 1, "{read}");
@@ -111,9 +157,17 @@ fn cli_late_failure_has_input_coordinate_and_no_durable_prefix() {
 #[test]
 fn cli_bad_rows_refuse_before_opening_a_missing_database() {
     let fixture = Fixture::unopened();
-    let failure = failed(fixture.run("write", &[
-        "--param", "rows=json:[{\"p\":1,\"q\":2},{\"p\":2,\"q\":true}]", COUNTER,
-    ]), 3);
+    let failure = failed(
+        fixture.run(
+            "write",
+            &[
+                "--param",
+                "rows=json:[{\"p\":1,\"q\":2},{\"p\":2,\"q\":true}]",
+                COUNTER,
+            ],
+        ),
+        3,
+    );
     assert!(failure.contains("IncompatibleFieldTypes"), "{failure}");
     assert!(!fixture.db.exists());
 }
@@ -122,9 +176,12 @@ fn cli_bad_rows_refuse_before_opening_a_missing_database() {
 fn cli_transaction_unwind_reads_its_overlay_and_rollback_hides_output() {
     let fixture = Fixture::new();
     let arguments = [
-        "--write", COUNTER,
-        "--param", "rows=json:[{\"p\":1,\"q\":2},{\"p\":1,\"q\":3}]",
-        "--query", READ,
+        "--write",
+        COUNTER,
+        "--param",
+        "rows=json:[{\"p\":1,\"q\":2},{\"p\":1,\"q\":3}]",
+        "--query",
+        READ,
     ];
     let mut rollback = arguments.to_vec();
     rollback.push("--rollback");
@@ -144,10 +201,19 @@ fn cli_transaction_unwind_reads_its_overlay_and_rollback_hides_output() {
 #[test]
 fn cli_transaction_statement_limit_counts_expanded_input_rows() {
     let fixture = Fixture::new();
-    let objects = (0..65).map(|p| format!(r#"{{"p":{p},"q":1}}"#)).collect::<Vec<_>>().join(",");
+    let objects = (0..65)
+        .map(|p| format!(r#"{{"p":{p},"q":1}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
     let rows = format!("rows=json:[{objects}]");
-    let failure = failed(fixture.run("transaction", &["--write", COUNTER, "--param", &rows]), 2);
-    assert!(failure.contains("exceeds 64 native statements"), "{failure}");
+    let failure = failed(
+        fixture.run("transaction", &["--write", COUNTER, "--param", &rows]),
+        2,
+    );
+    assert!(
+        failure.contains("exceeds 64 native statements"),
+        "{failure}"
+    );
     let read = successful(fixture.run("query", &[READ]));
     assert!(!read.contains("\"event\":\"row\""), "{read}");
 }

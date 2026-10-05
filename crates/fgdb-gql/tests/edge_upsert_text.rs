@@ -179,8 +179,10 @@ fn trailing_set_retains_its_own_clause_and_overwritten_on_actions() {
     assert_eq!(sequential.after().len(), 2);
     assert_eq!(sequential.action_count(GraphEdgeUpsertBranch::Create), 3);
     assert_eq!(sequential.action_count(GraphEdgeUpsertBranch::Match), 2);
-    assert_eq!(sequential.on_create()[0].value.literal().unwrap().value(),
-        &CanonicalScalar::Int(200));
+    assert_eq!(
+        sequential.on_create()[0].value.literal().unwrap().value(),
+        &CanonicalScalar::Int(200)
+    );
     assert_ne!(plain.canonical_bytes(), sequential.canonical_bytes());
     let flattened = bind(&format!(
         "{head} ON CREATE SET e.w=$seen, e.p=$fresh ON MATCH SET e.w=$seen, e.p=$fresh"
@@ -198,11 +200,20 @@ fn evaluate(
     match value {
         GraphEdgeUpsertValue::Literal(value) => value.value().clone(),
         GraphEdgeUpsertValue::Expression { properties, value } => {
-            let input = properties.iter().map(|key| {
-                GraphValue::Scalar(stored.iter().find(|(k, _)| k == key)
-                    .map_or(CanonicalScalar::Null, |(_, value)| value.clone()))
-            }).collect::<Vec<_>>();
-            value.evaluate_scalar_with_control(&input, &mut |_| Ok::<(), ()>(())).unwrap()
+            let input = properties
+                .iter()
+                .map(|key| {
+                    GraphValue::Scalar(
+                        stored
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .map_or(CanonicalScalar::Null, |(_, value)| value.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            value
+                .evaluate_scalar_with_control(&input, &mut |_| Ok::<(), ()>(()))
+                .unwrap()
         }
     }
 }
@@ -214,18 +225,34 @@ fn computed_expressions_rebind_without_catalog_reentry_and_keep_property_ordinal
     let prepared = PreparedGraphEdgeUpsertText::prepare(text, R, |kind, name| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(calls.get(), 3, "one resolution per R, w, p");
-    let original = prepared.bind_parameters(&GqlParameters::new().with_int64("step", 2).unwrap()).unwrap();
-    let changed = prepared.bind_parameters(&GqlParameters::new().with_int64("step", 3).unwrap()).unwrap();
+    let original = prepared
+        .bind_parameters(&GqlParameters::new().with_int64("step", 2).unwrap())
+        .unwrap();
+    let changed = prepared
+        .bind_parameters(&GqlParameters::new().with_int64("step", 3).unwrap())
+        .unwrap();
     assert_eq!(calls.get(), 3);
-    let fgdb_gql::GraphEdgeUpsertValue::Expression { properties, .. } = &original.after()[0].value else {
+    let fgdb_gql::GraphEdgeUpsertValue::Expression { properties, .. } = &original.after()[0].value
+    else {
         panic!("computed SET must retain its bytecode")
     };
-    assert_eq!(properties, &[W, P], "first-reference order; repeated w shares its slot");
+    assert_eq!(
+        properties,
+        &[W, P],
+        "first-reference order; repeated w shares its slot"
+    );
     let stored = [(P, CanonicalScalar::Int(5)), (W, CanonicalScalar::Int(7))];
-    assert_eq!(evaluate(&original.after()[0].value, &stored), CanonicalScalar::Int(24));
-    assert_eq!(evaluate(&changed.after()[0].value, &stored), CanonicalScalar::Int(29));
+    assert_eq!(
+        evaluate(&original.after()[0].value, &stored),
+        CanonicalScalar::Int(24)
+    );
+    assert_eq!(
+        evaluate(&changed.after()[0].value, &stored),
+        CanonicalScalar::Int(29)
+    );
     assert_ne!(original.canonical_bytes(), changed.canonical_bytes());
     assert_eq!(prepared.statement(), text);
     assert!(!format!("{prepared:?} {original:?}").contains("$step"));
@@ -235,16 +262,37 @@ fn computed_expressions_rebind_without_catalog_reentry_and_keep_property_ordinal
 fn shared_scalar_bytecode_handles_copy_null_lazy_case_text_and_boolean_results() {
     let head = "MATCH (a),(b) MERGE (a)-[e:R]->(b) SET e.w=";
     for (rhs, input, expected) in [
-        ("e.p", vec![(P, CanonicalScalar::Int(9))], CanonicalScalar::Int(9)),
+        (
+            "e.p",
+            vec![(P, CanonicalScalar::Int(9))],
+            CanonicalScalar::Int(9),
+        ),
         ("e.p", vec![], CanonicalScalar::Null),
-        ("COALESCE(e.p, 1/0)", vec![(P, CanonicalScalar::Int(9))], CanonicalScalar::Int(9)),
-        ("CASE WHEN e.p IS NULL THEN 4 ELSE 1/0 END", vec![], CanonicalScalar::Int(4)),
-        ("e.p > 3 AND e.p < 10", vec![(P, CanonicalScalar::Int(9))], CanonicalScalar::Bool(true)),
-        ("UPPER(e.p)", vec![(P, CanonicalScalar::ucs_basic_text("Ada").unwrap())],
-            CanonicalScalar::ucs_basic_text("ADA").unwrap()),
+        (
+            "COALESCE(e.p, 1/0)",
+            vec![(P, CanonicalScalar::Int(9))],
+            CanonicalScalar::Int(9),
+        ),
+        (
+            "CASE WHEN e.p IS NULL THEN 4 ELSE 1/0 END",
+            vec![],
+            CanonicalScalar::Int(4),
+        ),
+        (
+            "e.p > 3 AND e.p < 10",
+            vec![(P, CanonicalScalar::Int(9))],
+            CanonicalScalar::Bool(true),
+        ),
+        (
+            "UPPER(e.p)",
+            vec![(P, CanonicalScalar::ucs_basic_text("Ada").unwrap())],
+            CanonicalScalar::ucs_basic_text("ADA").unwrap(),
+        ),
     ] {
         let bound = PreparedGraphEdgeUpsertText::prepare(&format!("{head}{rhs}"), R, symbols)
-            .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
         assert_eq!(evaluate(&bound.after()[0].value, &input), expected, "{rhs}");
     }
 }
@@ -252,33 +300,64 @@ fn shared_scalar_bytecode_handles_copy_null_lazy_case_text_and_boolean_results()
 #[test]
 fn malformed_computed_or_foreign_inputs_are_refused_before_catalog_access() {
     let head = "MATCH (a),(b) MERGE (a)-[e:R]->(b) SET e.w=";
-    for rhs in ["a.p+1", "other.p", "e", "e.p+", "e.p.foo", "e.p[0]", "1+'text'", "CASE WHEN TRUE THEN 1 END +"] {
+    for rhs in [
+        "a.p+1",
+        "other.p",
+        "e",
+        "e.p+",
+        "e.p.foo",
+        "e.p[0]",
+        "1+'text'",
+        "CASE WHEN TRUE THEN 1 END +",
+    ] {
         let calls = Cell::new(0);
-        assert!(PreparedGraphEdgeUpsertText::prepare(&format!("{head}{rhs}"), R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        }).is_err(), "{rhs}");
+        assert!(
+            PreparedGraphEdgeUpsertText::prepare(&format!("{head}{rhs}"), R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{rhs}"
+        );
         assert_eq!(calls.get(), 0, "{rhs}");
     }
     let calls = Cell::new(0);
-    assert!(PreparedGraphEdgeUpsertText::prepare_with_parameter_types(
-        &format!("{head}e.p*$bad"), R,
-        &[("bad", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-    ).is_err());
-    assert_eq!(calls.get(), 0, "declared non-integer arithmetic refuses before names resolve");
+    assert!(
+        PreparedGraphEdgeUpsertText::prepare_with_parameter_types(
+            &format!("{head}e.p*$bad"),
+            R,
+            &[("bad", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "declared non-integer arithmetic refuses before names resolve"
+    );
 }
 
 #[test]
 fn computed_parameter_errors_keep_original_utf8_offsets() {
     let text = "\u{2003}MATCH (a),(b) MERGE (a)-[e:R]->(b) SET e.w=e.p+$step";
     let prepared = PreparedGraphEdgeUpsertText::prepare(text, R, symbols).unwrap();
-    for arguments in [GqlParameters::new(), GqlParameters::new().with_uint64("step", 1).unwrap()] {
+    for arguments in [
+        GqlParameters::new(),
+        GqlParameters::new().with_uint64("step", 1).unwrap(),
+    ] {
         let error = prepared.bind_parameters(&arguments).unwrap_err();
         assert_eq!(error.offset, text.find('$').unwrap());
-        assert!(matches!(error.kind,
-            GraphEdgeUpsertTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter
-                | GraphPatternTextErrorKind::ParameterTypeMismatch { .. })));
+        assert!(matches!(
+            error.kind,
+            GraphEdgeUpsertTextErrorKind::Query(
+                GraphPatternTextErrorKind::MissingParameter
+                    | GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
+            )
+        ));
     }
 }
 
@@ -286,18 +365,34 @@ fn computed_parameter_errors_keep_original_utf8_offsets() {
 fn combined_clause_cap_and_duplicate_fields_cannot_be_erased_by_overwrites() {
     let head = "MATCH (a),(b) MERGE (a)-[e:R]->(b)";
     let actions = (0..fgdb_gql::MAX_GRAPH_EDGE_UPSERT_ACTIONS)
-        .map(|i| format!("e.k{i}=1")).collect::<Vec<_>>().join(",");
+        .map(|i| format!("e.k{i}=1"))
+        .collect::<Vec<_>>()
+        .join(",");
     let error = PreparedGraphEdgeUpsertText::prepare(
-        &format!("{head} ON CREATE SET {actions} SET e.k0=e.k0+1"), R,
+        &format!("{head} ON CREATE SET {actions} SET e.k0=e.k0+1"),
+        R,
         |_, _| panic!("combined action cap must be admitted before catalog access"),
-    ).unwrap_err();
-    assert!(matches!(error.kind, GraphEdgeUpsertTextErrorKind::UpsertBuild(
-        GraphEdgeUpsertBuildError::TooManyActions { branch: GraphEdgeUpsertBranch::Create, observed: 257, .. }
-    )));
-    let bound = PreparedGraphEdgeUpsertText::prepare(
-        &format!("{head} SET e.w=e.p, e.w=1"), R, symbols,
-    ).unwrap().bind_parameters(&GqlParameters::new());
-    assert!(matches!(bound, Err(fgdb_gql::GraphEdgeUpsertTextError {
-        kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(GraphEdgeUpsertBuildError::DuplicateProperty { .. }), ..
-    })));
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        GraphEdgeUpsertTextErrorKind::UpsertBuild(GraphEdgeUpsertBuildError::TooManyActions {
+            branch: GraphEdgeUpsertBranch::Create,
+            observed: 257,
+            ..
+        })
+    ));
+    let bound =
+        PreparedGraphEdgeUpsertText::prepare(&format!("{head} SET e.w=e.p, e.w=1"), R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new());
+    assert!(matches!(
+        bound,
+        Err(fgdb_gql::GraphEdgeUpsertTextError {
+            kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
+                GraphEdgeUpsertBuildError::DuplicateProperty { .. }
+            ),
+            ..
+        })
+    ));
 }

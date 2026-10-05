@@ -369,25 +369,31 @@ impl PreparedGraphEdgeUpsertText {
                         EdgeUpsertValueTemplate::Parameter { index, at } => {
                             GraphEdgeUpsertValue::Literal(scalar(values[*index].clone(), *at)?)
                         }
-                        EdgeUpsertValueTemplate::Expression { properties, program, at } => {
-                            GraphEdgeUpsertValue::Expression {
-                                properties: properties.clone(),
-                                value: integer::bind_integer(program, &values, *at)?,
-                            }
-                        }
+                        EdgeUpsertValueTemplate::Expression {
+                            properties,
+                            program,
+                            at,
+                        } => GraphEdgeUpsertValue::Expression {
+                            properties: properties.clone(),
+                            value: integer::bind_integer(program, &values, *at)?,
+                        },
                     };
-                    Ok(GraphEdgeUpsertAction { key: action.key, value })
+                    Ok(GraphEdgeUpsertAction {
+                        key: action.key,
+                        value,
+                    })
                 })
                 .collect()
         };
         let on_match = bind(&self.on_match)?;
         let on_create = bind(&self.on_create)?;
         let after = bind(&self.after)?;
-        PreparedGraphEdgeUpsert::prepare_with_clauses(merge, on_match, on_create, after)
-            .map_err(|source| GraphEdgeUpsertTextError {
+        PreparedGraphEdgeUpsert::prepare_with_clauses(merge, on_match, on_create, after).map_err(
+            |source| GraphEdgeUpsertTextError {
                 offset: self.merge.selection.return_at,
                 kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(source),
-            })
+            },
+        )
     }
 }
 
@@ -419,7 +425,10 @@ fn resolve_actions<'a>(
                 Operand::Number(Number::Parameter(index)) => {
                     return Ok(EdgeUpsertActionTemplate {
                         key,
-                        value: EdgeUpsertValueTemplate::Parameter { index, at: action.at },
+                        value: EdgeUpsertValueTemplate::Parameter {
+                            index,
+                            at: action.at,
+                        },
                     });
                 }
                 Operand::Column(column) => vec![MutationIntegerTemplateOp::Bound(
@@ -427,12 +436,17 @@ fn resolve_actions<'a>(
                 )],
                 Operand::Integer { program, .. } => program,
             };
-            let properties = action.properties.into_iter().map(|name| {
-                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
-                    unreachable!("symbol domain checked")
-                };
-                Ok(key)
-            }).collect::<Result<Vec<_>, GraphPatternTextError>>()?;
+            let properties = action
+                .properties
+                .into_iter()
+                .map(|name| {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
+                    else {
+                        unreachable!("symbol domain checked")
+                    };
+                    Ok(key)
+                })
+                .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
             Ok(EdgeUpsertActionTemplate {
                 key,
                 value: EdgeUpsertValueTemplate::Expression {
