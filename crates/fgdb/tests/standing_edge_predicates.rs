@@ -17,6 +17,46 @@ use std::collections::BTreeMap;
 const L: PropertyKeyId = PropertyKeyId(11);
 const R: PropertyKeyId = PropertyKeyId(12);
 const REL: RelationId = RelationId(1);
+
+/// Independent exact order for an Int/Float pair, not the engine comparator:
+/// i128 arithmetic on the float's integral part, with NaN after every number
+/// as in the canonical STRICT_PORTABLE profile. Other pairs are None.
+fn numeric_order(left: &CanonicalScalar, right: &CanonicalScalar) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    fn int_float(integer: i64, float: f64) -> Ordering {
+        if float.is_nan() || float == f64::INFINITY {
+            return Ordering::Less;
+        }
+        if float == f64::NEG_INFINITY {
+            return Ordering::Greater;
+        }
+        let floor = float.floor();
+        // Saturation past 2^127 is far outside the i64 range either way.
+        match i128::from(integer).cmp(&(floor as i128)) {
+            Ordering::Equal if floor < float => Ordering::Less,
+            order => order,
+        }
+    }
+    let float_float = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).expect("non-NaN numbers order"),
+    };
+    match (left, right) {
+        (CanonicalScalar::Int(left), CanonicalScalar::Int(right)) => Some(left.cmp(right)),
+        (CanonicalScalar::Float(left), CanonicalScalar::Float(right)) => {
+            Some(float_float(left.get(), right.get()))
+        }
+        (CanonicalScalar::Int(left), CanonicalScalar::Float(right)) => {
+            Some(int_float(*left, right.get()))
+        }
+        (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
+            Some(int_float(*right, left.get()).reverse())
+        }
+        _ => None,
+    }
+}
 const OPS: [IntegerComparison; 6] = [
     IntegerComparison::Equal,
     IntegerComparison::NotEqual,
@@ -83,15 +123,17 @@ fn storage_count(db: &Database<MemVfs>, edge: bool, operator: usize) -> u64 {
             let (Some(a), Some(b)) = (left, right) else {
                 return false;
             };
-            if matches!(a, CanonicalScalar::Null)
-                || matches!(b, CanonicalScalar::Null)
-                || core::mem::discriminant(a) != core::mem::discriminant(b)
-            {
+            if matches!(a, CanonicalScalar::Null) || matches!(b, CanonicalScalar::Null) {
                 return false;
             }
-            // Canonical value ordering is shared data semantics. This oracle does
-            // not call the query predicate or the standing input/affected-set code.
-            let order = a.cmp(b);
+            // Canonical value ordering is shared data semantics, and Int/Float
+            // pairs compare exactly. This oracle does not call the query
+            // predicate or the standing input/affected-set code.
+            let order = match numeric_order(a, b) {
+                Some(order) => order,
+                None if core::mem::discriminant(a) == core::mem::discriminant(b) => a.cmp(b),
+                None => return false,
+            };
             match operator {
                 0 => order == Ordering::Equal,
                 1 => order != Ordering::Equal,
