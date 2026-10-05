@@ -162,7 +162,9 @@ fn bind_native<Clock: FnMut() -> u64>(
         // Every supported UNWIND mutation contains MERGE or MATCH. Refuse a
         // write-only grant BEFORE row inspection, including empty/malformed rows.
         if !scope.rights().can_read() {
-            return Err(admission(WriteTxnError::Authorization(Error::PermissionDenied)));
+            return Err(admission(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
         }
         let batch = parsed.bind_with_limit_controlled(
             params,
