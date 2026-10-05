@@ -17,7 +17,8 @@ use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphPath, GraphValue};
 use fgdb_gql::{
-    GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GqlScalarParameter,
+    BoundNativeGraphWrite, GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy,
+    GqlScalarParameter,
     GraphSymbol, GraphSymbolKind, GraphSymbolResolver, GraphWriteProgramPolicy,
     PreparedGraphWriteScript, ReverseSymbolCatalog,
 };
@@ -1076,6 +1077,19 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     None
                 };
                 let returning = if command == "write" && batch.is_none() { write_returning::prepare(&options)? } else { None };
+                // Native UNWIND mutations and ordinary scripts bind completely
+                // before opening storage. Keep the bound record map through
+                // completion instead of discarding it into a bare program.
+                let native = if command == "write" && batch.is_none() && returning.is_none() {
+                    Some(BoundNativeGraphWrite::bind(
+                        &options.text,
+                        &options.params,
+                        options.coordinate,
+                        |kind, name| options.resolve(kind, name),
+                    ).map_err(Failure::query)?)
+                } else {
+                    None
+                };
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
@@ -1105,15 +1119,19 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     if let Some(prepared) = returning {
                         return write_returning::run(&mut db, &contexts, prepared, robot, out).await;
                     }
-                    let (program, records) = match batch {
-                        Some((program, records)) => (program, Some(records)),
+                    let (program, records) = match batch.as_ref() {
+                        Some((program, records)) => (program, Some(*records)),
                         None => {
-                            let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
-                            let script = PreparedGraphWriteScript::prepare_with_parameter_types(&options.text, options.coordinate, &declarations, |kind, name| options.resolve(kind, name)).map_err(Failure::query)?;
-                            (script.bind_parameters(&options.params).map_err(Failure::query)?, None)
+                            let prepared = native.as_ref().expect("no-RETURN write was bound before open");
+                            (prepared.program(), prepared.input_records())
                         }
                     };
-                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), &program, GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.map_err(execution_failure)?;
+                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), program, GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.map_err(|error| {
+                        match &native {
+                            Some(prepared) => execution_failure(prepared.execution_error(error)),
+                            None => execution_failure(error),
+                        }
+                    })?;
                     let seq = match completion { EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq.0, EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq.0 };
                     let statements = receipt.stats().completed_statements;
                     // The robot record is the plain write's (the caller sent the

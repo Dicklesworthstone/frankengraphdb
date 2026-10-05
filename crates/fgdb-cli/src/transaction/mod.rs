@@ -22,9 +22,8 @@ use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValu
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
-    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphWriteProgram,
-    PreparedGraphWriteScript,
+    BoundNativeGraphWrite, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
+    PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
 };
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
@@ -89,7 +88,7 @@ impl Default for Limits {
 
 enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
-    Write(Box<PreparedGraphWriteProgram>),
+    Write(Box<BoundNativeGraphWrite>),
     Returning(Box<PreparedGraphInsertQuery>),
 }
 fn prepare(
@@ -130,22 +129,19 @@ fn prepare(
                         .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
                     return Ok(PreparedStep::Returning(Box::new(query)));
                 }
-                let declarations: Vec<_> = params
-                    .parameter_types()
-                    .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
-                    .collect();
-                let script = PreparedGraphWriteScript::prepare_with_parameter_types(
+                let bound = BoundNativeGraphWrite::bind(
                     &step.text,
+                    &params,
                     options.coordinate,
-                    &declarations,
                     |kind, name| options.resolve(kind, name),
                 )
                 .map_err(Failure::query)?;
-                let program = script.bind_parameters(&params).map_err(Failure::query)?;
+                // Count expanded UNWIND statements, not merely the one textual
+                // clause, against this invocation's existing 64-statement cap.
                 statements = statements
-                    .checked_add(program.statements().len())
+                    .checked_add(bound.program().statements().len())
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
-                Ok(PreparedStep::Write(Box::new(program)))
+                Ok(PreparedStep::Write(Box::new(bound)))
             } else {
                 let query = PreparedNativeRead::prepare(&step.text, &params, options)
                     .map_err(execution_failure)?;
@@ -423,15 +419,15 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .filter(|n| *n <= limits.rows)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
                     }
-                    PreparedStep::Write(program) => {
+                    PreparedStep::Write(bound) => {
                         let stats = txn
                             .execute_graph_write_program_engine_governed(
                                 db,
                                 &cx,
-                                program,
+                                bound.program(),
                                 GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
                             )
-                            .map_err(execution_failure)?;
+                            .map_err(|error| execution_failure(bound.execution_error(error)))?;
                         if robot {
                             output.line(&format!(
                                 r#"{{"v":1,"event":"statement","index":{},"kind":"write","view":"transaction_local","basis":{basis},"statements":{}}}"#,
