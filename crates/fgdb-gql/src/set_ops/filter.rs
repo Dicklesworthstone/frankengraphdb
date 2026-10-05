@@ -377,10 +377,8 @@ fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Op
             IntegerComparison::NotEqual => left != right,
             _ => return None,
         }),
-        (Cell::Scalar(left), Cell::Scalar(right))
-            if core::mem::discriminant(left) == core::mem::discriminant(right) =>
-        {
-            Some(comparison.accepts_scalar_pair(Some(left), Some(right)))
+        (Cell::Scalar(left), Cell::Scalar(right)) => {
+            comparison.evaluate_scalar_pair(Some(left), Some(right))
         }
         _ => None,
     }
@@ -485,5 +483,110 @@ impl PreparedGraphSet {
             offset: 0,
             count: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgdb_types::CanonicalF64;
+
+    fn code(comparison: IntegerComparison, negate: bool) -> Vec<GraphSetPredicateOp> {
+        let mut code = vec![GraphSetPredicateOp::Compare {
+            left: GraphSetOperand::Column(0),
+            comparison,
+            right: GraphSetOperand::Column(1),
+        }];
+        if negate {
+            code.push(GraphSetPredicateOp::Not);
+        }
+        GraphSetPredicateOp::validate_schema(&[GraphSetColumnType::Scalar; 2], &code).unwrap();
+        code
+    }
+
+    #[test]
+    fn numeric_row_and_join_filters_preserve_exact_comparisons_and_unknown() {
+        let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+        for (left, right, comparison, expected) in [
+            (CanonicalScalar::Int(7), float(7.0), IntegerComparison::Equal, Some(true)),
+            (float(7.0), CanonicalScalar::Int(7), IntegerComparison::Equal, Some(true)),
+            (
+                CanonicalScalar::Int(9_007_199_254_740_993),
+                float(9_007_199_254_740_992.0),
+                IntegerComparison::Greater,
+                Some(true),
+            ),
+            (
+                CanonicalScalar::Int(9_007_199_254_740_993),
+                float(9_007_199_254_740_992.0),
+                IntegerComparison::Equal,
+                Some(false),
+            ),
+            (CanonicalScalar::Null, float(7.0), IntegerComparison::Equal, None),
+            (CanonicalScalar::Bool(true), float(1.0), IntegerComparison::NotEqual, None),
+        ] {
+            let cells = [GraphValue::Scalar(left), GraphValue::Scalar(right)];
+            for negate in [false, true] {
+                let code = code(comparison, negate);
+                let expected = expected.map(|value| value != negate) == Some(true);
+                // Ordinary row and borrowed join-pair execution share this
+                // kernel. Exercise both layouts so projection cannot hide a
+                // different Int/Float rule at the relational boundary.
+                for split in [1, 2] {
+                    assert_eq!(
+                        GraphSetPredicateOp::evaluate_cells_with_control(
+                            &code,
+                            &cells[..split],
+                            &cells[split..],
+                            None,
+                            &mut |_| Ok::<_, ()>(())
+                        )
+                        .unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_numeric_row_filter_keeps_every_cancellation_checkpoint() {
+        let cells = [
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(1.0))),
+        ];
+        let code = code(IntegerComparison::Equal, false);
+        let mut checkpoints = 0;
+        assert!(
+            GraphSetPredicateOp::evaluate_cells_with_control(
+                &code,
+                &cells,
+                &[],
+                None,
+                &mut |_| {
+                    checkpoints += 1;
+                    Ok::<_, usize>(())
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(checkpoints, 3);
+        for stop in 1..=checkpoints {
+            let mut seen = 0;
+            assert_eq!(
+                GraphSetPredicateOp::evaluate_cells_with_control(
+                    &code,
+                    &cells,
+                    &[],
+                    None,
+                    &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }
+                ),
+                Err(stop)
+            );
+            assert_eq!(seen, stop);
+        }
     }
 }

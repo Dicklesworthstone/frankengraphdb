@@ -599,13 +599,7 @@ fn compare(left: &Value<'_>, right: &Value<'_>, comparison: IntegerComparison) -
             }))
         }
         (Value::Scalar(Some(left)), Value::Scalar(Some(right))) => {
-            if core::mem::discriminant(*left) != core::mem::discriminant(*right) {
-                Truth::Unknown
-            } else {
-                Truth::from(Some(
-                    comparison.accepts_scalar_pair(Some(*left), Some(*right)),
-                ))
-            }
+            Truth::from(comparison.evaluate_scalar_pair(Some(*left), Some(*right)))
         }
         _ => Truth::Unknown,
     }
@@ -998,6 +992,8 @@ mod tests {
             Some(CanonicalScalar::Bool(true)),
             Some(CanonicalScalar::Int(7)),
             Some(CanonicalScalar::Int(8)),
+            Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0))),
+            Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(8.0))),
         ];
         for comparison in [
             IntegerComparison::Equal,
@@ -1028,6 +1024,7 @@ mod tests {
                     .unwrap();
                 let expected = match value {
                     Some(CanonicalScalar::Int(n)) => !comparison.accepts(*n, 7),
+                    Some(CanonicalScalar::Float(n)) => !comparison.accepts(n.get() as i64, 7),
                     _ => false,
                 };
                 assert_eq!(actual, expected);
@@ -1048,6 +1045,41 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn mixed_numeric_literals_do_not_round_large_integer_properties() {
+        let actual = CanonicalScalar::Int(9_007_199_254_740_993);
+        let literal = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+            9_007_199_254_740_992.0,
+        ));
+        for (comparison, expected) in [
+            (IntegerComparison::Equal, false),
+            (IntegerComparison::NotEqual, true),
+            (IntegerComparison::Greater, true),
+            (IntegerComparison::Less, false),
+            (IntegerComparison::GreaterOrEqual, true),
+            (IntegerComparison::LessOrEqual, false),
+        ] {
+            let expression = bound(&[Op::Compare {
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(3),
+                },
+                comparison,
+                right: Arg::Literal(&literal),
+            }]);
+            assert_eq!(
+                expression
+                    .evaluate_vertex_binding(
+                        &[Some(VId(1))],
+                        &mut |_, _| Ok::<_, Failure<()>>(Some(&actual)),
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
