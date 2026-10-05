@@ -36,7 +36,10 @@ fn arguments(name: &str) -> GqlParameters {
     GqlParameters::new()
         .with_list(
             "rows",
-            vec![row(CanonicalScalar::Int(1), name), row(CanonicalScalar::Int(2), name)],
+            vec![
+                row(CanonicalScalar::Int(1), name),
+                row(CanonicalScalar::Int(2), name),
+            ],
         )
         .unwrap()
 }
@@ -54,7 +57,9 @@ fn controlled_and_plain_binding_have_identical_programs_and_locations() {
             match event {
                 GraphUnwindBindEvent::Work(units) => {
                     assert!(units > 0);
-                    if definitions != 0 { binding_units.push(units); }
+                    if definitions != 0 {
+                        binding_units.push(units);
+                    }
                 }
                 GraphUnwindBindEvent::Definition(script) => {
                     definitions += 1;
@@ -72,19 +77,36 @@ fn controlled_and_plain_binding_have_identical_programs_and_locations() {
     // Independently bind native statements, without the UNWIND lowering or
     // either batch wrapper, so equality is not just one wrapper calling itself.
     let native = PreparedGraphWriteScript::prepare_with_parameter_types(
-        "MERGE (n:Entity {id:$id}) SET n.name=$name", R,
+        "MERGE (n:Entity {id:$id}) SET n.name=$name",
+        R,
         &[
             ("id", GqlParameterType::Scalar(CanonicalScalarKind::Int)),
             ("name", GqlParameterType::Scalar(CanonicalScalarKind::Text)),
         ],
         symbols,
-    ).unwrap();
-    let expected = PreparedGraphWriteProgram::prepare((1..=2).flat_map(|id| {
-        let input = GqlParameters::new().with_scalar("id", CanonicalScalar::Int(id)).unwrap()
-            .with_text("name", "not syntax '; $value").unwrap();
-        native.bind_parameters(&input).unwrap().into_statements().into_vec()
-    }).collect()).unwrap();
-    assert_eq!(bound.program().canonical_bytes(), expected.canonical_bytes());
+    )
+    .unwrap();
+    let expected = PreparedGraphWriteProgram::prepare(
+        (1..=2)
+            .flat_map(|id| {
+                let input = GqlParameters::new()
+                    .with_scalar("id", CanonicalScalar::Int(id))
+                    .unwrap()
+                    .with_text("name", "not syntax '; $value")
+                    .unwrap();
+                native
+                    .bind_parameters(&input)
+                    .unwrap()
+                    .into_statements()
+                    .into_vec()
+            })
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(
+        bound.program().canonical_bytes(),
+        expected.canonical_bytes()
+    );
     for i in 0..2 {
         assert_eq!(plain.location(i), bound.location(i));
         assert_eq!(bound.location(i).unwrap().argument_set, i);
@@ -102,9 +124,17 @@ fn every_control_boundary_can_refuse_without_a_partial_program_or_later_callback
     let mut trace = Vec::new();
     parsed
         .bind_with_limit_controlled(
-            &args, R, 64,
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-            |_| { trace.push(calls.get()); Ok::<_, usize>(()) },
+            &args,
+            R,
+            64,
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+            |_| {
+                trace.push(calls.get());
+                Ok::<_, usize>(())
+            },
         )
         .unwrap();
     assert!(trace.len() > 2 * args.len());
@@ -112,8 +142,13 @@ fn every_control_boundary_can_refuse_without_a_partial_program_or_later_callback
         calls.set(0);
         let mut events = 0;
         let result = parsed.bind_with_limit_controlled(
-            &args, R, 64,
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+            &args,
+            R,
+            64,
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
             |_| {
                 let at = events;
                 events += 1;
@@ -132,11 +167,25 @@ fn a_post_catalog_refusal_is_not_misreported_as_unknown_symbol() {
     let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
     let calls = Cell::new(0);
     let result = parsed.bind_with_limit_controlled(
-        &arguments("x"), R, 64,
-        |_, _| { calls.set(calls.get() + 1); None },
-        |_| if calls.get() == 0 { Ok(()) } else { Err("expired after catalog") },
+        &arguments("x"),
+        R,
+        64,
+        |_, _| {
+            calls.set(calls.get() + 1);
+            None
+        },
+        |_| {
+            if calls.get() == 0 {
+                Ok(())
+            } else {
+                Err("expired after catalog")
+            }
+        },
     );
-    assert!(matches!(result, Err(GraphUnwindBindError::Interrupted("expired after catalog"))));
+    assert!(matches!(
+        result,
+        Err(GraphUnwindBindError::Interrupted("expired after catalog"))
+    ));
     assert_eq!(calls.get(), 1);
 }
 
@@ -144,15 +193,29 @@ fn a_post_catalog_refusal_is_not_misreported_as_unknown_symbol() {
 fn malformed_final_row_retains_its_typed_error_before_catalog_access() {
     let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
     let args = GqlParameters::new()
-        .with_list("rows", vec![row(CanonicalScalar::Int(1), "x"), row(CanonicalScalar::Bool(true), "y")])
+        .with_list(
+            "rows",
+            vec![
+                row(CanonicalScalar::Int(1), "x"),
+                row(CanonicalScalar::Bool(true), "y"),
+            ],
+        )
         .unwrap();
     let result = parsed.bind_with_limit_controlled(
-        &args, R, 64, |_, _| panic!("shape admission must finish first"),
+        &args,
+        R,
+        64,
+        |_, _| panic!("shape admission must finish first"),
         |_| Ok::<_, ()>(()),
     );
-    assert!(matches!(result, Err(GraphUnwindBindError::Binding(GraphUnwindWriteError::Row {
-        row: 1, kind: GraphUnwindRowError::IncompatibleFieldTypes, ..
-    }))));
+    assert!(matches!(
+        result,
+        Err(GraphUnwindBindError::Binding(GraphUnwindWriteError::Row {
+            row: 1,
+            kind: GraphUnwindRowError::IncompatibleFieldTypes,
+            ..
+        }))
+    ));
 }
 
 #[test]
@@ -160,10 +223,14 @@ fn payload_copies_and_repeated_global_transcripts_are_not_constant_price() {
     let total = |query: &str, args: &GqlParameters| {
         let parsed = GraphUnwindWriteText::parse(query).unwrap();
         let mut work = 0;
-        parsed.bind_with_limit_controlled(args, R, 64, symbols, |event| {
-            if let GraphUnwindBindEvent::Work(units) = event { work += units; }
-            Ok::<_, ()>(())
-        }).unwrap();
+        parsed
+            .bind_with_limit_controlled(args, R, 64, symbols, |event| {
+                if let GraphUnwindBindEvent::Work(units) = event {
+                    work += units;
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         work
     };
     let small = arguments("x");
@@ -172,7 +239,9 @@ fn payload_copies_and_repeated_global_transcripts_are_not_constant_price() {
 
     let query = "UNWIND $rows AS row MERGE (n:Entity {id:row.id}) SET n.name=$shared";
     let small = arguments("unused").with_text("shared", "x").unwrap();
-    let large = arguments("unused").with_text("shared", &"x".repeat(1025)).unwrap();
+    let large = arguments("unused")
+        .with_text("shared", &"x".repeat(1025))
+        .unwrap();
     let bytes = (large.canonical_byte_len() - small.canonical_byte_len()) as u64;
     assert_eq!(total(query, &large) - total(query, &small), 2 * bytes);
 }
@@ -180,13 +249,19 @@ fn payload_copies_and_repeated_global_transcripts_are_not_constant_price() {
 #[test]
 fn definition_gate_runs_before_binding_the_first_invalid_merge_key() {
     let parsed = GraphUnwindWriteText::parse(QUERY).unwrap();
-    let args = GqlParameters::new().with_list("rows", vec![row(CanonicalScalar::Null, "x")]).unwrap();
-    let result = parsed.bind_with_limit_controlled(&args, R, 64, symbols, |event| {
-        match event {
-            GraphUnwindBindEvent::Definition(_) => Err("operation class denied"),
-            GraphUnwindBindEvent::Work(_) => Ok(()),
-        }
+    let args = GqlParameters::new()
+        .with_list("rows", vec![row(CanonicalScalar::Null, "x")])
+        .unwrap();
+    let result = parsed.bind_with_limit_controlled(&args, R, 64, symbols, |event| match event {
+        GraphUnwindBindEvent::Definition(_) => Err("operation class denied"),
+        GraphUnwindBindEvent::Work(_) => Ok(()),
     });
-    assert!(matches!(result, Err(GraphUnwindBindError::Interrupted("operation class denied"))));
-    assert!(matches!(parsed.bind(&args, R, symbols), Err(GraphUnwindWriteError::Binding(_))));
+    assert!(matches!(
+        result,
+        Err(GraphUnwindBindError::Interrupted("operation class denied"))
+    ));
+    assert!(matches!(
+        parsed.bind(&args, R, symbols),
+        Err(GraphUnwindWriteError::Binding(_))
+    ));
 }
