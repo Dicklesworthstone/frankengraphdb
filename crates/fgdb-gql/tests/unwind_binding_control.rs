@@ -97,8 +97,8 @@ fn controlled_and_plain_binding_have_identical_programs_and_locations() {
                 native
                     .bind_parameters(&input)
                     .unwrap()
-                    .into_statements()
-                    .into_vec()
+                    .statements()
+                    .to_vec()
             })
             .collect(),
     )
