@@ -1528,47 +1528,59 @@ fn bound_edges<'a, E, Row>(
     };
     let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
     let mut frontier = std::collections::BTreeSet::new();
-    visit_vertices(&snapshot.patches, as_of, control, |row, control| {
-        control(SourceEvent::Work)?;
-        for predicate in predicates {
-            for _ in 0..predicate.comparison_work_units() {
+    // Roots come from the property index when a root predicate can seek it,
+    // so a bound hub costs its candidates, not a predicate test per vertex.
+    let roots = match indexed_roots(snapshot, predicates, as_of, control)? {
+        Some(roots) => roots,
+        None => {
+            let mut roots = Vec::new();
+            visit_vertices(&snapshot.patches, as_of, control, |row, control| {
                 control(SourceEvent::Work)?;
-            }
+                for predicate in predicates {
+                    for _ in 0..predicate.comparison_work_units() {
+                        control(SourceEvent::Work)?;
+                    }
+                }
+                if predicates
+                    .iter()
+                    .all(|p| p.matches(&row.labels, &row.props))
+                {
+                    roots.push(row.vid);
+                }
+                Ok(())
+            })?;
+            roots
         }
-        if predicates
-            .iter()
-            .all(|p| p.matches(&row.labels, &row.props))
-        {
-            snapshot.adjacency_index.visit(
-                &snapshot.blocks,
-                row.vid,
-                lookup_direction,
-                as_of,
-                control,
-                |entry, block, row, control| {
-                    if entry.relation == *relation && !selected.contains_key(&entry.eid) {
-                        control(SourceEvent::SnapshotRecord)?;
-                        control(SourceEvent::ScratchEntry)?;
-                        selected.insert(
-                            entry.eid,
-                            (
-                                (entry.eid, entry.src, entry.relation, entry.dst),
-                                edge_properties_at(&snapshot.block_props, block, row),
-                            ),
-                        );
-                        for endpoint in [entry.src, entry.dst] {
-                            if !frontier.contains(&endpoint) {
-                                control(SourceEvent::ScratchEntry)?;
-                                frontier.insert(endpoint);
-                            }
+    };
+    for root in roots {
+        snapshot.adjacency_index.visit(
+            &snapshot.blocks,
+            root,
+            lookup_direction,
+            as_of,
+            control,
+            |entry, block, row, control| {
+                if entry.relation == *relation && !selected.contains_key(&entry.eid) {
+                    control(SourceEvent::SnapshotRecord)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    selected.insert(
+                        entry.eid,
+                        (
+                            (entry.eid, entry.src, entry.relation, entry.dst),
+                            edge_properties_at(&snapshot.block_props, block, row),
+                        ),
+                    );
+                    for endpoint in [entry.src, entry.dst] {
+                        if !frontier.contains(&endpoint) {
+                            control(SourceEvent::ScratchEntry)?;
+                            frontier.insert(endpoint);
                         }
                     }
-                    Ok(())
-                },
-            )?;
-        }
-        Ok(())
-    })?;
+                }
+                Ok(())
+            },
+        )?;
+    }
     // Fixed-hop plans consume at most one new adjacency per Expand. Using
     // both endpoints and both directions is a superset even for correlations
     // and cycle closures; no source-level join can discard a valid witness.
@@ -1611,6 +1623,55 @@ fn bound_edges<'a, E, Row>(
         }
     }
     Ok(Some(selected.into_values().collect()))
+}
+
+/// The VIds of the visible vertices satisfying every root predicate, served
+/// from the property index when one predicate can seek it: a numeric
+/// comparison (both numeric kinds) or a non-null equality. None leaves the
+/// caller's predicate scan over every vertex.
+fn indexed_roots<E>(
+    snapshot: &Snapshot,
+    predicates: &[fgdb_gql::algebra::VertexPredicate],
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Vec<VId>>, E> {
+    use fgdb_gql::algebra::{IntegerComparison, VertexPredicate};
+    // A probed root is not an admitted record: the predicate scan this
+    // replaces charged root selection as work only, and every candidate here
+    // still charges work, so the budget governs the probe.
+    let control = &mut |event| match event {
+        SourceEvent::SnapshotRecord => Ok(()),
+        other => control(other),
+    };
+    if let Some((rows, _)) = numeric::bound_rows(snapshot, || predicates.iter(), as_of, control)? {
+        return Ok(Some(rows.into_iter().map(|row| row.vid).collect()));
+    }
+    let Some((key, value)) = predicates.iter().find_map(|predicate| match predicate {
+        VertexPredicate::ScalarProperty { key, predicate }
+            if predicate.comparison() == IntegerComparison::Equal
+                && !matches!(predicate.value(), CanonicalScalar::Null) =>
+        {
+            Some((*key, predicate.value()))
+        }
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let mut roots = Vec::new();
+    for vid in snapshot.property_index.lookup(key, value) {
+        control(SourceEvent::Work)?;
+        if let Some(row) =
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, *vid, as_of, control)?
+            && predicates
+                .iter()
+                .all(|predicate| predicate.matches(&row.labels, &row.props))
+        {
+            roots.push(row.vid);
+        }
+    }
+    Ok(Some(roots))
 }
 
 /// For an edge-rooted plan whose row-reading slots are all endpoints of the

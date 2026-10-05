@@ -132,8 +132,23 @@ pub(super) fn bound_vertices<'a, E>(
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E> {
+    bound_rows(snapshot, || predicates(operators), as_of, control)
+}
+
+/// The visible rows at `as_of` satisfying every predicate `predicates()`
+/// yields, seeking both numeric domains of the first numeric predicate's key,
+/// with the count of index candidates. None when no predicate is numeric.
+pub(super) fn bound_rows<'a, 'p, E, I>(
+    snapshot: &'a Snapshot,
+    predicates: impl Fn() -> I,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E>
+where
+    I: Iterator<Item = &'p VertexPredicate>,
+{
     let mut bounds: Option<NumericBounds> = None;
-    for predicate in predicates(operators) {
+    for predicate in predicates() {
         control(SourceEvent::Work)?;
         if let Some((key, comparison, value)) = numeric_operand(predicate) {
             let selected = bounds.get_or_insert_with(|| NumericBounds::new(key));
@@ -156,7 +171,7 @@ pub(super) fn bound_vertices<'a, E>(
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
         {
             let mut matches = true;
-            for predicate in predicates(operators) {
+            for predicate in predicates() {
                 control(SourceEvent::Work)?;
                 if !predicate.matches(&row.labels, &row.props) {
                     matches = false;

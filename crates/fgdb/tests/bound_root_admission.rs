@@ -13,7 +13,9 @@
 //!   including projections that DO read neighbour rows;
 //! - the work a one-hop count from a hub needs does not grow with
 //!   (degree x vertex patches): two databases that differ only in how many
-//!   commits wrote the vertices need nearly the same minimal work budget.
+//!   commits wrote the vertices need nearly the same minimal work budget;
+//! - nor with the number of vertices: the root comes from the property index,
+//!   not from testing the root predicate on every vertex.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
@@ -30,6 +32,8 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const DEGREE: u128 = 2_000;
 /// Vertex 2_001 points at the hub, so incoming and undirected answers differ.
 const INBOUND: u128 = DEGREE + 1;
+/// First VId of the unrelated vertices `hub_with` adds.
+const UNRELATED: u128 = 1_000_000_000;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -61,13 +65,20 @@ fn with_work(work: u64) -> GqlQueryPolicy {
 /// vertex patch each), then every edge in one more commit. A second relation
 /// at the hub must never be counted by an R pattern.
 async fn hub(commit: &CommitCx, commits: u128) -> Database<MemVfs> {
+    hub_with(commit, commits, 0).await
+}
+
+/// [`hub`] plus `unrelated` isolated Person vertices, spread over the same
+/// commits so the vertex patch count is unchanged.
+async fn hub_with(commit: &CommitCx, commits: u128, unrelated: u128) -> Database<MemVfs> {
     let mut db = Database::open_memory(commit, keys()).await.unwrap();
-    let total = INBOUND + 1;
-    let per = total.div_ceil(commits);
-    let mut vid = 0;
-    while vid < total {
+    let vids: Vec<u128> = (0..=INBOUND)
+        .chain((0..unrelated).map(|at| UNRELATED + at))
+        .collect();
+    let per = (vids.len() as u128).div_ceil(commits) as usize;
+    for chunk in vids.chunks(per) {
         let mut batch = WriteBatch::new(R);
-        for v in vid..(vid + per).min(total) {
+        for &v in chunk {
             batch.create_vertex(
                 VId(v),
                 vec![PERSON],
@@ -75,7 +86,6 @@ async fn hub(commit: &CommitCx, commits: u128) -> Database<MemVfs> {
             );
         }
         db.write(commit, batch).await.unwrap();
-        vid += per;
     }
     let mut edges = WriteBatch::new(R);
     for b in 1..=DEGREE {
@@ -218,6 +228,32 @@ fn a_one_hop_count_from_a_hub_costs_no_row_per_neighbour() {
             assert!(
                 many.saturating_sub(few) < 100_000,
                 "{text}: {few} work units with one vertex patch but {many} with 25"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_one_hop_count_from_a_hub_costs_no_work_per_unrelated_vertex() {
+    let ((), report) = run_async_under_lab(0x6875_6203, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let small = hub_with(&commit, 1, 0).await;
+        let large = hub_with(&commit, 1, 20_000).await;
+        for text in [
+            "MATCH (a:Person {p: 0})-[:R]->(b) RETURN count(b)",
+            "MATCH (b)<-[:R]-(a:Person {p: 0}) RETURN count(b)",
+        ] {
+            let few = minimal_work(&small, &cx, text);
+            let many = minimal_work(&large, &cx, text);
+            // Measured: +847 units for 20,000 more vertices when the root is
+            // served from the property index, +41,035 when the root
+            // predicate is tested on every vertex (about 2 units each).
+            assert!(
+                many.saturating_sub(few) < 4_000,
+                "{text}: {few} work units over the hub alone but {many} with 20,000 unrelated vertices"
             );
         }
     });
