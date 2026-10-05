@@ -49,9 +49,7 @@ impl MixedMeter {
         // overwrites an ON assignment. Require the exact expanded count; never
         // accept a receipt that silently drops one clause from the allowance.
         let expected = actions.len() as u128 + input.after().len() as u128;
-        if stats.merge.created_vertices != created
-            || u128::from(stats.action_effects) != expected
-        {
+        if stats.merge.created_vertices != created || u128::from(stats.action_effects) != expected {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         // A create branch can apply actions despite selecting ZERO MATCH rows.

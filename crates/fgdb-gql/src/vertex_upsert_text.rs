@@ -1,9 +1,9 @@
 //! Parse-once native vertex MERGE with bounded ON and trailing SET clauses.
 
 use crate::{
-    GqlScalarParameter, GraphMutationTextError, GraphMutationTextErrorKind,
-    GraphPatternTextError, GraphPatternTextErrorKind, GraphVertexMergeTextErrorKind,
-    GraphVertexUpsertBuildError, PreparedGraphVertexMergeText,
+    GqlScalarParameter, GraphMutationTextError, GraphMutationTextErrorKind, GraphPatternTextError,
+    GraphPatternTextErrorKind, GraphVertexMergeTextErrorKind, GraphVertexUpsertBuildError,
+    PreparedGraphVertexMergeText,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
