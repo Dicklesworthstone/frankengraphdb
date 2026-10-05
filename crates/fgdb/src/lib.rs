@@ -1629,11 +1629,21 @@ struct Snapshot {
     /// The manifest published beside `root` (fgdb-63w2) — the identity a
     /// root slot carries, re-derived identically by every rebuild.
     manifest: ManifestVersion,
-    /// The next unspent birth ordinal, derived by counting the creations the
-    /// durable stream already contains. Derived rather than stored: identity
-    /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
-    /// authority beside the stream.
-    next_birth_ordinal: u64,
+    /// The ordered local delta window derived from the same Chronicle cut as
+    /// every graph field above. Keeping it inside the immutable generation is
+    /// what makes a pinned view one coherent graph-and-delta publication:
+    /// writes build a successor off-side, and compaction carries this exact
+    /// window into its replacement generation.
+    delta_index: LocalDeltaBatchIndex,
+}
+
+/// What the NEXT commit needs and no read does: the version chain heads and
+/// the birth-ordinal allocator of the published generation. They live on the
+/// writing handle, beside its [`BlockWriter`], not in the [`Snapshot`] a read
+/// view shares. A view can therefore be issued without deriving them, and a
+/// commit while a view is pinned no longer copies them with the snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WriteHeads {
     /// The current element-version chain head of every LIVE element,
     /// derived by folding the stream (fgdb-p3ok). This is the state a
     /// delete's `before_version` names, so it is engine state — but the
@@ -1642,12 +1652,11 @@ struct Snapshot {
     /// every emitted image against the oracle's own chains, so a drift in
     /// either implementation is a refusal, not a silent agreement.
     versions: std::collections::BTreeMap<ElementId, ObjectId>,
-    /// The ordered local delta window derived from the same Chronicle cut as
-    /// every graph field above. Keeping it inside the immutable generation is
-    /// what makes a pinned view one coherent graph-and-delta publication:
-    /// writes build a successor off-side, and compaction carries this exact
-    /// window into its replacement generation.
-    delta_index: LocalDeltaBatchIndex,
+    /// The next unspent birth ordinal, derived by counting the creations the
+    /// durable stream already contains. Derived rather than stored: identity
+    /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
+    /// authority beside the stream.
+    next_birth_ordinal: u64,
 }
 
 fn read_error_from_index(error: IndexError) -> ReadError {
@@ -2110,6 +2119,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// recovery path, and `incremental_publish_equals_rebuild.rs` pins that a
     /// clone-publish of this writer is byte-identical to that rebuild.
     writer: BlockWriter,
+    /// The published generation's version heads and birth-ordinal allocator,
+    /// derived with the writer and replaced with it at every publication.
+    heads: WriteHeads,
     /// Per-open-handle, engine-owned identity reservations (never recycled;
     /// the durable floor is re-derived from the committed stream at open).
     identity_allocation: std::sync::Arc<std::sync::Mutex<crate::write_txn::IdentityAllocation>>,
@@ -2196,6 +2208,33 @@ impl Database<UnixVfs> {
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
         Self::open_with_vfs(cx, UnixVfs::new(), path, keys).await
+    }
+
+    /// Open `path` for reads only, returning a view of its published
+    /// generation.
+    ///
+    /// Before trusting a root, this authenticates exactly what
+    /// [`Database::open`] does: Chronicle recovery under the writer lease, the
+    /// root slot, and the selected manifest's chain binding (one shared
+    /// selection), then the same verified reopen of every block and patch the
+    /// root names, with the same root admission. What it skips is the state
+    /// only a writer needs: the retained fold, the element-version heads, the
+    /// birth-ordinal allocator, and the delta history. The view's delta window
+    /// is empty at its frontier, so a change cursor older than the frontier is
+    /// refused as retired, never answered from a partial window.
+    ///
+    /// The fast path needs durable state that is already current: a slot that
+    /// names a root published at the recovered chain's frontier. Anything else
+    /// (no slot yet, or commits past the root after a crash or lag) needs the
+    /// writes a full open performs to heal it. In that case this opens fully
+    /// and keeps that handle's generation. Either way the writer lease is
+    /// released before this returns: the view owns no lease and cannot write.
+    pub async fn open_read_view(
+        cx: &CommitCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<EmbeddedReadView, OpenError> {
+        Self::open_read_view_with_vfs(cx, UnixVfs::new(), path, keys).await
     }
 
     /// Open the commit stream and the block store, then rebuild the fold.
@@ -2368,41 +2407,73 @@ impl<V: Vfs + Clone> Database<V> {
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
         let path = path.as_ref();
-        match cx.with_restriction_async(vfs.symlink_metadata(path)).await {
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                return Err(OpenError::NotADirectory {
-                    path: path.to_path_buf(),
-                });
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(OpenError::NotADatabase {
-                    path: path.to_path_buf(),
-                    missing: "the directory itself",
-                });
-            }
-            Err(error) => return Err(OpenError::Io(error)),
-        }
-        match cx
-            .with_restriction_async(vfs.symlink_metadata(&path.join(CAPSULE_DIR)))
-            .await
-        {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => {
-                return Err(OpenError::NotADatabase {
-                    path: path.to_path_buf(),
-                    missing: CAPSULE_DIR,
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(OpenError::NotADatabase {
-                    path: path.to_path_buf(),
-                    missing: CAPSULE_DIR,
-                });
-            }
-            Err(error) => return Err(OpenError::Io(error)),
-        }
+        require_database_dir(cx, &vfs, path).await?;
         Self::bind_with_vfs(cx, vfs, path, keys, false).await
+    }
+
+    /// [`Database::open_read_view`] through an explicit filesystem: the lab
+    /// seam, as [`Database::open_with_vfs`] is for the writable open.
+    #[doc(hidden)]
+    pub async fn open_read_view_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+    ) -> Result<EmbeddedReadView, OpenError> {
+        let path = path.as_ref();
+        require_database_dir(cx, &vfs, path).await?;
+        if let Some(view) = Self::read_current_generation(cx, &vfs, path, &keys).await? {
+            return Ok(view);
+        }
+        // The durable state needs healing first, and healing writes: open
+        // fully, then keep only the generation that open published.
+        let database = Self::bind_with_vfs(cx, vfs, path, keys, false).await?;
+        Ok(EmbeddedReadView {
+            snapshot: Arc::clone(&database.snapshot),
+        })
+    }
+
+    /// The read-only open's fast path: `None` unless the slot selects a root
+    /// published at the recovered chain's frontier, in which case nothing is
+    /// left to fold or heal. The coordinator, and with it the writer lease,
+    /// drops before this returns, so a fallback open can take it.
+    async fn read_current_generation(
+        cx: &CommitCx,
+        vfs: &V,
+        path: &Path,
+        keys: &DatabaseKeys,
+    ) -> Result<Option<EmbeddedReadView>, OpenError> {
+        let coordinator =
+            CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
+        let store = open_block_store(cx, vfs, path, keys).await?;
+        let probe = RootStore::with_vfs(vfs.clone(), path);
+        let Some(checkpoint) =
+            select_checkpoint(cx, &coordinator, &store, &probe, keys, path).await?
+        else {
+            return Ok(None);
+        };
+        let chain_frontier = coordinator
+            .chain()
+            .entries()
+            .last()
+            .map_or(0, |entry| entry.marker.commit_seq);
+        if chain_frontier != checkpoint.published_at.0 {
+            return Ok(None);
+        }
+        let (root, blocks, block_props, patches) = store.reopen(cx, checkpoint.root_id).await?;
+        let mut snapshot = current_generation(
+            keys,
+            coordinator.chain(),
+            checkpoint.root_id,
+            root,
+            blocks,
+            block_props,
+            patches,
+        );
+        snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
+        Ok(Some(EmbeddedReadView {
+            snapshot: Arc::new(snapshot),
+        }))
     }
 
     /// The derived element-version heads, exposed for the fast-open
@@ -2417,7 +2488,7 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
     ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, ReadError> {
         self.ensure_readable()?;
-        Ok(&self.snapshot.versions)
+        Ok(&self.heads.versions)
     }
 
     // Type-erased because every constructor funnels through this bind: a
@@ -2471,92 +2542,39 @@ impl<V: Vfs + Clone> Database<V> {
             FirstCommitterWinsValidator::default()
                 .with_scalar_resolver(keys.scalar_resolver.clone()),
         ));
-        let store =
-            BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
-                .await?;
-        let store = match &keys.scalar_resolver {
-            Some(resolver) => store.with_scalar_resolver(resolver.clone()),
-            None => store,
-        };
+        let store = open_block_store(cx, &vfs, path, &keys).await?;
         let mut crypto_verification_events = Vec::new();
-        // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
-        // resolvable manifest. Before accepting it, bind verifies the selected
-        // partition's V2 marker-chain commitment against Chronicle's recovered
-        // chain; reopen_from_verified_checkpoint then reopens that partition
-        // and folds only the suffix. A missing slot falls back to a full
-        // rebuild (and the reconciliation below creates it), while a present
-        // slot that is foreign, malformed, or unaccountable refuses rather
-        // than being silently rebuilt over.
-        let (mut snapshot, writer) = if force_rebuild {
-            rebuild(
-                cx,
-                &coordinator,
-                &store,
-                &keys,
-                &mut crypto_verification_events,
-            )
-            .await?
+        // CHECKPOINT-SELECTED PATH (fgdb-ge6a): select_checkpoint accepts the
+        // slot's partition only once its chain binding holds;
+        // reopen_from_verified_checkpoint then reopens that partition and
+        // folds only the suffix. A missing slot falls back to a full rebuild
+        // (and the reconciliation below creates it).
+        let selected = if force_rebuild {
+            None
         } else {
-            match probe.current(cx).await {
-                Ok(slot) => {
-                    validate_plain_slot(&slot, &keys, path)?;
-                    let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
-                    match store.resolve_manifest(cx, claimed).await {
-                        Ok(resolved) if resolved.len() == 1 => {
-                            let (record, root) = &resolved[0];
-                            let describes_spine = record.graph == GRAPH
-                                && record.branch == BRANCH
-                                && record.partition == PARTITION
-                                && root.graph == GRAPH
-                                && root.branch == BRANCH
-                                && root.partition == PARTITION;
-                            // THE CHAIN BINDING (fgdb-90hw): the record claims
-                            // "the history whose chain at published_at hashes
-                            // to exactly this published my root", and the
-                            // recovered chain is the judge — one comparison,
-                            // no capsule folding. A future-frontier root falls
-                            // off the chain (None); a same-namespace FOREIGN
-                            // history hashes differently; a lagging root
-                            // matches at its own seq and heals below. WHAT was
-                            // published stays the equivalence law's question —
-                            // this binding answers WHO published it.
-                            let bound = chain_commitment_at(coordinator.chain(), root.published_at)
-                                .is_some_and(|expected| expected == record.published_chain_hash);
-                            if !describes_spine || !bound {
-                                return Err(OpenError::SlotDisagreesWithStream {
-                                    path: path.to_path_buf(),
-                                    slot_manifest: ObjectId(slot.root_manifest_oid),
-                                });
-                            }
-                            reopen_from_verified_checkpoint(
-                                cx,
-                                &coordinator,
-                                &store,
-                                &keys,
-                                record.root,
-                                &mut crypto_verification_events,
-                            )
-                            .await?
-                        }
-                        _ => {
-                            return Err(OpenError::SlotDisagreesWithStream {
-                                path: path.to_path_buf(),
-                                slot_manifest: ObjectId(slot.root_manifest_oid),
-                            });
-                        }
-                    }
-                }
-                Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    rebuild(
-                        cx,
-                        &coordinator,
-                        &store,
-                        &keys,
-                        &mut crypto_verification_events,
-                    )
-                    .await?
-                }
-                Err(error) => return Err(OpenError::Slot(error)),
+            select_checkpoint(cx, &coordinator, &store, &probe, &keys, path).await?
+        };
+        let (mut snapshot, writer, heads) = match selected {
+            Some(checkpoint) => {
+                reopen_from_verified_checkpoint(
+                    cx,
+                    &coordinator,
+                    &store,
+                    &keys,
+                    checkpoint.root_id,
+                    &mut crypto_verification_events,
+                )
+                .await?
+            }
+            None => {
+                rebuild(
+                    cx,
+                    &coordinator,
+                    &store,
+                    &keys,
+                    &mut crypto_verification_events,
+                )
+                .await?
             }
         };
         // RECONCILE THE ROOT SLOT (fgdb-ge6a, the PLAIN opener ruling). The
@@ -2646,6 +2664,7 @@ impl<V: Vfs + Clone> Database<V> {
             state: DatabaseState::Healthy { published_frontier },
             snapshot: Arc::new(snapshot),
             writer,
+            heads,
             // Deliberately empty rather than seeded from the rebuild: the first
             // publication's fallback re-earns every block's admission from disk
             // through the same checks, so an open session starts from proven
@@ -3196,7 +3215,7 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
-                        .or_else(|| self.snapshot.versions.get(&ElementId::Edge(eid)))
+                        .or_else(|| self.heads.versions.get(&ElementId::Edge(eid)))
                         .copied()
                         .expect("a live edge always has a version chain head");
                     prefix_deleted_edges.insert(eid);
@@ -3217,7 +3236,7 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Vertex(vid))
-                        .or_else(|| self.snapshot.versions.get(&ElementId::Vertex(vid)))
+                        .or_else(|| self.heads.versions.get(&ElementId::Vertex(vid)))
                         .copied()
                         .expect("a live vertex always has a version chain head");
                     // The cascade image is the incident set the FOLD will
@@ -3645,13 +3664,14 @@ impl<V: Vfs + Clone> Database<V> {
             CommittedMarker::attest(marker_ref, cx),
         );
         // The delta index and statement versions are TAKEN from the fenced
-        // snapshot, not cloned (a clone copied every retained batch and version
+        // handle, not cloned (a clone copied every retained batch and version
         // on every commit). The handle has been fenced since before this fold,
         // and `make_mut` copies only a snapshot a pinned read view still
-        // shares, so that view keeps its own unchanged generation.
+        // shares, so that view keeps its own unchanged generation. The
+        // versions are the handle's own, so a pinned view never copies them.
         let previous = Arc::make_mut(&mut self.snapshot);
         let mut next_delta_index = std::mem::take(&mut previous.delta_index);
-        let mut new_versions = std::mem::take(&mut previous.versions);
+        let mut new_versions = std::mem::take(&mut self.heads.versions);
         next_delta_index
             .insert(batch)
             .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -3664,7 +3684,7 @@ impl<V: Vfs + Clone> Database<V> {
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut folded =
             std::mem::replace(&mut self.writer, BlockWriter::new(GRAPH, BRANCH, PARTITION));
-        let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        let mut next_birth_ordinal = self.heads.next_birth_ordinal;
         let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
@@ -3979,6 +3999,10 @@ impl<V: Vfs + Clone> Database<V> {
         assert_eq!(decoded_patches.len(), patch_prefix);
         decoded_patches.extend(fresh_patches);
         self.writer = folded;
+        self.heads = WriteHeads {
+            versions: new_versions,
+            next_birth_ordinal,
+        };
         self.snapshot = Arc::new(Snapshot {
             adjacency_index: Arc::new(
                 self.snapshot
@@ -3998,8 +4022,6 @@ impl<V: Vfs + Clone> Database<V> {
             frontier,
             root: root_id,
             manifest,
-            next_birth_ordinal,
-            versions: new_versions,
             delta_index: next_delta_index,
         });
         self.state = DatabaseState::Healthy {
@@ -4469,10 +4491,9 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
 
-        // The logical state is unchanged, so versions and the allocator pass
-        // through; the shared tail republishes and reopens from disk.
-        let versions = self.snapshot.versions.clone();
-        let next_birth_ordinal = self.snapshot.next_birth_ordinal;
+        // The logical state is unchanged, so the handle's version heads and
+        // allocator stay as they are; the shared tail republishes and reopens
+        // from disk.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
         let (mut snapshot, writer) = publish_and_snapshot(
@@ -4480,9 +4501,7 @@ impl<V: Vfs + Clone> Database<V> {
             &self.store,
             &self.keys,
             writer,
-            versions,
             frontier,
-            next_birth_ordinal,
             published_chain_hash,
         )
         .await?;
@@ -5010,7 +5029,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     keys: &DatabaseKeys,
     root_id: PartitionRootVersion,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
-) -> Result<(Snapshot, BlockWriter), RebuildError> {
+) -> Result<OpenedGeneration, RebuildError> {
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
     let fgdb_strata::store::ReopenedPartition {
@@ -5059,29 +5078,177 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     )
     .await?;
 
+    let heads = WriteHeads {
+        versions,
+        next_birth_ordinal,
+    };
     if frontier.0 > published_at.0 {
         // The suffix advanced the fold: republish through the shared tail so
         // the durable root/manifest catch up (the slot heals in bind).
         let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
             .expect("the fold's frontier is on the recovered chain it folded");
-        let result = publish_and_snapshot(
-            cx,
-            store,
-            keys,
-            writer,
-            versions,
-            frontier,
-            next_birth_ordinal,
-            published_chain_hash,
-        )
-        .await;
-        return result;
+        let (snapshot, writer) =
+            publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
+        return Ok((snapshot, writer, heads));
     }
 
     // No suffix: the partition IS current, and the snapshot assembles from
     // what the reopen already decoded — no publish, no O(blocks) writes.
-    let published_chain_hash = chain_commitment_at(coordinator.chain(), published_at)
-        .expect("bind verified this publication against the recovered chain");
+    let snapshot = current_generation(
+        keys,
+        coordinator.chain(),
+        root_id,
+        root,
+        blocks,
+        block_props,
+        patches,
+    );
+    Ok((snapshot, writer, heads))
+}
+
+/// What an open derives: the generation readers share, the retained fold, and
+/// the write heads beside it.
+type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads);
+
+/// Refuse a `path` that does not hold a database before anything is opened
+/// under it. Shared by the writable and the read-only open; see
+/// [`OpenError::NotADatabase`] for why this cannot simply delegate to
+/// `CommitCoordinator::open`.
+async fn require_database_dir<V: Vfs>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+) -> Result<(), OpenError> {
+    match cx.with_restriction_async(vfs.symlink_metadata(path)).await {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(OpenError::NotADirectory {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OpenError::NotADatabase {
+                path: path.to_path_buf(),
+                missing: "the directory itself",
+            });
+        }
+        Err(error) => return Err(OpenError::Io(error)),
+    }
+    match cx
+        .with_restriction_async(vfs.symlink_metadata(&path.join(CAPSULE_DIR)))
+        .await
+    {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(OpenError::NotADatabase {
+            path: path.to_path_buf(),
+            missing: CAPSULE_DIR,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(OpenError::NotADatabase {
+                path: path.to_path_buf(),
+                missing: CAPSULE_DIR,
+            })
+        }
+        Err(error) => Err(OpenError::Io(error)),
+    }
+}
+
+/// The Strata block store under `path`, opened through the handle's one
+/// filesystem and carrying the keys' scalar resolver when they have one.
+async fn open_block_store<V: Vfs + Clone>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+    keys: &DatabaseKeys,
+) -> Result<BlockStore<V>, OpenError> {
+    let store =
+        BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
+            .await?;
+    Ok(match &keys.scalar_resolver {
+        Some(resolver) => store.with_scalar_resolver(resolver.clone()),
+        None => store,
+    })
+}
+
+/// The checkpoint a root slot selects, once verified (fgdb-ge6a).
+struct SelectedCheckpoint {
+    root_id: PartitionRootVersion,
+    published_at: CommitSeq,
+}
+
+/// Select the checkpoint the root slot names, accepting it only when the
+/// manifest describes the spine and its record is bound to the recovered
+/// chain (fgdb-90hw). `None` when there is no slot file: an interrupted
+/// create, which the caller rebuilds from the stream. A present slot that is
+/// foreign, malformed, or unaccountable refuses rather than being silently
+/// rebuilt over. The writable open and the read-only open both select here, so
+/// neither accepts a root the other refuses.
+async fn select_checkpoint<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    store: &BlockStore<V>,
+    probe: &RootStore<V>,
+    keys: &DatabaseKeys,
+    path: &Path,
+) -> Result<Option<SelectedCheckpoint>, OpenError> {
+    let slot = match probe.current(cx).await {
+        Ok(slot) => slot,
+        Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(OpenError::Slot(error)),
+    };
+    validate_plain_slot(&slot, keys, path)?;
+    let disagrees = || OpenError::SlotDisagreesWithStream {
+        path: path.to_path_buf(),
+        slot_manifest: ObjectId(slot.root_manifest_oid),
+    };
+    let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
+    let resolved = match store.resolve_manifest(cx, claimed).await {
+        Ok(resolved) if resolved.len() == 1 => resolved,
+        _ => return Err(disagrees()),
+    };
+    let (record, root) = &resolved[0];
+    let describes_spine = record.graph == GRAPH
+        && record.branch == BRANCH
+        && record.partition == PARTITION
+        && root.graph == GRAPH
+        && root.branch == BRANCH
+        && root.partition == PARTITION;
+    // THE CHAIN BINDING (fgdb-90hw): the record claims "the history whose
+    // chain at published_at hashes to exactly this published my root", and the
+    // recovered chain is the judge — one comparison, no capsule folding. A
+    // future-frontier root falls off the chain (None); a same-namespace FOREIGN
+    // history hashes differently; a lagging root matches at its own seq and
+    // heals in bind. WHAT was published stays the equivalence law's question —
+    // this binding answers WHO published it.
+    let bound = chain_commitment_at(coordinator.chain(), root.published_at)
+        .is_some_and(|expected| expected == record.published_chain_hash);
+    if !describes_spine || !bound {
+        return Err(disagrees());
+    }
+    Ok(Some(SelectedCheckpoint {
+        root_id: record.root,
+        published_at: root.published_at,
+    }))
+}
+
+/// The readable generation of a verified partition that is current with the
+/// recovered chain: the decoded state, its derived indexes, and the manifest
+/// identity re-derived from the one record that publishes it. Its delta window
+/// starts empty; each caller states what history it retains.
+fn current_generation(
+    keys: &DatabaseKeys,
+    chain: &fgdb_chronicle::MarkerChain,
+    root_id: PartitionRootVersion,
+    root: fgdb_strata::root::PartitionRoot,
+    blocks: Vec<Vec<AdjacencyEntry>>,
+    block_props: Vec<Option<BlockProps>>,
+    patches: Vec<VertexPatchRows>,
+) -> Snapshot {
+    let published_at = root.published_at;
+    let published_chain_hash = chain_commitment_at(chain, published_at)
+        .expect("select_checkpoint bound this publication to the recovered chain");
     let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
         .expect("one root is one canonical record");
     let manifest_bytes =
@@ -5091,24 +5258,19 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         keys.namespace,
         &manifest_bytes,
     ));
-    Ok((
-        Snapshot {
-            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
-            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
-            blocks,
-            refs: root.blocks,
-            block_props,
-            patches,
-            patch_refs: root.vertex_patches,
-            frontier: published_at,
-            root: root_id,
-            manifest,
-            next_birth_ordinal,
-            versions,
-            delta_index: LocalDeltaBatchIndex::new(),
-        },
-        writer,
-    ))
+    Snapshot {
+        adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
+        property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
+        blocks,
+        refs: root.blocks,
+        block_props,
+        patches,
+        patch_refs: root.vertex_patches,
+        frontier: published_at,
+        root: root_id,
+        manifest,
+        delta_index: LocalDeltaBatchIndex::new(),
+    }
 }
 
 async fn rebuild<V: Vfs>(
@@ -5117,7 +5279,7 @@ async fn rebuild<V: Vfs>(
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
-) -> Result<(Snapshot, BlockWriter), RebuildError> {
+) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
     let mut versions = std::collections::BTreeMap::new();
@@ -5136,17 +5298,16 @@ async fn rebuild<V: Vfs>(
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
         .expect("the fold's frontier is on the recovered chain it folded");
-    publish_and_snapshot(
-        cx,
-        store,
-        keys,
+    let (snapshot, writer) =
+        publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
+    Ok((
+        snapshot,
         writer,
-        versions,
-        frontier,
-        next_birth_ordinal,
-        published_chain_hash,
-    )
-    .await
+        WriteHeads {
+            versions,
+            next_birth_ordinal,
+        },
+    ))
 }
 
 /// Rebuild the derived delta window from the FULL recovered marker chain.
@@ -5371,15 +5532,12 @@ async fn fold_stream<V: Vfs>(
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
 /// Strata publication (fgdb-a5y6m).
-#[allow(clippy::too_many_arguments)]
 fn publish_and_snapshot<'a, V: Vfs>(
     cx: &'a CommitCx,
     store: &'a BlockStore<V>,
     keys: &'a DatabaseKeys,
     writer: BlockWriter,
-    versions: std::collections::BTreeMap<ElementId, ObjectId>,
     frontier: CommitSeq,
-    next_birth_ordinal: u64,
     published_chain_hash: Digest,
 ) -> SendFuture<'a, Result<(Snapshot, BlockWriter), RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
@@ -5387,22 +5545,17 @@ fn publish_and_snapshot<'a, V: Vfs>(
         store,
         keys,
         writer,
-        versions,
         frontier,
-        next_birth_ordinal,
         published_chain_hash,
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn publish_and_snapshot_inner<V: Vfs>(
     cx: &CommitCx,
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
     writer: BlockWriter,
-    versions: std::collections::BTreeMap<ElementId, ObjectId>,
     frontier: CommitSeq,
-    next_birth_ordinal: u64,
     published_chain_hash: Digest,
 ) -> Result<(Snapshot, BlockWriter), RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
@@ -5466,8 +5619,6 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             frontier,
             root: root_id,
             manifest,
-            next_birth_ordinal,
-            versions,
             delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,

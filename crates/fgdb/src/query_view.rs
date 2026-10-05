@@ -5,7 +5,10 @@
 //! it advances, compacts, is fenced or drops.
 //! This is not a durable snapshot lease or a new authorization boundary.
 
-use super::{Cancel, PreparedNativeRead, QueryError, QueryResult, aggregates, values};
+use super::{
+    Cancel, PreparedNativeRead, QueryError, QueryResult, aggregates, explain_prefix,
+    explain_result, values,
+};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
@@ -32,6 +35,8 @@ impl EmbeddedReadView {
     /// a future selector is refused, never clamped or served from the writer.
     /// Write statements refuse through native read preparation. This method
     /// cannot stage, commit, finish a transaction or acquire another generation.
+    /// `EXPLAIN [(CERTIFICATE)]` answers as it does on the database, with the
+    /// certificate bound to this view's frontier.
     pub fn query(
         &self,
         cx: &QueryCx,
@@ -40,6 +45,11 @@ impl EmbeddedReadView {
         resolver: impl GraphSymbolResolver,
         policy: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        if let Some(explain) = explain_prefix(text) {
+            let (statement, certificate) = explain?;
+            let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
+            return explain_result(listing, certificate);
+        }
         PreparedNativeRead::prepare(text, params, resolver)?
             .execute_in_view(self, cx, params, policy)
     }

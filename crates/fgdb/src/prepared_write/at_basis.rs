@@ -7,7 +7,7 @@
 //! await occurs.
 
 use crate::{
-    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteTxn,
+    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteHeads, WriteTxn,
     WriteTxnError,
 };
 use asupersync::fs::Vfs;
@@ -21,13 +21,14 @@ use std::sync::Arc;
 /// no DerefMut or accessor exposing the temporarily selected database to writes.
 pub(crate) struct PreparationBasis<'a, V: Vfs> {
     database: &'a mut Database<V>,
-    original: Option<(BlockWriter, Arc<Snapshot>)>,
+    original: Option<(BlockWriter, WriteHeads, Arc<Snapshot>)>,
 }
 
 impl<V: Vfs> Drop for PreparationBasis<'_, V> {
     fn drop(&mut self) {
-        if let Some((writer, snapshot)) = self.original.take() {
+        if let Some((writer, heads, snapshot)) = self.original.take() {
             self.database.writer = writer;
+            self.database.heads = heads;
             self.database.snapshot = snapshot;
         }
     }
@@ -215,12 +216,15 @@ impl<V: Vfs + Clone> Database<V> {
             checkpoint()?;
             let mut snapshot = (*self.snapshot).clone();
             snapshot.frontier = basis;
-            snapshot.versions = versions;
-            snapshot.next_birth_ordinal = births;
             let snapshot = Arc::new(snapshot);
+            let heads = WriteHeads {
+                versions,
+                next_birth_ordinal: births,
+            };
             checkpoint()?;
             Some((
                 std::mem::replace(&mut self.writer, writer),
+                std::mem::replace(&mut self.heads, heads),
                 std::mem::replace(&mut self.snapshot, snapshot),
             ))
         };

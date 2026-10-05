@@ -54,10 +54,14 @@ fn historical_preparation_keeps_exact_effects_and_commits_beside_disjoint_writes
         db.compact(&cx).await.unwrap();
         let root_before = db.partition_root().unwrap();
         let snapshot_before = Arc::clone(&db.snapshot);
+        let heads_before = db.heads.clone();
         let prepared = db.prepare_write_at(basis, change_vertex(1, 20)).unwrap();
         assert_eq!(prepared.basis(), basis);
         assert_eq!(prepared.template, expected.template);
         assert!(Arc::ptr_eq(&db.snapshot, &snapshot_before));
+        // The write heads live beside the snapshot, so they are restored
+        // separately; vertex 3's head moved after the basis.
+        assert_eq!(db.heads, heads_before);
         assert_eq!(db.frontier().unwrap(), winner);
         assert_eq!(db.partition_root().unwrap(), root_before);
         assert_eq!(value(&db, 1), CanonicalScalar::Int(10));
@@ -95,6 +99,7 @@ fn historical_guards_and_delete_versions_do_not_observe_the_live_successor() {
         winner.add_edge(EId(11), VId(1), VId(3), vec![]);
         let live = db.write(&cx, winner).await.unwrap();
         let original = Arc::clone(&db.snapshot);
+        let heads = db.heads.clone();
         let historical_delete = db.prepare_write_at(basis, deletion).unwrap();
         assert_eq!(historical_delete.template, expected_delete.template);
         for edge in [false, true] {
@@ -124,6 +129,7 @@ fn historical_guards_and_delete_versions_do_not_observe_the_live_successor() {
             assert_eq!(prepared.basis(), basis);
             expect_conflict(db.commit_prepared(&cx, prepared).await);
             assert!(Arc::ptr_eq(&db.snapshot, &original));
+            assert_eq!(db.heads, heads);
             assert_eq!(db.frontier().unwrap(), live);
         }
         expect_conflict(db.commit_prepared(&cx, historical_delete).await);
@@ -146,6 +152,7 @@ fn historical_spent_identities_refusals_and_unwind_restore_live_state() {
         let spent_basis = db.write(&cx, deletion).await.unwrap();
         let live = db.write(&cx, change_vertex(3, 99)).await.unwrap();
         let original = Arc::clone(&db.snapshot);
+        let heads = db.heads.clone();
         let mut recreate = WriteBatch::new(RelationId(1));
         recreate.create_vertex(VId(1), vec![], vec![]);
         assert!(matches!(
@@ -167,6 +174,7 @@ fn historical_spent_identities_refusals_and_unwind_restore_live_state() {
         }));
         assert!(unwound.is_err());
         assert!(Arc::ptr_eq(&db.snapshot, &original));
+        assert_eq!(db.heads, heads);
         assert_eq!(
             db.state(),
             DatabaseState::Healthy {

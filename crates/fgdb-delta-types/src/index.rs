@@ -218,6 +218,22 @@ impl LocalDeltaBatchIndex {
         }
     }
 
+    /// An empty window at `frontier`, retaining no history: `(frontier,
+    /// frontier]`. For a reader that serves only the generation at `frontier`.
+    /// `since(frontier)` is the empty caught-up answer, every older cursor is
+    /// [`IndexError::CursorRetired`], and the next insert must carry
+    /// `frontier + 1`. It attests no retired boundary, so a consumer resuming
+    /// exactly at `frontier` has no anchor to compare against here.
+    pub fn empty_at(frontier: CommitSeq) -> Self {
+        Self {
+            format: INDEX_FORMAT_V1,
+            retained_after_commit_seq: frontier,
+            frontier,
+            entries: BTreeMap::new(),
+            retired_boundary: None,
+        }
+    }
+
     /// Build a window from parts, INCLUDING incoherent ones.
     ///
     /// Test-facing. `insert` and `retire_prefix` maintain the gap-free

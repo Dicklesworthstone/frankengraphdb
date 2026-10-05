@@ -3,8 +3,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, GqlError, NativeReadClass, PreparedNativeRead, QueryError, QueryResult,
-    ReadError, WriteBatch,
+    Database, DatabaseKeys, DerivedPublicationStage, GqlError, MemVfs, NativeReadClass,
+    PreparedNativeRead, QueryError, QueryResult, ReadError, WriteBatch, WriteError,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -637,6 +637,159 @@ fn native_pull_rebinds_arguments_and_refuses_future_history_before_zero_limits()
         );
         assert_eq!(lower.snapshot_seq(), basis);
         assert_eq!(higher.snapshot_seq(), basis);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+const EXPLAINS: [&str; 2] = [
+    "EXPLAIN MATCH (n) RETURN n.p AS p ORDER BY p",
+    "EXPLAIN (CERTIFICATE) MATCH (n) RETURN COUNT(*) AS total, SUM(n.p) AS amount",
+];
+
+/// Create a database in a fresh memory filesystem and commit `values` as one
+/// vertex each, returning the filesystem and the frontier.
+async fn committed(commit: &fgdb_types::CommitCx, values: &[i64]) -> (MemVfs, CommitSeq) {
+    let vfs = MemVfs::new().unwrap();
+    let path = vfs.database_dir();
+    let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+        .await
+        .unwrap();
+    let mut frontier = CommitSeq(0);
+    for (vid, value) in (1..).zip(values) {
+        frontier = db.write(commit, batch(vid, *value)).await.unwrap();
+    }
+    (vfs, frontier)
+}
+
+#[test]
+fn a_read_only_open_answers_like_a_full_open_and_keeps_no_writer_state() {
+    let ((), report) = run_async_under_lab(0x7669_6509, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, frontier) = committed(&commit, &[4, 7, 11]).await;
+        let path = vfs.database_dir();
+        let params = GqlParameters::new();
+        let texts: Vec<&str> = cases()
+            .iter()
+            .map(|(text, _)| *text)
+            .chain(EXPLAINS)
+            .collect();
+
+        let full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let expected: Vec<QueryResult> = texts
+            .iter()
+            .map(|text| full.query(&cx, text, &params, symbols, policy()).unwrap())
+            .collect();
+        assert_eq!(expected[0], integers(&[4, 7, 11]));
+        assert_eq!(expected[4], integers(&[4]), "the temporal cut is older");
+        let full_view = full.read_session().unwrap();
+        assert_eq!(
+            full_view.delta_since(CommitSeq(0)).unwrap().count(),
+            3,
+            "a writable open retains the whole delta window"
+        );
+        drop(full);
+
+        let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(view.frontier(), frontier);
+        assert_eq!(view.partition_root(), full_view.partition_root());
+        assert_eq!(view.manifest(), full_view.manifest());
+        for (text, expected) in texts.iter().zip(&expected) {
+            assert_eq!(
+                &view.query(&cx, text, &params, symbols, policy()).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        // No delta history: an older cursor is retired, never answered from a
+        // partial window, and the frontier itself is caught up.
+        assert!(matches!(
+            view.delta_since(CommitSeq(0)),
+            Err(ReadError::DeltaCursorRetired { asked: CommitSeq(0), retained_after, frontier: at })
+                if retained_after == frontier && at == frontier
+        ));
+        assert_eq!(view.delta_since(frontier).unwrap().count(), 0);
+
+        // The view holds no writer lease: a writer opens beside it and
+        // commits, and the view stays on its own generation.
+        let mut writer = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        writer.write(&commit, batch(4, 13)).await.unwrap();
+        assert_eq!(
+            writer
+                .query(&cx, texts[0], &params, symbols, policy())
+                .unwrap(),
+            integers(&[4, 7, 11, 13])
+        );
+        assert_eq!(
+            view.query(&cx, texts[0], &params, symbols, policy())
+                .unwrap(),
+            expected[0]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
+    let ((), report) = run_async_under_lab(0x7669_650a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = committed(&commit, &[4]).await;
+        let path = vfs.database_dir();
+        let params = GqlParameters::new();
+        let text = "MATCH (n) RETURN n.p AS p ORDER BY p";
+
+        // Commit 2 is durable in Chronicle, but its partition root never
+        // published: the slot still names the root at seq 1.
+        let mut db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let error = db
+            .write_with_publication_failure(
+                &commit,
+                batch(2, 7),
+                DerivedPublicationStage::PublishPartitionRoot,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WriteError::CommittedNeedsRecovery { .. }));
+        drop(db);
+
+        // Serving the slot's root would answer [4] at seq 1. The read-only
+        // open must fold the committed suffix instead, which takes a full open;
+        // that open retains the whole delta window, the full open's signature.
+        let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(view.frontier(), CommitSeq(2));
+        assert_eq!(
+            view.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7])
+        );
+        assert_eq!(view.delta_since(CommitSeq(0)).unwrap().count(), 2);
+
+        // That open healed the durable root, so the next read-only open is
+        // the fast path (no delta history) onto the same generation.
+        let again = Database::open_read_view_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(again.partition_root(), view.partition_root());
+        assert_eq!(
+            again.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7])
+        );
+        assert!(matches!(
+            again.delta_since(CommitSeq(0)),
+            Err(ReadError::DeltaCursorRetired { .. })
+        ));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -1089,6 +1089,14 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 } else {
                     None
                 };
+                // A plain eager read needs no writer: open only the published
+                // generation, without the fold, version heads and delta history
+                // that only writes, streams and certificates use.
+                if command == "query" && !options.fnx_call && !options.stream && options.certify_to.is_none() {
+                    let view = Database::open_read_view(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?;
+                    let result = view.query(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
+                    return render(result, view.frontier().0, "rows", robot, out);
+                }
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;

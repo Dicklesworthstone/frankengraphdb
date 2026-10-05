@@ -1,10 +1,10 @@
 //! Shared native read classification and governed execution.
 
 use super::{QueryError, QueryResult, aggregates, values};
-use crate::Database;
 use crate::gql_cert::{
     NativeCertificatePlan, NativePlanCertificate, NativeReadClass, NativeResultCertificate,
 };
+use crate::{Database, EmbeddedReadView};
 use asupersync::fs::Vfs;
 use fgdb_crypto::Digest;
 use fgdb_gql::*;
@@ -793,20 +793,113 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         certificate: bool,
     ) -> Result<(Vec<ExplainRow>, Option<NativeExplainCertificate>), QueryError> {
-        let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
-        let rows = explain_rows(&prepared);
-        let cert = certificate.then(|| {
+        explain_at(text, params, resolver, certificate, || {
             // EXPLAIN is a successful top-level call: the live frontier read
             // has no failure mode left here beyond the plain read guard.
-            let snapshot_seq = self.frontier().map_err(|_| QueryError::Unsupported {
+            self.frontier().map_err(|_| QueryError::Unsupported {
                 diagnostics: vec!["snapshot frontier unavailable for certificate".to_owned()],
-            })?;
-            Ok(NativeExplainCertificate::new(&prepared, snapshot_seq))
-        });
-        let cert = match cert {
-            Some(result) => Some(result?),
-            None => None,
-        };
-        Ok((rows, cert))
+            })
+        })
     }
+}
+
+impl EmbeddedReadView {
+    /// EXPLAIN a native read statement against this view, exactly as
+    /// [`Database::explain`] does against the live handle: the same
+    /// preparation and listing, and a certificate bound to this view's
+    /// frontier. Nothing is bound or executed.
+    pub fn explain(
+        &self,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        certificate: bool,
+    ) -> Result<(Vec<ExplainRow>, Option<NativeExplainCertificate>), QueryError> {
+        explain_at(text, params, resolver, certificate, || Ok(self.frontier()))
+    }
+}
+
+/// EXPLAIN preparation shared by a database and its views. `snapshot_seq` is
+/// read only when a certificate is asked for.
+fn explain_at(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    certificate: bool,
+    snapshot_seq: impl FnOnce() -> Result<CommitSeq, QueryError>,
+) -> Result<(Vec<ExplainRow>, Option<NativeExplainCertificate>), QueryError> {
+    let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
+    let rows = explain_rows(&prepared);
+    let cert = if certificate {
+        Some(NativeExplainCertificate::new(&prepared, snapshot_seq()?))
+    } else {
+        None
+    };
+    Ok((rows, cert))
+}
+
+/// `Some((statement, certificate))` when `text` is `EXPLAIN [(CERTIFICATE)]
+/// <statement>`, a refusal for a malformed option, and `None` for any other
+/// text. Shared by the database's and the view's `query`, so both classify and
+/// refuse the prefix identically.
+pub(super) fn explain_prefix(text: &str) -> Option<Result<(&str, bool), QueryError>> {
+    let trimmed = text.trim_start();
+    let explain = trimmed
+        .get(..7)
+        .is_some_and(|word| word.eq_ignore_ascii_case("EXPLAIN"))
+        && trimmed
+            .as_bytes()
+            .get(7)
+            .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(');
+    if !explain {
+        return None;
+    }
+    let statement = trimmed[7..].trim_start();
+    let Some(options) = statement.strip_prefix('(') else {
+        return Some(Ok((statement, false)));
+    };
+    let Some((option, rest)) = options.split_once(')') else {
+        return Some(Err(QueryError::Unsupported {
+            diagnostics: vec!["unclosed EXPLAIN option".to_owned()],
+        }));
+    };
+    if !option.trim().eq_ignore_ascii_case("CERTIFICATE") {
+        return Some(Err(QueryError::Unsupported {
+            diagnostics: vec!["expected EXPLAIN (CERTIFICATE)".to_owned()],
+        }));
+    }
+    Some(Ok((rest.trim_start(), true)))
+}
+
+/// The EXPLAIN answer as `operator`/`detail` rows: the listing, then the
+/// certificate's digest and snapshot when one was asked for.
+pub(super) fn explain_result(
+    listing: Vec<ExplainRow>,
+    certificate: Option<NativeExplainCertificate>,
+) -> Result<QueryResult, QueryError> {
+    let mut rows = Vec::with_capacity(listing.len() + usize::from(certificate.is_some()) * 2);
+    let cell = |text: &str| {
+        fgdb_types::CanonicalScalar::ucs_basic_text(text)
+            .map(|value| GraphAggregateValue::Value(fgdb_gql::algebra::GraphValue::Scalar(value)))
+            .map_err(|_| QueryError::Unsupported {
+                diagnostics: vec!["EXPLAIN text exceeds canonical scalar bounds".to_owned()],
+            })
+    };
+    for row in listing {
+        rows.push(vec![cell(&row.operator)?, cell(&row.detail)?]);
+    }
+    if let Some(certificate) = certificate {
+        rows.push(vec![
+            cell("Certificate")?,
+            cell(&format!("{:?}", certificate.digest()))?,
+        ]);
+        rows.push(vec![
+            cell("Snapshot")?,
+            cell(&certificate.snapshot_seq().0.to_string())?,
+        ]);
+    }
+    Ok(QueryResult::Rows {
+        columns: vec!["operator".to_owned(), "detail".to_owned()],
+        rows,
+    })
 }
