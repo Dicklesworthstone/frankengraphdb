@@ -168,8 +168,10 @@ impl VertexPredicate {
                 value,
             } => properties.into_iter().any(|(actual_key, scalar)| {
                 actual_key == *key
-                    && matches!(scalar, CanonicalScalar::Int(actual)
-                    if comparison.accepts(*actual, *value))
+                    && comparison.accepts_scalar_pair(
+                        Some(scalar),
+                        Some(&CanonicalScalar::Int(*value)),
+                    )
             }),
             Self::ScalarProperty { key, predicate } => {
                 let actual = properties
@@ -1066,6 +1068,106 @@ mod tests {
                 predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(i64::MIN))]),
                 comparison.accepts(i64::MIN, i64::MAX)
             );
+        }
+    }
+
+    #[test]
+    fn integer_predicates_admit_float_properties_without_rounding_the_literal() {
+        use fgdb_types::CanonicalF64;
+
+        let comparisons = [
+            IntegerComparison::Equal,
+            IntegerComparison::NotEqual,
+            IntegerComparison::Greater,
+            IntegerComparison::Less,
+            IntegerComparison::GreaterOrEqual,
+            IntegerComparison::LessOrEqual,
+        ];
+        let equal = [true, false, false, false, true, true];
+        let less = [false, true, false, true, false, true];
+        let greater = [false, true, true, false, true, false];
+        for (actual, literal, expected) in [
+            (1.0, 1, equal),
+            (-0.0, 0, equal),
+            (1.5, 1, greater),
+            (-1.5, -1, less),
+            (9_007_199_254_740_992.0, 9_007_199_254_740_993, less),
+            (9_223_372_036_854_775_808.0, i64::MAX, greater),
+            (-9_223_372_036_854_775_808.0, i64::MIN, equal),
+            (f64::NEG_INFINITY, i64::MIN, less),
+            (f64::INFINITY, i64::MAX, greater),
+            // STRICT_PORTABLE puts the canonical NaN after positive infinity.
+            (f64::NAN, i64::MAX, greater),
+        ] {
+            let properties = [(
+                PropertyKeyId(4),
+                CanonicalScalar::Float(CanonicalF64::new(actual)),
+            )];
+            for (comparison, expected) in comparisons.into_iter().zip(expected) {
+                let predicate = VertexPredicate::IntegerProperty {
+                    key: PropertyKeyId(4),
+                    comparison,
+                    value: literal,
+                };
+                assert_eq!(predicate.matches(&[], &properties), expected);
+                assert_eq!(
+                    predicate.matches_borrowed(
+                        [],
+                        properties.iter().map(|(key, value)| (*key, value)),
+                    ),
+                    expected
+                );
+            }
+        }
+        for comparison in comparisons {
+            let predicate = VertexPredicate::IntegerProperty {
+                key: PropertyKeyId(4),
+                comparison,
+                value: 1,
+            };
+            for actual in [
+                CanonicalScalar::Null,
+                CanonicalScalar::Bool(true),
+                CanonicalScalar::ucs_basic_text("1").unwrap(),
+            ] {
+                assert!(!predicate.matches(&[], &[(PropertyKeyId(4), actual)]));
+            }
+            assert!(!predicate.matches(&[], &[]));
+            assert!(!predicate.matches(&[], &[(PropertyKeyId(99), CanonicalScalar::Int(1))]));
+        }
+    }
+
+    #[test]
+    fn lowered_node_and_edge_scans_keep_the_same_mixed_numeric_matches() {
+        use fgdb_types::CanonicalF64;
+
+        let values = [
+            CanonicalScalar::Int(1),
+            CanonicalScalar::Float(CanonicalF64::new(1.5)),
+            CanonicalScalar::Float(CanonicalF64::new(3.0)),
+            CanonicalScalar::Null,
+            CanonicalScalar::ucs_basic_text("3").unwrap(),
+            CanonicalScalar::Int(0),
+        ];
+        for statement in [
+            "MATCH (a:L) WHERE a.n > 1 RETURN a",
+            "MATCH (a:L)-[:R]->(b) WHERE a.n > 1 RETURN a",
+        ] {
+            let plan = GlaPlan::lower(&bind().bind(statement).unwrap());
+            let vertices: Vec<_> = (1..=values.len() as u128).map(VId).collect();
+            let edges: Vec<_> = vertices
+                .iter()
+                .map(|id| (*id, RelationId(1), *id))
+                .collect();
+            let rows = plan
+                .execute(vertices, edges, |id, predicates| {
+                    let properties = [(PropertyKeyId(4), values[id.0 as usize - 1].clone())];
+                    Ok::<_, ()>(predicates.iter().all(|predicate| {
+                        predicate.matches(&[LabelId(3)], &properties)
+                    }))
+                })
+                .unwrap();
+            assert_eq!(rows, vec![VId(2), VId(3)], "{statement}");
         }
     }
 
