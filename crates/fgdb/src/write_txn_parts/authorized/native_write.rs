@@ -22,6 +22,19 @@ fn checkpoint<Clock: FnMut() -> u64>(
     execution.checkpoint()
 }
 
+// The host ceiling counts native statements, including every expanded row.
+// Ordinary scripts are checked before binding, not just before execution.
+#[allow(clippy::result_large_err)]
+fn statement_limit(script: &PreparedGraphWriteScript, limit: usize) -> Result<(), Fault> {
+    let observed = script.statements().len() as u128;
+    if observed > limit as u128 {
+        return Err(Fault::BatchBinding(
+            fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { limit, observed },
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn reserve_text<Clock: FnMut() -> u64>(
     cx: &QueryCx,
@@ -118,6 +131,7 @@ fn bind_native<Clock: FnMut() -> u64>(
     params: &GqlParameters,
     relation: RelationId,
     scope: &PlannerPredicates,
+    max_statements: usize,
     resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
 ) -> Result<super::Bound<'static>, Fault> {
     cx.with_restriction(|| {
@@ -136,6 +150,7 @@ fn bind_native<Clock: FnMut() -> u64>(
             // CREATE/INSERT UNWIND and ordinary scripts keep their original
             // compiler, preflight and binding protocol, with no second byte bill.
             let script = prepare_admitted(cx, execution, text, params, relation, resolver)?;
+            statement_limit(&script, max_statements)?;
             let super::Bound::Script(program) =
                 Input::Script(&script, params).bind(cx, scope, execution)?
             else {
@@ -152,7 +167,7 @@ fn bind_native<Clock: FnMut() -> u64>(
         let batch = parsed.bind_with_limit_controlled(
             params,
             relation,
-            fgdb_gql::MAX_GRAPH_MUTATION_STATEMENTS,
+            max_statements,
             resolver,
             |event| {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
@@ -272,6 +287,7 @@ impl<V: Vfs + Clone> Database<V> {
                     params,
                     relation,
                     verified.predicates(),
+                    fgdb_gql::MAX_GRAPH_MUTATION_STATEMENTS,
                     resolver,
                 )?;
                 let (receipt, completion) = self

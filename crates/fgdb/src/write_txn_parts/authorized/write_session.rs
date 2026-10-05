@@ -6,15 +6,18 @@ use super::{
     Authority, CapabilityToken, CommitCx, Database, Error, Execution, Fault, GqlParameters,
     GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteProgramReceipt, Input,
     PreparedGraphWriteScript, QueryCx, RelationId, TxnCx, Vfs, WriteTxnError, admission,
-    checkpoint,
+    checkpoint, statement_limit,
 };
 use fgdb_gql::{
-    BoundGraphWriteScriptBatch, GraphWriteProgramStats, GraphWriteScriptBatchError,
-    GraphWriteScriptBatchLocation, GraphWriteStepReceipt,
+    BoundGraphWriteScriptBatch, GraphWriteProgramStats, GraphWriteScriptBatchLocation,
+    GraphWriteStepReceipt,
 };
 use fgdb_types::EmbeddedTxnCompletion;
 use fgdb_warden::{ExecutionPermit, VerifiedCapability, WriteAccess};
 use std::sync::Arc;
+
+#[cfg(test)]
+use fgdb_gql::GraphWriteScriptBatchError;
 
 type Receipt = (GraphWriteProgramReceipt, EmbeddedTxnCompletion);
 
@@ -185,17 +188,6 @@ fn tracked_clock<'a, C: FnMut() -> u64>(
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn statement_limit(script: &PreparedGraphWriteScript, limit: usize) -> Result<(), Fault> {
-    let observed = script.statements().len() as u128;
-    if observed > limit as u128 {
-        return Err(Fault::BatchBinding(
-            GraphWriteScriptBatchError::TooManyStatements { limit, observed },
-        ));
-    }
-    Ok(())
-}
-
 impl<V: Vfs + Clone> Database<V> {
     /// Fix a mutable session's authority and all trusted host inputs once.
     ///
@@ -340,6 +332,11 @@ where
     /// Parse, bind and commit native text with no request-supplied authority,
     /// allocator, catalog, route, clock or execution policy. The result is the
     /// complete ordered identity receipt plus the original native completion.
+    /// UNWIND MERGE/MATCH mutations bind all rows before graph access, under
+    /// the same permit as execution. Every expanded row counts against the
+    /// host's max_statements; no row or phase receives a fresh allowance.
+    /// CREATE/INSERT UNWIND retains its native compiler. A failure closes this
+    /// session and preserves original row coordinates and publication causes.
     #[allow(clippy::result_large_err)]
     pub async fn query(
         &mut self,
@@ -354,6 +351,21 @@ where
             GraphWriteProgramReceipt::new,
         )
         .await
+    }
+
+    /// Execute the same native text without retaining or delivering identity
+    /// receipts. A signed max_rows=0 is usable for ingestion; graph visibility,
+    /// binding, mutation and work limits are identical to query(). This does
+    /// not suppress errors or turn an uncertain completion into success.
+    #[allow(clippy::result_large_err)]
+    pub async fn query_stats(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
+        self.run(cx, Request::Text(text, params), false, |stats, _| stats)
+            .await
     }
 
     /// Rebind a template from this exact session, then execute one atomic
@@ -555,35 +567,40 @@ where
         commit_cx
             .with_restriction_async(async {
                 checkpoint(cx, &mut execution).map_err(admission)?;
-                let parsed;
-                let input = match request {
-                    Request::Text(text, params) => {
-                        parsed =
-                            super::prepare(cx, &mut execution, text, params, *relation, resolver)?;
-                        statement_limit(&parsed, *max_statements)?;
-                        Input::Script(&parsed, params)
-                    }
+                let bound = match request {
+                    Request::Text(text, params) => super::bind_native(
+                        cx,
+                        &mut execution,
+                        text,
+                        params,
+                        *relation,
+                        capability.predicates(),
+                        *max_statements,
+                        resolver,
+                    )?,
                     Request::Prepared(prepared, params) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
                         statement_limit(&prepared.script, *max_statements)?;
                         Input::Script(&prepared.script, params)
+                            .bind(cx, capability.predicates(), &mut execution)?
                     }
                     Request::Batch(prepared, arguments) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
                         Input::Batch(&prepared.script, arguments, *max_statements)
+                            .bind(cx, capability.predicates(), &mut execution)?
                     }
                     Request::Bound(bound) => {
                         if !Arc::ptr_eq(owner, &bound.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
                         Input::Bound(&bound.batch)
+                            .bind(cx, capability.predicates(), &mut execution)?
                     }
                 };
-                let bound = input.bind(cx, capability.predicates(), &mut execution)?;
                 database
                     .complete_authorized_program(
                         txn_cx,
