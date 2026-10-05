@@ -50,6 +50,8 @@ edition = "2024"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Every public type a caller can receive, it can also name and document.
+unnameable_types = "deny"
 
 [workspace.lints.clippy]
 # Justified by the 08-27 toolchain bump (088e510f):

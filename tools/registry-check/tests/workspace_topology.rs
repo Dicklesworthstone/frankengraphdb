@@ -39,8 +39,9 @@ use std::path::{Path, PathBuf};
 // unnecessary_mut_passed, manual_is_multiple_of: 9 rows; unusual_byte_groupings,
 // collapsible_if, too_many_arguments: 6 rows; unnecessary_literal_unwrap: 5;
 // type_complexity: 4; result_large_err: 3; rustc recursion_depth_exceeding_limit:
-// 2, leaving only the two 088e510f allows).
-const ID_TABLE_PIN: &str = "fnv1a64:71f859dac5846052";
+// 2, leaving only the two 088e510f allows), then by the rust::unnameable_types
+// deny row (fgdb-8m1in): 3 rows.
+const ID_TABLE_PIN: &str = "fnv1a64:038e596f60f3489a";
 // Re-frozen on each crate activation (fgdb-reference 08bfadf, fgdb-sim,
 // fgdb-strata, then fgdb by fgdb-j0vu, then fgdb-bench by fgdb-p95p's
 // §17 adversarial harness — bounded takeover re-freeze by MagentaShore after
@@ -63,8 +64,9 @@ const ID_TABLE_PIN: &str = "fnv1a64:71f859dac5846052";
 // 6 once unusual_byte_groupings, collapsible_if and too_many_arguments were,
 // 5 once unnecessary_literal_unwrap was, 4 once type_complexity was, 3 once
 // result_large_err was, 2 once rustc recursion_depth_exceeding_limit was (the
-// two kept 088e510f allows).
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:994d8c3eaf43401e";
+// two kept 088e510f allows), 3 with the rust::unnameable_types deny
+// (fgdb-8m1in), a strengthening rather than an allowance.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:9fcb6c08eb39d100";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -19,6 +19,7 @@ use fgdb_types::{CommitSeq, QueryCx};
 mod branch;
 #[path = "query_spool.rs"]
 mod spool;
+pub use spool::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
 
 impl EmbeddedReadView {
     /// Execute a native read at this view's immutable frontier. The same native

@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 #[path = "stream/aggregate.rs"]
 mod aggregate;
+pub use aggregate::AuthorizedAggregateCursor;
 
 type Shared<'q> = Rc<RefCell<Execution<'q, 'q, Box<dyn FnMut() -> u64 + 'q>>>>;
 type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;

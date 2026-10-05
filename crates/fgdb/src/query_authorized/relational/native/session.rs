@@ -6,6 +6,7 @@
 
 #[path = "session/stream.rs"]
 mod stream;
+pub use stream::{AuthorizedAggregateCursor, AuthorizedRowCursor};
 
 use super::*;
 use crate::EmbeddedReadView;
@@ -15,10 +16,12 @@ use std::sync::Arc;
 
 #[path = "session/analytics.rs"]
 mod analytics;
+pub use analytics::AuthorizedPreparedFnxCall;
 #[path = "session/batch.rs"]
 mod batch;
 #[path = "session/beacon.rs"]
 mod beacon;
+pub use beacon::AuthorizedBeaconIndex;
 
 struct State<'a, Resolver, Clock> {
     view: Option<EmbeddedReadView>,

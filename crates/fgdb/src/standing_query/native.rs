@@ -7,6 +7,9 @@ use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
 mod changes;
+pub use changes::{
+    NativeSubscription, SubscribeError, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+};
 mod cursor;
 mod row_handle;
 pub(super) mod set;

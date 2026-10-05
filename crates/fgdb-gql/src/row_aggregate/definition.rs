@@ -14,6 +14,8 @@ use core::convert::Infallible;
 
 pub mod operator;
 
+// Sealed: unnameable by design, so no other crate can implement it.
+#[allow(unnameable_types)]
 pub(crate) mod sealed {
     pub trait Sealed {}
 }

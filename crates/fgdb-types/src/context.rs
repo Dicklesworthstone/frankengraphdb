@@ -277,6 +277,8 @@ impl PurposeContexts {
     }
 }
 
+// Sealed: unnameable by design, so no other crate can implement it.
+#[allow(unnameable_types)]
 mod storage_read_seal {
     pub trait Sealed {}
 }

@@ -154,6 +154,8 @@ impl fmt::Display for IdentityPartsError {
 
 impl std::error::Error for IdentityPartsError {}
 
+// Sealed: unnameable by design, so no other crate can implement it.
+#[allow(unnameable_types)]
 mod sealed {
     pub trait Sealed {}
 }

@@ -179,3 +179,4 @@ mod tests;
 
 #[path = "write_session.rs"]
 mod session;
+pub use session::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};

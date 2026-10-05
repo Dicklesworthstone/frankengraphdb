@@ -118,7 +118,7 @@ build_here_count = 23
 consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
-lint_allowance_count = 2
+lint_allowance_count = 3
 required_dependency_count = 8
 # Monotone SET floor over named edges that have already been evaluated live.
 # Adding a newly live edge is optional and never needed merely to keep the tree
@@ -129,8 +129,8 @@ forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
-id_table_hash = "fnv1a64:71f859dac5846052"
-semantic_contract_hash = "fnv1a64:994d8c3eaf43401e"
+id_table_hash = "fnv1a64:038e596f60f3489a"
+semantic_contract_hash = "fnv1a64:9fcb6c08eb39d100"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1940,6 +1940,12 @@ lint = "clippy::needless_range_loop"
 level = "allow"
 reference = "088e510f"
 basis = "Toolchain bump: index walks over parallel slices by one counter; an iterator rewrite obscures the arithmetic."
+
+[[lint_allowance]]
+lint = "rust::unnameable_types"
+level = "deny"
+reference = "fgdb-8m1in"
+basis = "Strengthening, not an allowance: every public type a caller can receive must be nameable. Sealed-trait modules opt out with a stated reason."
 
 # --- build_here (23) ----------------------------------------------------------
 

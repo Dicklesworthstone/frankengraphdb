@@ -7,6 +7,7 @@
 
 #[path = "write_txn_parts/authorized.rs"]
 mod authorized;
+pub use authorized::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 #[path = "write_txn_parts/beacon.rs"]
 mod beacon;
 #[path = "write_txn_parts/native_query.rs"]

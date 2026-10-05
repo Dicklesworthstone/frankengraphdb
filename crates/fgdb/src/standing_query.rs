@@ -13,11 +13,16 @@ mod group;
 mod joins;
 mod kcore;
 mod native;
+pub use native::{
+    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, SubscribeError,
+    SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+};
 mod output;
 mod projection;
 mod recursive;
 mod reduction;
 mod replay;
+pub use replay::{StandingReplayBatch, StandingReplayWindow};
 mod sets;
 mod triangles;
 mod window;

@@ -34,6 +34,10 @@ mod beacon;
 mod overlay;
 #[path = "query_authorized/relational.rs"]
 mod relational;
+pub use relational::{
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+};
 
 type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;

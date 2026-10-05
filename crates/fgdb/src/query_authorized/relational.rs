@@ -7,6 +7,10 @@
 mod graph;
 #[path = "relational/native.rs"]
 mod native;
+pub use native::{
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+};
 
 use super::*;
 use fgdb_gql::algebra::GraphValueRow;

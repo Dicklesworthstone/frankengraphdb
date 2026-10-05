@@ -26,11 +26,17 @@ mod prism;
 mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
-pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
+pub use authorized::{
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+};
+pub use beacon::{PinnedIndex, RefreshReport, ResidentIndex, ResidentIndexError};
+pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 pub use prism::ProcedureError;
 pub(crate) use prism::{
     bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
 };
+pub use view::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.

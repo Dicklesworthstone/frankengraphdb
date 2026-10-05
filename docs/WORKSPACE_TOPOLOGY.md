@@ -311,6 +311,7 @@ Coverage of §18.2 is **proved by residue**: every phrase below is deleted from 
 |---|---|---|---|
 | `clippy::double_must_use` | allow | 088e510f | Toolchain bump: #[must_use] on functions already returning a must_use type; cosmetic. |
 | `clippy::needless_range_loop` | allow | 088e510f | Toolchain bump: index walks over parallel slices by one counter; an iterator rewrite obscures the arithmetic. |
+| `rust::unnameable_types` | deny | fgdb-8m1in | Strengthening, not an allowance: every public type a caller can receive must be nameable. Sealed-trait modules opt out with a stated reason. |
 
 ## Ownership vocabulary
 
@@ -388,5 +389,5 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 
 ## Pins
 
-* `id_table_hash` = `fnv1a64:71f859dac5846052` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:994d8c3eaf43401e` — every normative decision, prose excluded.
+* `id_table_hash` = `fnv1a64:038e596f60f3489a` — every stable id, sorted.
+* `semantic_contract_hash` = `fnv1a64:9fcb6c08eb39d100` — every normative decision, prose excluded.

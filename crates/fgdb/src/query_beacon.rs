@@ -19,6 +19,7 @@ pub(crate) mod graph;
 pub(crate) mod indexed;
 #[path = "query_beacon/resident.rs"]
 mod resident;
+pub use resident::{Error as ResidentIndexError, PinnedIndex, RefreshReport, ResidentIndex};
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
