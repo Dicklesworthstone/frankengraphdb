@@ -10,14 +10,16 @@
 //! kind per column; no numeric coercion is introduced. Nested field access,
 //! alias rebinding, multiple statements and empty batches are not admitted.
 
+mod controlled;
+pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
+
 use crate::algebra::GraphValue;
 use crate::{
-    BoundGraphWriteScriptBatch, GqlParameterError, GqlParameterType, GqlParameterValue,
-    GqlParameters, GraphSymbol, GraphSymbolKind, GraphWriteScriptBatchError, GraphWriteScriptError,
-    PreparedGraphWriteScript,
+    BoundGraphWriteScriptBatch, GqlParameterError, GqlParameters, GraphSymbol, GraphSymbolKind,
+    GraphWriteScriptBatchError, GraphWriteScriptError, PreparedGraphWriteScript,
 };
 use fgdb_delta_types::RelationId;
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
+use fgdb_types::CanonicalScalar;
 
 /// A cap on the SUM of expanded argument transcripts, including repeated global
 /// arguments. It is not an execution quota, allocator-byte bound or storage cap.
@@ -206,111 +208,13 @@ impl GraphUnwindWriteText {
         max_rows: usize,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
-        let Some(GqlParameterValue::List(source)) = arguments.get(&self.source_parameter) else {
-            return Err(GraphUnwindWriteError::SourceParameter);
-        };
-        let rows = source.values();
-        if rows.is_empty() {
-            return Err(GraphUnwindWriteError::Empty);
-        }
-        let limit = max_rows.min(PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
-        if rows.len() > limit {
-            return Err(GraphUnwindWriteError::TooManyRows {
-                limit,
-                observed: rows.len(),
-            });
-        }
-        if arguments.len() != self.external_parameters.len() + 1
-            || self
-                .external_parameters
-                .iter()
-                .any(|name| arguments.get(name).is_none())
-        {
-            return Err(GraphUnwindWriteError::ArgumentNames);
-        }
-
-        // First inspect all shapes and exact kinds, without cloning field data.
-        let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];
-        for (row_index, row) in rows.iter().enumerate() {
-            if !matches!(
-                row,
-                GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)
-            ) {
-                return Err(GraphUnwindWriteError::Row {
-                    row: row_index,
-                    offset: self.source_offset,
-                    kind: GraphUnwindRowError::ExpectedMap,
-                });
-            }
-            for (field, kind) in self.fields.iter().zip(kinds.iter_mut()) {
-                if let Some(value) = scalar_field(row, field, row_index)? {
-                    let actual = CanonicalScalarKind::of(value);
-                    if actual == CanonicalScalarKind::Null {
-                        continue;
-                    }
-                    if *kind != CanonicalScalarKind::Null && *kind != actual {
-                        return Err(GraphUnwindWriteError::Row {
-                            row: row_index,
-                            offset: field.offset,
-                            kind: GraphUnwindRowError::IncompatibleFieldTypes,
-                        });
-                    }
-                    *kind = actual;
-                }
-            }
-        }
-
-        let mut globals = GqlParameters::new();
-        for name in self.external_parameters.iter() {
-            let value = arguments
-                .get(name)
-                .ok_or(GraphUnwindWriteError::ArgumentNames)?;
-            globals
-                .insert(name.clone(), value)
-                .map_err(|source| GraphUnwindWriteError::Parameter { row: 0, source })?;
-        }
-        let mut declarations: Vec<_> = globals.parameter_types().collect();
-        declarations.extend(
-            self.fields
-                .iter()
-                .zip(&kinds)
-                .map(|(field, kind)| (field.parameter.as_str(), GqlParameterType::Scalar(*kind))),
-        );
-
-        let mut sets = Vec::with_capacity(rows.len());
-        let mut expanded_bytes = 0_u128;
-        for (row_index, row) in rows.iter().enumerate() {
-            let mut values = globals.clone();
-            for field in self.fields.iter() {
-                let value = scalar_field(row, field, row_index)?
-                    .cloned()
-                    .unwrap_or(CanonicalScalar::Null);
-                values = values
-                    .with_scalar(field.parameter.clone(), value)
-                    .map_err(|source| GraphUnwindWriteError::Parameter {
-                        row: row_index,
-                        source,
-                    })?;
-            }
-            expanded_bytes += values.canonical_byte_len() as u128;
-            if expanded_bytes > MAX_UNWIND_BOUND_PARAMETER_BYTES as u128 {
-                return Err(GraphUnwindWriteError::ExpandedParametersTooLarge {
-                    limit: MAX_UNWIND_BOUND_PARAMETER_BYTES,
-                    observed: expanded_bytes,
-                });
-            }
-            sets.push(values);
-        }
-        let prepared = PreparedGraphWriteScript::prepare_with_parameter_types(
-            &self.lowered,
-            relation,
-            &declarations,
-            resolve,
-        )
-        .map_err(GraphUnwindWriteError::Definition)?;
-        prepared
-            .bind_parameter_sets_with_limit(&sets, limit)
-            .map_err(GraphUnwindWriteError::Binding)
+        self.bind_with_limit_controlled(arguments, relation, max_rows, resolve, |_| {
+            Ok::<(), core::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            GraphUnwindBindError::Binding(error) => error,
+            GraphUnwindBindError::Interrupted(never) => match never {},
+        })
     }
 }
 
