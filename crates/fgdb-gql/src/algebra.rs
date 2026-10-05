@@ -717,6 +717,42 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
+    /// The binding slots whose vertex rows (labels or properties) this plan
+    /// reads, or `None` when that cannot be stated slot by slot (a Boolean
+    /// expression or a path projection may read any bound vertex).
+    #[must_use]
+    pub fn vertex_value_slots(&self) -> Option<std::collections::BTreeSet<u32>> {
+        let mut slots = std::collections::BTreeSet::new();
+        for operator in &self.operators {
+            match operator {
+                GlaOperator::Select { slot, predicates } if !predicates.is_empty() => {
+                    slots.insert(slot.ordinal());
+                }
+                GlaOperator::CompareProperties { left, right, .. } => {
+                    slots.insert(left.ordinal());
+                    slots.insert(right.ordinal());
+                }
+                GlaOperator::SelectBoolean { .. } => return None,
+                GlaOperator::ProjectValues { columns } => {
+                    for column in columns {
+                        match column {
+                            ValueProjection::Property { slot, .. }
+                            | ValueProjection::Labels { slot } => {
+                                slots.insert(slot.ordinal());
+                            }
+                            ValueProjection::Path { .. } => return None,
+                            ValueProjection::Vertex { .. }
+                            | ValueProjection::EdgeProperty { .. }
+                            | ValueProjection::Type { .. } => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(slots)
+    }
+
     #[must_use]
     pub fn needs_vertex_values(&self) -> bool {
         self.projects_properties()

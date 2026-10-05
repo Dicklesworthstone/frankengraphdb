@@ -1612,6 +1612,35 @@ fn bound_edges<'a, E, Row>(
     Ok(Some(selected.into_values().collect()))
 }
 
+/// For an edge-rooted plan whose row-reading slots are all endpoints of the
+/// root edge (slots 0 and 1): the root relation and whether the source and
+/// the destination of a root-relation edge fill such a slot. `None` when a
+/// slot bound by an expansion reads its row, or the read slots cannot be
+/// stated.
+fn root_endpoint_roles<Row>(
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+) -> Option<(RelationId, bool, bool)> {
+    use fgdb_gql::algebra::{GlaDirection, GlaOperator};
+    let Some(GlaOperator::ScanEdges {
+        relation,
+        direction,
+    }) = logical.operators().first()
+    else {
+        return None;
+    };
+    let slots = logical.vertex_value_slots()?;
+    if slots.iter().any(|slot| *slot > 1) {
+        return None;
+    }
+    let (first, second) = (slots.contains(&0), slots.contains(&1));
+    let (source, destination) = match direction {
+        GlaDirection::Forward => (first, second),
+        GlaDirection::Reverse => (second, first),
+        GlaDirection::Undirected => (first || second, first || second),
+    };
+    Some((*relation, source, destination))
+}
+
 /// Source selection is shared by scalar and tuple plans. Output columns do
 /// not change what snapshot generation or topology is admitted.
 pub(super) fn admit<'a, E, Row>(
@@ -1668,6 +1697,10 @@ pub(super) fn admit<'a, E, Row>(
         vertex_records = vertices.len() as u64;
     } else if logical.needs_vertex_values() {
         // Projection-only properties need admitted rows even with no WHERE.
+        // When every slot whose row is read is an endpoint of the root edge,
+        // only those endpoints of root-relation edges are hydrated: a
+        // one-hop count from a bound hub reads one row, not one per neighbour.
+        let roles = root_endpoint_roles(logical);
         let mut candidates = std::collections::BTreeSet::new();
         for &((_, src, relation, dst), _) in &edges {
             control(SourceEvent::Work)?;
@@ -1686,8 +1719,17 @@ pub(super) fn admit<'a, E, Row>(
             if !requested {
                 continue;
             }
-            for vid in [src, dst] {
-                if !candidates.contains(&vid) {
+            let wanted = match roles {
+                Some((root, source_read, destination_read)) => {
+                    if relation != root {
+                        continue;
+                    }
+                    [(src, source_read), (dst, destination_read)]
+                }
+                None => [(src, true), (dst, true)],
+            };
+            for (vid, read) in wanted {
+                if read && !candidates.contains(&vid) {
                     control(SourceEvent::ScratchEntry)?;
                     candidates.insert(vid);
                 }
