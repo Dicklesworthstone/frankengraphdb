@@ -118,16 +118,21 @@ for an offline client's ACK and never releases its output implicitly.
 
 ## Validation
 
-Run `cargo test -p fgdb-protocol`. The suite covers all header classes at every
-fragmentation boundary, one-byte feeds, coalesced frames, pre-allocation binding
-refusal, length/tag/flags/version checks, truncated EOF, debug redaction,
-handshake ordering, refresh fencing, generation-safe drain, duplicate/foreign
-send completion, credit replay, and uncertain-write accounting.
+Run `cargo test -p fgdb-protocol --features transport`. The suite covers all
+header classes at every fragmentation boundary, one-byte feeds, coalesced
+frames, pre-allocation binding refusal, length/tag/flags/version checks,
+truncated EOF, debug redaction, handshake ordering, refresh fencing,
+generation-safe drain, duplicate/foreign send completion, credit replay, and
+uncertain-write accounting. The 11 tests in `tests/transport.rs` drive the frame
+I/O layer and compile only with the `transport` feature.
 
 The tests were written without a Rust toolchain. They have since run:
 `cargo test -p fgdb-protocol` passed 16 of 16 on 2026-09-28 at `61aeeb0f`
-(pinned toolchain). No runtime, performance or full-protocol conformance claim
-is made beyond that suite.
+(pinned toolchain). Until 2026-10-05 no build had enabled `transport`, so its 11
+tests had never run. With `--features transport`, all 27 passed on 2026-10-05,
+and clippy was clean. Since then `scripts/check.sh` lints and tests with
+`--all-features`. No runtime, performance or full-protocol conformance claim is
+made beyond that suite.
 
 ## Remaining integration
 
