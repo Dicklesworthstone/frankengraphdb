@@ -64,14 +64,13 @@ fn one_parameter_table_spans_merge_key_and_both_action_branches() {
 }
 
 #[test]
-fn duplicate_branch_wrong_target_and_expression_assignment_refuse() {
+fn duplicate_branch_wrong_target_and_unknown_branch_refuse() {
     for (text, expected) in [
         (
             "MERGE (n:Person {p:1}) ON MATCH SET n.q=1 ON MATCH SET n:Seen",
             Some(GraphVertexUpsertTextErrorKind::DuplicateBranch),
         ),
         ("MERGE (n:Person {p:1}) ON CREATE SET other.q=1", None),
-        ("MERGE (n:Person {p:1}) ON CREATE SET n.q=n.q+1", None),
         ("MERGE (n:Person {p:1}) ON DELETE SET n.q=1", None),
     ] {
         let failed = PreparedGraphVertexUpsertText::prepare(text, R, symbols).unwrap_err();
@@ -79,6 +78,16 @@ fn duplicate_branch_wrong_target_and_expression_assignment_refuse() {
             assert_eq!(failed.kind, expected);
         }
     }
+    // Computed assignments over the chosen vertex compile since ec3a710d;
+    // their semantics are fgdb's tests/computed_merge_text.rs.
+    assert!(
+        PreparedGraphVertexUpsertText::prepare(
+            "MERGE (n:Person {p:1}) ON CREATE SET n.q=n.q+1",
+            R,
+            symbols,
+        )
+        .is_ok()
+    );
     assert!(
         PreparedGraphVertexMergeText::prepare(
             "MERGE (n:Person {p:1}) ON CREATE SET n.q=1",
@@ -136,11 +145,15 @@ fn missing_and_wrong_action_arguments_retain_original_offsets() {
 }
 
 /// openCypher `MERGE ... SET ...`: the assignments apply whether the vertex
-/// was matched or created, after any ON clause, so they compile to exactly
-/// the explicit two-branch upsert, and a later SET wins over an ON clause's
-/// assignment to the same property or label.
+/// was matched or created, after any ON clause. Since ec3a710d the trailing
+/// SET is its own clause, not folded into both branches: it sees the ON
+/// clause's staged effects, and it cannot erase an earlier failure or an
+/// unauthorized write by overwriting the same target. A spelling with a
+/// trailing SET is therefore a different statement from the explicit
+/// two-branch one, and it keeps its trailing actions. Which write wins is
+/// fgdb's tests/computed_merge_text.rs.
 #[test]
-fn trailing_set_is_both_branches_and_wins_over_an_on_clause() {
+fn a_trailing_set_is_its_own_clause_not_folded_into_both_branches() {
     // Bind exactly the parameters each statement declares.
     let bytes = |text: &str| {
         let template = PreparedGraphVertexUpsertText::prepare(text, R, symbols).unwrap();
@@ -169,7 +182,15 @@ fn trailing_set_is_both_branches_and_wins_over_an_on_clause() {
             "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen ON CREATE SET n.q=$c,n:Seen",
         ),
     ] {
-        assert_eq!(bytes(spelled), bytes(explicit), "{spelled}");
+        assert_ne!(bytes(spelled), bytes(explicit), "{spelled}");
+        let shape = |text: &str| {
+            format!(
+                "{:?}",
+                PreparedGraphVertexUpsertText::prepare(text, R, symbols).unwrap()
+            )
+        };
+        assert!(!shape(spelled).contains("after: 0"), "{spelled}");
+        assert!(shape(explicit).contains("after: 0"), "{explicit}");
     }
     // A repeat inside the one SET list still refuses when the typed
     // definition is built, as it does inside an ON clause.
