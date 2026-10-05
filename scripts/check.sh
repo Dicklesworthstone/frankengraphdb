@@ -120,9 +120,16 @@ CORE_GATE_FMT="cargo fmt --check"
 # "lock file needs to be updated" message. Without it cargo silently rewrote the
 # tracked lockfile mid-run, the gate reported nothing about the cause, and 33
 # commits sat on a tree no `--locked` build could open.
+#
+# `--all-features` on clippy and test (fgdb-f0u74, 2026-10-05): code behind a
+# first-party Cargo feature is tracked Rust that a default-features build never
+# compiles. fgdb-protocol's `transport` (a frame I/O driver and 11 tests) sat
+# unbuilt for 13 days that way. Every first-party feature is now linted and
+# tested by construction, including one added later; `cargo check` keeps the
+# default features, so the feature-off build still compiles.
 CORE_GATE_CHECK="cargo check --all-targets --locked"
-CORE_GATE_CLIPPY="cargo clippy --all-targets --locked -- -D warnings"
-CORE_GATE_TEST="cargo test --workspace --locked --no-fail-fast"
+CORE_GATE_CLIPPY="cargo clippy --all-targets --all-features --locked -- -D warnings"
+CORE_GATE_TEST="cargo test --workspace --all-features --locked --no-fail-fast"
 CORE_GATE_UBS="UBS over every tracked Rust source"
 CORE_GATE_ROSTER=(
   "$CORE_GATE_FILE_COVERAGE"
@@ -2111,7 +2118,7 @@ run_cargo_test_once() { # log
     return "$codec_rc"
   fi
 
-  CARGO_TERM_COLOR=never cargo test --color=never --workspace --locked --no-fail-fast 2>&1 | tee "$log"
+  CARGO_TERM_COLOR=never cargo test --color=never --workspace --all-features --locked --no-fail-fast 2>&1 | tee "$log"
 }
 
 run_cargo_test_workspace() {
@@ -3788,7 +3795,7 @@ gate_scope_abort_if_tree_moved "$CORE_GATE_FMT"
 run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets --locked
 gate_scope_abort_if_tree_moved "$CORE_GATE_CHECK"
 run_core_gate "$CORE_GATE_CLIPPY" \
-  cargo clippy --all-targets --locked -- -D warnings
+  cargo clippy --all-targets --all-features --locked -- -D warnings
 gate_scope_abort_if_tree_moved "$CORE_GATE_CLIPPY"
 CARGO_TEST_LOG="$GATE_LOG_DIR/core-cargo-test.log"
 run_core_gate "$CORE_GATE_TEST" run_cargo_test_workspace
