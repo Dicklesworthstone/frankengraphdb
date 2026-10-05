@@ -1,10 +1,10 @@
 //! Bounded canonical scalar operands for the shared vertex predicate engine.
 //!
 //! The scalar union, equality, ordering and encoding remain fgdb_types-owned.
-//! This profile compares only matching scalar kinds, without numeric coercion.
-//! Missing properties and canonical null fail every ordinary comparison; null
-//! tests are separate VertexPredicate operations. Within a kind, comparisons
-//! use STRICT_PORTABLE order, including its canonical NaN/collation/time rules.
+//! Query comparisons admit Int/Float pairs by exact numeric value, without
+//! changing canonical storage identity or cross-kind ordering. Missing/null
+//! and unrelated scalar kinds produce UNKNOWN. Within a kind, comparisons
+//! retain STRICT_PORTABLE order, including canonical NaN/collation/time rules.
 
 use super::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, IntegerComparison, VertexPredicate};
 use fgdb_delta_types::PropertyKeyId;
@@ -66,8 +66,9 @@ impl core::fmt::Debug for ScalarPredicate {
 }
 impl ScalarPredicate {
     /// The existing six comparison operators also apply to canonical scalar
-    /// operands. Comparisons never use cross-kind ranks to coerce an Int into
-    /// Float, or to treat a missing/ill-typed property as NotEqual.
+    /// operands. Int/Float comparisons use exact numeric value, not cross-kind
+    /// storage ranks or a lossy integer-to-float coercion. Missing and unrelated
+    /// scalar kinds do not become true under NotEqual.
     pub fn new(
         value: CanonicalScalar,
         comparison: IntegerComparison,
@@ -152,34 +153,79 @@ fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
 }
 
 impl IntegerComparison {
-    /// Compare two borrowed canonical properties under the same rule as a
-    /// scalar literal predicate. Missing/null/heterogeneous pairs never pass,
-    /// including NotEqual. This is a WHERE-selection result, not a three-valued
-    /// Boolean expression whose false result may safely be negated.
+    /// Compare borrowed scalar operands without collapsing UNKNOWN into FALSE.
+    /// Int/Float pairs compare numerically in either direction; other unequal
+    /// scalar kinds, missing properties, and stored null remain UNKNOWN. Float
+    /// NaN retains the existing STRICT_PORTABLE position after positive infinity.
     #[must_use]
-    pub fn accepts_scalar_pair(
+    pub fn evaluate_scalar_pair(
         self,
         left: Option<&CanonicalScalar>,
         right: Option<&CanonicalScalar>,
-    ) -> bool {
-        let (Some(left), Some(right)) = (left, right) else {
-            return false;
+    ) -> Option<bool> {
+        let (left, right) = (left?, right?);
+        let order = match (left, right) {
+            (CanonicalScalar::Null, _) | (_, CanonicalScalar::Null) => return None,
+            (CanonicalScalar::Int(left), CanonicalScalar::Float(right)) => {
+                compare_integer_float(*left, right.get())
+            }
+            (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
+                compare_integer_float(*right, left.get()).reverse()
+            }
+            _ if core::mem::discriminant(left) == core::mem::discriminant(right) => {
+                left.cmp(right)
+            }
+            _ => return None,
         };
-        if matches!(left, CanonicalScalar::Null)
-            || matches!(right, CanonicalScalar::Null)
-            || core::mem::discriminant(left) != core::mem::discriminant(right)
-        {
-            return false;
-        }
-        let order = left.cmp(right);
-        match self {
+        Some(match self {
             Self::Equal => order == Ordering::Equal,
             Self::NotEqual => order != Ordering::Equal,
             Self::Greater => order == Ordering::Greater,
             Self::Less => order == Ordering::Less,
             Self::GreaterOrEqual => order != Ordering::Less,
             Self::LessOrEqual => order != Ordering::Greater,
+        })
+    }
+
+    /// WHERE selection keeps only TRUE. Call evaluate_scalar_pair when the
+    /// result participates in NOT/AND/OR; UNKNOWN must not be negated as FALSE.
+    #[must_use]
+    pub fn accepts_scalar_pair(
+        self,
+        left: Option<&CanonicalScalar>,
+        right: Option<&CanonicalScalar>,
+    ) -> bool {
+        self.evaluate_scalar_pair(left, right) == Some(true)
+    }
+}
+
+/// Compare without rounding the integer to binary64. In particular, 2^53+1
+/// must not compare equal to 2^53, and i64::MAX is less than the float 2^63.
+fn compare_integer_float(integer: i64, floating: f64) -> Ordering {
+    const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if floating.is_nan() || floating >= I64_LIMIT {
+        return Ordering::Less;
+    }
+    if floating < -I64_LIMIT {
+        return Ordering::Greater;
+    }
+    // The range checks exclude infinities and both saturating-cast boundaries.
+    let truncated = floating as i64;
+    match integer.cmp(&truncated) {
+        Ordering::Equal => {
+            // Only here is converting the integer back to f64 exact: it came
+            // from this in-range float's integral part. Above 2^53 the float
+            // has no fractional bits; below it every integral part fits.
+            let integral = truncated as f64;
+            if integral < floating {
+                Ordering::Less
+            } else if integral > floating {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
         }
+        order => order,
     }
 }
 
@@ -213,8 +259,28 @@ mod tests {
     use super::*;
     use fgdb_types::CanonicalF64;
 
+    const COMPARISONS: [IntegerComparison; 6] = [
+        IntegerComparison::Equal,
+        IntegerComparison::NotEqual,
+        IntegerComparison::Greater,
+        IntegerComparison::Less,
+        IntegerComparison::GreaterOrEqual,
+        IntegerComparison::LessOrEqual,
+    ];
+
+    fn accepts_order(comparison: IntegerComparison, order: Ordering) -> bool {
+        match comparison {
+            IntegerComparison::Equal => order.is_eq(),
+            IntegerComparison::NotEqual => !order.is_eq(),
+            IntegerComparison::Greater => order.is_gt(),
+            IntegerComparison::Less => order.is_lt(),
+            IntegerComparison::GreaterOrEqual => !order.is_lt(),
+            IntegerComparison::LessOrEqual => !order.is_gt(),
+        }
+    }
+
     #[test]
-    fn every_comparison_uses_canonical_order_without_cross_kind_coercion() {
+    fn comparisons_preserve_canonical_order_except_for_mixed_numeric_pairs() {
         let values = [
             CanonicalScalar::Null,
             CanonicalScalar::Bool(false),
@@ -231,35 +297,99 @@ mod tests {
             CanonicalScalar::bytes(vec![0, 255]).unwrap(),
         ];
         for expected in &values {
-            for comparison in [
-                IntegerComparison::Equal,
-                IntegerComparison::NotEqual,
-                IntegerComparison::Greater,
-                IntegerComparison::Less,
-                IntegerComparison::GreaterOrEqual,
-                IntegerComparison::LessOrEqual,
-            ] {
+            for comparison in COMPARISONS {
                 let predicate = ScalarPredicate::new(expected.clone(), comparison).unwrap();
                 assert!(!predicate.matches(None));
                 for actual in &values {
-                    let comparable = !matches!(actual, CanonicalScalar::Null)
-                        && !matches!(expected, CanonicalScalar::Null)
-                        && core::mem::discriminant(actual) == core::mem::discriminant(expected);
-                    // Independently encoded order, not the predicate's comparator.
-                    let order = actual.encode().unwrap().cmp(&expected.encode().unwrap());
-                    let wanted = comparable
-                        && match comparison {
-                            IntegerComparison::Equal => order.is_eq(),
-                            IntegerComparison::NotEqual => !order.is_eq(),
-                            IntegerComparison::Greater => order.is_gt(),
-                            IntegerComparison::Less => order.is_lt(),
-                            IntegerComparison::GreaterOrEqual => !order.is_lt(),
-                            IntegerComparison::LessOrEqual => !order.is_gt(),
-                        };
-                    assert_eq!(predicate.matches(Some(actual)), wanted);
+                    let order = match (actual, expected) {
+                        (CanonicalScalar::Null, _) | (_, CanonicalScalar::Null) => None,
+                        // This fixture's floats are exactly zero, +inf, and NaN.
+                        // Neither nonzero float can be reached by an i64.
+                        (CanonicalScalar::Int(i), CanonicalScalar::Float(f)) => {
+                            Some(if f.get() == 0.0 { i.cmp(&0) } else { Ordering::Less })
+                        }
+                        (CanonicalScalar::Float(f), CanonicalScalar::Int(i)) => {
+                            Some(if f.get() == 0.0 { 0.cmp(i) } else { Ordering::Greater })
+                        }
+                        _ if core::mem::discriminant(actual)
+                            == core::mem::discriminant(expected) =>
+                        {
+                            // Independently encoded order, not the comparator.
+                            Some(actual.encode().unwrap().cmp(&expected.encode().unwrap()))
+                        }
+                        _ => None,
+                    };
+                    let wanted = order.map(|order| accepts_order(comparison, order));
+                    assert_eq!(
+                        comparison.evaluate_scalar_pair(Some(actual), Some(expected)),
+                        wanted
+                    );
+                    assert_eq!(predicate.matches(Some(actual)), wanted == Some(true));
                 }
             }
         }
+    }
+
+    #[test]
+    fn mixed_numeric_boundaries_are_exact_in_both_directions() {
+        use Ordering::{Equal, Greater, Less};
+        let cases = [
+            (0, 0.0, Equal),
+            (0, -0.0, Equal),
+            (0, f64::from_bits(1), Less),
+            (0, -f64::from_bits(1), Greater),
+            (1, 1.5, Less),
+            (-1, -1.5, Greater),
+            (9_007_199_254_740_993, 9_007_199_254_740_992.0, Greater),
+            (9_007_199_254_740_993, 9_007_199_254_740_994.0, Less),
+            (-9_007_199_254_740_993, -9_007_199_254_740_992.0, Less),
+            (i64::MIN, -9_223_372_036_854_775_808.0, Equal),
+            (i64::MIN + 1, -9_223_372_036_854_775_808.0, Greater),
+            (i64::MAX, 9_223_372_036_854_775_808.0, Less),
+            (i64::MAX - 1023, 9_223_372_036_854_774_784.0, Equal),
+            (i64::MIN, f64::NEG_INFINITY, Greater),
+            (i64::MAX, f64::INFINITY, Less),
+            (0, f64::NAN, Less),
+        ];
+        for (integer, floating, order) in cases {
+            let integer = CanonicalScalar::Int(integer);
+            let floating = CanonicalScalar::Float(CanonicalF64::new(floating));
+            for comparison in COMPARISONS {
+                assert_eq!(
+                    comparison.evaluate_scalar_pair(Some(&integer), Some(&floating)),
+                    Some(accepts_order(comparison, order))
+                );
+                assert_eq!(
+                    comparison.evaluate_scalar_pair(Some(&floating), Some(&integer)),
+                    Some(accepts_order(comparison, order.reverse()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_numeric_fractional_grid_matches_scaled_integer_oracle() {
+        for integer in -64_i64..=64 {
+            for numerator in -512_i64..=512 {
+                // Eighths are exactly representable, so integer scaling is an
+                // independent oracle with no float conversion of the subject.
+                let expected = (integer * 8).cmp(&numerator);
+                assert_eq!(
+                    compare_integer_float(integer, numerator as f64 / 8.0),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_predicate_equality_does_not_change_storage_identity() {
+        let integer = CanonicalScalar::Int(1);
+        let floating = CanonicalScalar::Float(CanonicalF64::new(1.0));
+        assert!(IntegerComparison::Equal.accepts_scalar_pair(Some(&integer), Some(&floating)));
+        assert_ne!(integer, floating);
+        assert_eq!(integer.cmp(&floating), Ordering::Less);
+        assert_ne!(integer.encode().unwrap(), floating.encode().unwrap());
     }
 
     #[test]
@@ -350,19 +480,14 @@ mod tests {
     fn borrowed_pairs_preserve_direction_and_reject_absence_on_either_side() {
         let small = CanonicalScalar::Int(i64::MIN);
         let large = CanonicalScalar::Int(i64::MAX);
-        let floating = CanonicalScalar::Float(CanonicalF64::new(0.0));
+        let boolean = CanonicalScalar::Bool(false);
         let null = CanonicalScalar::Null;
-        for comparison in [
-            IntegerComparison::Equal,
-            IntegerComparison::NotEqual,
-            IntegerComparison::Greater,
-            IntegerComparison::Less,
-            IntegerComparison::GreaterOrEqual,
-            IntegerComparison::LessOrEqual,
-        ] {
-            for absent in [None, Some(&null), Some(&floating)] {
+        for comparison in COMPARISONS {
+            for absent in [None, Some(&null), Some(&boolean)] {
                 assert!(!comparison.accepts_scalar_pair(Some(&small), absent));
                 assert!(!comparison.accepts_scalar_pair(absent, Some(&small)));
+                assert_eq!(comparison.evaluate_scalar_pair(Some(&small), absent), None);
+                assert_eq!(comparison.evaluate_scalar_pair(absent, Some(&small)), None);
             }
             assert_eq!(
                 comparison.accepts_scalar_pair(Some(&small), Some(&large)),
