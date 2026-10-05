@@ -4,8 +4,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::unwind_write::{GraphUnwindRowError, GraphUnwindWriteError};
 use fgdb_gql::{
-    BoundNativeGraphWrite, GqlParameters, GqlQueryError, GraphMutationProgramError,
-    GraphSymbol, GraphSymbolKind, GraphVertexUpsertError, GraphWriteProgramError,
+    BoundNativeGraphWrite, GqlParameters, GqlQueryError, GraphMutationProgramError, GraphSymbol,
+    GraphSymbolKind, GraphVertexUpsertError, GraphWriteProgramError,
     GraphWriteScriptExecutionError, NativeGraphWriteBindError,
 };
 use fgdb_types::CanonicalScalar;
@@ -62,11 +62,13 @@ fn late_row_refusal_precedes_all_resolution_and_is_not_retried() {
     });
     assert!(matches!(
         result,
-        Err(NativeGraphWriteBindError::Unwind(GraphUnwindWriteError::Row {
-            row: 1,
-            kind: GraphUnwindRowError::IncompatibleFieldTypes,
-            ..
-        }))
+        Err(NativeGraphWriteBindError::Unwind(
+            GraphUnwindWriteError::Row {
+                row: 1,
+                kind: GraphUnwindRowError::IncompatibleFieldTypes,
+                ..
+            }
+        ))
     ));
     assert_eq!(calls, 0);
     for arguments in [rows(vec![]), GqlParameters::new()] {
@@ -119,7 +121,10 @@ fn preparation_and_binding_errors_remain_distinguishable() {
 fn row_coordinates_survive_but_infrastructure_gets_no_invented_row() {
     let bound = BoundNativeGraphWrite::bind(
         UPSERT,
-        &rows(vec![row(1, CanonicalScalar::Int(2)), row(2, CanonicalScalar::Int(3))]),
+        &rows(vec![
+            row(1, CanonicalScalar::Int(2)),
+            row(2, CanonicalScalar::Int(3)),
+        ]),
         R,
         symbols,
     )
@@ -131,8 +136,13 @@ fn row_coordinates_survive_but_infrastructure_gets_no_invented_row() {
             observed: 1,
         }),
     });
-    let GraphWriteScriptExecutionError::BatchProgram { location: Some(location), .. } = located
-    else { panic!("a failing expanded step must retain its input coordinate") };
+    let GraphWriteScriptExecutionError::BatchProgram {
+        location: Some(location),
+        ..
+    } = located
+    else {
+        panic!("a failing expanded step must retain its input coordinate")
+    };
     assert_eq!(location.argument_set, 1);
     assert_eq!(location.statement, 0);
     assert_eq!(location.span, 0..UPSERT.len());

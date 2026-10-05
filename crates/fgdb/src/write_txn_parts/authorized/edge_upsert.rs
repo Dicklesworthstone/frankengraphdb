@@ -6,13 +6,13 @@ use super::{
 };
 use crate::write_txn::authorized::{edge_merge, stage};
 use crate::write_txn::{WriteTxn, edge_upsert_actions, edge_upsert_property};
-use std::cell::RefCell;
 use fgdb_gql::{
     GqlQueryError, GraphEdgeMergeOutcome, GraphEdgeUpsertError, GraphEdgeUpsertPolicy,
     GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
+use std::cell::RefCell;
 
 type Fault = GqlQueryError<GraphEdgeUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type Receipt = (
@@ -79,7 +79,9 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 let (transaction, database) = &mut *state;
                 let mut execution = controls.borrow_mut();
                 for row in batch.rows {
-                    cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(source)?;
+                    cx.checkpoint()
+                        .map_err(WriteTxnError::Interrupted)
+                        .map_err(source)?;
                     execution.checkpoint().map_err(source)?;
                     // Check ORIGINAL images and every field, before the next
                     // clause can overwrite it. Hidden fields stay untouched.

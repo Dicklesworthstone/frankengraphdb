@@ -114,7 +114,10 @@ pub struct GraphEdgeUpsertStats {
 #[derive(Debug)]
 pub enum GraphEdgeUpsertError<E, A> {
     Merge(crate::GraphEdgeMergeError<E, A>),
-    ActionLimit { limit: u64, observed: u128 },
+    ActionLimit {
+        limit: u64,
+        observed: u128,
+    },
     Staging(E),
     Expression {
         clause: usize,
@@ -133,8 +136,15 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 "relationship MERGE branch action limit exceeded: {observed} > {limit}"
             ),
             Self::Staging(error) => error.fmt(f),
-            Self::Expression { clause, action, source } => {
-                write!(f, "relationship MERGE clause {clause} action {action}: {source}")
+            Self::Expression {
+                clause,
+                action,
+                source,
+            } => {
+                write!(
+                    f,
+                    "relationship MERGE clause {clause} action {action}: {source}"
+                )
             }
         }
     }
@@ -194,7 +204,9 @@ fn validate(
                     observed: properties.len(),
                 });
             }
-            if value.referenced_columns().any(|column| column >= properties.len())
+            if value
+                .referenced_columns()
+                .any(|column| column >= properties.len())
                 || value.referenced_locals().next().is_some()
             {
                 return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
@@ -213,10 +225,13 @@ impl PreparedGraphEdgeUpsert {
         on_create: Vec<GraphEdgeUpsertAction>,
     ) -> Result<Self, GraphEdgeUpsertBuildError> {
         let literals = |actions: Vec<GraphEdgeUpsertAction>| {
-            actions.into_iter().map(|action| GraphEdgeUpsertAction {
-                key: action.key,
-                value: GraphEdgeUpsertValue::Literal(action.value),
-            }).collect()
+            actions
+                .into_iter()
+                .map(|action| GraphEdgeUpsertAction {
+                    key: action.key,
+                    value: GraphEdgeUpsertValue::Literal(action.value),
+                })
+                .collect()
         };
         Self::prepare_with_clauses(merge, literals(on_match), literals(on_create), Vec::new())
     }
@@ -245,7 +260,12 @@ impl PreparedGraphEdgeUpsert {
                 });
             }
         }
-        Ok(Self { merge, on_match, on_create, after })
+        Ok(Self {
+            merge,
+            on_match,
+            on_create,
+            after,
+        })
     }
     #[must_use]
     pub fn merge(&self) -> &PreparedGraphEdgeMerge {
@@ -279,17 +299,23 @@ impl PreparedGraphEdgeUpsert {
         use fgdb_types::CanonicalScalar;
         let selected = match branch {
             GraphEdgeUpsertBranch::NoInput => {
-                return Some(crate::GlaExecutionStats { work_units: 1, scratch_entries: 0 });
+                return Some(crate::GlaExecutionStats {
+                    work_units: 1,
+                    scratch_entries: 0,
+                });
             }
             GraphEdgeUpsertBranch::Match => &self.on_match,
             GraphEdgeUpsertBranch::Create => &self.on_create,
         };
         let mut scratch = self.action_count(branch) as u64;
         for action in selected.iter().chain(&self.after) {
-            let GraphEdgeUpsertValue::Literal(value) = &action.value else { return None };
+            let GraphEdgeUpsertValue::Literal(value) = &action.value else {
+                return None;
+            };
             let sizes = match value.value() {
                 CanonicalScalar::Text(value) => [
-                    value.len(), value.canonical_sort_key().map_or(0, <[u8]>::len),
+                    value.len(),
+                    value.canonical_sort_key().map_or(0, <[u8]>::len),
                 ],
                 CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
                 CanonicalScalar::Timestamp(value) => {
@@ -301,7 +327,10 @@ impl PreparedGraphEdgeUpsert {
                 scratch += bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) as u64;
             }
         }
-        Some(crate::GlaExecutionStats { work_units: scratch + 1, scratch_entries: scratch })
+        Some(crate::GlaExecutionStats {
+            work_units: scratch + 1,
+            scratch_entries: scratch,
+        })
     }
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
@@ -316,7 +345,9 @@ impl PreparedGraphEdgeUpsert {
                 match &action.value {
                     GraphEdgeUpsertValue::Literal(value) => {
                         bytes.push(0);
-                        bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(
+                            &(value.canonical_bytes().len() as u64).to_be_bytes(),
+                        );
                         bytes.extend_from_slice(value.canonical_bytes());
                     }
                     GraphEdgeUpsertValue::Expression { properties, value } => {

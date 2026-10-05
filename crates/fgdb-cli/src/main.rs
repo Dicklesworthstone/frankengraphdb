@@ -18,8 +18,7 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphPath, GraphValue};
 use fgdb_gql::{
     BoundNativeGraphWrite, GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy,
-    GqlScalarParameter,
-    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, GraphWriteProgramPolicy,
+    GqlScalarParameter, GraphSymbol, GraphSymbolKind, GraphSymbolResolver, GraphWriteProgramPolicy,
     PreparedGraphWriteScript, ReverseSymbolCatalog,
 };
 use fgdb_types::{
