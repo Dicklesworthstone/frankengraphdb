@@ -934,8 +934,12 @@ fn unwinding_while_preparing_a_frozen_batch_closes_without_escaping_a_prefix() {
             )
             .unwrap();
         let arguments = rows(&[(1, 2), (2, 3)]);
+        // Only the unwind matters here; `.is_ok()` keeps the closure's result
+        // small (clippy::result_large_err rejects the 160-byte error type).
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            session.bind_unwind_batch(&query, COUNTER, &arguments)
+            session
+                .bind_unwind_batch(&query, COUNTER, &arguments)
+                .is_ok()
         }));
         assert!(failure.is_err());
         assert!(session.is_closed());
