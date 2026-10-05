@@ -1072,6 +1072,68 @@ fn reopening_with_a_missing_block_is_refused() {
     });
 }
 
+/// Reopen reads up to `OPEN_READS_IN_FLIGHT` objects ahead of admission, but
+/// admits them in root order. With two damaged blocks inside one window, the
+/// earlier one in root order is the one reported, by both reopen faces, as a
+/// serial walk would report it.
+#[test]
+fn a_prefetching_reopen_reports_the_first_damaged_block_in_root_order() {
+    use fgdb_strata::store::OPEN_READS_IN_FLIGHT;
+    let dir = scratch_dir("reopen-prefetch-order");
+    under_lab(43, move |cx| async move {
+        let strata_keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, strata_keys);
+        // One source vertex per edge, so every edge is its own block family.
+        for i in 0..40u128 {
+            writer
+                .apply(strata_keys, CommitSeq(1), &create_vertex(1_000 + i))
+                .expect("creates a source");
+            writer
+                .apply(strata_keys, CommitSeq(1), &create(100 + i, 1_000 + i, 1))
+                .expect("creates an edge");
+        }
+        writer.seal(strata_keys).expect("seals");
+        let (root, blocks, patches) = writer
+            .publish(strata_keys, CommitSeq(1))
+            .expect("publishes");
+        let (early, late) = (3, OPEN_READS_IN_FLIGHT + 2);
+        assert!(
+            blocks.len() > late,
+            "the window must reach past the first damage"
+        );
+
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        for block in &blocks {
+            store.put(&cx, &block.bytes).await.expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(&cx, &patch.bytes)
+                .await
+                .expect("stores a vertex patch");
+        }
+        let root_id = store.put_root(&cx, &root).await.expect("stores root");
+        let clean = store.reopen(&cx, root_id).await.expect("reopens");
+        assert_eq!(clean.1.len(), blocks.len());
+
+        for at in [late, early] {
+            std::fs::write(store.path(root.blocks[at].block_id), b"damaged")
+                .expect("plants damage");
+        }
+        let first_damage = |result: Result<(), StoreError>| {
+            matches!(result, Err(StoreError::RootBlockLoad { at, error })
+                if at == early && matches!(*error, StoreError::IdentityMismatch { .. }))
+        };
+        assert!(first_damage(store.reopen(&cx, root_id).await.map(|_| ())));
+        assert!(first_damage(
+            store.reopen_sealed(&cx, root_id).await.map(|_| ())
+        ));
+    });
+}
+
 // ---------------------------------------------------------------------------
 // The receipted publish path (fgdb-gieu)
 // ---------------------------------------------------------------------------

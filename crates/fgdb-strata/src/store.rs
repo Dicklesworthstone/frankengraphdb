@@ -292,6 +292,65 @@ impl StoredObjectKind {
 /// descriptors stay well under the common 1024 soft limit.
 pub const BATCH_SYNCS_IN_FLIGHT: usize = 256;
 
+/// Object reads a full-root walk keeps in flight ahead of admission. Opening a
+/// database walks every object its root names, one file each. Measured
+/// 2026-10-05 on a bulk-loaded 900k-edge database (376k object files, warm
+/// cache): reading them all one at a time took 14.65 s of wall, almost all
+/// kernel time, against 2.33 s sixteen at a time.
+pub const OPEN_READS_IN_FLIGHT: usize = 32;
+
+/// Object reads with up to a window in flight, consumed strictly in the order
+/// they were issued. Only the reads overlap: the caller admits each result in
+/// that order, so what is accepted, and the first error reported, are the
+/// serial walk's. A read has no effects, so one started early and dropped
+/// unconsumed changes nothing. Under the lab runtime each read completes
+/// inline on its first poll, in order, as `sync_files_together`'s syncs do.
+struct OrderedReads<F: Future> {
+    reads: std::collections::VecDeque<InFlightRead<F>>,
+}
+
+/// A read in flight, with its result once it completes.
+type InFlightRead<F> = (std::pin::Pin<Box<F>>, Option<<F as Future>::Output>);
+
+impl<F: Future> OrderedReads<F> {
+    fn new() -> Self {
+        Self {
+            reads: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.reads.len()
+    }
+
+    fn push(&mut self, read: F) {
+        self.reads.push_back((Box::pin(read), None));
+    }
+
+    /// The oldest read's result, polling every read still in flight meanwhile;
+    /// `None` when nothing was issued.
+    async fn next(&mut self) -> Option<F::Output> {
+        let reads = &mut self.reads;
+        std::future::poll_fn(|task| {
+            for (read, outcome) in reads.iter_mut() {
+                if outcome.is_none()
+                    && let std::task::Poll::Ready(result) = read.as_mut().poll(task)
+                {
+                    *outcome = Some(result);
+                }
+            }
+            match reads.front() {
+                None => std::task::Poll::Ready(None),
+                Some((_, Some(_))) => {
+                    std::task::Poll::Ready(reads.pop_front().and_then(|(_, outcome)| outcome))
+                }
+                Some((_, None)) => std::task::Poll::Pending,
+            }
+        })
+        .await
+    }
+}
+
 /// One batch object whose inode is fully written but not yet synced.
 struct StagedObject<F> {
     file: F,
@@ -1331,11 +1390,28 @@ impl<V: Vfs> BlockStore<V> {
         observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
+            .await;
+        self.admit_root_block(cx, at, partition, reference, bytes, observe)
             .await
-            .map_err(|error| StoreError::RootBlockLoad {
-                at,
-                error: Box::new(error),
-            })?;
+    }
+
+    /// Admit one root-named block from the result of reading its bytes: every
+    /// check after the read. The serial resolver and the prefetching root walk
+    /// both admit here, so a block is accepted or refused identically however
+    /// its bytes were read.
+    async fn admit_root_block<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        at: usize,
+        partition: u64,
+        reference: &crate::root::BlockRef,
+        bytes: Result<Vec<u8>, StoreError>,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<ReadRootBlock, E> {
+        let bytes = bytes.map_err(|error| StoreError::RootBlockLoad {
+            at,
+            error: Box::new(error),
+        })?;
         observe(RootReadEvent::SourceBytes(bytes.len()))?;
         let entries = crate::root::resolve_block_ref(
             self.k_oid.expose(),
@@ -1420,10 +1496,11 @@ impl<V: Vfs> BlockStore<V> {
     /// Prove every block named by an already-structural root while retaining only
     /// the caller-selected decoded blocks.
     ///
-    /// Every encoded block is dropped before loading the next. One canonical
-    /// statement per EId remains in the incremental history validator so a future
-    /// block cannot reuse an identity and still mint a selective-read token. This
-    /// is the fresh admission path: even a block outside the requested snapshot is
+    /// Each encoded block is dropped once admitted, so at most
+    /// [`OPEN_READS_IN_FLIGHT`] are held at once. One canonical statement per
+    /// EId remains in the incremental history validator so a future block
+    /// cannot reuse an identity and still mint a selective-read token. This is
+    /// the fresh admission path: even a block outside the requested snapshot is
     /// checked, because neither an unproved range nor an unproved identity is
     /// permission to skip that block.
     #[allow(clippy::type_complexity)]
@@ -1439,6 +1516,7 @@ impl<V: Vfs> BlockStore<V> {
             root,
             |at, reference, read| retain(at, reference).then(|| decoded_block(read)),
             &mut |_| Ok::<(), StoreError>(()),
+            OPEN_READS_IN_FLIGHT,
         )
         .await
     }
@@ -1446,12 +1524,17 @@ impl<V: Vfs> BlockStore<V> {
     /// Admit every block named by `root`, in publication order, and keep what
     /// `keep` returns for each. Every block is proven whether or not it is
     /// kept; `keep` only decides what survives the read.
+    ///
+    /// Up to `in_flight` block reads run ahead of admission. A caller whose
+    /// `observe` meters or refuses work passes 1: each block's read then starts
+    /// only after its [`RootReadEvent::ObjectStart`], exactly as a serial walk.
     async fn inspect_root_blocks_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         mut keep: impl FnMut(usize, &crate::root::BlockRef, ReadRootBlock) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+        in_flight: usize,
     ) -> Result<Vec<T>, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
@@ -1461,9 +1544,25 @@ impl<V: Vfs> BlockStore<V> {
             (fgdb_types::VId, fgdb_delta_types::RelationId),
             ObjectId,
         > = std::collections::BTreeMap::new();
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
         for (at, reference) in root.blocks.iter().enumerate() {
+            observe(RootReadEvent::ObjectStart)?;
+            // Block `at` is always issued by now; later ones only up to the
+            // window.
+            while let Some(next) = root.blocks.get(issued)
+                && (issued <= at || reads.len() < in_flight)
+            {
+                reads.push(self.get_bytes(cx, DeltaBlockVersion(next.block_id)));
+                issued += 1;
+            }
+            let bytes = reads.next().await.ok_or_else(|| {
+                StoreError::Io(std::io::Error::other(
+                    "root block walk consumed a read it never issued",
+                ))
+            })?;
             let read = self
-                .resolve_root_block_observed(cx, at, root.partition, reference, observe)
+                .admit_root_block(cx, at, root.partition, reference, bytes, observe)
                 .await?;
             let (entries, _, predecessor) = &read.resolved;
             // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly
@@ -1534,11 +1633,24 @@ impl<V: Vfs> BlockStore<V> {
         observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
-            .await
-            .map_err(|error| StoreError::RootPatchLoad {
-                at,
-                error: Box::new(error),
-            })?;
+            .await;
+        self.admit_root_patch(at, reference, bytes, observe)
+    }
+
+    /// Admit one root-named vertex patch from the result of reading its bytes:
+    /// every check after the read, shared by the serial resolver and the
+    /// prefetching root walk.
+    fn admit_root_patch<E: From<StoreError>>(
+        &self,
+        at: usize,
+        reference: &crate::root::PatchRef,
+        bytes: Result<Vec<u8>, StoreError>,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<(VertexPatchRows, Vec<u8>), E> {
+        let bytes = bytes.map_err(|error| StoreError::RootPatchLoad {
+            at,
+            error: Box::new(error),
+        })?;
         observe(RootReadEvent::SourceBytes(bytes.len()))?;
         let rows = crate::root::resolve_patch_ref(
             self.k_oid.expose(),
@@ -1570,25 +1682,41 @@ impl<V: Vfs> BlockStore<V> {
             root,
             |at, reference, (rows, _)| retain(at, reference).then_some(rows),
             &mut |_| Ok::<(), StoreError>(()),
+            OPEN_READS_IN_FLIGHT,
         )
         .await
     }
 
     /// Admit every vertex patch named by `root` and keep what `keep` returns
-    /// for each; every patch is proven whether or not it is kept.
+    /// for each; every patch is proven whether or not it is kept. `in_flight`
+    /// bounds the reads running ahead of admission, as for blocks; a metering
+    /// `observe` passes 1.
     async fn inspect_root_patches_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         mut keep: impl FnMut(usize, &crate::root::PatchRef, (VertexPatchRows, Vec<u8>)) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+        in_flight: usize,
     ) -> Result<Vec<T>, E> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
         for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let read = self
-                .resolve_root_patch_observed(cx, at, reference, observe)
-                .await?;
+            observe(RootReadEvent::ObjectStart)?;
+            while let Some(next) = root.vertex_patches.get(issued)
+                && (issued <= at || reads.len() < in_flight)
+            {
+                reads.push(self.get_patch_bytes(cx, VertexPatchVersion(next.patch_id)));
+                issued += 1;
+            }
+            let bytes = reads.next().await.ok_or_else(|| {
+                StoreError::Io(std::io::Error::other(
+                    "root patch walk consumed a read it never issued",
+                ))
+            })?;
+            let read = self.admit_root_patch(at, reference, bytes, observe)?;
             history
                 .observe_patch(at, &read.0)
                 .map_err(StoreError::MalformedRoot)?;
@@ -2118,6 +2246,7 @@ impl<V: Vfs> BlockStore<V> {
                 &root,
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
+                OPEN_READS_IN_FLIGHT,
             )
             .await?;
         let mut blocks = Vec::with_capacity(read.len());
@@ -2144,6 +2273,7 @@ impl<V: Vfs> BlockStore<V> {
                 &root,
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
+                OPEN_READS_IN_FLIGHT,
             )
             .await?;
         let mut patches = Vec::with_capacity(read.len());
@@ -2987,5 +3117,76 @@ mod durability_tests {
                 original
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod ordered_reads_tests {
+    use super::OrderedReads;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::task::{Context, Poll, Waker};
+
+    /// Ready on its `(left + 1)`-th poll, counting every poll it receives.
+    struct Countdown {
+        left: u32,
+        value: usize,
+        polls: Arc<AtomicU32>,
+    }
+
+    impl Future for Countdown {
+        type Output = usize;
+        fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<usize> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            if self.left == 0 {
+                Poll::Ready(self.value)
+            } else {
+                self.left -= 1;
+                task.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    fn next(reads: &mut OrderedReads<Countdown>) -> Option<usize> {
+        let mut task = Context::from_waker(Waker::noop());
+        let mut next = std::pin::pin!(reads.next());
+        loop {
+            if let Poll::Ready(value) = next.as_mut().poll(&mut task) {
+                return value;
+            }
+        }
+    }
+
+    /// The window's whole contract: results come back in issue order even when
+    /// later reads finish first, every read in flight progresses while the
+    /// oldest is awaited, and a finished read is never polled again.
+    #[test]
+    fn ordered_reads_yield_in_issue_order_while_every_read_progresses() {
+        // (ready after this many extra polls, polls counter)
+        let lefts = [3, 0, 2, 0];
+        let polls: Vec<_> = lefts.iter().map(|_| Arc::new(AtomicU32::new(0))).collect();
+        let mut reads = OrderedReads::new();
+        for (value, (left, polls)) in lefts.iter().zip(&polls).enumerate() {
+            reads.push(Countdown {
+                left: *left,
+                value,
+                polls: Arc::clone(polls),
+            });
+        }
+        let count = |read: usize| polls[read].load(Ordering::Relaxed);
+
+        assert_eq!(next(&mut reads), Some(0));
+        // While read 0 took four polls, read 2 finished (three polls) and
+        // reads 1 and 3 finished on their first; none was polled after.
+        assert_eq!([count(0), count(1), count(2), count(3)], [4, 1, 3, 1]);
+        assert_eq!(next(&mut reads), Some(1));
+        assert_eq!(next(&mut reads), Some(2));
+        assert_eq!(next(&mut reads), Some(3));
+        assert_eq!([count(0), count(1), count(2), count(3)], [4, 1, 3, 1]);
+        assert_eq!(next(&mut reads), None);
+        assert_eq!(reads.len(), 0);
     }
 }
