@@ -887,8 +887,8 @@ run_fmt_check() {
 run_ubs() {
   local log="$GATE_LOG_DIR/core-ubs.log"
   local list="$GATE_LOG_DIR/core-ubs.sources"
-  local ubs_rc
-  local -a rust_sources=()
+  local ubs_rc=0 part_rc file key part covered=0 i
+  local -a rust_sources=() keys=() parts=() part_files=()
 
   # The domain is the TRACKED Rust set — precisely what this gate's name claims
   # — and not the directory the gate happens to run in. See gate_tracked_sources
@@ -914,9 +914,41 @@ run_ubs() {
   # ~377s over the full tracked set; 1800s is the error text's own sanctioned
   # headroom. A timeout that still fires classifies as ubs-module-timeout via
   # gate_env_failure_class in run_core_gate — UNRUN-retryable, not product red.
-  UBS_MODULE_TIMEOUT="${UBS_MODULE_TIMEOUT:-1800}" \
-    ubs --only=rust --ci "${rust_sources[@]}" 2>&1 | tee "$log"
-  ubs_rc=${PIPESTATUS[0]}
+  #
+  # fgdb-zww2g: one invocation over the whole set no longer completes. Since
+  # UBS v5.4.17 the rust module's ast-grep output over this repository exceeds
+  # a hard-coded 16 MiB cap and is truncated, so the set is scanned per crate
+  # root (crates/<x>, tools/<x>, else the top-level entry) into one transcript.
+  # Measured 2026-10-05: findings are per file (three A, B, A+B controls, every
+  # class exactly additive), each of the 30 partitions completes, and the
+  # ratchet already sums a class across sections. A partition that truncates
+  # anyway still trips the partial-run refusal below.
+  for file in "${rust_sources[@]}"; do
+    key="${file%%/*}"
+    if { [ "$key" = crates ] || [ "$key" = tools ]; } && [[ "$file" == */*/* ]]; then
+      part="${file#*/}"
+      key="$key/${part%%/*}"
+    fi
+    keys+=("$key")
+  done
+  readarray -t parts < <(printf '%s\n' "${keys[@]}" | sort -u)
+  : >"$log" || return 1
+  for part in "${parts[@]}"; do
+    part_files=()
+    for i in "${!rust_sources[@]}"; do
+      [ "${keys[i]}" = "$part" ] && part_files+=("${rust_sources[i]}")
+    done
+    covered=$((covered + ${#part_files[@]}))
+    echo "    partition $part: ${#part_files[@]} tracked Rust source(s)" | tee -a "$log"
+    UBS_MODULE_TIMEOUT="${UBS_MODULE_TIMEOUT:-1800}" \
+      ubs --only=rust --ci "${part_files[@]}" 2>&1 | tee -a "$log"
+    part_rc=${PIPESTATUS[0]}
+    [ "$part_rc" -gt "$ubs_rc" ] && ubs_rc="$part_rc"
+  done
+  if [ "$covered" -ne "${#rust_sources[@]}" ]; then
+    echo "ERROR: the UBS partitions cover $covered of ${#rust_sources[@]} tracked Rust sources." >&2
+    return 1
+  fi
   if grep -Eiq \
     'nothing was checked|did not run any scanner|no supported languages detected' \
     "$log"; then
@@ -1495,10 +1527,25 @@ run_ubs() {
 # - fgdb-strata spill/paged/tests.rs +2 (c95261fe); fgdb-cli
 #   transaction/returning_tests.rs +1 (a4b455e4).
 # Secret/token comparisons and Command::new are unchanged at 16 and 1.
+# fgdb-zww2g re-pin (2026-10-05, UBS v5.4.17, 1,742 tracked files): one
+# invocation over the whole set truncates (ast-grep output > 16 MiB), so
+# run_ubs scans per crate root (30 partitions, all complete). Same-tool
+# control: the partitioned scan at fc35151d reads 1 / 16 / 872, exactly the
+# complete-scan pin taken there with v5.4.9, so the method and the new tool
+# measure what the old one did. At 31d4b198 it reads 1 / 16 / 901. The +29 is
+# all in the panic class, crates/fgdb +28 and crates/fgdb-gql +1 by partition;
+# git grep over the same range adds 35 macro lines, 22 of them in tests:
+# - tests: tests/unwind_write_execution.rs +11, tests/mixed_numeric_paths.rs +4,
+#   tests/computed_vertex_upsert.rs +3, tests/bound_root_admission.rs +3,
+#   write_txn_parts/vertex_scan_boolean_tests.rs +1;
+# - cfg(test) modules: unwind_write.rs +3, numeric.rs's test module;
+# - guarded unreachable!: write_txn_parts/native_query.rs ("symbol domain
+#   checked", twice), gql_exec/source/numeric.rs ("only numeric operands
+#   enter numeric bounds"), and merge.rs's two.
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=872"
+  "panic!/unreachable!/todo!/unimplemented!=901"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1514,10 +1561,11 @@ UBS_CRITICAL_BASELINE=(
 # string occurs only in its Java scanner). The mode is not selected even with
 # ast-grep on PATH, so this table is unreachable with the installed tool. It
 # is kept equal to the measured regex table, not independently measured.
+# Still true of v5.4.17 (none of the 30 partition transcripts print it).
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=1"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=872"
+  "panic!/unreachable!/todo!/unimplemented!=901"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
