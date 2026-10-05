@@ -2,6 +2,7 @@
 //! These helpers do not validate raw blocks or bypass snapshot admission.
 
 mod aggregation;
+mod numeric;
 
 use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -622,21 +623,36 @@ impl PropertyEqualityIndex {
         Candidates(self.candidates.get(&(key, std::sync::Arc::from(encoded))))
     }
 
-    /// Ordered scalar bytes have the same order as CanonicalScalar::cmp.
-    /// Bounds stay within one type tag: predicate.rs::accepts_scalar_pair
-    /// rejects heterogeneous pairs, rather than comparing their type ranks.
+    /// Ordered bytes preserve storage order within a scalar kind. Numeric
+    /// query predicates separately seek BOTH numeric domains; a type tag is
+    /// not by itself a complete candidate bound for Int/Float comparisons.
     fn range_candidates<E>(
         &self,
         range: &PropertyRange,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<std::collections::BTreeSet<VId>, E> {
         let mut ids = std::collections::BTreeSet::new();
+        self.extend_range_candidates(range, &mut ids, control)?;
+        Ok(ids)
+    }
+
+    /// Share one deduplicated candidate set across disjoint scalar domains.
+    /// Charge work even for duplicate historical candidates: a long version
+    /// history must not become uninterruptible merely because no new ID enters.
+    fn extend_range_candidates<E>(
+        &self,
+        range: &PropertyRange,
+        ids: &mut std::collections::BTreeSet<VId>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        control(SourceEvent::Work)?;
         if range.empty {
-            return Ok(ids);
+            return Ok(());
         }
         let lower = (range.key, std::sync::Arc::from(range.lower.as_slice()));
         for ((key, encoded), candidates) in self.candidates.iter_from(&lower, range.lower_inclusive)
         {
+            control(SourceEvent::Work)?;
             if *key != range.key
                 || encoded.as_ref() > range.upper.as_slice()
                 || (!range.upper_inclusive && encoded.as_ref() == range.upper.as_slice())
@@ -644,13 +660,14 @@ impl PropertyEqualityIndex {
                 break;
             }
             for (vid, ()) in candidates.iter() {
+                control(SourceEvent::Work)?;
                 if !ids.contains(vid) {
                     control(SourceEvent::ScratchEntry)?;
                     ids.insert(*vid);
                 }
             }
         }
-        Ok(ids)
+        Ok(())
     }
 
     /// Latest statement at the cut, with later patches winning equal creation
@@ -888,6 +905,11 @@ fn bound_vertices<'a, E, Row>(
             }
         }
         return Ok(Some((rows, candidates.len() as u64)));
+    }
+    // Canonical equality/range keys are type-separated. Numeric predicates
+    // require both numeric domains before the visible row is rechecked.
+    if let Some(admitted) = numeric::bound_vertices(snapshot, prefix, as_of, control)? {
+        return Ok(Some(admitted));
     }
     let mut equality: Option<(PropertyKeyId, CanonicalScalar)> = None;
     let mut bound_predicates: &[VertexPredicate] = &[];
