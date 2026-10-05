@@ -145,14 +145,18 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 for row in batch.rows {
                     cx.checkpoint()
                         .map_err(WriteTxnError::Interrupted)
-                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
-                    execution.checkpoint()
-                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
+                        .map_err(|error| {
+                            GqlQueryError::Source(GraphVertexUpsertError::Staging(error))
+                        })?;
+                    execution.checkpoint().map_err(|error| {
+                        GqlQueryError::Source(GraphVertexUpsertError::Staging(error))
+                    })?;
                     // Authorize EVERY original field in EVERY clause, even a
                     // no-op or overwritten value. A scope escape refuses before
                     // a later clause can read that vertex or erase the attempt.
-                    stage(transaction, database, batch.relation, row, &mut execution)
-                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))?;
+                    stage(transaction, database, batch.relation, row, &mut execution).map_err(
+                        |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
+                    )?;
                 }
                 Ok(())
             },

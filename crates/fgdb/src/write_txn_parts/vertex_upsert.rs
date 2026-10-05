@@ -28,7 +28,13 @@ impl WriteTxn {
         let workspace = MutationProgramWorkspace::new(self);
         let (merge_stats, outcome) = workspace
             .txn
-            .execute_graph_vertex_merge_governed(database, cx, upsert.merge(), policy.merge, allocate)
+            .execute_graph_vertex_merge_governed(
+                database,
+                cx,
+                upsert.merge(),
+                policy.merge,
+                allocate,
+            )
             .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
         let stats = cx.with_restriction(|| {
             // The callbacks are sequential. Their borrows end before the next
@@ -47,9 +53,12 @@ impl WriteTxn {
                 |batch| {
                     let mut state = state.borrow_mut();
                     let (transaction, database) = &mut *state;
-                    transaction.write(database, batch)
+                    transaction
+                        .write(database, batch)
                         .map(|_| ())
-                        .map_err(|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)))
+                        .map_err(|error| {
+                            GqlQueryError::Source(GraphVertexUpsertError::Staging(error))
+                        })
                 },
             )
         })?;
@@ -76,16 +85,17 @@ fn vertex_upsert_actions<E, A, C>(
     ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
     mut stage: impl FnMut(WriteBatch) -> VertexUpsertActionResult<(), E, A, C>,
 ) -> VertexUpsertActionResult<fgdb_gql::GraphVertexUpsertStats, E, A, C> {
-    use fgdb_gql::{
-        GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-        GqlQueryError, GraphIntegerEvaluationError, GraphVertexMergeOutcome,
-        GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertError,
-        GraphVertexUpsertStats,
-    };
     use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::{
+        GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
+        GraphIntegerEvaluationError, GraphVertexMergeOutcome, GraphVertexUpsertAction,
+        GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats,
+    };
     let (branch, selected) = match outcome {
         GraphVertexMergeOutcome::Matched(_) => (GraphVertexUpsertBranch::Match, upsert.on_match()),
-        GraphVertexMergeOutcome::Created(_) => (GraphVertexUpsertBranch::Create, upsert.on_create()),
+        GraphVertexMergeOutcome::Created(_) => {
+            (GraphVertexUpsertBranch::Create, upsert.on_create())
+        }
     };
     let observed = selected.len() as u128 + upsert.after().len() as u128;
     if observed > u128::from(policy.max_actions) {
@@ -102,43 +112,71 @@ fn vertex_upsert_actions<E, A, C>(
         let scratch = u128::from(evaluator.scratch_entries)
             + u128::from(event == GlaExecutionEvent::ScratchEntry);
         for (observed, limit, dimension) in [
-            (work, policy.merge.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (scratch, policy.merge.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                work,
+                policy.merge.query.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                policy.merge.query.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > u128::from(limit) {
-                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
             }
         }
-        evaluator = GlaExecutionStats { work_units: work as u64, scratch_entries: scratch as u64 };
+        evaluator = GlaExecutionStats {
+            work_units: work as u64,
+            scratch_entries: scratch as u64,
+        };
         Ok(())
     };
     for (clause, actions) in [selected, upsert.after()].into_iter().enumerate() {
-        if actions.is_empty() { continue; }
+        if actions.is_empty() {
+            continue;
+        }
         let mut batch = WriteBatch::new(upsert.merge().relation());
         for (action, definition) in actions.iter().enumerate() {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?; // proposal before allocation
             match definition {
                 GraphVertexUpsertAction::SetProperty { key, value } => {
-                    point_payload_admission(value.value(), &mut |event| control(match event {
-                        SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-                        _ => GlaExecutionEvent::Work,
-                    }))?;
+                    point_payload_admission(value.value(), &mut |event| {
+                        control(match event {
+                            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                            _ => GlaExecutionEvent::Work,
+                        })
+                    })?;
                     batch.set_vertex_property(outcome.vertex(), *key, Some(value.value().clone()));
                 }
-                GraphVertexUpsertAction::SetExpression { key, properties, value } => {
-                    for _ in properties { control(GlaExecutionEvent::ScratchEntry)?; }
+                GraphVertexUpsertAction::SetExpression {
+                    key,
+                    properties,
+                    value,
+                } => {
+                    for _ in properties {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
                     let mut inputs = Vec::with_capacity(properties.len());
                     for key in properties {
                         let scalar = property(*key, &mut control)?;
                         inputs.push(fgdb_gql::algebra::GraphValue::Scalar(scalar));
                     }
-                    let value = value.evaluate_scalar_with_control(&inputs, &mut control)
+                    let value = value
+                        .evaluate_scalar_with_control(&inputs, &mut control)
                         .map_err(|error| match error {
                             GraphIntegerEvaluationError::Control(error) => error,
                             GraphIntegerEvaluationError::Value(source) => {
                                 GqlQueryError::Source(GraphVertexUpsertError::Expression {
-                                    clause, action, source,
+                                    clause,
+                                    action,
+                                    source,
                                 })
                             }
                         })?;
@@ -155,7 +193,11 @@ fn vertex_upsert_actions<E, A, C>(
     }
     drop(control);
     merge_stats.evaluator = evaluator;
-    Ok(GraphVertexUpsertStats { merge: merge_stats, branch, action_effects: observed as u64 })
+    Ok(GraphVertexUpsertStats {
+        merge: merge_stats,
+        branch,
+        action_effects: observed as u64,
+    })
 }
 
 // Read fields of the already admitted MERGE target with the same controlled
@@ -167,8 +209,9 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
     database: &Database<V>,
     vertex: VId,
     property: fgdb_delta_types::PropertyKeyId,
-    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent)
-        -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
 ) -> VertexUpsertActionResult<CanonicalScalar, WriteTxnError, A, C> {
     use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
@@ -180,12 +223,17 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
         element,
         accepted: false,
     };
-    let mut source_control = |event| control(match event {
-        SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-        SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
-    });
+    let mut source_control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+    };
     let projected = transaction.point_projection_with_control(
-        database, element, field, &mut source_control,
+        database,
+        element,
+        field,
+        &mut source_control,
         &|error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
     )?;
     if let Some(value) = projected.property {

@@ -6,8 +6,7 @@
 //! expressions use the ordinary checked bytecode, never a second interpreter.
 
 use crate::{
-    GqlScalarParameter, GraphIntegerExpression, GraphVertexMergePolicy,
-    PreparedGraphVertexMerge,
+    GqlScalarParameter, GraphIntegerExpression, GraphVertexMergePolicy, PreparedGraphVertexMerge,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use std::collections::BTreeSet;
@@ -108,7 +107,10 @@ pub struct GraphVertexUpsertStats {
 #[derive(Debug)]
 pub enum GraphVertexUpsertError<E, A> {
     Merge(crate::GraphVertexMergeError<E, A>),
-    ActionLimit { limit: u64, observed: u128 },
+    ActionLimit {
+        limit: u64,
+        observed: u128,
+    },
     /// Clause 0 is the selected ON branch; clause 1 is the trailing SET.
     Expression {
         clause: usize,
@@ -127,7 +129,11 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 f,
                 "MERGE branch action limit exceeded: {observed} > {limit}"
             ),
-            Self::Expression { clause, action, source } => {
+            Self::Expression {
+                clause,
+                action,
+                source,
+            } => {
                 write!(f, "MERGE clause {clause} action {action}: {source}")
             }
             Self::Staging(error) => error.fmt(f),
@@ -185,9 +191,13 @@ fn validate_branch(
                 if !properties.insert(*key) {
                     return Err(GraphVertexUpsertBuildError::DuplicateProperty { branch });
                 }
-                if let GraphVertexUpsertAction::SetExpression { properties, value, .. } = action
+                if let GraphVertexUpsertAction::SetExpression {
+                    properties, value, ..
+                } = action
                     && (properties.len() > MAX_GRAPH_VERTEX_UPSERT_ACTIONS
-                        || value.referenced_columns().any(|column| column >= properties.len())
+                        || value
+                            .referenced_columns()
+                            .any(|column| column >= properties.len())
                         || value.referenced_locals().next().is_some())
                 {
                     return Err(GraphVertexUpsertBuildError::ExpressionInputs {
@@ -238,17 +248,30 @@ impl PreparedGraphVertexUpsert {
                 });
             }
         }
-        Ok(Self { merge, on_match, on_create, after })
+        Ok(Self {
+            merge,
+            on_match,
+            on_create,
+            after,
+        })
     }
 
     #[must_use]
-    pub fn merge(&self) -> &PreparedGraphVertexMerge { &self.merge }
+    pub fn merge(&self) -> &PreparedGraphVertexMerge {
+        &self.merge
+    }
     #[must_use]
-    pub fn on_match(&self) -> &[GraphVertexUpsertAction] { &self.on_match }
+    pub fn on_match(&self) -> &[GraphVertexUpsertAction] {
+        &self.on_match
+    }
     #[must_use]
-    pub fn on_create(&self) -> &[GraphVertexUpsertAction] { &self.on_create }
+    pub fn on_create(&self) -> &[GraphVertexUpsertAction] {
+        &self.on_create
+    }
     #[must_use]
-    pub fn after(&self) -> &[GraphVertexUpsertAction] { &self.after }
+    pub fn after(&self) -> &[GraphVertexUpsertAction] {
+        &self.after
+    }
 
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
@@ -263,7 +286,9 @@ impl PreparedGraphVertexUpsert {
                     GraphVertexUpsertAction::SetProperty { key, value } => {
                         bytes.push(0);
                         bytes.extend_from_slice(&key.0.to_be_bytes());
-                        bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(
+                            &(value.canonical_bytes().len() as u64).to_be_bytes(),
+                        );
                         bytes.extend_from_slice(value.canonical_bytes());
                     }
                     GraphVertexUpsertAction::SetLabel { label, present } => {
@@ -271,11 +296,17 @@ impl PreparedGraphVertexUpsert {
                         bytes.extend_from_slice(&label.0.to_be_bytes());
                         bytes.push(u8::from(*present));
                     }
-                    GraphVertexUpsertAction::SetExpression { key, properties, value } => {
+                    GraphVertexUpsertAction::SetExpression {
+                        key,
+                        properties,
+                        value,
+                    } => {
                         bytes.push(2);
                         bytes.extend_from_slice(&key.0.to_be_bytes());
                         bytes.extend_from_slice(&(properties.len() as u64).to_be_bytes());
-                        for property in properties { bytes.extend_from_slice(&property.0.to_be_bytes()); }
+                        for property in properties {
+                            bytes.extend_from_slice(&property.0.to_be_bytes());
+                        }
                         let expression = value.canonical_bytes();
                         bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                         bytes.extend_from_slice(&expression);
