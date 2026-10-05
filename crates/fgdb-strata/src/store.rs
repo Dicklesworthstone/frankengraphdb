@@ -85,8 +85,6 @@ mod bounded_read;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 
-type ResolvedBlocks = Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>;
-
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
 
@@ -1319,6 +1317,7 @@ impl<V: Vfs> BlockStore<V> {
             Ok::<(), StoreError>(())
         })
         .await
+        .map(|read| read.resolved)
     }
 
     async fn resolve_root_block_observed<E: From<StoreError>>(
@@ -1328,7 +1327,7 @@ impl<V: Vfs> BlockStore<V> {
         partition: u64,
         reference: &crate::root::BlockRef,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
-    ) -> Result<ResolvedBlock, E> {
+    ) -> Result<ReadRootBlock, E> {
         observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
@@ -1369,7 +1368,7 @@ impl<V: Vfs> BlockStore<V> {
             )
             .into());
         }
-        let props = if let Some((patch_id, locators)) = patch {
+        let (props, property_patch) = if let Some((patch_id, locators)) = patch {
             observe(RootReadEvent::ObjectStart)?;
             let patch_bytes = self
                 .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
@@ -1404,11 +1403,18 @@ impl<V: Vfs> BlockStore<V> {
                     .into(),
                 );
             }
-            Some(BlockProps { locators, rows })
+            (
+                Some(BlockProps { locators, rows }),
+                Some((patch_id, patch_bytes)),
+            )
         } else {
-            None
+            (None, None)
         };
-        Ok((entries, props, predecessor))
+        Ok(ReadRootBlock {
+            resolved: (entries, props, predecessor),
+            bytes,
+            property_patch,
+        })
     }
 
     /// Prove every block named by an already-structural root while retaining only
@@ -1427,17 +1433,26 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
     ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
-        self.inspect_root_blocks_observed(cx, root, retain, &mut |_| Ok::<(), StoreError>(()))
-            .await
+        let mut retain = retain;
+        self.inspect_root_blocks_observed(
+            cx,
+            root,
+            |at, reference, read| retain(at, reference).then(|| decoded_block(read)),
+            &mut |_| Ok::<(), StoreError>(()),
+        )
+        .await
     }
 
-    async fn inspect_root_blocks_observed<E: From<StoreError>>(
+    /// Admit every block named by `root`, in publication order, and keep what
+    /// `keep` returns for each. Every block is proven whether or not it is
+    /// kept; `keep` only decides what survives the read.
+    async fn inspect_root_blocks_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
-        mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
+        mut keep: impl FnMut(usize, &crate::root::BlockRef, ReadRootBlock) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
-    ) -> Result<ResolvedBlocks, E> {
+    ) -> Result<Vec<T>, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
         let mut blocks = Vec::new();
@@ -1447,9 +1462,10 @@ impl<V: Vfs> BlockStore<V> {
             ObjectId,
         > = std::collections::BTreeMap::new();
         for (at, reference) in root.blocks.iter().enumerate() {
-            let (entries, props, predecessor) = self
+            let read = self
                 .resolve_root_block_observed(cx, at, root.partition, reference, observe)
                 .await?;
+            let (entries, _, predecessor) = &read.resolved;
             // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly
             // this root's publication order — finite, acyclic, newer-first by
             // construction. Checked here so every full read of a root walks a
@@ -1470,16 +1486,16 @@ impl<V: Vfs> BlockStore<V> {
                 chain_heads.insert(family, reference.block_id);
             }
             history
-                .observe_block(at, &entries)
+                .observe_block(at, entries)
                 .map_err(StoreError::MalformedRoot)?;
-            if retain(at, reference) {
+            if let Some(kept) = keep(at, reference, read) {
                 blocks.try_reserve(1).map_err(|_| {
                     StoreError::Io(std::io::Error::new(
                         std::io::ErrorKind::OutOfMemory,
                         "root block collection allocation failed",
                     ))
                 })?;
-                blocks.push((entries, props));
+                blocks.push(kept);
             }
         }
         Ok(blocks)
@@ -1503,15 +1519,18 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<VertexPatchRows, StoreError> {
         self.resolve_root_patch_observed(cx, at, reference, &mut |_| Ok::<(), StoreError>(()))
             .await
+            .map(|(rows, _)| rows)
     }
 
+    /// One root-named vertex patch, admitted: its decoded rows and the
+    /// identity-verified bytes they came from.
     async fn resolve_root_patch_observed<E: From<StoreError>>(
         &self,
         cx: &impl StorageReadCx,
         at: usize,
         reference: &crate::root::PatchRef,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
-    ) -> Result<VertexPatchRows, E> {
+    ) -> Result<(VertexPatchRows, Vec<u8>), E> {
         observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
@@ -1531,7 +1550,7 @@ impl<V: Vfs> BlockStore<V> {
         )
         .map_err(StoreError::MalformedRoot)?;
         observe(RootReadEvent::VertexVersions(rows.len()))?;
-        Ok(rows)
+        Ok((rows, bytes))
     }
 
     /// Prove every vertex patch named by an already-structural root while
@@ -1545,34 +1564,42 @@ impl<V: Vfs> BlockStore<V> {
         root: &crate::root::PartitionRoot,
         retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
     ) -> Result<Vec<VertexPatchRows>, StoreError> {
-        self.inspect_root_patches_observed(cx, root, retain, &mut |_| Ok::<(), StoreError>(()))
-            .await
+        let mut retain = retain;
+        self.inspect_root_patches_observed(
+            cx,
+            root,
+            |at, reference, (rows, _)| retain(at, reference).then_some(rows),
+            &mut |_| Ok::<(), StoreError>(()),
+        )
+        .await
     }
 
-    async fn inspect_root_patches_observed<E: From<StoreError>>(
+    /// Admit every vertex patch named by `root` and keep what `keep` returns
+    /// for each; every patch is proven whether or not it is kept.
+    async fn inspect_root_patches_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
-        mut retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
+        mut keep: impl FnMut(usize, &crate::root::PatchRef, (VertexPatchRows, Vec<u8>)) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
-    ) -> Result<Vec<VertexPatchRows>, E> {
+    ) -> Result<Vec<T>, E> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
         for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let rows = self
+            let read = self
                 .resolve_root_patch_observed(cx, at, reference, observe)
                 .await?;
             history
-                .observe_patch(at, &rows)
+                .observe_patch(at, &read.0)
                 .map_err(StoreError::MalformedRoot)?;
-            if retain(at, reference) {
+            if let Some(kept) = keep(at, reference, read) {
                 patches.try_reserve(1).map_err(|_| {
                     StoreError::Io(std::io::Error::new(
                         std::io::ErrorKind::OutOfMemory,
                         "root patch collection allocation failed",
                     ))
                 })?;
-                patches.push(rows);
+                patches.push(kept);
             }
         }
         Ok(patches)
@@ -2075,6 +2102,71 @@ impl<V: Vfs> BlockStore<V> {
         Ok((root, blocks, block_props, patches))
     }
 
+    /// [`BlockStore::reopen`], also returning the sealed bytes a retained
+    /// writer needs, taken from the same identity-verified reads. A caller that
+    /// rebuilds a writer from a reopened partition must not read and verify
+    /// every block and patch a second time to get bytes it already had.
+    pub async fn reopen_sealed(
+        &self,
+        cx: &impl StorageReadCx,
+        id: PartitionRootVersion,
+    ) -> Result<ReopenedPartition, StoreError> {
+        let root = self.get_root(cx, id).await?;
+        let read = self
+            .inspect_root_blocks_observed(
+                cx,
+                &root,
+                |_, reference, read| Some((*reference, read)),
+                &mut |_| Ok::<(), StoreError>(()),
+            )
+            .await?;
+        let mut blocks = Vec::with_capacity(read.len());
+        let mut block_props = Vec::with_capacity(read.len());
+        let mut sealed_blocks = Vec::with_capacity(read.len());
+        for (reference, read) in read {
+            let property_patch = read
+                .property_patch
+                .map(|(patch_id, bytes)| crate::writer::SealedPropertyPatch { patch_id, bytes });
+            sealed_blocks.push(crate::writer::SealedBlock {
+                block_id: reference.block_id,
+                bytes: read.bytes,
+                first_seq: reference.first_seq,
+                last_seq: reference.last_seq,
+                property_patch,
+            });
+            let (entries, props, _) = read.resolved;
+            blocks.push(entries);
+            block_props.push(props);
+        }
+        let read = self
+            .inspect_root_patches_observed(
+                cx,
+                &root,
+                |_, reference, read| Some((*reference, read)),
+                &mut |_| Ok::<(), StoreError>(()),
+            )
+            .await?;
+        let mut patches = Vec::with_capacity(read.len());
+        let mut sealed_patches = Vec::with_capacity(read.len());
+        for (reference, (rows, bytes)) in read {
+            sealed_patches.push(crate::writer::SealedPatch {
+                patch_id: reference.patch_id,
+                bytes,
+                first_seq: reference.first_seq,
+                last_seq: reference.last_seq,
+            });
+            patches.push(rows);
+        }
+        Ok(ReopenedPartition {
+            root,
+            blocks,
+            block_props,
+            patches,
+            sealed_blocks,
+            sealed_patches,
+        })
+    }
+
     /// Admit a stored root against every named block and patch without
     /// retaining the decoded partition.
     pub async fn admit_root(
@@ -2193,6 +2285,31 @@ type ResolvedBlock = (
     Option<BlockProps>,
     Option<DeltaBlockVersion>,
 );
+
+/// One root-named block exactly as admission read it: the proven decode, the
+/// identity-verified bytes, and its hosted property patch's id and bytes.
+struct ReadRootBlock {
+    resolved: ResolvedBlock,
+    bytes: Vec<u8>,
+    property_patch: Option<(ObjectId, Vec<u8>)>,
+}
+
+fn decoded_block(read: ReadRootBlock) -> (Vec<crate::AdjacencyEntry>, Option<BlockProps>) {
+    let (entries, props, _) = read.resolved;
+    (entries, props)
+}
+
+/// A whole partition reopened from one verified read of every object: the
+/// decoded state [`BlockStore::reopen`] returns, plus the sealed bytes a
+/// retained [`crate::writer::BlockWriter`] holds, in root order.
+pub struct ReopenedPartition {
+    pub root: crate::root::PartitionRoot,
+    pub blocks: Vec<Vec<crate::AdjacencyEntry>>,
+    pub block_props: Vec<Option<BlockProps>>,
+    pub patches: Vec<VertexPatchRows>,
+    pub sealed_blocks: Vec<crate::writer::SealedBlock>,
+    pub sealed_patches: Vec<crate::writer::SealedPatch>,
+}
 
 #[derive(Debug, Default)]
 pub struct PublishReceipts {
