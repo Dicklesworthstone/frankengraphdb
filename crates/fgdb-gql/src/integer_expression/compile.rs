@@ -9,6 +9,7 @@ use super::*;
 enum Kind {
     Null,
     Integer,
+    Float,
     Boolean,
     Text,
     Dynamic,
@@ -27,6 +28,19 @@ impl Kind {
             Some(Self::Dynamic)
         } else {
             None
+        }
+    }
+    /// Comparison admission only: no cast is emitted and result branches
+    /// still use merge(), so accepting Int/Float equality cannot admit float
+    /// arithmetic or an implicit conversion of a CASE/COALESCE result.
+    fn merge_comparison(self, other: Self) -> Option<Self> {
+        if matches!(
+            (self, other),
+            (Self::Integer, Self::Float) | (Self::Float, Self::Integer)
+        ) {
+            Some(Self::Float)
+        } else {
+            self.merge(other)
         }
     }
 }
@@ -137,7 +151,8 @@ fn prepare_root(
             }
         }
         // Keep checking exact domains even if another member is dynamic/null.
-        let merge_positions = |positions: &[usize]| -> Result<Kind, GraphIntegerBuildError> {
+        let merge_positions = |positions: &[usize], numeric_comparison: bool|
+         -> Result<Kind, GraphIntegerBuildError> {
             let mut known = Kind::Null;
             let mut dynamic = false;
             for &position in positions {
@@ -145,7 +160,12 @@ fn prepare_root(
                 if kind == Kind::Dynamic {
                     dynamic = true;
                 } else {
-                    known = known.merge(kind).ok_or_else(wrong)?;
+                    known = if numeric_comparison {
+                        known.merge_comparison(kind)
+                    } else {
+                        known.merge(kind)
+                    }
+                    .ok_or_else(wrong)?;
                 }
             }
             Ok(if dynamic && known == Kind::Null {
@@ -159,28 +179,29 @@ fn prepare_root(
             Op::Scalar(value) => match value.value() {
                 CanonicalScalar::Null => Kind::Null,
                 CanonicalScalar::Int(_) => Kind::Integer,
+                CanonicalScalar::Float(_) => Kind::Float,
                 CanonicalScalar::Bool(_) => Kind::Boolean,
                 CanonicalScalar::Text(_) => Kind::Text,
                 _ => return Err(wrong()),
             },
             Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
-            Op::Coalesce => merge_positions(&[0, 1])?,
-            Op::Case => merge_positions(&[1, 2])?,
+            Op::Coalesce => merge_positions(&[0, 1], false)?,
+            Op::Case => merge_positions(&[1, 2], false)?,
             Op::Compare(_) => {
-                merge_positions(&[0, 1])?;
+                merge_positions(&[0, 1], true)?;
                 Kind::Boolean
             }
             Op::InList { .. } => {
-                merge_positions(&(0..arity).collect::<Vec<_>>())?;
+                merge_positions(&(0..arity).collect::<Vec<_>>(), true)?;
                 Kind::Boolean
             }
             Op::SimpleCase { alternatives } => {
                 let mut candidates = vec![0];
                 candidates.extend((0..*alternatives).map(|arm| 1 + 2 * arm));
-                merge_positions(&candidates)?;
+                merge_positions(&candidates, true)?;
                 let mut results: Vec<_> = (0..*alternatives).map(|arm| 2 + 2 * arm).collect();
                 results.push(arity - 1);
-                merge_positions(&results)?
+                merge_positions(&results, false)?
             }
             Op::Truth(_)
             | Op::IsNull(_)
@@ -477,6 +498,185 @@ mod tests {
             .unwrap()
             .evaluate_with_control(&[], &mut |_| Ok::<_, ()>(()))
             .unwrap()
+    }
+
+    fn floating(value: f64) -> Op {
+        Op::Scalar(
+            ScalarPredicate::new(
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)),
+                IntegerComparison::Equal,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn scalar_value(ops: &[Op], row: &[GraphValue]) -> CanonicalScalar {
+        prepare_scalar(ops)
+            .unwrap()
+            .evaluate_scalar_with_control(row, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+    }
+
+    #[test]
+    fn mixed_numeric_scalar_comparisons_are_exact_for_literals_and_columns() {
+        for (integer, float, order) in [
+            (7, 7.0, core::cmp::Ordering::Equal),
+            (-1, -1.5, core::cmp::Ordering::Greater),
+            (0, f64::from_bits(1), core::cmp::Ordering::Less),
+            (9_007_199_254_740_993, 9_007_199_254_740_992.0, core::cmp::Ordering::Greater),
+            (i64::MAX, 9_223_372_036_854_775_808.0, core::cmp::Ordering::Less),
+        ] {
+            for reverse in [false, true] {
+                let mut literals = vec![Op::Literal(Some(integer)), floating(float)];
+                let mut row = vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(integer)),
+                    GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(float))),
+                ];
+                if reverse {
+                    literals.reverse();
+                    row.reverse();
+                }
+                let order = if reverse { order.reverse() } else { order };
+                for (comparison, expected) in [
+                    (IntegerComparison::Equal, order.is_eq()),
+                    (IntegerComparison::NotEqual, !order.is_eq()),
+                    (IntegerComparison::Less, order.is_lt()),
+                    (IntegerComparison::LessOrEqual, !order.is_gt()),
+                    (IntegerComparison::Greater, order.is_gt()),
+                    (IntegerComparison::GreaterOrEqual, !order.is_lt()),
+                ] {
+                    let mut ops = literals.clone();
+                    ops.push(Op::Compare(comparison));
+                    assert_eq!(scalar_value(&ops, &[]), CanonicalScalar::Bool(expected));
+                    assert_eq!(
+                        scalar_value(
+                            &[Op::ScalarColumn(0), Op::ScalarColumn(1), Op::Compare(comparison)],
+                            &row
+                        ),
+                        CanonicalScalar::Bool(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_membership_and_case_keep_unknown_precision_and_lazy_branches() {
+        for (selector, expected) in [(7, Some(true)), (8, None)] {
+            let ops = [
+                Op::Literal(Some(selector)),
+                floating(7.0),
+                Op::Literal(None),
+                Op::InList { members: 2 },
+            ];
+            assert_eq!(scalar_value(&ops, &[]), boolean_scalar(expected));
+            let mut negated = ops.to_vec();
+            negated.push(Op::Not);
+            assert_eq!(
+                scalar_value(&negated, &[]),
+                boolean_scalar(expected.map(|value| !value))
+            );
+        }
+        assert_eq!(
+            scalar_value(
+                &[
+                    Op::Literal(Some(9_007_199_254_740_993)),
+                    floating(9_007_199_254_740_992.0),
+                    Op::InList { members: 1 }
+                ],
+                &[]
+            ),
+            CanonicalScalar::Bool(false)
+        );
+        // The matching mixed-numeric arm must not evaluate the invalid fallback.
+        assert_eq!(
+            value(&[
+                Op::Literal(Some(7)),
+                floating(7.0),
+                Op::Literal(Some(42)),
+                Op::Column(usize::MAX),
+                Op::SimpleCase { alternatives: 1 }
+            ]),
+            Some(42)
+        );
+        // Rounding the selector into f64 would take the wrong arm here.
+        assert_eq!(
+            value(&[
+                Op::Literal(Some(9_007_199_254_740_993)),
+                floating(9_007_199_254_740_992.0),
+                Op::Column(usize::MAX),
+                Op::Literal(Some(42)),
+                Op::SimpleCase { alternatives: 1 }
+            ]),
+            Some(42)
+        );
+        assert_eq!(
+            scalar_value(&[Op::Literal(None), floating(1.5), Op::Coalesce], &[]),
+            CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5))
+        );
+    }
+
+    #[test]
+    fn float_comparison_admission_does_not_relax_integer_or_result_domains() {
+        for ops in [
+            vec![floating(1.0), Op::Unary(GraphIntegerUnary::Negate)],
+            vec![floating(1.0), Op::Literal(Some(1)), Op::Binary(GraphIntegerBinary::Add)],
+            vec![floating(1.0), Op::Truth(Some(true)), Op::Compare(IntegerComparison::Equal)],
+            vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
+            vec![Op::Truth(Some(true)), floating(1.0), Op::Literal(Some(1)), Op::Case],
+            vec![Op::ScalarColumn(0), floating(1.0), Op::Truth(Some(true)), Op::InList { members: 2 }],
+        ] {
+            assert!(matches!(
+                prepare_scalar(&ops),
+                Err(GraphIntegerBuildError::OperandType { .. })
+            ));
+        }
+        assert!(matches!(
+            prepare(&[floating(1.0)]),
+            Err(GraphIntegerBuildError::OperandType { .. })
+        ));
+        let comparison = prepare_scalar(&[
+            Op::ScalarColumn(0),
+            floating(1.0),
+            Op::Compare(IntegerComparison::Equal),
+        ])
+        .unwrap();
+        assert!(matches!(
+            comparison.evaluate_scalar_with_control(
+                &[GraphValue::Scalar(CanonicalScalar::Bool(true))],
+                &mut |_| Ok::<_, ()>(())
+            ),
+            Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                kind: GraphIntegerErrorKind::IncompatibleOperands,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn mixed_numeric_scalar_execution_preserves_all_cancellation_checkpoints() {
+        let ops = [Op::Literal(Some(7)), floating(7.0), Op::Compare(IntegerComparison::Equal)];
+        let expression = prepare_scalar(&ops).unwrap();
+        let frozen = expression.canonical_bytes();
+        let mut count = 0;
+        assert_eq!(
+            expression.evaluate_scalar_with_control(&[], &mut |_| {
+                count += 1;
+                Ok::<_, usize>(())
+            }).unwrap(),
+            CanonicalScalar::Bool(true)
+        );
+        assert!(count >= 5);
+        for stop in 1..=count {
+            let mut seen = 0;
+            let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GraphIntegerEvaluationError::Control(at)) if at == stop));
+            assert_eq!(seen, stop);
+            assert_eq!(expression.canonical_bytes(), frozen);
+        }
     }
 
     #[test]

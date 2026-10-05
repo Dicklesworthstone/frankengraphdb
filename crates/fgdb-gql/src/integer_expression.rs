@@ -2,6 +2,7 @@
 //!
 //! Bounded typed postfix IR compiles to private linear bytecode. CASE and
 //! COALESCE are lazy. Integer arithmetic remains checked, with no coercions.
+//! Int/Float comparisons use exact numeric value, not storage type ranks.
 //! Text operations use Unicode scalar positions and UCS_BASIC result collation.
 
 mod compile;
@@ -32,7 +33,8 @@ pub enum GraphIntegerBinary {
 }
 
 /// Postfix construction IR. Arithmetic operands/results are nullable integers.
-/// Scalar conditions and results never implicitly coerce between domains.
+/// Scalar results never implicitly coerce between domains; Int/Float
+/// comparisons use exact numeric value while preserving each operand's kind.
 /// Case consumes (condition, then_value, else_value); only the selected
 /// result executes. Nest Case in the else operand for ordered WHEN clauses.
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
@@ -348,6 +350,7 @@ impl ExpressionCell<'_> {
                     value.as_ref(),
                     CanonicalScalar::Null
                         | CanonicalScalar::Int(_)
+                        | CanonicalScalar::Float(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
                 ) =>
@@ -434,7 +437,7 @@ impl GraphIntegerExpression {
         compile::prepare(ops)
     }
 
-    /// Admit an integer, Boolean, text or null root, including dynamic columns.
+    /// Admit an integer, float, Boolean, text or null root, including dynamic columns.
     pub fn prepare_scalar(ops: &[GraphIntegerOp]) -> Result<Self, GraphIntegerBuildError> {
         compile::prepare_scalar(ops)
     }
@@ -1147,17 +1150,21 @@ fn compare_scalars<E>(
     if matches!(left, CanonicalScalar::Null) || matches!(right, CanonicalScalar::Null) {
         return Ok(None);
     }
-    if core::mem::discriminant(left) != core::mem::discriminant(right) {
+    let numeric_pair = matches!(
+        (left, right),
+        (CanonicalScalar::Int(_), CanonicalScalar::Float(_))
+            | (CanonicalScalar::Float(_), CanonicalScalar::Int(_))
+    );
+    if !numeric_pair && core::mem::discriminant(left) != core::mem::discriminant(right) {
         return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
             instruction,
             kind: GraphIntegerErrorKind::IncompatibleOperands,
         }));
     }
+    // Reserve variable-size scans before invoking the shared comparator.
     charge_payload(scalar_payload_bytes(left), false, control)?;
     charge_payload(scalar_payload_bytes(right), false, control)?;
-    Ok(Some(
-        comparison.accepts_scalar_pair(Some(left), Some(right)),
-    ))
+    Ok(comparison.evaluate_scalar_pair(Some(left), Some(right)))
 }
 
 fn apply_binary(
