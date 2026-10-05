@@ -824,16 +824,42 @@ pub fn recover(
     // of budget instead of destroying an object that had ample repair capacity.
     //
     // Symbols are verified twice as a result — once to decide membership, once
-    // by the decoder as its own precondition. That is deliberate: recovery is
-    // not a hot path, and the alternative is a decoder that trusts a caller's
-    // filtering.
-    let authentic: Vec<Vec<u8>> = symbols
+    // by the decoder as its own precondition. That is deliberate: the
+    // alternative is a decoder that trusts a caller's filtering.
+    let mut authentic = Vec::new();
+    let mut coordinates = Vec::new();
+    for bytes in symbols {
+        if let Ok(record) = crate::symbol::SymbolRecord::verify(bytes, &encoding, dek, verification)
+        {
+            coordinates.push((record.source_block, record.esi));
+            authentic.push(bytes.clone());
+        }
+    }
+
+    // A read needs the object, not a parity audit. When every original symbol
+    // survived, decode from those alone: the strict decoder then reconstructs
+    // without an equation system. Every open reads every capsule, and solving
+    // with surplus repair equations was a fifth of a 900k-edge open. Repair
+    // symbols stay audited where integrity is the question: scrub decodes
+    // every authentic symbol strictly, so an inconsistent repair is still
+    // reported there.
+    let records: Vec<(u32, u32, &[u8])> = coordinates
         .iter()
-        .filter(|bytes| {
-            crate::symbol::SymbolRecord::verify(bytes, &encoding, dek, verification).is_ok()
-        })
-        .cloned()
+        .zip(&authentic)
+        .map(|(&(block, esi), raw)| (block, esi, raw.as_slice()))
         .collect();
+    let sources = crate::symbolize::blocks::complete_source_records(
+        &encoding,
+        descriptor.protected_len() as usize,
+        &records,
+    );
+    let authentic = match sources {
+        Some(indices) => indices
+            .into_iter()
+            .map(|index| std::mem::take(&mut authentic[index]))
+            .collect(),
+        None => authentic,
+    };
 
     // Steps 4-6: decode, open the AEAD, and recompute the keyed ObjectId.
     // `decode_object` owns that sequence and fails closed at each stage.
@@ -924,6 +950,90 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::{CapsuleProfile, MAX_PROTECTED_LEN_V1};
+
+    /// A read with every original symbol decodes from those alone, so an
+    /// authenticated repair symbol that disagrees with them does not fail
+    /// it; scrub, which audits every authentic symbol, still reports it.
+    /// With an original lost, the read needs the repairs and fails closed.
+    #[test]
+    fn a_complete_read_ignores_repairs_and_scrub_still_audits_them() {
+        use crate::scrub::{ScrubVerdict, scrub_object};
+        use crate::symbol::SymbolRecord;
+        use crate::symbolize::RecoveryTarget;
+        use fgdb_types::ids::DatabaseSecurityNamespaceId;
+        let (k_oid, dek) = ([0x5a; 32], [0x3c; 32]);
+        let namespace = DatabaseSecurityNamespaceId([0x77; 32]);
+        let plaintext: Vec<u8> = (0..2000u32).map(|i| (i % 251) as u8).collect();
+        let capsule = super::seal(
+            &k_oid,
+            namespace,
+            &dek,
+            0x0274,
+            &plaintext,
+            CapsuleProfile::balanced(),
+        )
+        .unwrap();
+        let encoding = capsule
+            .descriptor
+            .validated_encoding(capsule.object_id, &mut Vec::new())
+            .unwrap();
+        let protected_len = capsule.descriptor.protected_len() as usize;
+        let sources =
+            crate::symbolize::source_symbol_count(protected_len, encoding.descriptor().symbol_size);
+        let read = |symbols: &[Vec<u8>]| {
+            super::recover(
+                &capsule.descriptor,
+                symbols,
+                capsule.object_id,
+                &k_oid,
+                namespace,
+                &dek,
+                &mut Vec::new(),
+            )
+        };
+
+        let mut symbols = capsule.symbols.clone();
+        assert!(
+            symbols.len() > sources,
+            "the profile carries repair symbols"
+        );
+        let last = symbols.len() - 1;
+        let mut repair =
+            SymbolRecord::verify(&symbols[last], &encoding, &dek, &mut Vec::new()).unwrap();
+        assert!(
+            repair.esi as usize >= sources,
+            "the last record is a repair symbol"
+        );
+        repair.payload[0] ^= 1;
+        symbols[last] = repair.serialize(&encoding.symbol_auth_key(&dek));
+
+        assert_eq!(read(&symbols).unwrap(), plaintext);
+        let report = scrub_object(
+            &encoding,
+            &symbols,
+            RecoveryTarget {
+                k_oid: &k_oid,
+                namespace,
+                object_id: capsule.object_id,
+                canonical_header: &[],
+                protected_len,
+            },
+            &dek,
+            &mut Vec::new(),
+        );
+        assert!(
+            !matches!(report.verdict, ScrubVerdict::Intact),
+            "scrub must still audit repair symbols: {:?}",
+            report.verdict
+        );
+
+        // An original lost: the read now needs repair equations, and the
+        // inconsistent one makes it fail closed rather than return bytes.
+        let mut lost = symbols.clone();
+        lost.remove(0);
+        assert!(read(&lost).is_err());
+        assert_eq!(read(&capsule.symbols[1..]).unwrap(), plaintext);
+    }
 
     /// For every protected length a V1 capsule may carry, the writer's member
     /// is registered, keeps K at or under the target (or is the family's

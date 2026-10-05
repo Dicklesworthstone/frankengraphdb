@@ -440,7 +440,15 @@ fn control_capsule_bytes(round: u64) -> (Vec<u8>, fgdb::PreparedCapsule) {
 
 #[test]
 fn the_o_history_term_lives_in_rebuild_not_in_the_commit_protocol() {
-    const HISTORY_POINTS: [usize; 3] = [8, 32, 96];
+    // The largest point is 384, not 96: once a capsule read with every
+    // original symbol stopped solving an equation system (fgdb-2n2a2), the
+    // rebuild replica at 96 commits fell from ~650-840 ms to ~80-105 ms, about
+    // one marginal write, so verdict 2 could no longer tell the two apart
+    // (marginal writes were unchanged at 69-87 ms). At 384 the replica's
+    // O(history) term dominates again (~250 ms, 39-41x its sentinel, against
+    // ~11-12x for the write; the incumbent reads 2.05-2.11 s there), and
+    // verdict 1's flatness bound now spans a 48x longer history.
+    const HISTORY_POINTS: [usize; 3] = [8, 32, 384];
 
     let (runtime, cx) = production_runtime();
     let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
