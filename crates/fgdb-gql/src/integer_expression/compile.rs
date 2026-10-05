@@ -151,7 +151,8 @@ fn prepare_root(
             }
         }
         // Keep checking exact domains even if another member is dynamic/null.
-        let merge_positions = |positions: &[usize], numeric_comparison: bool|
+        let merge_positions = |positions: &[usize],
+                               numeric_comparison: bool|
          -> Result<Kind, GraphIntegerBuildError> {
             let mut known = Kind::Null;
             let mut dynamic = false;
@@ -523,14 +524,24 @@ mod tests {
             (7, 7.0, core::cmp::Ordering::Equal),
             (-1, -1.5, core::cmp::Ordering::Greater),
             (0, f64::from_bits(1), core::cmp::Ordering::Less),
-            (9_007_199_254_740_993, 9_007_199_254_740_992.0, core::cmp::Ordering::Greater),
-            (i64::MAX, 9_223_372_036_854_775_808.0, core::cmp::Ordering::Less),
+            (
+                9_007_199_254_740_993,
+                9_007_199_254_740_992.0,
+                core::cmp::Ordering::Greater,
+            ),
+            (
+                i64::MAX,
+                9_223_372_036_854_775_808.0,
+                core::cmp::Ordering::Less,
+            ),
         ] {
             for reverse in [false, true] {
                 let mut literals = vec![Op::Literal(Some(integer)), floating(float)];
                 let mut row = vec![
                     GraphValue::Scalar(CanonicalScalar::Int(integer)),
-                    GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(float))),
+                    GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+                        float,
+                    ))),
                 ];
                 if reverse {
                     literals.reverse();
@@ -550,7 +561,11 @@ mod tests {
                     assert_eq!(scalar_value(&ops, &[]), CanonicalScalar::Bool(expected));
                     assert_eq!(
                         scalar_value(
-                            &[Op::ScalarColumn(0), Op::ScalarColumn(1), Op::Compare(comparison)],
+                            &[
+                                Op::ScalarColumn(0),
+                                Op::ScalarColumn(1),
+                                Op::Compare(comparison)
+                            ],
                             &row
                         ),
                         CanonicalScalar::Bool(expected)
@@ -620,11 +635,29 @@ mod tests {
     fn float_comparison_admission_does_not_relax_integer_or_result_domains() {
         for ops in [
             vec![floating(1.0), Op::Unary(GraphIntegerUnary::Negate)],
-            vec![floating(1.0), Op::Literal(Some(1)), Op::Binary(GraphIntegerBinary::Add)],
-            vec![floating(1.0), Op::Truth(Some(true)), Op::Compare(IntegerComparison::Equal)],
+            vec![
+                floating(1.0),
+                Op::Literal(Some(1)),
+                Op::Binary(GraphIntegerBinary::Add),
+            ],
+            vec![
+                floating(1.0),
+                Op::Truth(Some(true)),
+                Op::Compare(IntegerComparison::Equal),
+            ],
             vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
-            vec![Op::Truth(Some(true)), floating(1.0), Op::Literal(Some(1)), Op::Case],
-            vec![Op::ScalarColumn(0), floating(1.0), Op::Truth(Some(true)), Op::InList { members: 2 }],
+            vec![
+                Op::Truth(Some(true)),
+                floating(1.0),
+                Op::Literal(Some(1)),
+                Op::Case,
+            ],
+            vec![
+                Op::ScalarColumn(0),
+                floating(1.0),
+                Op::Truth(Some(true)),
+                Op::InList { members: 2 },
+            ],
         ] {
             assert!(matches!(
                 prepare_scalar(&ops),
@@ -655,15 +688,21 @@ mod tests {
 
     #[test]
     fn mixed_numeric_scalar_execution_preserves_all_cancellation_checkpoints() {
-        let ops = [Op::Literal(Some(7)), floating(7.0), Op::Compare(IntegerComparison::Equal)];
+        let ops = [
+            Op::Literal(Some(7)),
+            floating(7.0),
+            Op::Compare(IntegerComparison::Equal),
+        ];
         let expression = prepare_scalar(&ops).unwrap();
         let frozen = expression.canonical_bytes();
         let mut count = 0;
         assert_eq!(
-            expression.evaluate_scalar_with_control(&[], &mut |_| {
-                count += 1;
-                Ok::<_, usize>(())
-            }).unwrap(),
+            expression
+                .evaluate_scalar_with_control(&[], &mut |_| {
+                    count += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
             CanonicalScalar::Bool(true)
         );
         assert!(count >= 5);

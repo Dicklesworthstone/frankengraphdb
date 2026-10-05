@@ -508,8 +508,18 @@ mod tests {
     fn numeric_row_and_join_filters_preserve_exact_comparisons_and_unknown() {
         let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
         for (left, right, comparison, expected) in [
-            (CanonicalScalar::Int(7), float(7.0), IntegerComparison::Equal, Some(true)),
-            (float(7.0), CanonicalScalar::Int(7), IntegerComparison::Equal, Some(true)),
+            (
+                CanonicalScalar::Int(7),
+                float(7.0),
+                IntegerComparison::Equal,
+                Some(true),
+            ),
+            (
+                float(7.0),
+                CanonicalScalar::Int(7),
+                IntegerComparison::Equal,
+                Some(true),
+            ),
             (
                 CanonicalScalar::Int(9_007_199_254_740_993),
                 float(9_007_199_254_740_992.0),
@@ -522,8 +532,18 @@ mod tests {
                 IntegerComparison::Equal,
                 Some(false),
             ),
-            (CanonicalScalar::Null, float(7.0), IntegerComparison::Equal, None),
-            (CanonicalScalar::Bool(true), float(1.0), IntegerComparison::NotEqual, None),
+            (
+                CanonicalScalar::Null,
+                float(7.0),
+                IntegerComparison::Equal,
+                None,
+            ),
+            (
+                CanonicalScalar::Bool(true),
+                float(1.0),
+                IntegerComparison::NotEqual,
+                None,
+            ),
         ] {
             let cells = [GraphValue::Scalar(left), GraphValue::Scalar(right)];
             for negate in [false, true] {
@@ -558,16 +578,10 @@ mod tests {
         let code = code(IntegerComparison::Equal, false);
         let mut checkpoints = 0;
         assert!(
-            GraphSetPredicateOp::evaluate_cells_with_control(
-                &code,
-                &cells,
-                &[],
-                None,
-                &mut |_| {
-                    checkpoints += 1;
-                    Ok::<_, usize>(())
-                }
-            )
+            GraphSetPredicateOp::evaluate_cells_with_control(&code, &cells, &[], None, &mut |_| {
+                checkpoints += 1;
+                Ok::<_, usize>(())
+            })
             .unwrap()
         );
         assert_eq!(checkpoints, 3);

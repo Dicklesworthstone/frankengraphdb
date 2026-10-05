@@ -1050,9 +1050,8 @@ mod tests {
     #[test]
     fn mixed_numeric_literals_do_not_round_large_integer_properties() {
         let actual = CanonicalScalar::Int(9_007_199_254_740_993);
-        let literal = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
-            9_007_199_254_740_992.0,
-        ));
+        let literal =
+            CanonicalScalar::Float(fgdb_types::CanonicalF64::new(9_007_199_254_740_992.0));
         for (comparison, expected) in [
             (IntegerComparison::Equal, false),
             (IntegerComparison::NotEqual, true),

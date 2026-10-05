@@ -172,9 +172,7 @@ impl IntegerComparison {
             (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
                 compare_integer_float(*right, left.get()).reverse()
             }
-            _ if core::mem::discriminant(left) == core::mem::discriminant(right) => {
-                left.cmp(right)
-            }
+            _ if core::mem::discriminant(left) == core::mem::discriminant(right) => left.cmp(right),
             _ => return None,
         };
         Some(match self {
@@ -306,10 +304,18 @@ mod tests {
                         // This fixture's floats are exactly zero, +inf, and NaN.
                         // Neither nonzero float can be reached by an i64.
                         (CanonicalScalar::Int(i), CanonicalScalar::Float(f)) => {
-                            Some(if f.get() == 0.0 { i.cmp(&0) } else { Ordering::Less })
+                            Some(if f.get() == 0.0 {
+                                i.cmp(&0)
+                            } else {
+                                Ordering::Less
+                            })
                         }
                         (CanonicalScalar::Float(f), CanonicalScalar::Int(i)) => {
-                            Some(if f.get() == 0.0 { 0.cmp(i) } else { Ordering::Greater })
+                            Some(if f.get() == 0.0 {
+                                0.cmp(i)
+                            } else {
+                                Ordering::Greater
+                            })
                         }
                         _ if core::mem::discriminant(actual)
                             == core::mem::discriminant(expected) =>

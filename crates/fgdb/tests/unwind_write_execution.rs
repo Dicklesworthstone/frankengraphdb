@@ -317,9 +317,7 @@ fn row_limit_and_empty_input_refuse_before_any_catalog_or_allocator_call() {
                     limit,
                     |_, _| panic!("row-count admission must precede catalog resolution"),
                     policy(0, 10),
-                    |_| -> Result<ElementId, ()> {
-                        panic!("row-count refusal cannot allocate")
-                    },
+                    |_| -> Result<ElementId, ()> { panic!("row-count refusal cannot allocate") },
                 )
                 .await;
             match result {
@@ -522,9 +520,7 @@ fn matching_only_batch_closes_read_only_without_allocating_or_advancing_frontier
                 3,
                 symbols,
                 policy(0, 0),
-                |_| -> Result<ElementId, ()> {
-                    panic!("matching an existing key cannot allocate")
-                },
+                |_| -> Result<ElementId, ()> { panic!("matching an existing key cannot allocate") },
             )
             .await
             .unwrap();
