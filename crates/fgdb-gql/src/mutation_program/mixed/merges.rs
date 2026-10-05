@@ -154,7 +154,7 @@ impl MixedMeter {
             }
             None => {
                 u128::from(stats.evaluator.work_units)
-                    >= u128::from(stats.merge.evaluator.work_units) + effects + 1
+                    > u128::from(stats.merge.evaluator.work_units) + effects
                     && u128::from(stats.evaluator.scratch_entries)
                         >= u128::from(stats.merge.evaluator.scratch_entries) + effects
             }
