@@ -124,6 +124,29 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         }
         Self::node(key, value, left, right, work)
     }
+    /// A height-balanced tree over `items`, which are sorted by key with no
+    /// duplicates: one node per item, built bottom-up, no rebalancing. Sibling
+    /// heights differ by at most one, so later path-copying inserts see the
+    /// same AVL invariant they maintain.
+    fn from_sorted(items: Vec<(K, V)>, work: &mut u64) -> Self {
+        fn subtree<K: Ord + Clone, V: Clone>(
+            items: &mut std::vec::IntoIter<(K, V)>,
+            count: usize,
+            work: &mut u64,
+        ) -> IndexMap<K, V> {
+            if count == 0 {
+                return IndexMap::new();
+            }
+            let left = subtree(items, count / 2, work);
+            let (key, value) = items.next().expect("count items remain");
+            let right = subtree(items, count - count / 2 - 1, work);
+            IndexMap::node(key, value, left, right, work)
+        }
+        debug_assert!(items.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let count = items.len();
+        subtree(&mut items.into_iter(), count, work)
+    }
+
     fn get(&self, key: &K) -> Option<&V> {
         let mut cursor = self.0.as_deref();
         while let Some(node) = cursor {
@@ -259,6 +282,13 @@ impl<'a, K, V> Iterator for IndexIter<'a, K, V> {
     }
 }
 
+/// The set of `keys` as a unit-valued tree (sorted and deduplicated here).
+fn unit_set<K: Ord + Clone>(mut keys: Vec<K>, work: &mut u64) -> IndexMap<K, ()> {
+    keys.sort_unstable();
+    keys.dedup();
+    IndexMap::from_sorted(keys.into_iter().map(|key| (key, ())).collect(), work)
+}
+
 #[cfg(test)]
 mod persistent_index_tests {
     use super::IndexMap;
@@ -350,15 +380,44 @@ pub(crate) struct AdjacencyIndex {
 }
 
 impl AdjacencyIndex {
+    /// Build a generation from scratch: group rows in ordinary sorted maps,
+    /// then assemble each persistent tree bottom-up. The contents equal
+    /// folding every row through `apply_added`, without a path copy per row.
     pub(crate) fn build(blocks: &[Vec<AdjacencyEntry>]) -> Self {
-        let mut index = Self {
-            histories: IndexMap::new(),
-            outgoing: IndexMap::new(),
-            incoming: IndexMap::new(),
-            work: 0,
+        let mut work = 0;
+        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
+        let mut outgoing = BTreeMap::<VId, Vec<EId>>::new();
+        let mut incoming = BTreeMap::<VId, Vec<EId>>::new();
+        for (block, entries) in blocks.iter().enumerate() {
+            for (row, entry) in entries.iter().enumerate() {
+                work += 1;
+                histories
+                    .entry(entry.eid)
+                    .or_default()
+                    .push((entry.created_at, block, row));
+                outgoing.entry(entry.src).or_default().push(entry.eid);
+                incoming.entry(entry.dst).or_default().push(entry.eid);
+            }
+        }
+        let face = |map: BTreeMap<VId, Vec<EId>>, work: &mut u64| {
+            let items = map
+                .into_iter()
+                .map(|(vid, eids)| (vid, unit_set(eids, work)))
+                .collect();
+            IndexMap::from_sorted(items, work)
         };
-        index.apply_added(blocks, 0);
-        index
+        let outgoing = face(outgoing, &mut work);
+        let incoming = face(incoming, &mut work);
+        let histories = histories
+            .into_iter()
+            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
+            .collect();
+        Self {
+            histories: IndexMap::from_sorted(histories, &mut work),
+            outgoing,
+            incoming,
+            work,
+        }
     }
 
     /// The retained writer appends sealed objects in publication order.
@@ -543,14 +602,48 @@ pub(crate) struct PropertyEqualityIndex {
 }
 
 impl PropertyEqualityIndex {
+    /// Build a generation from scratch bottom-up, with the same contents as
+    /// folding every row through `apply_added`.
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
-        let mut index = Self {
-            candidates: IndexMap::new(),
-            histories: IndexMap::new(),
-            work: 0,
-        };
-        index.apply_added(patches, 0);
-        index
+        let mut work = 0;
+        let mut histories = BTreeMap::<VId, Vec<(CommitSeq, usize, usize)>>::new();
+        let mut candidates = BTreeMap::<(PropertyKeyId, std::sync::Arc<[u8]>), Vec<VId>>::new();
+        for (patch, rows) in patches.iter().enumerate() {
+            for (row_at, row) in rows.iter().enumerate() {
+                work += 1;
+                histories
+                    .entry(row.vid)
+                    .or_default()
+                    .push((row.created_at, patch, row_at));
+                for (key, value) in &row.props {
+                    work += 1;
+                    if matches!(value, CanonicalScalar::Null) {
+                        continue;
+                    }
+                    let Ok(encoded) = value.encode() else {
+                        continue;
+                    };
+                    work += encoded.len() as u64;
+                    candidates
+                        .entry((*key, std::sync::Arc::from(encoded)))
+                        .or_default()
+                        .push(row.vid);
+                }
+            }
+        }
+        let histories = histories
+            .into_iter()
+            .map(|(vid, versions)| (vid, unit_set(versions, &mut work)))
+            .collect();
+        let candidates = candidates
+            .into_iter()
+            .map(|(key, vids)| (key, unit_set(vids, &mut work)))
+            .collect();
+        Self {
+            candidates: IndexMap::from_sorted(candidates, &mut work),
+            histories: IndexMap::from_sorted(histories, &mut work),
+            work,
+        }
     }
 
     pub(crate) fn extend(&self, patches: &[VertexPatchRows], carried: usize) -> Self {
@@ -1167,6 +1260,130 @@ mod indexed_tests {
         assert!(total >= 4);
         for stop in 1..=total {
             assert_eq!(run(stop), (Err(stop), stop));
+        }
+    }
+
+    /// Height, size and key order of every node, outer and inner: the
+    /// invariants later path-copying inserts rely on.
+    fn assert_avl<K: Ord + Clone + std::fmt::Debug, V: Clone>(
+        map: &IndexMap<K, V>,
+    ) -> (u16, usize) {
+        let Some(node) = map.0.as_deref() else {
+            return (0, 0);
+        };
+        let (left_height, left_len) = assert_avl(&node.left);
+        let (right_height, right_len) = assert_avl(&node.right);
+        assert!(
+            left_height.abs_diff(right_height) <= 1,
+            "unbalanced at {:?}",
+            node.key
+        );
+        assert_eq!(node.height, 1 + left_height.max(right_height));
+        assert_eq!(node.len, 1 + left_len + right_len);
+        let keys: Vec<&K> = map.iter().map(|(key, _)| key).collect();
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "keys out of order"
+        );
+        (node.height, node.len)
+    }
+
+    fn assert_nested_avl<K: Ord + Clone + std::fmt::Debug, I: Ord + Clone + std::fmt::Debug>(
+        map: &IndexMap<K, IndexMap<I, ()>>,
+    ) {
+        assert_avl(map);
+        for (_, inner) in map.iter() {
+            assert_avl(inner);
+        }
+    }
+
+    /// A from-scratch build equals folding every block through the
+    /// incremental path, its trees satisfy the AVL invariant, and extending a
+    /// bulk-built generation equals building the whole history at once.
+    #[test]
+    fn bulk_builds_equal_the_incremental_fold_and_stay_avl() {
+        for seed in [1_u64, 7, 29, 113] {
+            let mut state = seed;
+            let mut next = |bound: u64| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) % bound
+            };
+            let mut blocks = Vec::new();
+            let mut patches = Vec::new();
+            for seq in 1..=9_u64 {
+                let mut block = Vec::new();
+                for _ in 0..next(40) {
+                    // Few identities, so restatements and shared endpoints recur.
+                    let eid = next(25);
+                    block.push(AdjacencyEntry {
+                        src: VId(u128::from(next(12))),
+                        dst: VId(u128::from(next(12))),
+                        relation: RelationId(1 + next(2)),
+                        eid: EId(u128::from(eid)),
+                        created_at: CommitSeq(seq),
+                        retired_at: (next(5) == 0).then_some(CommitSeq(seq)),
+                    });
+                }
+                blocks.push(block);
+                let mut rows = Vec::new();
+                for vid in 0..next(15) {
+                    let value = match next(4) {
+                        0 => CanonicalScalar::Null,
+                        _ => CanonicalScalar::Int(next(6) as i64),
+                    };
+                    rows.push(VertexRow {
+                        vid: VId(u128::from(vid)),
+                        birth_ordinal: vid,
+                        created_at: CommitSeq(seq),
+                        retired_at: None,
+                        labels: vec![],
+                        props: vec![(PropertyKeyId(1 + next(2)), value)],
+                    });
+                }
+                let bytes = fgdb_strata::vertex::encode_patch(&rows).unwrap();
+                patches.push(fgdb_strata::vertex::decode_patch(&bytes).unwrap());
+            }
+
+            let built = AdjacencyIndex::build(&blocks);
+            let mut folded = AdjacencyIndex::build(&[]);
+            for carried in 0..blocks.len() {
+                folded = folded.extend(&blocks[..=carried], carried);
+            }
+            assert!(
+                built.equivalent(&folded),
+                "seed {seed}: adjacency build != fold"
+            );
+            assert_nested_avl(&built.histories);
+            assert_nested_avl(&built.outgoing);
+            assert_nested_avl(&built.incoming);
+            let last = blocks.len() - 1;
+            let extended = AdjacencyIndex::build(&blocks[..last]).extend(&blocks, last);
+            assert!(
+                extended.equivalent(&built),
+                "seed {seed}: extend of a bulk build"
+            );
+            assert_nested_avl(&extended.histories);
+
+            let built = PropertyEqualityIndex::build(&patches);
+            let mut folded = PropertyEqualityIndex::build(&[]);
+            for carried in 0..patches.len() {
+                folded = folded.extend(&patches[..=carried], carried);
+            }
+            assert!(
+                built.equivalent(&folded),
+                "seed {seed}: property build != fold"
+            );
+            assert_nested_avl(&built.histories);
+            assert_nested_avl(&built.candidates);
+            let last = patches.len() - 1;
+            let extended = PropertyEqualityIndex::build(&patches[..last]).extend(&patches, last);
+            assert!(
+                extended.equivalent(&built),
+                "seed {seed}: extend of a bulk build"
+            );
+            assert_nested_avl(&extended.candidates);
         }
     }
 
