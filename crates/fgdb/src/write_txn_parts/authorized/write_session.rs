@@ -646,22 +646,31 @@ where
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
                         statement_limit(&prepared.script, *max_statements)?;
-                        Input::Script(&prepared.script, params)
-                            .bind(cx, capability.predicates(), &mut execution)?
+                        Input::Script(&prepared.script, params).bind(
+                            cx,
+                            capability.predicates(),
+                            &mut execution,
+                        )?
                     }
                     Request::Batch(prepared, arguments) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
-                        Input::Batch(&prepared.script, arguments, *max_statements)
-                            .bind(cx, capability.predicates(), &mut execution)?
+                        Input::Batch(&prepared.script, arguments, *max_statements).bind(
+                            cx,
+                            capability.predicates(),
+                            &mut execution,
+                        )?
                     }
                     Request::Bound(bound) => {
                         if !Arc::ptr_eq(owner, &bound.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
-                        Input::Bound(&bound.batch)
-                            .bind(cx, capability.predicates(), &mut execution)?
+                        Input::Bound(&bound.batch).bind(
+                            cx,
+                            capability.predicates(),
+                            &mut execution,
+                        )?
                     }
                 };
                 database
