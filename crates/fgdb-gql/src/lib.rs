@@ -34,6 +34,7 @@ mod mutation;
 mod mutation_program;
 mod mutation_program_template;
 mod mutation_text;
+mod native_write_text;
 mod overlay_evidence;
 mod parameters;
 mod parser;
@@ -174,6 +175,7 @@ pub use mutation_text::{
     GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphDeleteText,
     PreparedGraphEdgeMergeText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
+pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
     GqlListParameter, GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,

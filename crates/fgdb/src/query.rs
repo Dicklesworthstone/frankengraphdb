@@ -175,6 +175,8 @@ impl core::error::Error for QueryError {
 #[derive(Debug)]
 pub enum QueryWriteError<A> {
     Prepare(GraphWriteScriptError),
+    /// A recognized UNWIND mutation failed whole-input admission/binding.
+    UnwindBinding(fgdb_gql::unwind_write::GraphUnwindWriteError),
     Execute(GraphWriteScriptExecutionError<WriteTxnError, A, Cancel>),
     /// CREATE/INSERT RETURN is a single native query, not a no-result script.
     InsertText(GraphInsertTextError),
@@ -184,13 +186,35 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Prepare(e) => e.fmt(f),
+            Self::UnwindBinding(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
             Self::InsertText(e) => e.fmt(f),
             Self::Insert(e) => e.fmt(f),
         }
     }
 }
-impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> {}
+impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Prepare(error) => Some(error),
+            Self::UnwindBinding(error) => Some(error),
+            Self::Execute(error) => Some(error),
+            Self::InsertText(error) => Some(error),
+            Self::Insert(error) => Some(error),
+        }
+    }
+}
+impl<A> From<NativeGraphWriteBindError> for QueryWriteError<A> {
+    fn from(error: NativeGraphWriteBindError) -> Self {
+        match error {
+            NativeGraphWriteBindError::ScriptPreparation(error) => Self::Prepare(error),
+            NativeGraphWriteBindError::ScriptBinding(error) => {
+                Self::Execute(GraphWriteScriptExecutionError::Binding(error))
+            }
+            NativeGraphWriteBindError::Unwind(error) => Self::UnwindBinding(error),
+        }
+    }
+}
 
 // Both public write entrypoints must bind the same native query. The parser,
 // not a text rewrite, owns statement framing, scopes and parameter occurrence
@@ -346,11 +370,14 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
     /// allocator remain explicit, exactly as in the existing native script API.
-    /// A single statement is a one-step program; scripts share one work budget.
+    /// Ordinary scripts and expanded UNWIND batches share one work budget.
     /// CREATE/INSERT RETURN produces Rows only after native transaction finish
     /// succeeds. Writes without RETURN retain their Write receipt. A RETURN
     /// failure is never retried as a script or as a read. Multi-statement RETURN
     /// scripts are refused rather than executing a prefix and dropping rows.
+    /// One bounded UNWIND MERGE/MATCH mutation binds every map row before the
+    /// ordinary atomic executor starts. Its rows share the whole program budget
+    /// and its errors retain input-record coordinates; no per-row commit occurs.
     #[allow(clippy::too_many_arguments)]
     // Returns once per statement/script and wraps the script execution error,
     // whose record location plus program error is deliberate (write_scripts).
@@ -391,23 +418,14 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
         }
-        let declarations: Vec<(&str, GqlParameterType)> = params
-            .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
-            .collect();
-        let script = PreparedGraphWriteScript::prepare_with_parameter_types(
-            text,
-            relation,
-            &declarations,
-            resolver,
-        )
-        .map_err(QueryWriteError::Prepare)?;
+        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
+            .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
-            .execute_graph_write_script_autocommit_governed(
-                txcx, cx, commit_cx, &script, params, budget, allocate,
+            .execute_graph_write_program_returning_autocommit_governed(
+                txcx, cx, commit_cx, bound.program(), budget, allocate,
             )
             .await
-            .map_err(QueryWriteError::Execute)?;
+            .map_err(|error| QueryWriteError::Execute(bound.execution_error(error)))?;
         Ok(QueryResult::Write {
             receipt,
             completion: Some(completion),
@@ -456,20 +474,13 @@ impl WriteTxn {
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
         }
-        let declarations: Vec<(&str, GqlParameterType)> = params
-            .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
-            .collect();
-        let script = PreparedGraphWriteScript::prepare_with_parameter_types(
-            text,
-            relation,
-            &declarations,
-            resolver,
-        )
-        .map_err(QueryWriteError::Prepare)?;
+        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
+            .map_err(QueryWriteError::from)?;
         let receipt = self
-            .execute_graph_write_script_governed(database, cx, &script, params, budget, allocate)
-            .map_err(QueryWriteError::Execute)?;
+            .execute_graph_write_program_returning_governed(
+                database, cx, bound.program(), budget, allocate,
+            )
+            .map_err(|error| QueryWriteError::Execute(bound.execution_error(error)))?;
         Ok(QueryResult::Write {
             receipt,
             completion: None,
