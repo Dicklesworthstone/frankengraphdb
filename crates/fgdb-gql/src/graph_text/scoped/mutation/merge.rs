@@ -599,19 +599,34 @@ impl PreparedGraphVertexUpsertText {
                             };
                             VertexUpsertActionTemplate::Property { key, value }
                         }
-                        ParsedUpsertAction::Expression { key, properties, program, at } => {
-                            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)?
+                        ParsedUpsertAction::Expression {
+                            key,
+                            properties,
+                            program,
+                            at,
+                        } => {
+                            let GraphSymbol::Property(key) =
+                                symbol(GraphSymbolKind::Property, key)?
                             else {
                                 unreachable!("symbol domain checked")
                             };
-                            let properties = properties.into_iter().map(|name| {
-                                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
-                                else {
-                                    unreachable!("symbol domain checked")
-                                };
-                                Ok(key)
-                            }).collect::<Result<Vec<_>, GraphPatternTextError>>()?;
-                            VertexUpsertActionTemplate::Expression { key, properties, program, at }
+                            let properties = properties
+                                .into_iter()
+                                .map(|name| {
+                                    let GraphSymbol::Property(key) =
+                                        symbol(GraphSymbolKind::Property, name)?
+                                    else {
+                                        unreachable!("symbol domain checked")
+                                    };
+                                    Ok(key)
+                                })
+                                .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
+                            VertexUpsertActionTemplate::Expression {
+                                key,
+                                properties,
+                                program,
+                                at,
+                            }
                         }
                         ParsedUpsertAction::Label { label } => {
                             let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)?
@@ -641,7 +656,12 @@ impl PreparedGraphVertexUpsertText {
             &mut symbol,
         )
         .map_err(upsert_merge_error)?;
-        Ok(Self { merge, on_match, on_create, after })
+        Ok(Self {
+            merge,
+            on_match,
+            on_create,
+            after,
+        })
     }
 
     pub fn bind_parameters(
