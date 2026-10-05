@@ -5,7 +5,9 @@ use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
-use fgdb_gql::unwind_write::{GraphUnwindRowError, GraphUnwindWriteError};
+use fgdb_gql::unwind_write::{
+    GraphUnwindBindEvent, GraphUnwindRowError, GraphUnwindWriteError, GraphUnwindWriteText,
+};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
     GraphWriteScriptBatchError, GraphWriteScriptExecutionError,
@@ -15,7 +17,7 @@ use fgdb_types::{
     PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, Error, Grant, LimitDimension, QueryLimits, Rights, Scope};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 type Fault = GraphWriteScriptExecutionError<WriteTxnError, WriteTxnError, WriteTxnError>;
 const R: RelationId = RelationId(1);
@@ -352,6 +354,323 @@ fn catalog_expiry_is_not_a_syntax_error_and_cannot_be_retried() {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         drop(session);
         assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_unwind_inputs_and_receipts_reuse_without_catalog_or_rebinding() {
+    lab(0xac27, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let catalog_open = AtomicBool::new(true);
+        let calls = AtomicUsize::new(0);
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH,
+            |kind, name| {
+                assert!(catalog_open.load(Ordering::Relaxed), "bound execution reentered catalog");
+                calls.fetch_add(1, Ordering::Relaxed);
+                symbols(kind, name)
+            },
+            R, policy(), 64, || NOW,
+        ).unwrap();
+        let mut arguments = rows(&[(1, 2), (2, 4), (1, 3)]);
+        let bound = session.bind_unwind_batch(&query, COUNTER, &arguments).unwrap();
+        assert_eq!(bound.argument_sets(), 3);
+        assert_eq!(bound.location(2).unwrap().argument_set, 2);
+        assert_eq!(bound.location(2).unwrap().span, 0..COUNTER.len());
+        assert!(bound.location(3).is_none());
+        assert_eq!(txn.outstanding_obligations(), 0, "binding cannot pin a transaction");
+        assert!(!format!("{bound:?}").contains("Visible"));
+        let frozen_calls = calls.load(Ordering::Relaxed);
+        assert!(frozen_calls > 0);
+        // Replace and drop the caller's map; the handle owns its original values.
+        arguments = rows(&[(99, 999)]);
+        assert_eq!(arguments.len(), 1);
+        drop(arguments);
+        catalog_open.store(false, Ordering::Relaxed);
+        let (receipt, completion) = session.execute_bound_batch(&query, &bound).await.unwrap();
+        let first = receipt.steps()[0].merged_vertex().unwrap().vertex();
+        let second = receipt.steps()[1].merged_vertex().unwrap().vertex();
+        assert_eq!(receipt.steps()[2].merged_vertex().unwrap().vertex(), first);
+        let record = bound.record_receipts(&receipt, 2).unwrap();
+        assert_eq!(record.len(), 1);
+        assert_eq!(record[0].merged_vertex().unwrap().vertex(), first);
+        assert!(bound.record_receipts(&receipt, 3).is_none());
+        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted {
+            commit_seq: CommitSeq(basis.0 + 1),
+        });
+        // Reusing the same handle is another complete write, never deduplication.
+        let (stats, completion) = session.execute_bound_batch_stats(&query, &bound).await.unwrap();
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(stats.completed_statements, 3);
+        assert_eq!(stats.mutation_effects, 3);
+        assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted {
+            commit_seq: CommitSeq(basis.0 + 2),
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), frozen_calls);
+        assert!(!session.is_closed());
+        drop(session);
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.vertex(first).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))]);
+        assert_eq!(db.vertex(second).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(8))]);
+        let expected = db.vertices().unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!(db.vertices().unwrap(), expected);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_batch_preparation_neither_allocates_graph_ids_nor_accepts_nonbatch_fallbacks() {
+    lab(0xac28, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for mode in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut session = db.authorized_write_session(
+                &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(),
+                if mode == 1 { 1 } else { 64 }, || NOW,
+            ).unwrap();
+            let result = match mode {
+                2 => session.bind_unwind_batch(&query, "CREATE (n:Visible {p:1})", &GqlParameters::new()),
+                3 => session.bind_unwind_batch(&query, COUNTER, &GqlParameters::new().with_list(
+                    "rows", vec![row(1, CanonicalScalar::Int(1)), row(2, CanonicalScalar::Bool(true))],
+                ).unwrap()),
+                _ => session.bind_unwind_batch(&query, COUNTER, &rows(&[(1, 2), (2, 3)])),
+            };
+            if mode == 0 {
+                assert_eq!(result.unwrap().argument_sets(), 2);
+                assert!(!session.is_closed());
+            } else {
+                let error = result.unwrap_err();
+                match mode {
+                    1 => assert!(matches!(error, Fault::UnwindBinding(GraphUnwindWriteError::TooManyRows {
+                        limit: 1, observed: 2,
+                    }))),
+                    2 => assert!(matches!(error, Fault::Program(fgdb_gql::GraphWriteProgramError::Program(
+                        fgdb_gql::GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
+                    )))),
+                    _ => assert!(matches!(error, Fault::UnwindBinding(GraphUnwindWriteError::Row { row: 1, .. }))),
+                }
+                assert!(session.is_closed());
+            }
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                .unwrap(), ElementId::Vertex(VId(1)));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn frozen_unwind_handle_cannot_cross_identical_sessions() {
+    lab(0xac29, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut first = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(), 64, || NOW,
+        ).unwrap();
+        let bound = first.bind_unwind_batch(&query, COUNTER, &rows(&[(1, 2)])).unwrap();
+        drop(first);
+        let calls = AtomicUsize::new(0);
+        let mut second = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH,
+            |kind, name| { calls.fetch_add(1, Ordering::Relaxed); symbols(kind, name) },
+            R, policy(), 64, || NOW,
+        ).unwrap();
+        let error = second.execute_bound_batch(&query, &bound).await.unwrap_err();
+        assert!(matches!(error, Fault::Program(fgdb_gql::GraphWriteProgramError::Program(
+            fgdb_gql::GraphMutationProgramError::Preflight(WriteTxnError::AuthorizedMutationRefused)
+        ))));
+        assert!(second.is_closed());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        drop(second);
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+            .unwrap(), ElementId::Vertex(VId(1)));
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_input_never_freezes_credentials_or_the_clock_high_water_mark() {
+    lab(0xac2a, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        for mode in 0..3 {
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), NOW).unwrap();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let time = AtomicU64::new(NOW);
+            let mut session = db.authorized_write_session(
+                &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(), 64,
+                || time.load(Ordering::Relaxed),
+            ).unwrap();
+            time.store(200, Ordering::Relaxed);
+            let bound = session.bind_unwind_batch(&query, COUNTER, &rows(&[(1, 2)])).unwrap();
+            let expected = match mode {
+                0 => { time.store(150, Ordering::Relaxed); Error::ClockWentBackwards }
+                1 => { time.store(10_000, Ordering::Relaxed); Error::Expired }
+                _ => { assert!(issuer.retire()); Error::AuthorityRetired }
+            };
+            let error = session.execute_bound_batch_stats(&query, &bound).await.unwrap_err();
+            assert_eq!(authorization(&error), Some(expected));
+            assert!(session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn frozen_batch_runtime_failure_has_original_coordinates_and_no_durable_prefix() {
+    lab(0xac2b, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(90), vec![L], vec![
+            (P, CanonicalScalar::Int(90)), (Q, CanonicalScalar::Int(i64::MAX)),
+        ]);
+        db.write(&commit, seed).await.unwrap();
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(), 64, || NOW,
+        ).unwrap();
+        // Binding does not evaluate the existing graph's overflowing counter.
+        let bound = session.bind_unwind_batch(&query, COUNTER, &rows(&[(1, 2), (90, 1)])).unwrap();
+        let error = session.execute_bound_batch(&query, &bound).await.unwrap_err();
+        let Fault::BatchProgram { location: Some(location), .. } = error else {
+            panic!("bound ingestion must preserve its original failing record")
+        };
+        assert_eq!(location, bound.location(1).unwrap());
+        assert_eq!(location.span, 0..COUNTER.len());
+        assert!(session.is_closed());
+        drop(session);
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn unwinding_while_preparing_a_frozen_batch_closes_without_escaping_a_prefix() {
+    lab(0xac2c, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let calls = AtomicUsize::new(0);
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH,
+            |_, _| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                panic!("injected preparation callback unwind")
+            },
+            R, policy(), 64, || NOW,
+        ).unwrap();
+        let arguments = rows(&[(1, 2), (2, 3)]);
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.bind_unwind_batch(&query, COUNTER, &arguments)
+        }));
+        assert!(failure.is_err());
+        assert!(session.is_closed());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let error = session.bind_unwind_batch(&query, COUNTER, &arguments).unwrap_err();
+        assert_eq!(authorization(&error), Some(Error::ExecutionStopped));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn explicit_preparation_is_separate_but_query_must_not_refresh_its_binding_allowance() {
+    lab(0xac2d, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let text = "UNWIND $rows AS row MERGE (n:Visible {p:row.p}) SET n.q=row.q";
+        let payload = CanonicalScalar::ucs_basic_text(&"x".repeat(4096)).unwrap();
+        let arguments = GqlParameters::new().with_list("rows", vec![
+            row(1, payload.clone()), row(1, payload),
+        ]).unwrap();
+        let mut binding_work = 0;
+        GraphUnwindWriteText::parse(text).unwrap().bind_with_limit_controlled(
+            &arguments, R, 64, symbols, |event| {
+                if let GraphUnwindBindEvent::Work(units) = event { binding_work += units; }
+                Ok::<_, ()>(())
+            },
+        ).unwrap();
+        let mut scope = grant();
+        // Session entry, original text, post-classification, and the complete
+        // controlled binder. Nothing remains for the native execution phase.
+        scope.limits.max_work = text.len() as u64 + 2 + binding_work;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(), 64, || NOW,
+        ).unwrap();
+        let error = session.query(&query, text, &arguments).await.unwrap_err();
+        assert!(matches!(authorization(&error), Some(Error::LimitExceeded(_))));
+        assert!(matches!(error, Fault::BatchProgram { location: None, .. }));
+        assert!(session.is_closed());
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
+        // One extra unit admits bind_unwind_batch's final handle acceptance.
+        // Each execute_bound_batch is explicitly a NEW operation, not a hidden
+        // reset inside query. This budget is sufficient for the write itself.
+        scope.limits.max_work += 1;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut session = db.authorized_write_session(
+            &txn, &commit, &issuer, &token, BRANCH, symbols, R, policy(), 64, || NOW,
+        ).unwrap();
+        let bound = session.bind_unwind_batch(&query, text, &arguments).unwrap();
+        let (receipt, _) = session.execute_bound_batch(&query, &bound).await.unwrap();
+        assert_eq!(receipt.stats().completed_statements, 2);
+        assert_eq!(receipt.stats().created_vertices, 1);
+        assert!(!session.is_closed());
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.vertices().unwrap().len(), 1);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

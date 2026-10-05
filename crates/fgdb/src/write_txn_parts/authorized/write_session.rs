@@ -477,6 +477,69 @@ where
         result
     }
 
+    /// Freeze a bounded native UNWIND MERGE/MATCH batch for this exact session.
+    /// All rows, scalar kinds, catalog symbols and the host's expanded-statement
+    /// cap are admitted under one live preparation permit. No graph observation,
+    /// snapshot pin, identity reservation or mutation occurs. The existing native
+    /// classifier/binder is the only compiler; a non-batch form is refused rather
+    /// than converted into a new batch interpretation or executed as a fallback.
+    ///
+    /// This owns the supplied values, not a template for later argument sets.
+    /// execute_bound_batch[_stats] reuses them without catalog lookup or rebind,
+    /// checks live authority again and commits once per invocation. Re-execution
+    /// is a new write, NOT an idempotency/retry guarantee. Preparation and each
+    /// execution are separate operations with separate per-execution permits;
+    /// query[_stats] instead shares ONE permit across both phases.
+    ///
+    /// Any error or unwind closes the session; no partial batch escapes. The
+    /// handle retains native input coordinates, but neither its bound program
+    /// nor this session's authority can be exported or used by another owner.
+    #[allow(clippy::result_large_err)]
+    pub fn bind_unwind_batch(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        arguments: &GqlParameters,
+    ) -> Result<AuthorizedBoundWriteBatch, Fault> {
+        let mut state = self.state.take().ok_or_else(stopped)?;
+        let result = (|| {
+            let permit = begin(
+                &state.capability,
+                &state.branch,
+                &mut state.clock,
+                &mut state.last_now_ms,
+            )?;
+            let mut execution = Execution {
+                cx: state.commit_cx,
+                permit,
+                clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
+            };
+            checkpoint(cx, &mut execution).map_err(admission)?;
+            let bound = super::bind_native(
+                cx,
+                &mut execution,
+                text,
+                arguments,
+                state.relation,
+                state.capability.predicates(),
+                state.max_statements,
+                &mut state.resolver,
+            )?;
+            checkpoint(cx, &mut execution).map_err(admission)?;
+            let Bound::Batch(batch) = bound else {
+                return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+            };
+            Ok(AuthorizedBoundWriteBatch {
+                owner: Arc::clone(&self.owner),
+                batch,
+            })
+        })();
+        if result.is_ok() {
+            self.state = Some(state);
+        }
+        result
+    }
+
     /// Execute an immutable same-session bound batch without rebind or cloning.
     /// Credentials are live, not inherited as a reusable unchecked permit.
     #[allow(clippy::result_large_err)]
