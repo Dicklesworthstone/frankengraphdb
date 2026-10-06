@@ -1333,8 +1333,10 @@ fn bind_stages(
                 namespace,
                 name,
                 arguments,
+                names,
                 outputs,
                 vertices,
+                ..
             } => {
                 let mut bound = Vec::with_capacity(arguments.len());
                 for argument in arguments {
@@ -1345,6 +1347,7 @@ fn bind_stages(
                         namespace.clone(),
                         name.clone(),
                         bound,
+                        names.clone(),
                         outputs.clone(),
                         vertices.clone(),
                     )

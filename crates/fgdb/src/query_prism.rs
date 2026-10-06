@@ -42,6 +42,8 @@ pub enum ProcedureError {
     Read(Box<FnxReadError<ReadError, core::convert::Infallible>>),
     /// A count beyond the GQL Int64 domain.
     ResultDomain,
+    /// A `CALL hybrid.search` refused its arguments or its retrieval.
+    Search(crate::query::HybridCallError),
 }
 impl core::fmt::Display for ProcedureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -49,6 +51,7 @@ impl core::fmt::Display for ProcedureError {
             Self::Bind(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
             Self::ResultDomain => f.write_str("Prism count exceeds the Int64 domain"),
+            Self::Search(error) => error.fmt(f),
         }
     }
 }
@@ -56,6 +59,7 @@ impl core::error::Error for ProcedureError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Bind(error) => Some(error),
+            Self::Search(error) => Some(error),
             Self::Read(_) | Self::ResultDomain => None,
         }
     }
@@ -110,6 +114,12 @@ pub(crate) fn bind_procedure<C>(
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],
 ) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
+    if !call.argument_names().is_empty() {
+        return Err(refuse(ProcedureError::Bind(FnxCallError {
+            site: FnxCallSite::Argument(0),
+            kind: FnxBindErrorKind::InvalidArgument("Prism procedures take positional arguments"),
+        })));
+    }
     let mut supplied = Vec::with_capacity(arguments.len());
     for (index, value) in arguments.iter().enumerate() {
         let argument = match value {

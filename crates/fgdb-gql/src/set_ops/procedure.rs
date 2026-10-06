@@ -18,6 +18,8 @@ pub struct PreparedProcedureCall {
     pub(super) namespace: String,
     pub(super) name: String,
     pub(super) arguments: Vec<GraphSetValue>,
+    /// One name per argument for a named call; empty for a positional one.
+    pub(super) names: Vec<String>,
     /// The procedure's own output names, in YIELD order.
     pub(super) outputs: Vec<String>,
     /// Ascending positions in `outputs` the statement matches as vertices.
@@ -32,6 +34,14 @@ impl PreparedProcedureCall {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+    /// The argument names, parallel to the evaluated arguments, when the
+    /// call named them (`k => 10`); empty for a positional call. A host that
+    /// takes only positional arguments must refuse a named call. A schema-name
+    /// argument already carries the integer identity its name resolved to.
+    #[must_use]
+    pub fn argument_names(&self) -> &[String] {
+        &self.names
     }
     /// The procedure output columns the host must return, in this order.
     #[must_use]
@@ -52,8 +62,15 @@ impl PreparedProcedureCall {
             bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
             bytes.extend_from_slice(text.as_bytes());
         }
-        bytes.extend_from_slice(&(self.arguments.len() as u64).to_be_bytes());
-        for argument in &self.arguments {
+        // A named call sets the count's high bit and prefixes each value by
+        // its name, so every positional call keeps its exact bytes.
+        let named = if self.names.is_empty() { 0 } else { 1 << 63 };
+        bytes.extend_from_slice(&(self.arguments.len() as u64 | named).to_be_bytes());
+        for (index, argument) in self.arguments.iter().enumerate() {
+            if let Some(name) = self.names.get(index) {
+                bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+            }
             super::projection::append_value_transcript(argument, bytes);
         }
         bytes.extend_from_slice(&(self.outputs.len() as u64).to_be_bytes());

@@ -182,6 +182,24 @@ fn gql_budget<E, C>(error: &GqlQueryError<E, C>) -> bool {
     matches!(error, GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
 }
 
+/// A CALL whose name, arguments or YIELD list its procedure refused is a
+/// statement error; a refusal while it ran (projection, index, kernel) is not.
+fn procedure_statement<C>(
+    error: &GqlQueryError<fgdb_gql::GraphSetExecutionError<fgdb::GqlError>, C>,
+) -> bool {
+    let GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(fgdb::GqlError::Procedure(
+        procedure,
+    ))) = error
+    else {
+        return false;
+    };
+    match procedure {
+        fgdb::ProcedureError::Bind(_) => true,
+        fgdb::ProcedureError::Search(search) => !matches!(search, fgdb::HybridCallError::Index(_)),
+        _ => false,
+    }
+}
+
 fn query_refusal(error: QueryError) -> Refusal {
     let code = match &error {
         QueryError::Authorization(error) => warden_code(*error),
@@ -189,6 +207,7 @@ fn query_refusal(error: QueryError) -> Refusal {
         QueryError::Pattern(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Aggregate(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Set(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::Set(e) if procedure_statement(e) => ErrorCode::Statement,
         QueryError::Pattern(_) | QueryError::Aggregate(_) | QueryError::Set(_) => {
             ErrorCode::Execution
         }

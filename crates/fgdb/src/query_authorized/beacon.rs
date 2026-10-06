@@ -216,6 +216,87 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+/// A `CALL hybrid.search` stage under the capability: exactly the corpus of
+/// [`Database::beacon_search_graph_authorized`]. Original-label predicates
+/// admit vertices before projection, property masks precede BM25 statistics
+/// and vector validation, and only allowed relations between admitted
+/// vertices carry the graph lane (FG-INV-20: security applies before
+/// expansion, never as a post-filter). Work and node admission spend this
+/// read's own live permit; hidden history is polled without signed charges.
+/// The rows are intermediate: only the statement's final rows are delivered.
+pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
+    snapshot: &crate::Snapshot,
+    at: fgdb_types::CommitSeq,
+    call: &fgdb_gql::PreparedProcedureCall,
+    arguments: &[fgdb_gql::algebra::GraphValue],
+    scope: &super::PlannerPredicates,
+    execution: &RefCell<super::Execution<'_, '_, Clock>>,
+    remaining: fgdb_gql::GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    fgdb_gql::GqlQueryError<crate::GqlError, QueryError>,
+> {
+    use beacon::procedure::{HybridSearch, failure, refuse};
+    let search = HybridSearch::bind(call, arguments, at, remaining).map_err(refuse)?;
+    let spent = core::cell::Cell::new(0_u64);
+    let admitted = core::cell::Cell::new(0_u64);
+    let work = RefCell::new(Meter::new(
+        search.options().policy.max_work_units,
+        |units| {
+            spent.set(spent.get().saturating_add(units as u64));
+            let mut live = execution.borrow_mut();
+            live.checkpoint()?;
+            let units = u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+            let now = (live.clock)();
+            let charged = live.permit.charge_work_at(now, units);
+            charged.map_err(|error| live.refusal(error))
+        },
+    ));
+    let mut poll = || {
+        let polled = execution.borrow_mut().poll();
+        polled.map_err(|error| work.borrow_mut().refuse(error))
+    };
+    let result = beacon::graph::evaluate(
+        snapshot,
+        at,
+        search.options(),
+        search.query(),
+        search.expansion(),
+        &work,
+        beacon::Scan::Unmetered(&mut poll),
+        |row| {
+            if !scope.allows_vertex(&row.labels) {
+                return Ok(false);
+            }
+            execution
+                .borrow_mut()
+                .node()
+                .map_err(|error| work.borrow_mut().refuse(error))?;
+            admitted.set(admitted.get() + 1);
+            Ok(true)
+        },
+        |label| scope.allows_label(label),
+        |key| scope.allows_property(key),
+        |relation| scope.allows_relation(relation),
+    );
+    let hits = work
+        .into_inner()
+        .finish::<ReadError, _>(result)
+        .map_err(failure)?;
+    let value = search.rows(hits);
+    Ok(fgdb_gql::GqlQueryExecution {
+        rows: fgdb_gql::GqlExecutionStats {
+            snapshot_records: admitted.get(),
+            result_rows: value.len() as u64,
+        },
+        evaluator: fgdb_gql::GlaExecutionStats {
+            work_units: spent.get(),
+            scratch_entries: value.len() as u64,
+        },
+        value,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     database: &Database<V>,

@@ -156,10 +156,10 @@ pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
     AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, ExplainRow,
-    NativeAggregateCursor, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
-    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedNativeRead, ProcedureError,
-    QueryError, QueryResult, QueryValue, QueryWriteError, RefreshReport, ReplayRefusal,
-    ResidentIndex, ResidentIndexError,
+    HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor, NativeExplainCertificate,
+    NativeResultCertificate, NativeResultSpool, NativeSpoolCursor, NativeSpoolError, PinnedIndex,
+    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
+    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession, WriteTxn,

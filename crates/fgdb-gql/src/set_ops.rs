@@ -384,6 +384,7 @@ impl PreparedGraphSet {
         namespace: String,
         name: String,
         arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
     ) -> Result<Self, GraphSetProjectionError> {
@@ -414,15 +415,27 @@ impl PreparedGraphSet {
         for (column, argument) in arguments.iter().enumerate() {
             projection::value_type(argument, &[], column)?;
         }
+        // Named arguments name every argument, each once.
+        if !names.is_empty() {
+            if names.len() != arguments.len() {
+                return Err(Error::Empty);
+            }
+            for (column, argument) in names.iter().enumerate() {
+                projection::validate_name(argument, column)?;
+                if names[..column].contains(argument) {
+                    return Err(Error::DuplicateName { column });
+                }
+            }
+        }
         let mut columns = Vec::with_capacity(outputs.len());
-        let mut names = Vec::with_capacity(outputs.len());
+        let mut output_names = Vec::with_capacity(outputs.len());
         for (column, (output, alias)) in outputs.into_iter().enumerate() {
             projection::validate_name(&alias, column)?;
             if columns.contains(&alias) {
                 return Err(Error::DuplicateName { column });
             }
             columns.push(alias);
-            names.push(output);
+            output_names.push(output);
         }
         let operands = self.operands + 1;
         if operands > MAX_GRAPH_SET_OPERANDS {
@@ -437,7 +450,8 @@ impl PreparedGraphSet {
                 namespace,
                 name,
                 arguments,
-                outputs: names,
+                names,
+                outputs: output_names,
                 vertices,
             })),
             columns,

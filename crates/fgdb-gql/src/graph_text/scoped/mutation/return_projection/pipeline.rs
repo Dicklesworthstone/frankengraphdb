@@ -79,6 +79,7 @@ fn expected(at: usize, item: &'static str) -> GraphSetTextError {
         kind: GraphSetTextErrorKind::Expected(item),
     }
 }
+
 fn append_stage(
     stages: &mut Vec<ReadStageTemplate>,
     stage: ReadStageTemplate,
@@ -519,9 +520,11 @@ impl<'a> Parser<'a> {
     }
 
     /// `CALL namespace.name(arguments) YIELD output [AS alias], ...` after the
-    /// CALL keyword. Arguments are constant row values (literals, parameters);
+    /// CALL keyword. Arguments are constant row values (literals, parameters),
+    /// either all positional or all named (`name => value`, each name once);
     /// each yielded output becomes an Any-domain column, as UNWIND's does.
-    /// The host resolves the procedure and checks its arguments at execution.
+    /// The host resolves the procedure and checks its arguments at execution,
+    /// except schema names (`symbol_argument`), which resolve with the pattern.
     pub(in crate::graph_text) fn call_stage(
         &mut self,
         schema: &mut RowSchema<'a>,
@@ -532,8 +535,27 @@ impl<'a> Parser<'a> {
         let name = self.name()?;
         self.punct(b'(', "procedure arguments")?;
         let mut arguments = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut offsets = Vec::new();
         if !self.take(b')')? {
             loop {
+                let named = self.argument_name()?;
+                match named {
+                    Some(argument) if names.len() == arguments.len() => {
+                        if names.iter().any(|seen| seen == argument.text) {
+                            return Err(expected(argument.at, "a procedure argument named once"));
+                        }
+                        names.push(argument.text.to_owned());
+                    }
+                    Some(argument) => {
+                        return Err(expected(argument.at, "a positional procedure argument"));
+                    }
+                    None if !names.is_empty() => {
+                        return Err(expected(self.current.at, "a named procedure argument"));
+                    }
+                    None => {}
+                }
+                offsets.push(self.current.at);
                 arguments.push(self.read_row_value(schema, 0)?);
                 if self.take(b',')? {
                     continue;
@@ -570,10 +592,37 @@ impl<'a> Parser<'a> {
             namespace: namespace.text.to_owned(),
             name: name.text.to_owned(),
             arguments,
+            names,
+            offsets,
             outputs,
             // A following MATCH (written or implied) marks its vertex uses.
             vertices: Vec::new(),
         })
+    }
+
+    /// `name =>` opening a named procedure argument, consumed when present.
+    /// The arrow is one token pair with nothing between `=` and `>`.
+    fn argument_name(&mut self) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        let TokenKind::Word(text) = self.current.kind else {
+            return Ok(None);
+        };
+        let mut lexer = self.lexer.clone();
+        let equals = lexer.next()?;
+        let arrow = lexer.next()?;
+        if !matches!(equals.kind, TokenKind::Punct(b'='))
+            || !matches!(arrow.kind, TokenKind::Punct(b'>'))
+            || arrow.at != equals.at + 1
+        {
+            return Ok(None);
+        }
+        let argument = Name {
+            text,
+            at: self.current.at,
+        };
+        for _ in 0..3 {
+            self.advance()?;
+        }
+        Ok(Some(argument))
     }
 
     /// `CALL ... YIELD n, score RETURN n.name, score` (fgdb-luq0b): the CALL

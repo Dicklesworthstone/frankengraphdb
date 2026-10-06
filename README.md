@@ -78,20 +78,19 @@ RETURN node.name, score ORDER BY score DESC LIMIT 10;
 -- Standing query: a live changefeed maintained incrementally by Ripple
 SUBSCRIBE TO MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.born < 1800;
 
--- GraphRAG retrieval in one planner-fused operator (ANN + BM25 + graph expansion)
+-- GraphRAG retrieval in one fused operator (ANN + BM25 + graph expansion, exact RRF)
 CALL hybrid.search(
-  text  => 'computing pioneers',
-  vector => $query_embedding,
-  seeds  => [ (:Person {name: 'Ada'}) ],
-  expand_pattern => '-[:KNOWS]->{1,2}',
-  k => 20, fusion => RRF
-) YIELD node, score RETURN node.name, score;
+  text   => 'computing pioneers',  text_property => 'bio',
+  vector => $query_embedding,      vector_properties => ['e0', 'e1', 'e2'],
+  seeds  => $ada, relation => 'KNOWS', max_hops => 2,
+  k => 20, fusion => 'RRF'
+) YIELD node, score RETURN node.name, score ORDER BY score DESC;
 
 -- Every result is auditable: get its plan certificate
 EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 ```
 
-> **Target state.** Checked 2026-09-28, and again 2026-10-05, by running each statement through the `fgdb` CLI on a fresh database: 5 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)` and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), naming a graph in `CALL` (fgdb-luq0b), and `CALL hybrid.search` (no `hybrid` procedure namespace exists).
+> **Target state.** Checked 2026-09-28, and again 2026-10-05, by running each statement through the `fgdb` CLI on a fresh database: 6 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)`, `CALL hybrid.search` (named arguments; the corpus is the projection the arguments name, built per call at the read's snapshot, and `$ada` is a list of seed vertices) and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), and naming a graph in `CALL` (fgdb-luq0b).
 
 ---
 
@@ -238,6 +237,12 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
 # Beacon retrieval: BM25 text, exact/ANN vector, or exact-RRF hybrid over one sequence
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
   --text "graph memory" --text-property title --vector 0.5 --vector-property x --k 5
+
+# ...or the same retrieval inside GQL, composed with the rest of the statement
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
+  "CALL hybrid.search(text => 'graph memory', text_property => 'title', vector => [0.5],
+     vector_properties => ['x'], k => 5) YIELD node, score
+   RETURN node.title, score ORDER BY score DESC"
 
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert

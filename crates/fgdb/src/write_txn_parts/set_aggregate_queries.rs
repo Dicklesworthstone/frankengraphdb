@@ -67,6 +67,16 @@ mod set_aggregate_queries {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
                     },
                     |call, arguments, remaining| {
+                        if crate::query::is_hybrid(call) {
+                            return crate::query::hybrid_procedure(
+                                &self.snapshot,
+                                as_of,
+                                call,
+                                arguments,
+                                remaining,
+                                cx,
+                            );
+                        }
                         crate::query::fnx_procedure(
                             call,
                             arguments,
@@ -114,6 +124,16 @@ mod set_aggregate_queries {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
                     },
                     |call, arguments, remaining| {
+                        if crate::query::is_hybrid(call) {
+                            return crate::query::hybrid_procedure(
+                                &self.snapshot,
+                                as_of,
+                                call,
+                                arguments,
+                                remaining,
+                                cx,
+                            );
+                        }
                         crate::query::fnx_procedure(
                             call,
                             arguments,

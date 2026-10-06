@@ -146,7 +146,7 @@ Milestone beads closed: `fgdb-w4-g1-txn-core-qpmg` (W4/G1 transaction core; *reo
 - `fgdb-prism` — snapshot projections + sealed-view FNX kernels including Dijkstra;
 - `fgdb-repl` — bonded replica catch-up;
 - `fgdb-warden` — macaroon issuance/attenuation;
-- `fgdb-beacon` — memory-resident HNSW/BM25/hybrid index.
+- `fgdb-beacon` — memory-resident HNSW/BM25/hybrid index. Reachable from GQL as `CALL hybrid.search(name => value, ...) YIELD node, score, ...` (text, vector and graph lanes fused by exact RRF; schema-name arguments resolve at prepare time; privileged and capability-authorized hosts, so `fgdbd` serves it). Built per call at the read's snapshot: no durable index definition yet.
 
 Topology: `g0_topology_e2e` is green and `topology_registry_validates_clean` passes as of 2026-10-05, with all seven once-contested crates registered; bead `fgdb-topology-seven-crates-9n8ao` is still open and should be reconciled against that. The checker index grew from 99 rows (57 live) at the 2026-09-07 census to 120 rows (74 live: 16 script, 11 binary, 47 cargo-test) by 2026-09-22.
 

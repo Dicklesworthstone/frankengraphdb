@@ -30,6 +30,8 @@ pub use authorized::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
     AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
 };
+pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
+pub(crate) use beacon::procedure::{is_hybrid, privileged as hybrid_procedure};
 pub use beacon::{PinnedIndex, RefreshReport, ResidentIndex, ResidentIndexError};
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};

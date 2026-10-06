@@ -196,6 +196,16 @@ impl<V: Vfs + Clone> Database<V> {
                     })
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_hybrid(call) {
+                        return crate::query::hybrid_procedure(
+                            &self.snapshot,
+                            as_of,
+                            call,
+                            arguments,
+                            remaining,
+                            cx,
+                        );
+                    }
                     crate::query::fnx_procedure(
                         call,
                         arguments,
@@ -251,6 +261,16 @@ impl EmbeddedReadView {
                     })
                 },
                 |call, arguments, remaining| {
+                    if crate::query::is_hybrid(call) {
+                        return crate::query::hybrid_procedure(
+                            &self.snapshot,
+                            as_of,
+                            call,
+                            arguments,
+                            remaining,
+                            cx,
+                        );
+                    }
                     crate::query::fnx_procedure(
                         call,
                         arguments,

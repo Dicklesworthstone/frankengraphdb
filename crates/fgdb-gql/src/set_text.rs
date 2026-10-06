@@ -439,17 +439,24 @@ impl ReadStageTemplate {
                 namespace,
                 name,
                 arguments,
+                names,
                 outputs,
                 vertices,
                 ..
             } => {
-                bytes.push(5);
+                // A named call has its own tag, so every positional call keeps
+                // its exact template bytes.
+                bytes.push(if names.is_empty() { 5 } else { 6 });
                 for text in [namespace, name] {
                     bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(text.as_bytes());
                 }
                 bytes.extend_from_slice(&(arguments.len() as u64).to_be_bytes());
-                for argument in arguments {
+                for (index, argument) in arguments.iter().enumerate() {
+                    if let Some(name) = names.get(index) {
+                        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(name.as_bytes());
+                    }
                     argument.append_template_transcript(bytes);
                 }
                 bytes.extend_from_slice(&(outputs.len() as u64).to_be_bytes());
@@ -636,6 +643,11 @@ pub(crate) enum ReadStageTemplate {
         namespace: String,
         name: String,
         arguments: Vec<ReadValueTemplate>,
+        /// One name per argument when the call names them (`k => 10`);
+        /// empty for a positional call. A call never mixes the two.
+        names: Vec<String>,
+        /// Byte offset of each argument's value, for binding refusals.
+        offsets: Vec<usize>,
         /// (procedure output, column alias), in YIELD order.
         outputs: Vec<(String, String)>,
         /// YIELD positions the statement matches as vertices (`MATCH (n)` on

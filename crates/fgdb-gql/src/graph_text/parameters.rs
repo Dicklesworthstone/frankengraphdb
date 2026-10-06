@@ -3,7 +3,10 @@
 //! from a database sample, parameter spelling, value, or text substitution.
 
 use super::*;
-use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate};
+use crate::set_text::{
+    BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+};
+use fgdb_types::CanonicalScalar;
 
 impl PreparedGraphText {
     /// Prepare with explicit types for selected argument names (without `$`).
@@ -181,9 +184,12 @@ impl UnresolvedGraphText<'_> {
     }
 
     pub(crate) fn resolve(
-        self,
+        mut self,
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<BoundSetTextInput, GraphPatternTextError> {
+        for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
+            resolve_call_symbols(stage, &mut resolve)?;
+        }
         let quantifier = if self.syntax.distinct {
             crate::GraphSetQuantifier::Distinct
         } else {
@@ -367,6 +373,103 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
+}
+
+/// The named procedure arguments whose values are schema names: text
+/// literals (or a list of them) that resolve through the catalog at prepare
+/// time, exactly as a pattern's labels do, so the host receives identities
+/// and a prepared call never re-resolves. Every other argument is a value.
+#[must_use]
+pub(crate) fn symbol_argument(
+    namespace: &str,
+    name: &str,
+    argument: &str,
+) -> Option<GraphSymbolKind> {
+    match (namespace, name, argument) {
+        ("hybrid", "search", "text_property" | "vector_properties") => {
+            Some(GraphSymbolKind::Property)
+        }
+        ("hybrid", "search", "label") => Some(GraphSymbolKind::Label),
+        ("hybrid", "search", "relation") => Some(GraphSymbolKind::Relation),
+        _ => None,
+    }
+}
+
+/// Replace each schema-name argument of a CALL stage by the integer
+/// identity its name resolves to. A miss, a symbol of another kind, or a
+/// value that is not a text literal refuses at that argument.
+fn resolve_call_symbols(
+    stage: &mut ReadStageTemplate,
+    resolve: &mut impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+) -> Result<(), GraphPatternTextError> {
+    let ReadStageTemplate::Call {
+        namespace,
+        name,
+        arguments,
+        names,
+        offsets,
+        ..
+    } = stage
+    else {
+        return Ok(());
+    };
+    for ((argument, value), &at) in names.iter().zip(arguments.iter_mut()).zip(offsets.iter()) {
+        let Some(kind) = symbol_argument(namespace, name, argument) else {
+            continue;
+        };
+        let mut one = |value: &mut ReadValueTemplate| {
+            let ReadValueTemplate::Literal(literal) = value else {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("a text literal naming a schema symbol"),
+                ));
+            };
+            let CanonicalScalar::Text(text) = literal.value() else {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("a text literal naming a schema symbol"),
+                ));
+            };
+            let symbol = resolve(kind, text.as_str())
+                .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+            let id = match symbol {
+                GraphSymbol::Label(id) if kind == GraphSymbolKind::Label => id.0,
+                GraphSymbol::Relation(id) if kind == GraphSymbolKind::Relation => id.0,
+                GraphSymbol::Property(id) if kind == GraphSymbolKind::Property => id.0,
+                found => {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::WrongSymbolKind {
+                            expected: kind,
+                            found: found.kind(),
+                        },
+                    ));
+                }
+            };
+            let id = i64::try_from(id)
+                .ok()
+                .and_then(|id| crate::GqlScalarParameter::new(CanonicalScalar::Int(id)).ok())
+                .ok_or_else(|| {
+                    error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a symbol identity in the Int64 domain",
+                        ),
+                    )
+                })?;
+            *value = ReadValueTemplate::Literal(id);
+            Ok(())
+        };
+        match value {
+            ReadValueTemplate::List(items) => {
+                for item in items {
+                    one(item)?;
+                }
+            }
+            value => one(value)?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

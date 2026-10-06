@@ -193,7 +193,11 @@ fn round_integral(
                 half_order.is_gt() || (half_order.is_eq() && !number.negative)
             }
         };
-    pack(number.negative, u128::from(whole) + u128::from(increment), 0)
+    pack(
+        number.negative,
+        u128::from(whole) + u128::from(increment),
+        0,
+    )
 }
 
 impl CanonicalF64 {
@@ -384,7 +388,11 @@ mod tests {
             assert_eq!(bits(SIGN | raw).checked_ceil(), Ok(f(0.0)));
             assert_eq!(bits(SIGN | raw).checked_round(), Ok(f(0.0)));
         }
-        for raw in [0x4330_0000_0000_0001, 0x43e0_0000_0000_0000, 0x7fef_ffff_ffff_ffff] {
+        for raw in [
+            0x4330_0000_0000_0001,
+            0x43e0_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+        ] {
             for sign in [0, SIGN] {
                 let number = bits(sign | raw);
                 assert_eq!(number.checked_floor(), Ok(number));
@@ -393,9 +401,18 @@ mod tests {
             }
         }
         for nonfinite in [f(f64::INFINITY), f(f64::NEG_INFINITY), f(f64::NAN)] {
-            assert_eq!(nonfinite.checked_floor(), Err(FloatArithmeticError::NonFinite));
-            assert_eq!(nonfinite.checked_ceil(), Err(FloatArithmeticError::NonFinite));
-            assert_eq!(nonfinite.checked_round(), Err(FloatArithmeticError::NonFinite));
+            assert_eq!(
+                nonfinite.checked_floor(),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                nonfinite.checked_ceil(),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                nonfinite.checked_round(),
+                Err(FloatArithmeticError::NonFinite)
+            );
         }
     }
 
@@ -412,10 +429,18 @@ mod tests {
             let input = f64::from_bits(state);
             let lower = input.floor();
             let upper = input.ceil();
-            let nearest = if input - lower < upper - input { lower } else { upper };
+            let nearest = if input - lower < upper - input {
+                lower
+            } else {
+                upper
+            };
             assert_eq!(f(input).checked_floor(), Ok(f(lower)), "bits={state:016x}");
             assert_eq!(f(input).checked_ceil(), Ok(f(upper)), "bits={state:016x}");
-            assert_eq!(f(input).checked_round(), Ok(f(nearest)), "bits={state:016x}");
+            assert_eq!(
+                f(input).checked_round(),
+                Ok(f(nearest)),
+                "bits={state:016x}"
+            );
         }
     }
 

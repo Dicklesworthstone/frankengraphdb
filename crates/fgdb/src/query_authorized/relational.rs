@@ -92,6 +92,11 @@ fn procedure_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     remaining: GqlQueryPolicy,
 ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
+    if crate::query::is_hybrid(call) {
+        return super::beacon::hybrid_at(
+            snapshot, at, call, arguments, scope, execution, remaining,
+        );
+    }
     let spec = crate::query::bind_procedure(call, arguments)?;
     let options = crate::query::procedure_options(&spec, at, remaining);
     super::analytics::preflight(&spec, options.projection.directedness)
