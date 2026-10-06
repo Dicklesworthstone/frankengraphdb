@@ -14,6 +14,7 @@ pub mod bytes;
 pub mod context;
 pub mod decimal;
 pub mod embedded_txn;
+pub mod float_arithmetic;
 pub mod ids;
 pub mod refs;
 pub mod scalar;
@@ -35,6 +36,7 @@ pub use decimal::{
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
 pub use embedded_txn::{EmbeddedTxnCompletion, EmbeddedTxnState};
+pub use float_arithmetic::FloatArithmeticError;
 pub use ids::{
     BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
     IssuerId, KeyEpoch, LogicalCommandSeq, ObjectId, PrincipalId, RevocationIndex,
