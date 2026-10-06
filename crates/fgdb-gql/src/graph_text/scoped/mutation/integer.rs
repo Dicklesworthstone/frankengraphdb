@@ -299,6 +299,19 @@ impl<'a> Parser<'a> {
                             noninteger_parameter.get_or_insert(*at);
                             GraphIntegerOp::Truth(Some(false))
                         }
+                        GqlParameterType::Scalar(CanonicalScalarKind::Float) => {
+                            noninteger_parameter.get_or_insert(*at);
+                            // Keep the declared domain: an integer witness would
+                            // admit integer-only uses and change numeric lowering.
+                            // This value is never executed, even in a denominator.
+                            GraphIntegerOp::Scalar(
+                                crate::GqlScalarParameter::new(CanonicalScalar::Float(
+                                    fgdb_types::CanonicalF64::new(0.0),
+                                ))
+                                .expect("zero float is an admitted scalar")
+                                .predicate(IntegerComparison::Equal),
+                            )
+                        }
                         GqlParameterType::Scalar(CanonicalScalarKind::Text) => {
                             noninteger_parameter.get_or_insert(*at);
                             GraphIntegerOp::Scalar(
@@ -885,5 +898,153 @@ mod predicate_boundary_tests {
                 Some(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Or))
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod float_parameter_tests {
+    use super::*;
+    use crate::algebra::GraphValue;
+    use crate::{GraphIntegerErrorKind, GraphIntegerEvaluationError};
+    use fgdb_types::CanonicalF64;
+
+    fn float(value: f64) -> CanonicalScalar {
+        CanonicalScalar::Float(CanonicalF64::new(value))
+    }
+
+    fn template(text: &str, kind: CanonicalScalarKind) -> (Vec<MutationIntegerTemplateOp>, usize) {
+        let mut parser = Parser::new_with_parameter_types(
+            text,
+            &[("delta", GqlParameterType::Scalar(kind))],
+        )
+        .unwrap();
+        let columns = [(Name { text: "x", at: 0 }, crate::GraphSetColumnType::Scalar)];
+        let operand = parser.row_expression(&columns).unwrap();
+        assert!(matches!(parser.current.kind, TokenKind::End));
+        let Operand::Integer { program, at } = operand else {
+            panic!("an expression must retain its native parameter holes")
+        };
+        (program, at)
+    }
+
+    fn evaluate(
+        template: &(Vec<MutationIntegerTemplateOp>, usize),
+        parameter: CanonicalScalar,
+        property: CanonicalScalar,
+    ) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+        let value = GqlParameterValue::Scalar(crate::GqlScalarParameter::new(parameter).unwrap());
+        bind_integer(&template.0, &[value], template.1)
+            .unwrap()
+            .evaluate_scalar_with_control(&[GraphValue::Scalar(property)], &mut |_| Ok::<_, ()>(()))
+            .map_err(|error| match error {
+                GraphIntegerEvaluationError::Value(error) => error.kind,
+                GraphIntegerEvaluationError::Control(()) => unreachable!(),
+            })
+    }
+
+    #[test]
+    fn declared_float_parameters_reach_every_numeric_operator() {
+        for (text, expected) in [
+            ("x + $delta", 7.5),
+            ("x - $delta", 3.5),
+            ("x * $delta", 11.0),
+            ("x / $delta", 2.75),
+            ("x % $delta", 1.5),
+            ("ABS(-$delta)", 2.0),
+            ("+$delta", 2.0),
+        ] {
+            let prepared = template(text, CanonicalScalarKind::Float);
+            assert_eq!(evaluate(&prepared, float(2.0), float(5.5)), Ok(float(expected)), "{text}");
+        }
+        let prepared = template("x + $delta", CanonicalScalarKind::Float);
+        for delta in [0.5, 1.25, -2.0] {
+            assert_eq!(
+                evaluate(&prepared, float(delta), CanonicalScalar::Int(2)),
+                Ok(float(2.0 + delta)),
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_parameters_and_lazy_branches_do_not_execute_type_witnesses() {
+        for (text, delta, expected) in [
+            ("x / $delta", float(2.0), float(2.75)),
+            ("x / $delta", CanonicalScalar::Null, CanonicalScalar::Null),
+            ("COALESCE($delta, 2.0) * 2", CanonicalScalar::Null, float(4.0)),
+            ("COALESCE($delta, 1.0 / 0.0)", float(1.25), float(1.25)),
+            ("CASE WHEN x > 0 THEN $delta ELSE 1.0 / 0.0 END", float(3.5), float(3.5)),
+            ("NULLIF($delta, 2.0)", float(2.0), CanonicalScalar::Null),
+        ] {
+            let prepared = template(text, CanonicalScalarKind::Float);
+            assert_eq!(evaluate(&prepared, delta, float(5.5)), Ok(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn float_parameters_do_not_weaken_text_boolean_or_integer_only_admission() {
+        for text in [
+            "UPPER($delta)",
+            "$delta AND TRUE",
+            "SUBSTRING('abc', $delta, 1)",
+            "SUBSTRING('abc', 1, $delta)",
+        ] {
+            let mut parser = Parser::new_with_parameter_types(
+                text,
+                &[("delta", GqlParameterType::Scalar(CanonicalScalarKind::Float))],
+            )
+            .unwrap();
+            let error = parser.row_expression(&[]).err().expect("invalid operand kind");
+            assert_eq!(error.offset, text.find('$').unwrap(), "{text}");
+            assert!(matches!(error.kind, GraphMutationTextErrorKind::IntegerOperand));
+        }
+        for kind in [CanonicalScalarKind::Bool, CanonicalScalarKind::Text] {
+            let text = "$delta * 2";
+            let mut parser = Parser::new_with_parameter_types(
+                text,
+                &[("delta", GqlParameterType::Scalar(kind))],
+            )
+            .unwrap();
+            assert!(parser.row_expression(&[]).is_err());
+        }
+    }
+
+    #[test]
+    fn float_parameter_failures_remain_typed_arithmetic_exceptions() {
+        for (text, delta, expected) in [
+            ("x / $delta", 0.0, GraphIntegerErrorKind::DivisionByZero),
+            ("$delta * 2.0", f64::MAX, GraphIntegerErrorKind::Overflow),
+            ("$delta + 1.0", f64::INFINITY, GraphIntegerErrorKind::Overflow),
+            ("$delta + 1.0", f64::NAN, GraphIntegerErrorKind::Overflow),
+        ] {
+            let prepared = template(text, CanonicalScalarKind::Float);
+            assert_eq!(evaluate(&prepared, float(delta), float(5.5)), Err(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn integer_parameter_division_and_overflow_are_unchanged() {
+        let prepared = template("$delta / 2", CanonicalScalarKind::Int);
+        assert_eq!(
+            evaluate(&prepared, CanonicalScalar::Int(5), CanonicalScalar::Null),
+            Ok(CanonicalScalar::Int(2)),
+        );
+        let prepared = template("$delta + 1", CanonicalScalarKind::Int);
+        assert_eq!(
+            evaluate(&prepared, CanonicalScalar::Int(i64::MAX), CanonicalScalar::Null),
+            Err(GraphIntegerErrorKind::Overflow),
+        );
+    }
+
+    #[test]
+    fn exact_mixed_numeric_comparison_is_not_rounded_by_parameter_admission() {
+        let prepared = template("x = $delta", CanonicalScalarKind::Float);
+        assert_eq!(
+            evaluate(&prepared, float(9_007_199_254_740_992.0), CanonicalScalar::Int(9_007_199_254_740_993)),
+            Ok(CanonicalScalar::Bool(false)),
+        );
+        assert_eq!(
+            evaluate(&prepared, float(9_007_199_254_740_992.0), CanonicalScalar::Int(9_007_199_254_740_992)),
+            Ok(CanonicalScalar::Bool(true)),
+        );
     }
 }
