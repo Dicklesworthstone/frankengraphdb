@@ -111,8 +111,12 @@ fn native_pipeline_matches_typed_ir_and_retains_written_result_order() {
         .with_order_by(&[GraphValueOrder::ascending(0)])
         .unwrap()
         .with_page(1, Some(3));
-    let plus = GraphIntegerExpression::prepare(&[
-        GraphIntegerOp::Column(1),
+    // The native pipeline reads `n.p` as a scalar column and prepares `n.p+1`
+    // as a scalar expression. Since 31408b2c a dynamic column under
+    // arithmetic stays a scalar load (it may hold a Float), so the typed mirror
+    // spells it the same way.
+    let plus = GraphIntegerExpression::prepare_scalar(&[
+        GraphIntegerOp::ScalarColumn(1),
         GraphIntegerOp::Literal(Some(1)),
         GraphIntegerOp::Binary(GraphIntegerBinary::Add),
     ])
