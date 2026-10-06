@@ -49,6 +49,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | RESULT_ACK / RESULT_RELEASE | 0x0016 / 0x0017 | client |
 | SNAPSHOT_RESULT_CHUNK / SNAPSHOT_RESULT_END | 0x0018 / 0x0019 | server |
 | WINDOW_UPDATE | 0x001a | client |
+| SUBSCRIPTION_BATCH | 0x001b | server |
 | PING / PONG | 0x0020 / 0x0021 | client / server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
@@ -153,9 +154,10 @@ redacted from `Debug`.
 | AUTH_OK | `session_transcript [32]`, `auth_generation u64` |
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
-| EXECUTE | `mode u8` (0 read, 1 write), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
+| SUBSCRIPTION_BATCH | `frontier u64`, `snapshot bool`, `last bool`, `columns: none \| [text]` (first frame only), `entries [(weight i128 ≠ 0, [value])]` |
 | ERROR | `code u16`, `message text` (structural diagnostics only) |
 | WINDOW_UPDATE | `sequence u64`, `bytes u64`, `rows u64` |
 | PING / PONG | `nonce u64` |
@@ -225,6 +227,30 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   retained, so nothing is detached); a committed write reports
   `SemanticTerminalDurable`.
 
+- **Subscriptions.** EXECUTE with mode `subscribe` and `SUBSCRIBE TO <read>`
+  registers the engine's own maintained query (`Database::subscribe_native`)
+  on a server-minted subscription child stream. The first batch is a
+  replacement baseline (weights are multiplicities); every later batch is the
+  exact bag delta from the previous batch's frontier, as signed (weight, row)
+  entries. After each committed write the server wakes caught-up
+  subscriptions, which poll under the read lock; a batch is acknowledged to
+  the engine only after its last frame is written, and the next delta starts
+  at that acknowledged frontier, so a slow subscriber receives coalesced
+  deltas, never a backlog or a gap (an unretained delta is replaced by a new
+  baseline). Large batches span frames sized to the stream's credit; only the
+  final frame sets `last`. An empty delta reports that the frontier moved and
+  nothing the query returns changed. QUERY_CANCEL ends the stream with
+  SNAPSHOT_RESULT_END at the last delivered frontier (or, if it lands while a
+  batch waits for credit, a stream-scoped `cancelled` ERROR); DRAIN and
+  shutdown end it the same way. The capability is rechecked before every
+  batch, so expiry or issuer retirement ends a subscription. Because
+  maintained queries are not masked by capability scope yet, a subscription
+  requires a read capability whose scope hides nothing (refused
+  `permission_denied` otherwise), and because a registration lives as long as
+  the open database, each served database admits a bounded number of
+  registrations per server lifetime (default 64; refused `budget` beyond).
+  `fgdb remote subscribe` streams `change` and `progress` records; the HTTP
+  adapter refuses subscriptions (they need a flow-controlled connection).
 - **HTTP/1.1 JSON adapter.** `fgdbd serve --http-listen` adds the same
   autocommit statements over plain HTTP: `POST /v1/databases/<name>/query`
   or `/write` with `Authorization: Bearer <hex token>` and a body
@@ -249,8 +275,8 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
 AUTH_REFRESH, explicit multi-statement transactions with ownership and
-reattachment, subscriptions, TLS, and the HTTP/2, gRPC, WebSocket and Bolt
-adapters. Because results are ephemeral, a disconnect can lose undelivered
+reattachment, durable subscriptions with resume across reconnects, TLS, and
+the HTTP/2, gRPC, WebSocket and Bolt adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
 
 Witnesses: `cargo test -p fgdb-protocol --all-features` (body round trips,
@@ -262,14 +288,18 @@ database: the handshake, a multi-relation CREATE, a 20-map UNWIND batch, a
 refusals that leave the connection usable, a read-only token's write refused
 `permission_denied`, a Company-only token counting zero vertices, a foreign
 issuer's token refused `unauthenticated`, drain delivering GOODBYE,
-committed writes surviving a server restart, and the HTTP adapter's health,
-parameterized write and read, every refusal status and the Host allow-list).
+committed writes surviving a server restart, the HTTP adapter's health,
+parameterized write and read, every refusal status and the Host allow-list,
+and a subscription receiving its baseline, an insert delta, a ten-row batch
+through a four-row window, a progress-only delta, an exact retraction, its
+END on cancel, and a scoped token's refusal).
 
 ## Remaining integration
 
 Authoritative frame-catalog generation, protected transport (TLS), durable
 result machines with ACK/release/resume, PREPARE, explicit transactions with
-ownership and reattachment, SnapshotQuery proofs, subscriptions, the surface
+ownership and reattachment, SnapshotQuery proofs, durable and capability-masked
+subscriptions, the surface
 adapters, multi-tenant admission/QoS, and the native Python packaging boundary
 remain separate implementation work. Do not expose raw embedded queries
 through this codec while bypassing the authorized session owners.

@@ -6,7 +6,8 @@
 //! credit, the connection keeps reading frames, so WINDOW_UPDATE,
 //! QUERY_CANCEL, PING and DRAIN are never starved by the data they control.
 
-use crate::execute::{Answer, read, write};
+use crate::commits::CommitWatcher;
+use crate::execute::{Answer, poll, read, subscribe, write};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
 use asupersync::Cx;
@@ -17,6 +18,7 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, Body, Credential, Empty, ErrorBody, ErrorCode, Execute, ExecuteMode, Hello,
     HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
+    WireValue,
 };
 use fgdb_protocol::transport::{FrameReader, FrameWriter};
 use fgdb_protocol::{
@@ -36,6 +38,14 @@ const RECENTLY_FINISHED: usize = 64;
 const CHUNK_OVERHEAD: usize = 1 + 4;
 
 enum Inbound {
+    Frame(Box<Frame>),
+    Closed,
+    Shutdown,
+}
+
+/// What woke a caught-up subscription.
+enum Idle {
+    Commit,
     Frame(Box<Frame>),
     Closed,
     Shutdown,
@@ -522,7 +532,12 @@ impl Lane {
                 break candidate;
             }
         };
-        let Ok(generation) = self.conn.admit_child(stream, ChildKind::Query) else {
+        let kind = if statement.mode == ExecuteMode::Subscribe {
+            ChildKind::Subscription
+        } else {
+            ChildKind::Query
+        };
+        let Ok(generation) = self.conn.admit_child(stream, kind) else {
             let busy = ErrorBody {
                 code: ErrorCode::Busy,
                 message: "a statement is already in flight on this connection".into(),
@@ -543,10 +558,19 @@ impl Lane {
                 Err(Stop::Transport)
             };
         };
-        let mode = statement.mode;
-        let answer = match mode {
+        if statement.mode == ExecuteMode::Subscribe {
+            let delivered = self
+                .subscription(cx, waiter, db, token, request, stream, binding, &statement)
+                .await;
+            let _ = self
+                .conn
+                .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
+            self.finish(stream);
+            return delivered;
+        }
+        let answer = match statement.mode {
             ExecuteMode::Read => read(cx, db, token, &statement).await,
-            ExecuteMode::Write => write(cx, db, token, &statement).await,
+            _ => write(cx, db, token, &statement).await,
         };
         let committed = matches!(
             answer,
@@ -583,11 +607,413 @@ impl Lane {
             ChildTerminus::EphemeralCompleted
         };
         let _ = self.conn.child_terminal(stream, generation, terminus);
+        self.finish(stream);
+        delivered
+    }
+
+    fn finish(&mut self, stream: StreamId) {
         if self.finished.len() == RECENTLY_FINISHED {
             self.finished.pop_front();
         }
         self.finished.push_back(stream);
-        delivered
+    }
+
+    /// Register a subscription and push its baseline, then one delta batch
+    /// per change, until the client cancels (answered with END at the last
+    /// delivered frontier), drains, or the capability lapses. Each batch is
+    /// acknowledged to the engine only after its last frame is written, and
+    /// the next delta always starts at the last acknowledged frontier, so a
+    /// slow subscriber receives coalesced deltas rather than a backlog.
+    #[allow(clippy::too_many_arguments)]
+    async fn subscription(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        db: &Served,
+        token: &CapabilityToken,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        statement: &Execute,
+    ) -> Result<(), Stop> {
+        let mut subscription = match subscribe(cx, db, token, statement).await {
+            Ok(subscription) => subscription,
+            Err(refusal) => {
+                return self
+                    .refuse(cx, request, stream, binding, refusal.code, &refusal.message)
+                    .await;
+            }
+        };
+        let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
+            .map_err(|_| Stop::Transport)?;
+        let mut columns = Some(core::mem::take(&mut subscription.columns));
+        let mut watcher = db.commits.watcher();
+        let mut delivered = 0u64;
+        let result = loop {
+            let batch = match poll(cx, db, token, &mut subscription).await {
+                Ok(batch) => batch,
+                Err(refusal) => {
+                    break self
+                        .refuse(cx, request, stream, binding, refusal.code, &refusal.message)
+                        .await;
+                }
+            };
+            if let Some(batch) = batch {
+                let mut entries = Vec::with_capacity(batch.rows().len());
+                for (row, weight) in batch.rows().iter() {
+                    let Some(weight) = weight.to_i128() else {
+                        break;
+                    };
+                    entries.push((weight, row.iter().map(crate::convert::cell).collect()));
+                }
+                if entries.len() != batch.rows().len() {
+                    break self
+                        .refuse(
+                            cx,
+                            request,
+                            stream,
+                            binding,
+                            ErrorCode::Execution,
+                            "a change weight exceeds the wire range",
+                        )
+                        .await;
+                }
+                let frontier = batch.frontier().0;
+                if let Err(stop) = self
+                    .send_batch(
+                        cx,
+                        waiter,
+                        &mut window,
+                        request,
+                        stream,
+                        binding,
+                        frontier,
+                        batch.is_snapshot(),
+                        &mut columns,
+                        entries,
+                    )
+                    .await
+                {
+                    break Err(stop);
+                }
+                if subscription.consumer.acknowledge(batch.receipt()).is_err() {
+                    break self
+                        .refuse(
+                            cx,
+                            request,
+                            stream,
+                            binding,
+                            ErrorCode::Execution,
+                            "subscription acknowledgement refused",
+                        )
+                        .await;
+                }
+                delivered = frontier;
+                continue;
+            }
+            match self.idle(cx, waiter, &mut watcher).await {
+                Idle::Commit => {}
+                Idle::Closed => break Err(Stop::Transport),
+                Idle::Shutdown => {
+                    let _ = self
+                        .end(cx, &mut window, request, stream, binding, delivered)
+                        .await;
+                    break Err(Stop::Drain);
+                }
+                Idle::Frame(frame) => {
+                    let header = *frame.header();
+                    match header.kind() {
+                        FrameKind::QueryCancel if header.stream_id() == stream => {
+                            break self
+                                .end(cx, &mut window, request, stream, binding, delivered)
+                                .await;
+                        }
+                        FrameKind::WindowUpdate if header.stream_id() == stream => {
+                            let Ok(update) = WindowUpdate::decode(frame.payload()) else {
+                                break Err(Stop::Transport);
+                            };
+                            let grant = CreditUpdate {
+                                sequence: update.sequence,
+                                bytes: update.bytes,
+                                rows: update.rows,
+                            };
+                            if window.grant(grant).is_err() {
+                                let _ = self
+                                    .refuse(
+                                        cx,
+                                        request,
+                                        stream,
+                                        binding,
+                                        ErrorCode::Protocol,
+                                        "invalid flow-credit update",
+                                    )
+                                    .await;
+                                break Err(Stop::Transport);
+                            }
+                        }
+                        FrameKind::Drain => {
+                            let _ = self
+                                .end(cx, &mut window, request, stream, binding, delivered)
+                                .await;
+                            break Err(Stop::Drain);
+                        }
+                        _ => {
+                            if let Err(stop) = self.interleaved(cx, &frame).await {
+                                break Err(stop);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        subscription.consumer.close();
+        result
+    }
+
+    /// One subscription batch, split across frames sized to the stream's
+    /// credit and the frame limit; only the final frame sets `last`.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_batch(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        window: &mut FlowWindow,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        frontier: u64,
+        snapshot: bool,
+        columns: &mut Option<Vec<String>>,
+        entries: Vec<(i128, Vec<WireValue>)>,
+    ) -> Result<(), Stop> {
+        // frontier, snapshot, last, column presence and the entry count.
+        let framing = binding.header_len() + 8 + 1 + 1 + 1 + 4;
+        let frame_budget = self.send_limits.max_frame_len() - framing;
+        let mut entries = entries.into_iter().peekable();
+        loop {
+            let available = window.available();
+            let byte_room = usize::try_from(available.bytes)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(framing)
+                .min(frame_budget);
+            let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
+            let mut size = columns.as_ref().map_or(0, |names| {
+                4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
+            });
+            if size > frame_budget {
+                return self
+                    .refuse(
+                        cx,
+                        request,
+                        stream,
+                        binding,
+                        ErrorCode::Execution,
+                        "the column list exceeds the negotiated frame limit",
+                    )
+                    .await
+                    .and(Err(Stop::Cancelled));
+            }
+            let mut part = Vec::new();
+            if size <= byte_room {
+                while part.len() < row_room {
+                    let Some((_, row)) = entries.peek() else {
+                        break;
+                    };
+                    let Ok(len) = fgdb_protocol::body::SubscriptionBatch::entry_len(row) else {
+                        return self
+                            .refuse(
+                                cx,
+                                request,
+                                stream,
+                                binding,
+                                ErrorCode::Execution,
+                                "a change value exceeds the wire bounds",
+                            )
+                            .await
+                            .and(Err(Stop::Cancelled));
+                    };
+                    if size + len > frame_budget && part.is_empty() {
+                        return self
+                            .refuse(
+                                cx,
+                                request,
+                                stream,
+                                binding,
+                                ErrorCode::Execution,
+                                "a change row exceeds the negotiated frame limit",
+                            )
+                            .await
+                            .and(Err(Stop::Cancelled));
+                    }
+                    if size + len > byte_room {
+                        break;
+                    }
+                    size += len;
+                    part.extend(entries.next());
+                }
+            }
+            let last = entries.peek().is_none();
+            // A frame that carries nothing new (no columns, no entries, more to
+            // come) waits for credit instead of spending it.
+            if size > byte_room || (part.is_empty() && columns.is_none() && !last) {
+                self.await_credit(cx, waiter, window, stream, request, binding)
+                    .await?;
+                continue;
+            }
+            let count = part.len() as u64;
+            let body = fgdb_protocol::body::SubscriptionBatch {
+                frontier,
+                snapshot,
+                last,
+                columns: columns.take(),
+                entries: part,
+            };
+            let payload = body.encode().map_err(|_| Stop::Transport)?;
+            let frame = Frame::new(
+                FrameKind::SubscriptionBatch,
+                request,
+                stream,
+                binding,
+                payload,
+                self.send_limits,
+            )
+            .map_err(|_| Stop::Transport)?;
+            self.credited(cx, waiter, window, stream, &frame, count)
+                .await?;
+            if last {
+                return Ok(());
+            }
+        }
+    }
+
+    /// END a subscription at the last frontier it delivered.
+    async fn end(
+        &mut self,
+        cx: &Cx,
+        window: &mut FlowWindow,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        delivered: u64,
+    ) -> Result<(), Stop> {
+        let end = ResultEnd {
+            outcome: Outcome::Rows { seq: delivered },
+            rows: 0,
+        };
+        let payload = end.encode().map_err(|_| Stop::Transport)?;
+        let frame = Frame::new(
+            FrameKind::SnapshotResultEnd,
+            request,
+            stream,
+            binding,
+            payload,
+            self.send_limits,
+        )
+        .map_err(|_| Stop::Transport)?;
+        // END is a control-sized frame; it is not withheld for credit here,
+        // because a cancelled stream may have none left and must still end.
+        let _ = window;
+        if self.send_frame(cx, &frame).await {
+            Ok(())
+        } else {
+            Err(Stop::Transport)
+        }
+    }
+
+    /// Wait while a subscription is caught up: for a commit, a client frame,
+    /// the connection closing, or the drain signal.
+    async fn idle(&mut self, cx: &Cx, waiter: &Waiter, watcher: &mut CommitWatcher<'_>) -> Idle {
+        let Self {
+            reader,
+            conn,
+            finished,
+            ..
+        } = self;
+        poll_fn(|task| {
+            if waiter.poll_triggered(task) {
+                return Poll::Ready(Idle::Shutdown);
+            }
+            if watcher.poll_changed(task) {
+                return Poll::Ready(Idle::Commit);
+            }
+            reader
+                .poll_receive(cx, task, |header| validate(conn, finished, header))
+                .map(|received| match received {
+                    Ok(Some(frame)) => Idle::Frame(Box::new(frame)),
+                    Ok(None) | Err(_) => Idle::Closed,
+                })
+        })
+        .await
+    }
+
+    /// Answer a frame that arrives while a stream is open but does not
+    /// address it: PING is answered, a second EXECUTE is refused as busy,
+    /// late credit or cancel for a finished stream is ignored, and anything
+    /// else ends the connection.
+    async fn interleaved(&mut self, cx: &Cx, frame: &Frame) -> Result<(), Stop> {
+        let header = *frame.header();
+        let current = self.conn.binding();
+        match header.kind() {
+            FrameKind::Ping => {
+                let Ok(ping) = Ping::decode(frame.payload()) else {
+                    return Err(Stop::Transport);
+                };
+                if self
+                    .send(
+                        cx,
+                        FrameKind::Pong,
+                        header.request_id(),
+                        StreamId::CONTROL,
+                        current,
+                        &ping,
+                    )
+                    .await
+                {
+                    Ok(())
+                } else {
+                    Err(Stop::Transport)
+                }
+            }
+            FrameKind::Execute => {
+                let busy = ErrorBody {
+                    code: ErrorCode::Busy,
+                    message: "a statement is already in flight on this connection".into(),
+                };
+                if self
+                    .send(
+                        cx,
+                        FrameKind::Error,
+                        header.request_id(),
+                        StreamId::CONTROL,
+                        current,
+                        &busy,
+                    )
+                    .await
+                {
+                    Ok(())
+                } else {
+                    Err(Stop::Transport)
+                }
+            }
+            FrameKind::WindowUpdate | FrameKind::QueryCancel => Ok(()),
+            _ => {
+                let refusal = ErrorBody {
+                    code: ErrorCode::Protocol,
+                    message: "frame not legal while a result streams".into(),
+                };
+                let _ = self
+                    .send(
+                        cx,
+                        FrameKind::Error,
+                        header.request_id(),
+                        StreamId::CONTROL,
+                        current,
+                        &refusal,
+                    )
+                    .await;
+                Err(Stop::Transport)
+            }
+        }
     }
 
     /// Send the answer as chunks under the stream's flow credit, then END.

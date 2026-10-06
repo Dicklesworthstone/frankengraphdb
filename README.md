@@ -252,12 +252,16 @@ fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fg
 fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 
+# Live changefeed: a baseline, then one exact delta per commit
+fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
+  subscribe "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
+
 # ...or over HTTP/JSON (add --http-listen 127.0.0.1:7474 to serve)
 curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) RETURN p.name"}' \
   http://127.0.0.1:7474/v1/databases/social/query
 ```
 
-`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, one autocommit GQL read or write per `EXECUTE`, and ephemeral flow-controlled result streams, plus the same statements over an HTTP/1.1 JSON adapter. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve TLS, durable result retention (ACK/release/resume), explicit multi-statement transactions, subscriptions, or the HTTP/2, gRPC, WebSocket and Bolt adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, one autocommit GQL read or write per `EXECUTE`, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the same statements over an HTTP/1.1 JSON adapter. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve TLS, durable result retention (ACK/release/resume), explicit multi-statement transactions, durable or capability-masked subscriptions, or the HTTP/2, gRPC, WebSocket and Bolt adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
 
 > **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the remaining `fgdbd` surfaces above remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
 

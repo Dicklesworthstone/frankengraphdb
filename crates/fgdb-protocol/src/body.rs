@@ -767,6 +767,9 @@ body!(
 pub enum ExecuteMode {
     Read,
     Write,
+    /// `SUBSCRIBE TO <read>`: a baseline, then one delta batch per change,
+    /// pushed as SUBSCRIPTION_BATCH frames until the client cancels.
+    Subscribe,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -790,6 +793,7 @@ body!(
         out.u8(match s.mode {
             ExecuteMode::Read => 0,
             ExecuteMode::Write => 1,
+            ExecuteMode::Subscribe => 2,
         });
         out.text(&s.statement);
         out.len(s.parameters.len());
@@ -804,6 +808,7 @@ body!(
         let mode = match input.u8()? {
             0 => ExecuteMode::Read,
             1 => ExecuteMode::Write,
+            2 => ExecuteMode::Subscribe,
             _ => return Err(BodyError::UnknownTag),
         };
         let statement = input.text(MAX_STATEMENT_BYTES)?;
@@ -897,6 +902,96 @@ body!(
             rows.push(row);
         }
         ResultChunk { columns, rows }
+    }
+);
+
+/// One frame of a subscription's change stream. A batch is a complete
+/// replacement baseline (`snapshot`) or the exact bag delta from the previous
+/// batch's frontier to this one's; a large batch spans several frames, the
+/// last of which sets `last`. Each entry is a row and its signed multiplicity
+/// change (a baseline's weights are the rows' multiplicities). The first frame
+/// of a subscription carries the column names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubscriptionBatch {
+    pub frontier: u64,
+    pub snapshot: bool,
+    pub last: bool,
+    pub columns: Option<Vec<String>>,
+    pub entries: Vec<(i128, Vec<WireValue>)>,
+}
+
+impl SubscriptionBatch {
+    /// The encoded size of one entry, as a chunker needs to fill a frame.
+    pub fn entry_len(row: &[WireValue]) -> Result<usize, BodyError> {
+        Ok(16 + ResultChunk::row_len(row)?)
+    }
+}
+
+body!(
+    SubscriptionBatch,
+    |s, out| {
+        check_len(s.entries.len(), MAX_ROWS_PER_CHUNK)?;
+        out.u64(s.frontier);
+        out.u8(u8::from(s.snapshot));
+        out.u8(u8::from(s.last));
+        match &s.columns {
+            None => out.u8(0),
+            Some(columns) => {
+                check_len(columns.len(), MAX_COLUMNS)?;
+                out.u8(1);
+                out.len(columns.len());
+                for column in columns {
+                    check_len(column.len(), MAX_NAME_BYTES)?;
+                    out.text(column);
+                }
+            }
+        }
+        out.len(s.entries.len());
+        for (weight, row) in &s.entries {
+            check_len(row.len(), MAX_COLUMNS)?;
+            out.i128(*weight);
+            out.len(row.len());
+            for value in row {
+                value.check(0)?;
+                value.put(&mut out);
+            }
+        }
+    },
+    |input| {
+        let frontier = input.u64()?;
+        let snapshot = input.bool()?;
+        let last = input.bool()?;
+        let columns = if input.bool()? {
+            let n = input.count(MAX_COLUMNS, 4)?;
+            let mut columns = Vec::with_capacity(n);
+            for _ in 0..n {
+                columns.push(input.text(MAX_NAME_BYTES)?);
+            }
+            Some(columns)
+        } else {
+            None
+        };
+        let n = input.count(MAX_ROWS_PER_CHUNK, 20)?;
+        let mut entries = Vec::with_capacity(n);
+        for _ in 0..n {
+            let weight = input.i128()?;
+            if weight == 0 {
+                return Err(BodyError::Noncanonical);
+            }
+            let width = input.count(MAX_COLUMNS, 1)?;
+            let mut row = Vec::with_capacity(width);
+            for _ in 0..width {
+                row.push(WireValue::get(&mut input, 0)?);
+            }
+            entries.push((weight, row));
+        }
+        SubscriptionBatch {
+            frontier,
+            snapshot,
+            last,
+            columns,
+            entries,
+        }
     }
 );
 
@@ -1178,7 +1273,7 @@ mod tests {
 
     fn execute() -> Execute {
         Execute {
-            mode: ExecuteMode::Write,
+            mode: ExecuteMode::Subscribe,
             statement: "MATCH (n) RETURN n".into(),
             parameters: vec![("a".into(), sample_value()), ("b".into(), WireValue::Null)],
         }
@@ -1253,6 +1348,20 @@ mod tests {
             assert_eq!(ResultEnd::decode(&bytes).unwrap(), end);
             every_prefix_refuses::<ResultEnd>(&bytes);
         }
+
+        let batch = SubscriptionBatch {
+            frontier: 7,
+            snapshot: false,
+            last: true,
+            columns: Some(vec!["n".into()]),
+            entries: vec![
+                (-2, vec![WireValue::Int(1)]),
+                (i128::MAX, vec![sample_value()]),
+            ],
+        };
+        let bytes = batch.encode().unwrap();
+        assert_eq!(SubscriptionBatch::decode(&bytes).unwrap(), batch);
+        every_prefix_refuses::<SubscriptionBatch>(&bytes);
 
         let error = ErrorBody {
             code: ErrorCode::Conflict,

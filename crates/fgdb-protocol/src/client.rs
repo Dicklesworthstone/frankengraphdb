@@ -10,8 +10,8 @@
 
 use crate::body::{
     Auth, AuthOk, Body, BodyError, Credential, Empty, ErrorBody, ErrorCode, Execute, ExecuteMode,
-    Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
-    WireValue,
+    Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase,
+    SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{FrameReader, FrameWriter, TransportError};
 use crate::{
@@ -73,6 +73,15 @@ pub struct Selected {
     /// The frontier the selection observed.
     pub frontier: u64,
     pub binding: ReadyBinding,
+}
+
+/// One complete subscription batch: a replacement baseline (`snapshot`) or
+/// the exact bag delta up to `frontier`, as (signed weight, row) entries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub frontier: u64,
+    pub snapshot: bool,
+    pub entries: Vec<(i128, Vec<WireValue>)>,
 }
 
 /// A complete statement answer, as [`Client::execute`] collects it.
@@ -309,6 +318,130 @@ impl Client {
         }
     }
 
+    /// Subscribe to `SUBSCRIBE TO <read>`: hand over the columns once, then
+    /// every complete batch (the baseline first) as it arrives. Returning
+    /// `Ok(false)` from `on_change` cancels the subscription; the server then
+    /// ends the stream and this returns the last frontier it delivered.
+    pub async fn subscribe(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        mut parameters: Vec<(String, WireValue)>,
+        mut on_columns: impl FnMut(&[String]),
+        mut on_change: impl FnMut(Change) -> Result<bool, ClientError>,
+    ) -> Result<u64, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let body = Execute {
+            mode: ExecuteMode::Subscribe,
+            statement: statement.to_owned(),
+            parameters,
+        };
+        let request = self
+            .send(cx, FrameKind::Execute, StreamId::CONTROL, &body)
+            .await?;
+        let (initial_bytes, initial_rows) = self.initial_window;
+        let mut available = (initial_bytes, initial_rows);
+        let mut grants = 0u64;
+        let mut stream: Option<StreamId> = None;
+        let mut seen_columns = false;
+        let mut cancelled = false;
+        let mut pending: Option<Change> = None;
+        loop {
+            let frame = self.reply(cx, request).await?;
+            let header = *frame.header();
+            match stream {
+                None if !header.stream_id().is_control() => stream = Some(header.stream_id()),
+                Some(id) if id != header.stream_id() => {
+                    return Err(ClientError::Protocol(
+                        "subscription frame on a foreign stream",
+                    ));
+                }
+                _ => {}
+            }
+            match header.kind() {
+                FrameKind::SubscriptionBatch => {
+                    let part = SubscriptionBatch::decode(frame.payload())?;
+                    match (part.columns, seen_columns) {
+                        (Some(names), false) => {
+                            seen_columns = true;
+                            on_columns(&names);
+                        }
+                        (None, true) => {}
+                        _ => return Err(ClientError::Protocol("columns out of order")),
+                    }
+                    let count = part.entries.len() as u64;
+                    let cost = header.frame_len() as u64;
+                    if cost > available.0 || count > available.1 {
+                        return Err(ClientError::Protocol("server exceeded its flow credit"));
+                    }
+                    available = (available.0 - cost, available.1 - count);
+                    let change = pending.get_or_insert_with(|| Change {
+                        frontier: part.frontier,
+                        snapshot: part.snapshot,
+                        entries: Vec::new(),
+                    });
+                    if change.frontier != part.frontier || change.snapshot != part.snapshot {
+                        return Err(ClientError::Protocol("a batch changed frontier mid-stream"));
+                    }
+                    change.entries.extend(part.entries);
+                    if part.last {
+                        let change = pending.take().expect("a pending batch was just extended");
+                        if !cancelled && !on_change(change)? {
+                            cancelled = true;
+                            let Some(id) = stream else {
+                                return Err(ClientError::Protocol("batch on the control stream"));
+                            };
+                            self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
+                        }
+                    }
+                    let frame_limit = self.send_limits.max_frame_len() as u64;
+                    if available.0 < frame_limit || available.1 == 0 {
+                        let Some(id) = stream else {
+                            return Err(ClientError::Protocol("batch on the control stream"));
+                        };
+                        grants += 1;
+                        let update = WindowUpdate {
+                            sequence: grants,
+                            bytes: initial_bytes - available.0,
+                            rows: initial_rows - available.1,
+                        };
+                        self.send(cx, FrameKind::WindowUpdate, id, &update).await?;
+                        available = (initial_bytes, initial_rows);
+                    }
+                }
+                FrameKind::SnapshotResultEnd => {
+                    let Outcome::Rows { seq } = ResultEnd::decode(frame.payload())?.outcome else {
+                        return Err(ClientError::Protocol(
+                            "a subscription ended with a write outcome",
+                        ));
+                    };
+                    return Ok(seq);
+                }
+                FrameKind::Error => {
+                    let error = server_error(&frame);
+                    // A cancel that lands while a batch waits for credit ends
+                    // the stream with this class instead of END.
+                    if cancelled
+                        && matches!(
+                            error,
+                            ClientError::Server {
+                                code: ErrorCode::Cancelled,
+                                ..
+                            }
+                        )
+                    {
+                        return Ok(0);
+                    }
+                    return Err(error);
+                }
+                _ => return Err(ClientError::Protocol("unexpected frame in a subscription")),
+            }
+        }
+    }
+
     /// Round-trip a PING.
     pub async fn ping(&mut self, cx: &Cx, nonce: u64) -> Result<(), ClientError> {
         let request = self
@@ -399,7 +532,8 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         FrameKind::Pong
         | FrameKind::Goodbye
         | FrameKind::SnapshotResultChunk
-        | FrameKind::SnapshotResultEnd => header.binding() == expected,
+        | FrameKind::SnapshotResultEnd
+        | FrameKind::SubscriptionBatch => header.binding() == expected,
         _ => return Err(ProtocolError::InvalidState),
     };
     if binding_ok {

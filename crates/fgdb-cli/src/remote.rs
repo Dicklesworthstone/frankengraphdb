@@ -28,6 +28,8 @@ struct RemoteOptions {
     mode: ExecuteMode,
     statement: String,
     parameters: Vec<(String, WireValue)>,
+    /// `subscribe` stops after this many batches (default: until interrupted).
+    max_batches: Option<u64>,
 }
 
 fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
@@ -36,6 +38,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut database = None;
     let mut positional = Vec::new();
     let mut parameters: Vec<(String, WireValue)> = Vec::new();
+    let mut max_batches = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -55,6 +58,16 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             }
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
+            "--max-batches" if max_batches.is_none() => {
+                let raw = value()?;
+                if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(Failure::usage("--max-batches needs a decimal number"));
+                }
+                max_batches = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| Failure::usage("--max-batches is out of range"))?,
+                );
+            }
             "--param" => {
                 let raw = value()?;
                 let (name, typed) = raw
@@ -73,11 +86,26 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         at += 1;
     }
     let [verb, statement] = <[String; 2]>::try_from(positional)
-        .map_err(|_| Failure::usage("remote needs query|write and one statement"))?;
+        .map_err(|_| Failure::usage("remote needs query|write|subscribe and one statement"))?;
     let mode = match verb.as_str() {
         "query" => ExecuteMode::Read,
         "write" => ExecuteMode::Write,
-        _ => return Err(Failure::usage("remote needs query or write")),
+        "subscribe" => ExecuteMode::Subscribe,
+        _ => return Err(Failure::usage("remote needs query, write or subscribe")),
+    };
+    if max_batches.is_some() && mode != ExecuteMode::Subscribe {
+        return Err(Failure::usage("--max-batches applies only to subscribe"));
+    }
+    // `subscribe` takes the read itself; the SUBSCRIBE TO header is optional.
+    let statement = if mode == ExecuteMode::Subscribe
+        && !statement
+            .trim_start()
+            .get(..9)
+            .is_some_and(|head| head.eq_ignore_ascii_case("SUBSCRIBE"))
+    {
+        format!("SUBSCRIBE TO {statement}")
+    } else {
+        statement
     };
     Ok(RemoteOptions {
         addr: addr.ok_or_else(|| Failure::usage("remote needs --addr"))?,
@@ -86,6 +114,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         mode,
         statement,
         parameters,
+        max_batches,
     })
 }
 
@@ -202,6 +231,9 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     let options = parse(args)?;
     let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    if options.mode == ExecuteMode::Subscribe {
+        return runtime.block_on(subscribe(&cx, options, robot, out));
+    }
     let answer = runtime.block_on(async {
         let token = read_token(&options.token_file).await?;
         let mut client = Client::connect(&cx, options.addr, token)
@@ -244,6 +276,118 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 emit(out, &format!("completed at seq {seq}"))
             }
         }
+    }
+}
+
+/// Stream a subscription: the columns once, then per batch one `change`
+/// record per entry (its signed multiplicity change; a baseline's weights are
+/// multiplicities) and one `progress` record carrying the batch's entry count
+/// and frontier. Each batch is flushed as it arrives. With --max-batches the
+/// subscription is cancelled after that many batches and a final `result`
+/// record (kind `rows`, the last delivered frontier, the total change count)
+/// marks a complete stream; without it the stream runs until interrupted.
+async fn subscribe(
+    cx: &asupersync::Cx,
+    options: RemoteOptions,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let token = read_token(&options.token_file).await?;
+    let mut client = Client::connect(cx, options.addr, token)
+        .await
+        .map_err(failure)?;
+    client
+        .select(cx, &options.database)
+        .await
+        .map_err(failure)?;
+    // Both callbacks write the one output stream; a cell shares it.
+    let sink = core::cell::RefCell::new((out, None::<Failure>));
+    let write_line = |line: &str, flush: bool| {
+        let (out, failed) = &mut *sink.borrow_mut();
+        let result = emit(*out, line).and_then(|()| {
+            if flush {
+                out.flush().map_err(Failure::io)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = result {
+            failed.get_or_insert(error);
+        }
+    };
+    let mut batches = 0u64;
+    let mut changes = 0u64;
+    let limit = options.max_batches;
+    let end = client
+        .subscribe(
+            cx,
+            &options.statement,
+            options.parameters,
+            |columns| {
+                let line = if robot {
+                    format!(
+                        r#"{{"v":1,"event":"columns","columns":[{}]}}"#,
+                        columns
+                            .iter()
+                            .map(|c| fgdb_protocol::json::quote(c))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                } else {
+                    format!("weight | {}", columns.join(" | "))
+                };
+                write_line(&line, false);
+            },
+            |change| {
+                for (weight, row) in &change.entries {
+                    let line = if robot {
+                        format!(
+                            r#"{{"v":1,"event":"change","weight":"{weight}","cells":[{}]}}"#,
+                            row.iter().map(cell).collect::<Vec<_>>().join(",")
+                        )
+                    } else {
+                        format!(
+                            "{weight:+} | {}",
+                            row.iter().map(human).collect::<Vec<_>>().join(" | ")
+                        )
+                    };
+                    write_line(&line, false);
+                }
+                changes += change.entries.len() as u64;
+                let line = if robot {
+                    format!(
+                        r#"{{"v":1,"event":"progress","rows":{},"seq":{}}}"#,
+                        change.entries.len(),
+                        change.frontier
+                    )
+                } else {
+                    let kind = if change.snapshot { "baseline" } else { "delta" };
+                    format!(
+                        "-- {kind} at seq {} ({} change(s))",
+                        change.frontier,
+                        change.entries.len()
+                    )
+                };
+                write_line(&line, true);
+                batches += 1;
+                // Stop on an output failure or at the requested batch count.
+                Ok(sink.borrow().1.is_none() && limit.is_none_or(|limit| batches < limit))
+            },
+        )
+        .await
+        .map_err(failure)?;
+    let _ = client.close(cx).await;
+    let (out, failed) = sink.into_inner();
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    if robot {
+        emit(
+            out,
+            &format!(r#"{{"v":1,"event":"result","kind":"rows","seq":{end},"count":{changes}}}"#),
+        )
+    } else {
+        emit(out, &format!("{changes} change(s) through seq {end}"))
     }
 }
 

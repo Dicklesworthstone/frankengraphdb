@@ -54,12 +54,18 @@ Usage: fgdb [--robot] <command>
   search --db <dir> --key-file <file> [bindings] [text lane] [vector lane] [--k N]
          [--candidates N] [--vertex-label <label>] [--as-of <seq>]
   remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... query|write <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]...
+         [--max-batches N] subscribe <read>
   robot schema
   help
 remote runs one statement on an fgdbd server over FGP, authenticated by the hex
 capability token in --token-file (owner-only; minted by `fgdbd token`). Output and
 exit codes are query/write's; the server's own name bindings apply. Remote
 parameters: int:, float:, text:, bool:true|false, null, json:<array>.
+remote subscribe streams a live changefeed (SUBSCRIBE TO <read>): columns, then
+per batch one change record per row (signed weight; the first batch is the
+baseline) and a progress record with the frontier. It needs a capability with
+unrestricted scope; --max-batches N cancels after N batches with a final result.
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array> (a list: objects are maps, integers int, other numbers float).

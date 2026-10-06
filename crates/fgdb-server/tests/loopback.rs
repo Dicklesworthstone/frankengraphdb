@@ -527,3 +527,197 @@ fn http_adapter_serves_the_same_authorized_statements() {
         handle.join(cx).await.unwrap();
     });
 }
+
+/// Wait (in short real-time sleeps) until `ready` holds.
+async fn until(cx: &Cx, mut ready: impl FnMut() -> bool) {
+    for _ in 0..2000 {
+        if ready() {
+            return;
+        }
+        asupersync::time::sleep(cx.now(), std::time::Duration::from_millis(5)).await;
+    }
+    panic!("condition not reached");
+}
+
+#[test]
+fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
+    use fgdb_protocol::client::Change;
+    use std::sync::Mutex;
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "subscribe").await;
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Ann', age: 30})",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // A capability that hides anything cannot subscribe: maintained
+        // queries are not masked yet, so the refusal precedes registration.
+        let mut scoped = Client::connect(
+            cx,
+            addr,
+            token(&Grant {
+                labels: Scope::only([LabelId(1)]),
+                ..grant(Rights::Read)
+            }),
+        )
+        .await
+        .unwrap();
+        scoped.select(cx, "social").await.unwrap();
+        let refused = scoped
+            .subscribe(
+                cx,
+                "SUBSCRIBE TO MATCH (p:Person) RETURN p.name AS name",
+                vec![],
+                |_| {},
+                |_| Ok(true),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+
+        let changes: Arc<Mutex<Vec<Change>>> = Arc::default();
+        let columns: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (seen, names) = (Arc::clone(&changes), Arc::clone(&columns));
+        let read_token = token(&grant(Rights::Read));
+        let mut subscriber = cx
+            .spawn(move |child| async move {
+                let mut client = Client::connect(&child, addr, read_token).await.unwrap();
+                client.select(&child, "social").await.unwrap();
+                let end = client
+                    .subscribe(
+                        &child,
+                        "SUBSCRIBE TO MATCH (p:Person) WHERE p.age >= $min RETURN p.name AS name",
+                        vec![("min".into(), WireValue::Int(20))],
+                        |list| *names.lock().unwrap() = list.to_vec(),
+                        |change| {
+                            let mut seen = seen.lock().unwrap();
+                            // An empty delta reports progress: the frontier
+                            // moved and nothing the query returns changed.
+                            if change.entries.is_empty() && !change.snapshot {
+                                assert!(
+                                    seen.last()
+                                        .is_some_and(|last| last.frontier < change.frontier)
+                                );
+                                return Ok(true);
+                            }
+                            seen.push(change);
+                            // Baseline, one insert, a 10-row batch, a delete.
+                            Ok(seen.len() < 4)
+                        },
+                    )
+                    .await
+                    .unwrap();
+                client.close(&child).await.unwrap();
+                end
+            })
+            .unwrap();
+        until(cx, || changes.lock().unwrap().len() == 1).await;
+        {
+            let changes = changes.lock().unwrap();
+            assert!(changes[0].snapshot, "the first batch is the baseline");
+            assert_eq!(changes[0].frontier, 1);
+            assert_eq!(changes[0].entries, [(1, vec![text("Ann")])]);
+        }
+        assert_eq!(*columns.lock().unwrap(), ["name"]);
+
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Bob', age: 25})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        until(cx, || changes.lock().unwrap().len() == 2).await;
+        // Ten people through a four-row window: one batch over several frames.
+        let rows = WireValue::List(
+            (0..10)
+                .map(|i| {
+                    WireValue::Map(vec![
+                        ("age".into(), WireValue::Int(40 + i)),
+                        ("name".into(), text(&format!("p{i}"))),
+                    ])
+                })
+                .collect(),
+        );
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "UNWIND $rows AS row CREATE (:Person {name: row.name, age: row.age})",
+                vec![("rows".into(), rows)],
+            )
+            .await
+            .unwrap();
+        until(cx, || changes.lock().unwrap().len() == 3).await;
+        // A person below the threshold changes nothing the query returns,
+        // and a delete retracts exactly one row.
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Kid', age: 9})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (p:Person {name: 'Ann'}) DETACH DELETE p",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let end = subscriber.join(cx).await.unwrap();
+        let changes = changes.lock().unwrap();
+        assert_eq!(changes.len(), 4);
+        assert!(!changes[1].snapshot);
+        assert_eq!(
+            (changes[1].frontier, changes[1].entries.clone()),
+            (2, vec![(1, vec![text("Bob")])])
+        );
+        assert_eq!(changes[2].frontier, 3);
+        let mut batch: Vec<_> = changes[2]
+            .entries
+            .iter()
+            .map(|(w, row)| (*w, row[0].clone()))
+            .collect();
+        batch.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(
+            batch,
+            (0..10)
+                .map(|i| (1, text(&format!("p{i}"))))
+                .collect::<Vec<_>>()
+        );
+        // The empty change at seq 4 may be coalesced into the delete's batch.
+        assert!(
+            matches!(changes[3].frontier, 4 | 5),
+            "{}",
+            changes[3].frontier
+        );
+        let retracted: Vec<_> = changes[3]
+            .entries
+            .iter()
+            .filter(|(w, _)| *w != 0)
+            .cloned()
+            .collect();
+        assert_eq!(retracted, [(-1, vec![text("Ann")])]);
+        assert_eq!(end, changes[3].frontier);
+        drop(changes);
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}

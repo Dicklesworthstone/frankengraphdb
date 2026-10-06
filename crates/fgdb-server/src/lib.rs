@@ -34,6 +34,7 @@
 
 #![forbid(unsafe_code)]
 
+mod commits;
 mod connection;
 mod convert;
 mod execute;
@@ -66,7 +67,7 @@ use fgdb_warden::{Authority, CapabilityToken, Grant};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// The branch every served capability is scoped to: the engine serves one
@@ -139,6 +140,9 @@ pub struct DatabaseConfig {
     pub write_policy: GraphWriteProgramPolicy,
     /// Host ceiling on expanded statements per write program.
     pub max_statements: usize,
+    /// Subscription registrations this database admits over the server's
+    /// lifetime: a registration lives as long as the open database.
+    pub max_subscriptions: usize,
 }
 
 impl DatabaseConfig {
@@ -156,6 +160,7 @@ impl DatabaseConfig {
             query_policy,
             write_policy: GraphWriteProgramPolicy::new(query_policy, 100_000, 100_000, 100_000),
             max_statements: 64,
+            max_subscriptions: 64,
         }
     }
 }
@@ -222,6 +227,9 @@ pub(crate) struct Served {
     pub(crate) query_policy: GqlQueryPolicy,
     pub(crate) write_policy: GraphWriteProgramPolicy,
     pub(crate) max_statements: usize,
+    pub(crate) max_subscriptions: usize,
+    pub(crate) subscriptions: AtomicUsize,
+    pub(crate) commits: commits::CommitSignal,
     pub(crate) namespace: [u8; 32],
     pub(crate) incarnation: [u8; 32],
     pub(crate) authority_commitment: [u8; 32],
@@ -311,6 +319,9 @@ impl Server {
                 query_policy: config.query_policy,
                 write_policy: config.write_policy,
                 max_statements: config.max_statements,
+                max_subscriptions: config.max_subscriptions,
+                subscriptions: AtomicUsize::new(0),
+                commits: commits::CommitSignal::default(),
                 namespace,
                 incarnation,
                 authority_commitment,

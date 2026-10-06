@@ -4,11 +4,16 @@
 
 use crate::{Served, TRUNK, convert, unix_millis};
 use asupersync::Cx;
-use fgdb::{QueryError, QueryResult};
+use fgdb::{
+    NativeSubscription, QueryError, QueryResult, StandingQueryError, SubscribeError,
+    SubscriptionBatch, SubscriptionError,
+};
 use fgdb_gql::GqlQueryError;
 use fgdb_protocol::body::{ErrorCode, Execute, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// A refusal of one statement, reported on its child stream.
 pub(crate) struct Refusal {
@@ -142,11 +147,18 @@ async fn write_inner(
         .await
         .map_err(|error| write_refusal(&error))?;
     let statements = receipt.stats().completed_statements as u64;
+    drop(session);
+    drop(guard);
     let outcome = match completion {
-        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Outcome::WriteCommitted {
-            seq: commit_seq.0,
-            statements,
-        },
+        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
+            // Wake subscriptions only after the write lock is released, so
+            // their polls observe the published generation.
+            db.commits.committed();
+            Outcome::WriteCommitted {
+                seq: commit_seq.0,
+                statements,
+            }
+        }
         EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => Outcome::ReadClosed {
             seq: snapshot_seq.0,
             statements,
@@ -220,4 +232,119 @@ fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
         source = current.source();
     }
     Refusal::new(code, error.to_string())
+}
+
+/// A registered subscription and its output columns.
+pub(crate) struct Subscription {
+    pub(crate) consumer: NativeSubscription,
+    pub(crate) columns: Vec<String>,
+}
+
+/// Register `SUBSCRIBE TO <read>` for a capability that may observe it.
+///
+/// The engine's maintained queries are privileged: they have no capability
+/// masking yet. Until authorized standing queries exist, a subscription
+/// therefore requires a read capability whose scope hides nothing (every
+/// label, relation and property), for which the unmasked result is exactly
+/// what it may already read. Registrations live as long as the database, so
+/// each served database admits a bounded number over the server's lifetime.
+pub(crate) async fn subscribe(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    statement: &Execute,
+) -> Result<Subscription, Refusal> {
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    capability
+        .begin_read_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let scope = capability.predicates();
+    if !(scope.sees_all_incidence() && scope.sees_all_fields()) {
+        return Err(Refusal::new(
+            ErrorCode::PermissionDenied,
+            "a subscription requires a read capability with unrestricted label, relation and property scope",
+        ));
+    }
+    let parameters = convert::parameters(&statement.parameters, None)
+        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    if db
+        .subscriptions
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < db.max_subscriptions).then_some(count + 1)
+        })
+        .is_err()
+    {
+        return Err(Refusal::new(
+            ErrorCode::Budget,
+            "this database's subscription registrations are exhausted until restart",
+        ));
+    }
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = contexts.query();
+    let mut guard = db
+        .db
+        .write(cx)
+        .await
+        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let consumer = guard
+        .subscribe_native(
+            &query,
+            &statement.statement,
+            &parameters,
+            db.symbols.clone(),
+            db.query_policy,
+        )
+        .map_err(|error| {
+            let code = match &error {
+                SubscribeError::Subscription(SubscriptionError::Query(
+                    StandingQueryError::Interrupted(_),
+                )) => ErrorCode::Execution,
+                _ => ErrorCode::Statement,
+            };
+            Refusal::new(code, error.to_string())
+        })?;
+    let columns = guard
+        .standing_native_columns(&query, consumer.handle())
+        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?
+        .to_vec();
+    Ok(Subscription { consumer, columns })
+}
+
+/// The next batch the subscriber has not acknowledged, or `None` when it is
+/// caught up. The capability is rechecked first, so expiry or a retired
+/// issuer ends a subscription at its next batch. A delta the engine no longer
+/// retains is replaced by a fresh baseline, never by an empty or partial one.
+pub(crate) async fn poll(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    subscription: &mut Subscription,
+) -> Result<Option<Arc<SubscriptionBatch>>, Refusal> {
+    db.authority
+        .verify_at(token, TRUNK, unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = contexts.query();
+    let guard = db
+        .db
+        .read(cx)
+        .await
+        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    match subscription.consumer.poll(&guard, &query, db.query_policy) {
+        Err(SubscriptionError::Query(StandingQueryError::DeltaUnavailable { .. })) => {
+            subscription
+                .consumer
+                .restart_from_current()
+                .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+            subscription
+                .consumer
+                .poll(&guard, &query, db.query_policy)
+                .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))
+        }
+        other => other.map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string())),
+    }
 }

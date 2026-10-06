@@ -239,6 +239,10 @@ pub(crate) async fn respond(cx: &Cx, server: &Server, request: Request) -> Respo
     let answer = match mode {
         ExecuteMode::Read => read(cx, db, &token, &statement).await,
         ExecuteMode::Write => write(cx, db, &token, &statement).await,
+        // A change stream needs a long-lived, flow-controlled connection.
+        ExecuteMode::Subscribe => {
+            return refusal_response(ErrorCode::Protocol, "subscriptions are served over FGP");
+        }
     };
     match answer {
         Ok(answer) => answer_response(&answer),

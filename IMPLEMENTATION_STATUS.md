@@ -163,6 +163,7 @@ The embedded library posture is live. The CLI binary is real, but the robot cont
 - Results as ephemeral SNAPSHOT_RESULT chunks on a server-minted stream under exact byte-and-row flow credit, with QUERY_CANCEL, PING and DRAIN served while a stream waits; SIGINT/SIGTERM drain with GOODBYE.
 - Clients: `fgdb_protocol::client::Client` and the CLI's `fgdb remote query|write`.
 - An HTTP/1.1 JSON adapter (`fgdbd serve --http-listen`) over the same execution path, with a Host allow-list.
+- Live subscriptions: `SUBSCRIBE TO <read>` over FGP pushes the engine's maintained-query baseline and exact per-commit deltas as SUBSCRIPTION_BATCH frames under flow credit (`fgdb remote subscribe`). They require an unrestricted-scope capability (maintained queries are not capability-masked yet) and are in-process only: no durable resume across reconnects.
 
 Not yet: TLS, durable result retention with ACK/release/resume, PREPARE, explicit multi-statement transactions and reattachment, subscriptions, multi-tenant admission/QoS, and the HTTP/2, gRPC, WebSocket and Bolt adapters. Names resolve through operator-declared bindings because there is no durable catalog.
 
