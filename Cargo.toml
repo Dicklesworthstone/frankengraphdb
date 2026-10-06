@@ -42,6 +42,7 @@ members = [
     "crates/fgdb-unsafe-vfs",
     "crates/fgdb-warden",
     "crates/fgdb-bench",
+    "crates/fgdb-server",
     "tools/registry-check",
 ]
 

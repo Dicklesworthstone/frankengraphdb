@@ -1,7 +1,7 @@
 # Fabric protocol mechanisms
 
 Owner beads: `fgdb-w10-fgp-core-5b1`, `fgdb-w10-flow-send-obligations-smd`,
-`fgdb-w10-fgp-frame-catalog-j1bl`. These beads remain open.
+`fgdb-w10-fgp-frame-catalog-j1bl`, `fgdb-w10-server-rte`. These beads remain open.
 
 `fgdb-protocol` implements the transport-independent framing, connection-state,
 flow-credit and drain mechanisms. It is a std-only, unsafe-forbidden crate. It
@@ -134,10 +134,120 @@ and clippy was clean. Since then `scripts/check.sh` lints and tests with
 `--all-features`. No runtime, performance or full-protocol conformance claim is
 made beyond that suite.
 
+## Typed operation bodies
+
+`fgdb_protocol::body` gives the frames `fgdbd` serves an exact canonical body
+encoding: fixed-width big-endian integers, `u32`-length-prefixed UTF-8 text
+and byte strings, explicit tags on every closed union, and counts that are
+bounded before any allocation. Decoding refuses trailing bytes, every
+truncated prefix, unknown tags, non-UTF-8 text, a non-0/1 boolean byte, an
+unsorted or duplicated map key or parameter name, a zero-denominator average,
+nesting deeper than 64, and more than 2^22 value nodes. A credential is
+redacted from `Debug`.
+
+| Frame | Body |
+|---|---|
+| HELLO | `min_version u16`, `max_version u16`, `client_nonce [32]`, `max_frame_len u32` |
+| HELLO_ACK | `version u16`, `server_nonce [32]`, `max_frame_len u32`, `initial_window_bytes u64`, `initial_window_rows u64` |
+| AUTH | `mechanism u8` (1 = Warden capability), `credential bytes` |
+| AUTH_OK | `session_transcript [32]`, `auth_generation u64` |
+| SELECT_DATABASE | `name text` |
+| READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
+| EXECUTE | `mode u8` (0 read, 1 write), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
+| SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
+| ERROR | `code u16`, `message text` (structural diagnostics only) |
+| WINDOW_UPDATE | `sequence u64`, `bytes u64`, `rows u64` |
+| PING / PONG | `nonce u64` |
+| DRAIN / GOODBYE / QUERY_CANCEL | empty |
+
+A value is one tagged node of the engine's value lattice, mirroring the CLI
+robot contract's cell types exactly: null, bool, int (i64), float (binary64
+bits), decimal (canonical text), text, bytes, timestamp (UTC nanoseconds,
+offset seconds, optional zone identifier plus tzdb object id), vertex, edge
+(u128 identities), path, vertices, edges, list, map, count, wide integer
+(i128) and exact average. Error codes are the closed set `protocol`,
+`unsupported_version`, `unauthenticated`, `not_found_or_unauthorized`,
+`statement`, `permission_denied`, `budget`, `conflict`, `execution`,
+`outcome_unknown`, `busy`, `draining` and `cancelled`.
+
+## fgdbd: the served subset
+
+`crates/fgdb-server` composes the embedded engine behind this machine over
+asupersync TCP. The `fgdbd` binary serves one or more databases; `fgdbd
+token` mints capability tokens and `fgdbd keygen` writes owner-only key files.
+The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
+
+- **Handshake.** HELLO selects version 1 and the smaller of both frame
+  limits. AUTH carries a Warden capability token; a token no served issuer
+  accepts, a bad signature and a malformed token share one `unauthenticated`
+  refusal, and the connection closes. The session binding is a keyed BLAKE3
+  of the HELLO/HELLO_ACK transcript digest and the AUTH body digest under a
+  per-process server secret, derived before AUTH_OK is encoded. A database
+  that does not exist and one this token may not select share one
+  `not_found_or_unauthorized` reply, and the connection stays authenticated.
+  READY's incarnation is a keyed digest of the namespace under that secret,
+  so every server restart presents a new incarnation; its authority
+  commitment binds the namespace and the issuer's policy epoch.
+- **Statements.** EXECUTE runs one GQL statement through a capability
+  session constructed fresh for that statement from the connection's token,
+  so signature, scope, expiry, signed budgets and issuer retirement are
+  rechecked per statement, and scope applies before expansion (FG-INV-20). A
+  read runs on a read-only authorized session pinned to exactly the frontier
+  its END reports; a write statement presented as a read is refused, never
+  reinterpreted. A write is one autocommit program through an authorized write
+  session; its END reports the commit sequence. Names resolve through the
+  operator's bindings for that database, the CLI's `--label/--relation/
+  --property` contract, because the engine has no durable catalog yet.
+- **Results.** Every result is the session-owned, ephemeral
+  SNAPSHOT_RESULT class on a server-minted 128-bit child stream. The first
+  chunk carries the columns. Each chunk is sized to the stream's available
+  credit (bytes including the header, and rows) when it is assembled, so the
+  server never waits for a grant the client could only send after receiving
+  that chunk; END is charged too. The client models that credit exactly and
+  replenishes it whenever less than one maximal frame or zero rows remain.
+  While a stream waits for credit the server keeps reading: WINDOW_UPDATE,
+  QUERY_CANCEL (answered with a stream-scoped `cancelled` ERROR), PING and
+  DRAIN get through, and a second EXECUTE is refused `busy`. A late
+  WINDOW_UPDATE or QUERY_CANCEL for one of the last 64 finished streams is
+  accepted and ignored instead of poisoning the connection.
+- **Send guard.** Every write attempt rechecks that the frame carries the
+  binding the connection holds at that moment. The only exceptions are
+  HELLO_ACK and AUTH_OK on the transport header and READY on the session
+  header it completes.
+- **Drain.** DRAIN, SIGINT or SIGTERM drains: admission stops, every
+  connection is observed at its next receive point (an admitted statement
+  finishes under its own rules, so a write commits or refuses first), the
+  connection closes, and GOODBYE is its last write. A drain never waits for an
+  offline client.
+- **Children.** A finished read reports the new `ChildTerminus::
+  EphemeralCompleted` (legal for query children only: nothing durable is
+  retained, so nothing is detached); a committed write reports
+  `SemanticTerminalDurable`.
+
+Not served, and refused with a typed error rather than approximated: the
+durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
+AUTH_REFRESH, explicit multi-statement transactions with ownership and
+reattachment, subscriptions, TLS, and the HTTP/2, gRPC, WebSocket and Bolt
+adapters. Because results are ephemeral, a disconnect can lose undelivered
+rows but never a commit: a write's outcome is decided before its first frame.
+
+Witnesses: `cargo test -p fgdb-protocol --all-features` (body round trips,
+every truncated prefix, trailing bytes, noncanonical spellings, hostile
+counts and depth, exact float bits) and `cargo test -p fgdb-server`
+(`tests/loopback.rs`, over real loopback TCP against a durable on-disk
+database: the handshake, a multi-relation CREATE, a 20-map UNWIND batch, a
+22-row read through a 4-row window, parameterized pattern reads, statement
+refusals that leave the connection usable, a read-only token's write refused
+`permission_denied`, a Company-only token counting zero vertices, a foreign
+issuer's token refused `unauthenticated`, drain delivering GOODBYE, and
+committed writes surviving a server restart).
+
 ## Remaining integration
 
-Typed operation bodies and authoritative catalog generation, protected-transport
-authentication, Operational-root selection, fresh send guards, durable result
-machines, SnapshotQuery proofs, the daemon/CLI, surface adapters, and the native
-Python packaging boundary remain separate implementation work. Do not expose
-raw embedded queries through this codec while bypassing those owners.
+Authoritative frame-catalog generation, protected transport (TLS), durable
+result machines with ACK/release/resume, PREPARE, explicit transactions with
+ownership and reattachment, SnapshotQuery proofs, subscriptions, the surface
+adapters, multi-tenant admission/QoS, and the native Python packaging boundary
+remain separate implementation work. Do not expose raw embedded queries
+through this codec while bypassing the authorized session owners.

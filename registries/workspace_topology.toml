@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 71
-active_crate_count = 29
-planned_crate_count = 41
+active_crate_count = 30
+planned_crate_count = 40
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -130,7 +130,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:038e596f60f3489a"
-semantic_contract_hash = "fnv1a64:9fcb6c08eb39d100"
+semantic_contract_hash = "fnv1a64:714ca6dea8bd6d6b"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1589,12 +1589,12 @@ layer_position = 2
 role = "top-level Fabric+Warden+Aegis composition"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "entry_server"
 posture_basis = "composition_entry"
 owner = "W10"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-w10-server-rte"
+manifest_dir = "crates/fgdb-server"
 
 [[crate]]
 name = "fgdb-cli"
@@ -1755,8 +1755,8 @@ title = "Server binary"
 entry_crate = "fgdb-server"
 binary_name = "fgdbd"
 plan_anchor = "§1 constraint 5(b), §13"
-status = "deferred"
-deferred_to = "the owner bead of fgdb-server (W10 composition)"
+status = "live"
+deferred_to = ""
 consumes_entries = ["embedded"]
 
 [[posture]]

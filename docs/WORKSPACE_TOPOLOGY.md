@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 71 (29 active, 41 planned, 1 reserved)
+* **Crates:** 71 (30 active, 40 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -167,7 +167,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb` | active | `forbid` | entry_embedded | W10 | fgdb-j0vu | embedded API |
-| 2 | `fgdb-server` | planned | `forbid` | entry_server | W10 | — | top-level Fabric+Warden+Aegis composition |
+| 2 | `fgdb-server` | active | `forbid` | entry_server | W10 | fgdb-w10-server-rte | top-level Fabric+Warden+Aegis composition |
 | 3 | `fgdb-cli` | active | `forbid` | entry_cli | W10 | fgdb-huu9 | The CLI binary with robot mode and a human mode. |
 | 4 | `fgdb-python` | planned | `forbid` | packaging_boundary | W10 | — | allowed fnx-python packaging boundary only |
 | 5 | `fgdb-adbc` | planned | `forbid` | packaging_boundary | W10 | — | C-ABI ADBC packaging at the same boundary; §13.7 |
@@ -188,7 +188,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | Posture | Entry crate | Binary | Status | Deferred to | Anchor |
 |---|---|---|---|---|---|
 | Embedded library | `fgdb` | — | live | — | §1 constraint 5(a), §13.1 |
-| Server binary | `fgdb-server` | fgdbd | deferred | the owner bead of fgdb-server (W10 composition) | §1 constraint 5(b), §13 |
+| Server binary | `fgdb-server` | fgdbd | live | — | §1 constraint 5(b), §13 |
 | CLI binary | `fgdb-cli` | fgdb | live | — | §1 constraint 5(c) |
 
 A posture closure is the transitive dependency set of its entry crate over the LIVE graph. A `test_only`, `packaging_boundary`, or foreign-entry crate inside a shipped closure is a violation. While every entry crate is `planned` the law reports `deferred` — never `pass` — and the closure evaluator is proved against synthetic graphs in the suite instead.
@@ -390,4 +390,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:038e596f60f3489a` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:9fcb6c08eb39d100` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:714ca6dea8bd6d6b` — every normative decision, prose excluded.

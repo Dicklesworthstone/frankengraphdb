@@ -606,6 +606,7 @@ dependencies = [
  "fgdb-delta-types",
  "fgdb-gql",
  "fgdb-prism",
+ "fgdb-protocol",
  "fgdb-strata",
  "fgdb-types",
 ]
@@ -715,6 +716,20 @@ name = "fgdb-resource"
 version = "0.0.1"
 dependencies = [
  "fgdb-types",
+]
+
+[[package]]
+name = "fgdb-server"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb",
+ "fgdb-crypto",
+ "fgdb-delta-types",
+ "fgdb-gql",
+ "fgdb-protocol",
+ "fgdb-types",
+ "fgdb-warden",
 ]
 
 [[package]]

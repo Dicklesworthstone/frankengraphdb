@@ -152,7 +152,18 @@ Topology: `g0_topology_e2e` is green and `topology_registry_validates_clean` pas
 
 ### Posture claim, limited on purpose
 
-The embedded library posture is live. The CLI binary is real, but the robot contract is mid-consolidation. The server posture is absent. No claim beyond that is made here.
+The embedded library posture is live. The CLI binary is real, but the robot contract is mid-consolidation. The server posture is live as a subset since 2026-10-06 (see below). No claim beyond that is made here.
+
+## Server posture (2026-10-06)
+
+`fgdbd` (`crates/fgdb-server`) composes the embedded engine behind `fgdb-protocol`'s FGP connection machine over asupersync TCP. Witness: `crates/fgdb-server/tests/loopback.rs` over real loopback TCP and a durable on-disk database.
+
+- Handshake HELLO/HELLO_ACK/AUTH/AUTH_OK/SELECT_DATABASE/READY with typed canonical bodies (`crates/fgdb-protocol/src/body.rs`), a transcript-derived session binding, and one uniform refusal for a nonexistent or unauthorized database.
+- Authentication by Warden capability token (`fgdbd token`); each EXECUTE builds a fresh `authorized_read_session` or `authorized_write_session`, so scope, expiry and signed budgets are rechecked per statement and masking applies before expansion.
+- Results as ephemeral SNAPSHOT_RESULT chunks on a server-minted stream under exact byte-and-row flow credit, with QUERY_CANCEL, PING and DRAIN served while a stream waits; SIGINT/SIGTERM drain with GOODBYE.
+- Clients: `fgdb_protocol::client::Client` and the CLI's `fgdb remote query|write`.
+
+Not yet: TLS, durable result retention with ACK/release/resume, PREPARE, explicit multi-statement transactions and reattachment, subscriptions, multi-tenant admission/QoS, and the HTTP/gRPC/WebSocket/Bolt adapters. Names resolve through operator-declared bindings because there is no durable catalog.
 
 ## Query evidence tower
 
@@ -410,7 +421,7 @@ The following remain incomplete or absent:
 - full ISO GQL, GLA lowering, Loom operators, optimizer, spill, and larger-than-memory execution;
 - Strata tiers I/R/A and production compaction/migration policy;
 - the Ripple crate, Fabric, and maturation of the 2026-09-21/22 crates (`fgdb-order`, `fgdb-policy`, `fgdb-prism`, `fgdb-repl`, `fgdb-warden`, `fgdb-beacon`) into their full planned subsystems;
-- server, Python bindings, packaging, signed releases, installer, and upgrade tooling (the robot CLI binary itself has landed — see the reality check).
+- the server's remaining surfaces (TLS, durable result machines, explicit transactions, subscriptions, adapters), Python bindings, packaging, signed releases, installer, and upgrade tooling (the robot CLI binary and the `fgdbd` FGP subset have landed — see above).
 
 ## Dependency-ordered next work
 

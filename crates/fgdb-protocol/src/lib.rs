@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod body;
 mod connection;
 mod flow;
 mod frame;
@@ -22,6 +23,10 @@ mod frame;
 /// state machines remain usable without enabling a runtime dependency.
 #[cfg(feature = "transport")]
 pub mod transport;
+
+/// A TCP client for the operations `fgdbd` serves.
+#[cfg(feature = "transport")]
+pub mod client;
 
 pub use connection::{ChildKind, ChildTerminus, Connection, Phase, SendTerminus, SendTicket};
 pub use flow::{CreditUpdate, FlowWindow, Reservation, SendCost, SendState, WindowStatus};

@@ -244,9 +244,18 @@ fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 
 # Agent-first surface: the self-describing, frozen event contract
 fgdb robot schema
+
+# Serve over the network (FGP over TCP) and query remotely with a capability token
+fgdbd keygen --issuer issuer.key
+fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fgdb.keys \
+  --issuer-key-file issuer.key --label Person=1 --relation KNOWS=1 --property name=1
+fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
+fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 ```
 
-> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the `fgdbd` server binary remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
+`fgdbd` (`crates/fgdb-server`) serves the FGP handshake, one autocommit GQL read or write per `EXECUTE`, and ephemeral flow-controlled result streams. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve TLS, durable result retention (ACK/release/resume), explicit multi-statement transactions, subscriptions, or the HTTP/gRPC/WebSocket/Bolt adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
+
+> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the remaining `fgdbd` surfaces above remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
 
 ## Installation
 
@@ -261,7 +270,7 @@ cargo build --release                        # builds the library workspace
 cargo run -p fgdb --example open_a_database  # a real main(): create, commit, reopen, verify
 ```
 
-A `fgdb` CLI binary is produced today (`cargo build -p fgdb-cli`; [The `fgdb` CLI](#the-fgdb-cli) lists the commands it runs). The `fgdbd` server binary is **not** produced yet: `registries/workspace_topology.toml` defers `fgdb-server` to W10 composition.
+A `fgdb` CLI binary is produced today (`cargo build -p fgdb-cli`; [The `fgdb` CLI](#the-fgdb-cli) lists the commands it runs), and so is the `fgdbd` server binary (`cargo build -p fgdb-server`), which serves the FGP subset described above.
 
 **3. Embedded, as a Rust library:**
 
@@ -306,7 +315,7 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 
 ## Quick start
 
-> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch`, `subscribe`, and `fgdbd` steps below await W10 composition. The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
+> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` and `subscribe` steps, and `fgdbd`'s TOML config and Bolt protocol, await W10 composition (`fgdbd serve` itself runs today with flags, FGP only). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
 
 ```bash
 # 1. Create a database directory and bulk-load a graph

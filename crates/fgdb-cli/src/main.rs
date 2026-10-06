@@ -6,6 +6,7 @@ mod diff;
 mod fnx;
 mod import;
 mod load;
+mod remote;
 mod scrub;
 mod search;
 mod stream;
@@ -52,8 +53,13 @@ Usage: fgdb [--robot] <command>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
   search --db <dir> --key-file <file> [bindings] [text lane] [vector lane] [--k N]
          [--candidates N] [--vertex-label <label>] [--as-of <seq>]
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... query|write <gql>
   robot schema
   help
+remote runs one statement on an fgdbd server over FGP, authenticated by the hex
+capability token in --token-file (owner-only; minted by `fgdbd token`). Output and
+exit codes are query/write's; the server's own name bindings apply. Remote
+parameters: int:, float:, text:, bool:true|false, null, json:<array>.
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array> (a list: objects are maps, integers int, other numbers float).
@@ -1038,6 +1044,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
+        Some("remote") => remote::run(&args[1..], robot, out),
         Some(
             command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"
             | "compact" | "scrub" | "import-csv" | "search"),
