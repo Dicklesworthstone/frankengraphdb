@@ -1,7 +1,8 @@
 //! Finite binary64 arithmetic with integer-only rounding.
 //!
-//! Every operation rounds once to nearest, ties to even, with gradual underflow
-//! and canonical positive zero. No native floating arithmetic, libm, FMA,
+//! Arithmetic rounds once to nearest, ties to even, with gradual underflow.
+//! Integral rounding has explicit floor/ceiling/nearest-ties-positive policies.
+//! All results have canonical positive zero. No native floating arithmetic, libm, FMA,
 //! allocation, or ambient rounding mode is used by the kernel. Non-finite
 //! operands, overflow and division by zero are explicit refusals. This is not
 //! the complete STRICT_PORTABLE numeric profile or a transcendental library.
@@ -154,6 +155,47 @@ fn add(mut a: Number, mut b: Number) -> Result<CanonicalF64, FloatArithmeticErro
     pack(a.negative, magnitude, a.exponent - 3)
 }
 
+#[derive(Clone, Copy)]
+enum IntegralRounding {
+    Floor,
+    Ceiling,
+    NearestTiesPositive,
+}
+
+// Inspect the exact binary fraction, not floor(x + 0.5): adding half can round
+// a value just BELOW a tie up to that tie. Very small magnitudes are known to
+// lie below half without shifting by more than a machine word. Values with a
+// nonnegative significand exponent are already integral, including f64::MAX.
+fn round_integral(
+    input: CanonicalF64,
+    mode: IntegralRounding,
+) -> Result<CanonicalF64, FloatArithmeticError> {
+    let number = Number::read(input)?;
+    if number.significand == 0 || number.exponent >= 0 {
+        return Ok(input);
+    }
+    let shift = number.exponent.unsigned_abs();
+    let (whole, fractional, half_order) = if shift > 53 {
+        (0, true, core::cmp::Ordering::Less)
+    } else {
+        let remainder = number.significand & ((1_u64 << shift) - 1);
+        (
+            number.significand >> shift,
+            remainder != 0,
+            remainder.cmp(&(1_u64 << (shift - 1))),
+        )
+    };
+    let increment = fractional
+        && match mode {
+            IntegralRounding::Floor => number.negative,
+            IntegralRounding::Ceiling => !number.negative,
+            IntegralRounding::NearestTiesPositive => {
+                half_order.is_gt() || (half_order.is_eq() && !number.negative)
+            }
+        };
+    pack(number.negative, u128::from(whole) + u128::from(increment), 0)
+}
+
 impl CanonicalF64 {
     /// Convert a signed integer using round-to-nearest, ties-to-even. Integers
     /// outside binary64's exact precision are rounded, never truncated through
@@ -241,6 +283,25 @@ impl CanonicalF64 {
         Number::read(self)?;
         Ok(value(self.to_bits() & !SIGN))
     }
+
+    /// Greatest integral binary64 value not greater than this finite input.
+    /// No i64 narrowing occurs: all finite exponents are accepted.
+    pub fn checked_floor(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::Floor)
+    }
+
+    /// Least integral binary64 value not less than this finite input.
+    pub fn checked_ceil(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::Ceiling)
+    }
+
+    /// Nearest integral binary64 value, with exact half ties toward positive
+    /// infinity, as in single-argument openCypher round(). This is deliberately
+    /// distinct from arithmetic's nearest-even and Rust's ties-away rounding.
+    /// Negative values rounded to zero produce canonical positive zero.
+    pub fn checked_round(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::NearestTiesPositive)
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +345,77 @@ mod tests {
             (i64::MIN, 0xc3e0_0000_0000_0000),
         ] {
             assert_eq!(CanonicalF64::from_i64_rounded(integer).to_bits(), encoded);
+        }
+    }
+
+    #[test]
+    fn integral_rounding_keeps_signs_exact_ties_and_neighboring_values() {
+        for (input, floor, ceil, nearest) in [
+            (-2.75, -3.0, -2.0, -3.0),
+            (-2.5, -3.0, -2.0, -2.0),
+            (-1.5, -2.0, -1.0, -1.0),
+            (-0.5, -1.0, 0.0, 0.0),
+            (-0.25, -1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0),
+            (0.25, 0.0, 1.0, 0.0),
+            (0.5, 0.0, 1.0, 1.0),
+            (1.5, 1.0, 2.0, 2.0),
+            (2.75, 2.0, 3.0, 3.0),
+        ] {
+            assert_eq!(f(input).checked_floor(), Ok(f(floor)));
+            assert_eq!(f(input).checked_ceil(), Ok(f(ceil)));
+            assert_eq!(f(input).checked_round(), Ok(f(nearest)));
+        }
+        let half = 0x3fe0_0000_0000_0000;
+        assert_eq!(bits(half - 1).checked_round(), Ok(f(0.0)));
+        assert_eq!(bits(half + 1).checked_round(), Ok(f(1.0)));
+        assert_eq!(bits(SIGN | (half - 1)).checked_round(), Ok(f(0.0)));
+        assert_eq!(bits(SIGN | (half + 1)).checked_round(), Ok(f(-1.0)));
+        assert_eq!(f(-0.0).checked_round().unwrap().to_bits(), 0);
+    }
+
+    #[test]
+    fn integral_rounding_admits_every_finite_exponent_and_refuses_nonfinite() {
+        for raw in [1, FRACTION, HIDDEN] {
+            assert_eq!(bits(raw).checked_floor(), Ok(f(0.0)));
+            assert_eq!(bits(raw).checked_ceil(), Ok(f(1.0)));
+            assert_eq!(bits(raw).checked_round(), Ok(f(0.0)));
+            assert_eq!(bits(SIGN | raw).checked_floor(), Ok(f(-1.0)));
+            assert_eq!(bits(SIGN | raw).checked_ceil(), Ok(f(0.0)));
+            assert_eq!(bits(SIGN | raw).checked_round(), Ok(f(0.0)));
+        }
+        for raw in [0x4330_0000_0000_0001, 0x43e0_0000_0000_0000, 0x7fef_ffff_ffff_ffff] {
+            for sign in [0, SIGN] {
+                let number = bits(sign | raw);
+                assert_eq!(number.checked_floor(), Ok(number));
+                assert_eq!(number.checked_ceil(), Ok(number));
+                assert_eq!(number.checked_round(), Ok(number));
+            }
+        }
+        for nonfinite in [f(f64::INFINITY), f(f64::NEG_INFINITY), f(f64::NAN)] {
+            assert_eq!(nonfinite.checked_floor(), Err(FloatArithmeticError::NonFinite));
+            assert_eq!(nonfinite.checked_ceil(), Err(FloatArithmeticError::NonFinite));
+            assert_eq!(nonfinite.checked_round(), Err(FloatArithmeticError::NonFinite));
+        }
+    }
+
+    #[test]
+    fn integral_rounding_matches_independent_hardware_neighbors() {
+        let mut state = 0x696e_7465_6772_616c_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
+                continue;
+            }
+            let input = f64::from_bits(state);
+            let lower = input.floor();
+            let upper = input.ceil();
+            let nearest = if input - lower < upper - input { lower } else { upper };
+            assert_eq!(f(input).checked_floor(), Ok(f(lower)), "bits={state:016x}");
+            assert_eq!(f(input).checked_ceil(), Ok(f(upper)), "bits={state:016x}");
+            assert_eq!(f(input).checked_round(), Ok(f(nearest)), "bits={state:016x}");
         }
     }
 
