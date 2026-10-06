@@ -473,7 +473,7 @@ fn execute_shortest_at<C>(
     }
 
     let adjacency = shortest_admission::collect(
-        &snapshot.adjacency_index,
+        snapshot.adjacency_index(),
         &snapshot.blocks,
         shortest_admission::Scope {
             source,

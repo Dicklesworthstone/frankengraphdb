@@ -149,7 +149,7 @@ impl WriteTxn {
         } else {
             GlaDirection::Forward
         };
-        let index = &snapshot.adjacency_index;
+        let index = snapshot.adjacency_index();
         let mut matching = std::collections::BTreeMap::new();
         let mut after = None;
         loop {

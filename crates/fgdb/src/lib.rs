@@ -1609,7 +1609,11 @@ pub struct EdgeRecord {
 #[derive(Clone, Debug)]
 struct Snapshot {
     blocks: Vec<Vec<AdjacencyEntry>>,
-    adjacency_index: Arc<gql_exec::source::AdjacencyIndex>,
+    /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
+    /// Every writable path builds it with the generation (commits extend it
+    /// incrementally); a read-only view builds it on first use, because a
+    /// point read by property never touches adjacency.
+    adjacency: std::sync::OnceLock<Arc<gql_exec::source::AdjacencyIndex>>,
     property_index: Arc<gql_exec::source::PropertyEqualityIndex>,
     /// The root's block references, aligned with `blocks`. Retained so the
     /// next commit can tell which decoded blocks the new root carries forward
@@ -1698,13 +1702,21 @@ impl Snapshot {
         // were published or reopened; the maintained index answers from that
         // admitted state instead of re-collapsing every block per read.
         self.check_frontier(as_of)?;
-        Ok(self.adjacency_index.neighbours_at(
+        Ok(self.adjacency_index().neighbours_at(
             &self.blocks,
             src,
             relation,
             fgdb_gql::algebra::GlaDirection::Forward,
             as_of,
         ))
+    }
+
+    /// The generation's adjacency index, built from its blocks on first use
+    /// when it was not built with the generation. The build is a pure,
+    /// deterministic function of `blocks`, so a lazy index equals an eager one.
+    fn adjacency_index(&self) -> &Arc<gql_exec::source::AdjacencyIndex> {
+        self.adjacency
+            .get_or_init(|| Arc::new(gql_exec::source::AdjacencyIndex::build(&self.blocks)))
     }
 
     fn in_neighbours_at(
@@ -1714,7 +1726,7 @@ impl Snapshot {
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, ReadError> {
         self.check_frontier(as_of)?;
-        Ok(self.adjacency_index.neighbours_at(
+        Ok(self.adjacency_index().neighbours_at(
             &self.blocks,
             dst,
             relation,
@@ -1726,7 +1738,7 @@ impl Snapshot {
     fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
         self.check_frontier(as_of)?;
         Ok(self
-            .adjacency_index
+            .adjacency_index()
             .statement_at(&self.blocks, eid, as_of)
             .map(|(block, row)| EdgeRecord {
                 entry: self.blocks[block][row],
@@ -4004,11 +4016,11 @@ impl<V: Vfs + Clone> Database<V> {
             next_birth_ordinal,
         };
         self.snapshot = Arc::new(Snapshot {
-            adjacency_index: Arc::new(
+            adjacency: std::sync::OnceLock::from(Arc::new(
                 self.snapshot
-                    .adjacency_index
+                    .adjacency_index()
                     .extend(&decoded, self.snapshot.refs.len()),
-            ),
+            )),
             property_index: Arc::new(
                 self.snapshot
                     .property_index
@@ -4046,7 +4058,7 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn index_maintenance_work(&self) -> Result<(u64, u64), ReadError> {
         self.ensure_readable()?;
         Ok((
-            self.snapshot.adjacency_index.maintenance_work(),
+            self.snapshot.adjacency_index().maintenance_work(),
             self.snapshot.property_index.maintenance_work(),
         ))
     }
@@ -4057,7 +4069,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()?;
         Ok(self
             .snapshot
-            .adjacency_index
+            .adjacency_index()
             .equivalent(&gql_exec::source::AdjacencyIndex::build(
                 &self.snapshot.blocks,
             ))
@@ -5103,6 +5115,9 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         block_props,
         patches,
     );
+    // A writable handle extends the adjacency index on every commit, so it
+    // is built with the generation rather than on first read.
+    snapshot.adjacency_index();
     Ok((snapshot, writer, heads))
 }
 
@@ -5259,7 +5274,8 @@ fn current_generation(
         &manifest_bytes,
     ));
     Snapshot {
-        adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
+        // Built on first use; a writable caller forces it at once.
+        adjacency: std::sync::OnceLock::new(),
         property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
         blocks,
         refs: root.blocks,
@@ -5607,7 +5623,9 @@ async fn publish_and_snapshot_inner<V: Vfs>(
 
     Ok((
         Snapshot {
-            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&decoded)),
+            adjacency: std::sync::OnceLock::from(Arc::new(
+                gql_exec::source::AdjacencyIndex::build(&decoded),
+            )),
             property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
                 &decoded_patches,
             )),

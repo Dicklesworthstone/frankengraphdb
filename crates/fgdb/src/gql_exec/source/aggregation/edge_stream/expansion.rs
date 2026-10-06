@@ -32,7 +32,7 @@ pub(crate) fn next_from_view<C>(
 ) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
     cx.with_restriction(|| {
         view.snapshot
-            .adjacency_index
+            .adjacency_index()
             .next_incident_edge(endpoint, direction, after, control)
             .map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))
     })
@@ -178,7 +178,7 @@ impl Snapshot {
     where
         C: FnMut(SourceEvent) -> Result<(), E>,
     {
-        self.adjacency_index.visit_all_coordinates(
+        self.adjacency_index().visit_all_coordinates(
             &self.blocks,
             as_of,
             control,
@@ -644,7 +644,7 @@ mod indexed_scan_tests {
                 assert!(std::ptr::eq(*a, *b));
                 assert!(std::ptr::eq(*ap, *bp));
                 let (block, row) = snapshot
-                    .adjacency_index
+                    .adjacency_index()
                     .statement_at_controlled(&snapshot.blocks, a.eid, at, &mut |_| Ok::<_, ()>(()))
                     .unwrap()
                     .unwrap();

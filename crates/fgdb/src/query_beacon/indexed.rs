@@ -87,7 +87,7 @@ where
         let direction = self.direction;
         let mut after = None;
         loop {
-            let next = snapshot.adjacency_index.next_incident_edge(
+            let next = snapshot.adjacency_index().next_incident_edge(
                 vertex,
                 direction,
                 after,
@@ -109,7 +109,7 @@ where
             self.source_event(SourceEvent::Work, work)?;
             let Some((block, row)) =
                 snapshot
-                    .adjacency_index
+                    .adjacency_index()
                     .statement_at(&snapshot.blocks, eid, self.at)
             else {
                 continue;

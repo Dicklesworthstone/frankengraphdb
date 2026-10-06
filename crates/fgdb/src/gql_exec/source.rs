@@ -1770,7 +1770,7 @@ fn bound_edges<'a, E, Row>(
         }
     };
     for root in roots {
-        snapshot.adjacency_index.visit(
+        snapshot.adjacency_index().visit(
             &snapshot.blocks,
             root,
             lookup_direction,
@@ -1811,7 +1811,7 @@ fn bound_edges<'a, E, Row>(
             }
             control(SourceEvent::ScratchEntry)?;
             visited.insert(endpoint);
-            snapshot.adjacency_index.visit(
+            snapshot.adjacency_index().visit(
                 &snapshot.blocks,
                 endpoint,
                 GlaDirection::Undirected,

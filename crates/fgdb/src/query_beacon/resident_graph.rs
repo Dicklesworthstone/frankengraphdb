@@ -271,7 +271,7 @@ impl<M: ExpansionMembership> ExpansionNeighbors for Neighbors<'_, M> {
         let snapshot = &self.view.snapshot;
         let mut after = None;
         loop {
-            let next = snapshot.adjacency_index.next_incident_edge(
+            let next = snapshot.adjacency_index().next_incident_edge(
                 vertex,
                 self.direction,
                 after,
@@ -288,7 +288,7 @@ impl<M: ExpansionMembership> ExpansionNeighbors for Neighbors<'_, M> {
             work.charge(1)?;
             let Some((block, row)) =
                 snapshot
-                    .adjacency_index
+                    .adjacency_index()
                     .statement_at(&snapshot.blocks, eid, self.at)
             else {
                 continue;
