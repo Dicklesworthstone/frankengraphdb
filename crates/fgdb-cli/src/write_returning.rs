@@ -1,6 +1,5 @@
-//! Pre-open preparation for CREATE RETURN and bounded native UNWIND writes.
-
-mod unwind;
+//! Pre-open preparation for CREATE RETURN writes. A RETURN-less write,
+//! including a bounded native UNWIND, is bound by `main`'s native write path.
 
 use super::{
     Failure, Options, emit, execution_failure, human_value, policy, render_row_body, value_cell,
@@ -8,9 +7,7 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{
-    BoundGraphWriteScriptBatch, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-};
+use fgdb_gql::{PreparedGraphInsertQuery, PreparedGraphInsertQueryText};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
 use std::io::{self, Write};
 
@@ -19,14 +16,9 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 // bounded integer encodings plus the fixed terminal frame fit this reservation.
 const TERMINAL_RESERVATION: usize = 256;
 
-pub(super) enum PreparedWrite {
-    Returning(Box<PreparedGraphInsertQuery>),
-    Unwind(BoundGraphWriteScriptBatch),
-}
-
-pub(super) fn prepare(options: &Options) -> Result<Option<PreparedWrite>, Failure> {
+pub(super) fn prepare(options: &Options) -> Result<Option<PreparedGraphInsertQuery>, Failure> {
     if !PreparedGraphInsertQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
-        return unwind::prepare(options).map(|batch| batch.map(PreparedWrite::Unwind));
+        return Ok(None);
     }
     let declarations: Vec<_> = options.params.parameter_types().collect();
     let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
@@ -38,7 +30,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<PreparedWrite>, Failur
     .map_err(Failure::query)?;
     template
         .bind_parameters(&options.params)
-        .map(|query| Some(PreparedWrite::Returning(Box::new(query))))
+        .map(Some)
         .map_err(Failure::query)
 }
 
@@ -67,16 +59,10 @@ impl Write for BufferedRows {
 pub(super) async fn run<V: Vfs + Clone>(
     database: &mut Database<V>,
     contexts: &PurposeContexts,
-    query: PreparedWrite,
+    query: PreparedGraphInsertQuery,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let query = match query {
-        PreparedWrite::Returning(query) => *query,
-        PreparedWrite::Unwind(batch) => {
-            return unwind::run(database, contexts, batch, robot, out).await;
-        }
-    };
     let cx = contexts.query();
     let mut transaction = database.begin(&contexts.txn()).map_err(execution_failure)?;
     let prepared = (|| {
