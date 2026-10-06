@@ -1600,6 +1600,163 @@ fn strata_batch_inode_sync_lie_fences_before_root_publication() {
     });
 }
 
+/// A vertex and an edge to it that `write_history` never used: a first commit
+/// that writes one new edge block and one new vertex patch.
+fn first_commit_batch() -> WriteBatch {
+    let mut batch = WriteBatch::new(KNOWS);
+    batch.create_vertex(VId(900), vec![], vec![]);
+    batch.add_edge(EId(900), VId(1), VId(900), vec![]);
+    batch
+}
+
+/// Recreate `from`'s tree at `to` through `vfs` without a single sync: the
+/// copy `cp -r` leaves in the page cache. Not `Vfs::write`, which syncs.
+async fn copy_without_sync(vfs: &FaultVfs, from: &Path, to: &Path) {
+    let create = OpenOptions::new().write(true).create(true).truncate(true);
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, target)) = pending.pop() {
+        vfs.create_dir(&target).await.expect("copy a directory");
+        for entry in std::fs::read_dir(&source).expect("read a source directory") {
+            let entry = entry.expect("source entry");
+            let kind = entry.file_type().expect("source entry type");
+            let destination = target.join(entry.file_name());
+            if kind.is_dir() {
+                pending.push((entry.path(), destination));
+            } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).expect("read a source file");
+                let mut file = vfs
+                    .open(&destination, &create)
+                    .await
+                    .expect("create a copied file");
+                let mut written = 0;
+                while written < bytes.len() {
+                    let accepted =
+                        poll_fn(|task| Pin::new(&mut file).poll_write(task, &bytes[written..]))
+                            .await
+                            .expect("copy file bytes");
+                    assert!(accepted > 0, "a copy write made no progress");
+                    written += accepted;
+                }
+            }
+        }
+    }
+}
+
+/// Open `dir` through `vfs`, commit [`first_commit_batch`], then lose the
+/// process. Returns the committed sequence.
+async fn first_commit_then_crash(cx: &CommitCx, vfs: &FaultVfs, dir: &Path) -> CommitSeq {
+    let mut db = Database::open_with_vfs(cx, vfs.clone(), dir, engine_keys())
+        .await
+        .expect("a fresh process opens the database");
+    let seq = db
+        .write(cx, first_commit_batch())
+        .await
+        .expect("the first commit lands");
+    vfs.crash().await.expect("simulate process loss");
+    drop(db);
+    seq
+}
+
+/// The reopened database holds `seq`'s write and nothing past it.
+async fn assert_first_commit_survived(cx: &CommitCx, dir: &Path, seq: CommitSeq) {
+    let db = Database::open(cx, dir, engine_keys())
+        .await
+        .expect("the database reopens after the crash");
+    assert_eq!(db.frontier().expect("healthy frontier"), seq);
+    assert!(
+        db.vertex(VId(900)).expect("healthy read").is_some(),
+        "the first commit's vertex survived"
+    );
+    assert!(
+        db.neighbours(VId(1), KNOWS)
+            .expect("healthy read")
+            .contains(&VId(900)),
+        "the first commit's edge survived"
+    );
+}
+
+/// **A FRESH PROCESS'S FIRST COMMIT TRUSTS PUBLICATION; A COPY IS ADOPTED
+/// FIRST** (fgdb-ibbuq; owner ruling 2026-10-06, "trust publication").
+///
+/// A writable open seeds its publish receipts from the root the slot
+/// selects, so its first commit syncs only the objects it writes. Four
+/// crashes pin what that may and may not cost:
+/// - a database the engine wrote survives a crash right after a fresh
+///   process's first commit, the write included;
+/// - an fsync lie on that commit's first new strata inode is caught before
+///   any root names the object, and a reopen recovers the committed write
+///   from Chronicle;
+/// - a copy made without a sync does not survive the same sequence. This is
+///   the control: the model can see the copy hazard;
+/// - the same copy, adopted before its first open, survives.
+#[test]
+fn a_fresh_processs_first_commit_trusts_publication_and_a_copy_is_adopted_first() {
+    let source = scratch("ibbuq-source");
+    let lied = scratch("ibbuq-lied");
+    let raw_copy = scratch("ibbuq-raw-copy");
+    let adopted_copy = scratch("ibbuq-adopted-copy");
+    under_lab(0x1bb_0001, move |cx| async move {
+        let cx = &cx;
+        let history = write_history(cx, &source).await;
+        let next = CommitSeq(history.last().expect("a history").0 + 1);
+        write_history(cx, &lied).await;
+
+        let raw_vfs = FaultVfs::unix(FaultPlan::faultless());
+        copy_without_sync(&raw_vfs, &source, &raw_copy).await;
+        let adopted_vfs = FaultVfs::unix(FaultPlan::faultless());
+        copy_without_sync(&adopted_vfs, &source, &adopted_copy).await;
+
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        assert_eq!(first_commit_then_crash(cx, &vfs, &source).await, next);
+        assert_first_commit_survived(cx, &source, next).await;
+
+        // D1 and D2 come first; the third eligible sync is the commit's first
+        // new strata inode, as the path assertion below pins.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::At(3),
+            ..FaultPlan::faultless()
+        });
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &lied, engine_keys())
+            .await
+            .expect("a fresh process opens the database");
+        let error = db
+            .write(cx, first_commit_batch())
+            .await
+            .expect_err("the durable read-back exposes the lie");
+        assert!(
+            matches!(error, WriteError::CommittedNeedsRecovery { .. }),
+            "a lie after D2 must fence, not refuse: {error:?}"
+        );
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie fires");
+        assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+        assert_eq!(
+            events[0].path.parent(),
+            Some(lied.join(fgdb_strata::store::BLOCK_DIR).as_path())
+        );
+        vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_first_commit_survived(cx, &lied, next).await;
+
+        let seq = first_commit_then_crash(cx, &raw_vfs, &raw_copy).await;
+        assert_eq!(seq, next);
+        assert!(
+            Database::open(cx, &raw_copy, engine_keys()).await.is_err(),
+            "an unadopted copy loses what it never synced"
+        );
+
+        let adopted = Database::adopt_with_vfs(cx, adopted_vfs.clone(), &adopted_copy)
+            .await
+            .expect("adopts the copy");
+        assert!(adopted.files > 0);
+        assert_eq!(
+            first_commit_then_crash(cx, &adopted_vfs, &adopted_copy).await,
+            next
+        );
+        assert_first_commit_survived(cx, &adopted_copy, next).await;
+    });
+}
+
 /// Dropping an async write is the cancellation boundary callers actually own.
 /// Chronicle poisons its coordinator before appending the marker, but a
 /// cancelled outer future cannot execute the error arm that copies that fact

@@ -2143,11 +2143,11 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// back. Keeping the stale values allocated is harmless because every
     /// public graph read and every write checks this state first.
     state: DatabaseState,
-    /// Durability-and-admission receipts for the blocks this session has
-    /// already published (fgdb-gieu). Session-scoped like the writer above,
-    /// and with the same trust story: never authoritative, never persisted —
-    /// a fresh process re-earns every proof from disk via the receipts'
-    /// fallback path on its first publication.
+    /// Durability-and-admission receipts for the objects the current
+    /// generation names (fgdb-gieu). Session-scoped like the writer above:
+    /// never authoritative and never persisted. Open earns them by publishing,
+    /// or seeds them from the admission of the root the slot selected
+    /// (fgdb-ibbuq).
     receipts: PublishReceipts,
     /// The durable I/O authority retained so same-handle recovery reopens
     /// through the SAME injected filesystem rather than silently escaping to
@@ -2220,6 +2220,26 @@ impl Database<UnixVfs> {
         keys: DatabaseKeys,
     ) -> Result<Self, OpenError> {
         Self::open_with_vfs(cx, UnixVfs::new(), path, keys).await
+    }
+
+    /// Make a database directory that was copied without a sync safe to open
+    /// for writing (fgdb-ibbuq).
+    ///
+    /// A writable open trusts publication. Every object the root slot's root
+    /// names was synced before the slot named it, so [`Database::open`] seeds
+    /// its publish receipts from the reopen, and the first commit syncs only
+    /// what it writes. A copy made with `cp -r`, an archive tool or similar
+    /// has had no such sync. Its files can sit in the page cache only, and a
+    /// commit that trusted them could publish a root over bytes a crash then
+    /// loses. Adopt such a copy once, before its first writable open.
+    ///
+    /// Adopting syncs every regular file under `path`, then every directory
+    /// from the deepest up, then `path`'s parent, so each name becomes durable
+    /// after the inode it names. It follows no symlinks, needs no keys, and
+    /// refuses a `path` that does not hold a database. Adopting a database
+    /// that was never copied is harmless; it only costs the syncs.
+    pub async fn adopt(cx: &CommitCx, path: impl AsRef<Path>) -> Result<Adopted, OpenError> {
+        Self::adopt_with_vfs(cx, UnixVfs::new(), path).await
     }
 
     /// Open `path` for reads only, returning a view of its published
@@ -2423,6 +2443,50 @@ impl<V: Vfs + Clone> Database<V> {
         Self::bind_with_vfs(cx, vfs, path, keys, false).await
     }
 
+    /// [`Database::adopt`] through an explicit filesystem: the lab seam.
+    #[doc(hidden)]
+    pub async fn adopt_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+    ) -> Result<Adopted, OpenError> {
+        let path = path.as_ref();
+        require_database_dir(cx, &vfs, path).await?;
+        let mut adopted = Adopted::default();
+        let mut directories = vec![path.to_path_buf()];
+        let mut next = 0;
+        while let Some(directory) = directories.get(next).cloned() {
+            next += 1;
+            let mut entries = cx.with_restriction_async(vfs.read_dir(&directory)).await?;
+            while let Some(entry) = cx.with_restriction_async(entries.next_entry()).await? {
+                let kind = cx.with_restriction_async(entry.file_type()).await?;
+                if kind.is_dir() {
+                    directories.push(entry.path());
+                } else if kind.is_file() {
+                    let file = entry.path();
+                    cx.with_restriction_async(async {
+                        let file = vfs.open(&file, &OpenOptions::new().read(true)).await?;
+                        file.sync_all().await
+                    })
+                    .await?;
+                    adopted.files += 1;
+                }
+            }
+        }
+        // Breadth-first discovery lists every directory after its parent, so
+        // the reverse order syncs each one after all of its descendants.
+        for directory in directories.iter().rev() {
+            sync_vfs_directory(cx, &vfs, directory).await?;
+            adopted.directories += 1;
+        }
+        let parent = path
+            .parent()
+            .filter(|candidate| !candidate.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_vfs_directory(cx, &vfs, parent).await?;
+        Ok(adopted)
+    }
+
     /// [`Database::open_read_view`] through an explicit filesystem: the lab
     /// seam, as [`Database::open_with_vfs`] is for the writable open.
     #[doc(hidden)]
@@ -2566,7 +2630,7 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             select_checkpoint(cx, &coordinator, &store, &probe, &keys, path).await?
         };
-        let (mut snapshot, writer, heads) = match selected {
+        let (mut snapshot, writer, heads, receipts) = match selected {
             Some(checkpoint) => {
                 reopen_from_verified_checkpoint(
                     cx,
@@ -2677,11 +2741,9 @@ impl<V: Vfs + Clone> Database<V> {
             snapshot: Arc::new(snapshot),
             writer,
             heads,
-            // Deliberately empty rather than seeded from the rebuild: the first
-            // publication's fallback re-earns every block's admission from disk
-            // through the same checks, so an open session starts from proven
-            // state without a second trust-bearing constructor (fgdb-gieu).
-            receipts: PublishReceipts::new(),
+            // Earned by the rebuild's or suffix's publication, or seeded from
+            // the slot-selected root's admission (fgdb-ibbuq).
+            receipts,
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
@@ -4508,7 +4570,7 @@ impl<V: Vfs + Clone> Database<V> {
         // from disk.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
-        let (mut snapshot, writer) = publish_and_snapshot(
+        let (mut snapshot, writer, receipts) = publish_and_snapshot(
             cx,
             &self.store,
             &self.keys,
@@ -4557,9 +4619,9 @@ impl<V: Vfs + Clone> Database<V> {
         self.slot_generation = next_generation;
         self.snapshot = Arc::new(snapshot);
         self.writer = writer;
-        // Receipts describe the superseded generation; the replacement earns
-        // its own on the next publish.
-        self.receipts = PublishReceipts::new();
+        // The old receipts describe the superseded generation. The ones the
+        // compacted publication earned describe the replacement exactly.
+        self.receipts = receipts;
         self.state = DatabaseState::Healthy {
             published_frontier: frontier,
         };
@@ -4589,6 +4651,14 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn path(&self) -> &Path {
         self.coordinator.database_dir()
     }
+}
+
+/// What [`Database::adopt`] synced under the database directory, the
+/// directory itself included. The parent's sync is not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Adopted {
+    pub files: u64,
+    pub directories: u64,
 }
 
 /// Make every namespace entry currently visible in `directory` durable through
@@ -5051,6 +5121,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         patches,
         sealed_blocks,
         sealed_patches,
+        admission,
     } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
 
@@ -5096,12 +5167,13 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     };
     if frontier.0 > published_at.0 {
         // The suffix advanced the fold: republish through the shared tail so
-        // the durable root/manifest catch up (the slot heals in bind).
+        // the durable root/manifest catch up (the slot heals in bind). That
+        // publication syncs every object again and earns its own receipts.
         let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
             .expect("the fold's frontier is on the recovered chain it folded");
-        let (snapshot, writer) =
+        let (snapshot, writer, receipts) =
             publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
-        return Ok((snapshot, writer, heads));
+        return Ok((snapshot, writer, heads, receipts));
     }
 
     // No suffix: the partition IS current, and the snapshot assembles from
@@ -5118,12 +5190,23 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // A writable handle extends the adjacency index on every commit, so it
     // is built with the generation rather than on first read.
     snapshot.adjacency_index();
-    Ok((snapshot, writer, heads))
+    // The root slot selected this root, so publication already made every
+    // object it names durable; the reopen just admitted each one. Owner
+    // ruling 2026-10-06 (fgdb-ibbuq, "trust publication"): seed the receipts
+    // from that admission instead of re-syncing all of them on the first
+    // commit. A copy made without syncing must be adopted before this open
+    // ([`Database::adopt`]).
+    let receipts = PublishReceipts::for_published_root(admission);
+    Ok((snapshot, writer, heads, receipts))
 }
 
-/// What an open derives: the generation readers share, the retained fold, and
-/// the write heads beside it.
-type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads);
+/// What an open derives: the generation readers share, the retained fold, the
+/// write heads beside it, and the receipts for what is already published.
+type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads, PublishReceipts);
+
+/// What a publication yields: the generation, the retained fold, and the
+/// receipts it earned.
+type PublishedGeneration = (Snapshot, BlockWriter, PublishReceipts);
 
 /// Refuse a `path` that does not hold a database before anything is opened
 /// under it. Shared by the writable and the read-only open; see
@@ -5314,7 +5397,7 @@ async fn rebuild<V: Vfs>(
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
         .expect("the fold's frontier is on the recovered chain it folded");
-    let (snapshot, writer) =
+    let (snapshot, writer, receipts) =
         publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
     Ok((
         snapshot,
@@ -5323,6 +5406,7 @@ async fn rebuild<V: Vfs>(
             versions,
             next_birth_ordinal,
         },
+        receipts,
     ))
 }
 
@@ -5544,6 +5628,8 @@ async fn fold_stream<V: Vfs>(
 /// The publication tail every open path shares: publish from a clone, make
 /// the blocks/patches/root/manifest durable, and assemble the snapshot from
 /// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+/// The receipts this publication earned come back with it, so the handle's
+/// first commit does not re-sync what this call just synced (fgdb-ibbuq).
 ///
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
@@ -5555,7 +5641,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
-) -> SendFuture<'a, Result<(Snapshot, BlockWriter), RebuildError>> {
+) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
         store,
@@ -5573,7 +5659,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
-) -> Result<(Snapshot, BlockWriter), RebuildError> {
+) -> Result<PublishedGeneration, RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
     // equality law pins clone-publish == this very rebuild, byte for byte.
@@ -5640,6 +5726,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,
+        receipts,
     ))
 }
 
@@ -6161,5 +6248,186 @@ mod commit_growth_laws {
         assert_eq!(all.len(), 320);
         assert!(all.iter().any(|record| record.entry.eid == EId(320)));
         assert!(all.iter().all(|record| record.entry.eid != EId(10_000)));
+    }
+}
+
+#[cfg(test)]
+mod publish_receipt_laws {
+    use super::*;
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        )
+    }
+
+    /// One new vertex and one edge to it: each commit adds a block and a
+    /// vertex patch.
+    fn commit_batch(commit: u128) -> WriteBatch {
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(100 + commit), vec![], vec![]);
+        batch.add_edge(EId(commit), VId(1), VId(100 + commit), vec![]);
+        batch
+    }
+
+    /// Whether the handle holds a receipt for every block and vertex patch
+    /// its published root names, with that whole root as its verified prefix.
+    fn receipts_cover_the_root<V: Vfs + Clone>(db: &Database<V>) -> bool {
+        let snapshot = &db.snapshot;
+        db.receipts.verified_root_prefix(PARTITION)
+            == (snapshot.refs.len(), snapshot.patch_refs.len())
+            && snapshot.refs.iter().all(|reference| {
+                db.receipts
+                    .holds(fgdb_strata::DeltaBlockVersion(reference.block_id))
+            })
+            && snapshot.patch_refs.iter().all(|reference| {
+                db.receipts.holds_patch(fgdb_strata::vertex::VertexPatchVersion(
+                    reference.patch_id,
+                ))
+            })
+    }
+
+    /// **EVERY OPEN PATH LEAVES THE HANDLE HOLDING RECEIPTS FOR ITS WHOLE
+    /// PUBLISHED ROOT** (fgdb-ibbuq; owner ruling 2026-10-06, "trust
+    /// publication"). The checkpoint open seeds them from the slot-selected
+    /// root's admission. The rebuild open and compaction keep the ones their
+    /// own publication earned. So the first commit after any of them syncs
+    /// only what it writes. The seeded handle's next commit publishes the same
+    /// root as a twin that never closed, so seeding changes no published byte.
+    #[test]
+    fn every_open_path_holds_receipts_for_its_published_root() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let twin_vfs = MemVfs::new().unwrap();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut twin = runtime
+            .block_on(Database::create_with_vfs(
+                &cx,
+                twin_vfs.clone(),
+                twin_vfs.database_dir(),
+                keys(),
+            ))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(twin.write(&cx, origin)).unwrap();
+        for commit in 1..=12 {
+            runtime.block_on(db.write(&cx, commit_batch(commit))).unwrap();
+            runtime
+                .block_on(twin.write(&cx, commit_batch(commit)))
+                .unwrap();
+        }
+        assert_eq!(db.partition_root().unwrap(), twin.partition_root().unwrap());
+        assert!(
+            db.snapshot.refs.len() > 1 && db.snapshot.patch_refs.len() > 1,
+            "the fixture must publish several blocks and vertex patches"
+        );
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "the checkpoint open seeds receipts for the slot-selected root"
+        );
+        runtime.block_on(db.write(&cx, commit_batch(13))).unwrap();
+        runtime
+            .block_on(twin.write(&cx, commit_batch(13)))
+            .unwrap();
+        assert_eq!(
+            db.partition_root().unwrap(),
+            twin.partition_root().unwrap(),
+            "the seeded handle publishes the never-closed twin's root"
+        );
+        assert!(receipts_cover_the_root(&db));
+
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "compaction keeps the receipts its publication earned"
+        );
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs(&cx, vfs.clone(), &dir, keys(), true))
+            .unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "the rebuild open keeps the receipts its publication earned"
+        );
+    }
+
+    /// The regular files and directories under `dir`, `dir` included, found
+    /// without following a symlink.
+    fn count_tree(dir: &Path) -> (u64, u64) {
+        let (mut files, mut directories) = (0, 1);
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                let (below_files, below_directories) = count_tree(&entry.path());
+                files += below_files;
+                directories += below_directories;
+            } else if kind.is_file() {
+                files += 1;
+            }
+        }
+        (files, directories)
+    }
+
+    /// **ADOPTING A COPY SYNCS EVERY FILE AND DIRECTORY IN IT** (fgdb-ibbuq).
+    /// A writable open trusts that the published root's objects are durable,
+    /// which a directory copied without a sync breaks; adopt is the step that
+    /// restores the premise. It reaches exactly what an independent walk of
+    /// the tree finds, the database then opens and writes, and a directory
+    /// that is not a database is refused before anything is synced.
+    #[test]
+    fn adopt_syncs_every_file_and_directory_and_refuses_a_non_database() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let dir = std::env::temp_dir().join(format!("fgdb-adopt-law-{}", std::process::id()));
+
+        let mut db = runtime
+            .block_on(Database::create(&cx, &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        for commit in 1..=3 {
+            runtime.block_on(db.write(&cx, commit_batch(commit))).unwrap();
+        }
+        drop(db);
+
+        let adopted = runtime.block_on(Database::adopt(&cx, &dir)).unwrap();
+        let (files, directories) = count_tree(&dir);
+        assert!(files > 0 && directories > 1, "the fixture has a tree");
+        assert_eq!(adopted, Adopted { files, directories });
+
+        let mut db = runtime
+            .block_on(Database::open(&cx, &dir, keys()))
+            .unwrap();
+        runtime.block_on(db.write(&cx, commit_batch(4))).unwrap();
+
+        let plain = dir.with_extension("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(matches!(
+            runtime.block_on(Database::adopt(&cx, &plain)),
+            Err(OpenError::NotADatabase { .. })
+        ));
     }
 }

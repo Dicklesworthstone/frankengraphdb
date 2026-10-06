@@ -802,6 +802,22 @@ pub struct SegmentCache {
     patches: Vec<SegmentRef>,
 }
 
+impl SegmentCache {
+    /// The cache an encoder that sealed `frame`'s segments would hold. It is
+    /// valid for exactly the root assembled from this frame, once each named
+    /// segment has been read and proven against its reference: the decoder
+    /// derives the segment count from the list total (`count / SEGMENT_REFS`),
+    /// and every segment decodes to exactly [`SEGMENT_REFS`] references, so
+    /// these are the segments [`encode_root_v4`] would seal from scratch.
+    pub(crate) fn of_frame(frame: &RootFrameV4) -> Self {
+        Self {
+            coordinate: Some(frame.coordinate()),
+            blocks: frame.block_segments.clone(),
+            patches: frame.patch_segments.clone(),
+        }
+    }
+}
+
 /// A V4 root's own content, before its segments are read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootFrameV4 {

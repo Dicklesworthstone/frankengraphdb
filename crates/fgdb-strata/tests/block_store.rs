@@ -2583,6 +2583,97 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
     });
 }
 
+/// **RECEIPTS SEEDED FROM A REOPEN ARE THE RECEIPTS ITS PUBLISHER HELD**
+/// (fgdb-ibbuq). A 767-block root is two full segments plus a 255-reference
+/// tail, and the next root adds one block, which fills a third segment. Three
+/// sessions verify that next root:
+/// - the publisher, with its live receipts;
+/// - a fresh handle seeded from `reopen_sealed`'s admission;
+/// - a fresh handle with empty receipts.
+///
+/// The seeded session holds every block and resumes after the whole root. All
+/// three derive the same root identity, so seeding (segment cache included)
+/// changes no byte. A seeded session still refuses a next root that lies
+/// about a seeded block's range.
+#[test]
+fn receipts_seeded_from_a_reopen_verify_what_the_publisher_would() {
+    let dir = scratch_dir("receipts-seeded-from-reopen");
+    under_lab(0xd8, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let root = batch_of_blocks(&cx, &store, 3 * SEGMENT_REFS - 1).await;
+        let mut live = PublishReceipts::new();
+        let root_id = store
+            .put_root_verified(&cx, &root, &mut live)
+            .await
+            .expect("publishes");
+        let added = encode_block(0, None, &[entry(9_000, 900_000, 2)]).expect("encodes");
+        let added = store.put(&cx, &added).await.expect("durable block");
+        let mut next = root.clone();
+        next.published_at = CommitSeq(3);
+        next.blocks.push(BlockRef {
+            block_id: added.0,
+            first_seq: CommitSeq(2),
+            last_seq: CommitSeq(2),
+        });
+
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        let (handle, read_cx) = (&reopened, &cx);
+        let seed = || async move {
+            PublishReceipts::for_published_root(
+                handle
+                    .reopen_sealed(read_cx, root_id)
+                    .await
+                    .expect("reopens the partition")
+                    .admission,
+            )
+        };
+        let mut seeded = seed().await;
+        assert_eq!(seeded.verified_root_prefix(0), (root.blocks.len(), 0));
+        for reference in &root.blocks {
+            assert!(seeded.holds(DeltaBlockVersion(reference.block_id)));
+        }
+        assert!(!seeded.holds(added));
+
+        let live_id = store
+            .verify_root(&cx, &next, &mut live)
+            .await
+            .expect("live receipts verify")
+            .id();
+        let seeded_id = reopened
+            .verify_root(&cx, &next, &mut seeded)
+            .await
+            .expect("seeded receipts verify")
+            .id();
+        let cold_id = reopened
+            .verify_root(&cx, &next, &mut PublishReceipts::new())
+            .await
+            .expect("cold receipts verify")
+            .id();
+        assert_eq!(seeded_id, live_id);
+        assert_eq!(cold_id, live_id);
+
+        // The last seeded block claims (1, 2) for its actual (1, 1). The added
+        // block after it keeps the order lawful, so only the span check can
+        // refuse it.
+        let last_seeded = root.blocks.len() - 1;
+        let mut lying = next.clone();
+        lying.blocks[last_seeded].last_seq = CommitSeq(2);
+        let refused = reopened.verify_root(&cx, &lying, &mut seed().await).await;
+        assert!(
+            matches!(
+                refused,
+                Err(StoreError::MalformedRoot(RootError::BlockRangeMismatch { at, .. }))
+                    if at == last_seeded
+            ),
+            "a seeded session must refuse the range lie: {refused:?}"
+        );
+    });
+}
+
 /// **A SEGMENT IS AUTHENTICATED LIKE ANY OBJECT.** A byte flipped in a stored
 /// segment, or another genuine segment planted at its path, is refused by
 /// identity before its references are trusted; restoring the bytes restores

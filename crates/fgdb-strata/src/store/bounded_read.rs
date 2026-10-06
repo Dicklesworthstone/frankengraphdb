@@ -214,6 +214,20 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::PartitionRootVersion,
         maximum: usize,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
+        self.get_root_and_segments(cx, id, maximum)
+            .await
+            .map(|(root, _)| root)
+    }
+
+    /// [`Self::get_root_with_byte_limit`], also returning the segment cache
+    /// for the segments it read and proved. A V3 root names none, so its
+    /// cache is empty.
+    pub(super) async fn get_root_and_segments(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::PartitionRootVersion,
+        maximum: usize,
+    ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
         let bytes = self
             .read_object_bytes(
@@ -233,9 +247,12 @@ impl<V: Vfs> BlockStore<V> {
         }
         let frame =
             match crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)? {
-                crate::root::RootFrame::V3(root) => return Ok(root),
+                crate::root::RootFrame::V3(root) => {
+                    return Ok((root, crate::root::SegmentCache::default()));
+                }
                 crate::root::RootFrame::V4(frame) => frame,
             };
+        let segments = crate::root::SegmentCache::of_frame(&frame);
         // A V4 root's segments share the caller's byte ceiling with the root
         // itself, so a two-level root reads no more than a flat one could.
         let mut remaining = maximum.saturating_sub(bytes.len() as u64);
@@ -277,7 +294,9 @@ impl<V: Vfs> BlockStore<V> {
             }
         }
         let [blocks, patches] = lists;
-        crate::root::assemble_root(frame, blocks, patches).map_err(StoreError::MalformedRoot)
+        let root = crate::root::assemble_root(frame, blocks, patches)
+            .map_err(StoreError::MalformedRoot)?;
+        Ok((root, segments))
     }
 
     /// Authenticate a whole root under explicit source ceilings, retaining only
@@ -324,13 +343,21 @@ impl<V: Vfs> BlockStore<V> {
                 |_, _, read| Some(super::decoded_block(read)),
                 &mut observe,
                 1,
+                &mut super::RootWalk::default(),
             )
             .await?;
         // Still validate the complete vertex history. The validator retains its
         // existing owned version records, but no second patch collection is kept.
         drop(
-            self.inspect_root_patches_observed(cx, &root, |_, _, _| None::<()>, &mut observe, 1)
-                .await?,
+            self.inspect_root_patches_observed(
+                cx,
+                &root,
+                |_, _, _| None::<()>,
+                &mut observe,
+                1,
+                &mut super::RootWalk::default(),
+            )
+            .await?,
         );
         let mut blocks = Vec::new();
         let mut properties = Vec::new();

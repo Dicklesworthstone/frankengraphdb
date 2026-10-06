@@ -1552,6 +1552,7 @@ impl<V: Vfs> BlockStore<V> {
             |at, reference, read| retain(at, reference).then(|| decoded_block(read)),
             &mut |_| Ok::<(), StoreError>(()),
             OPEN_READS_IN_FLIGHT,
+            &mut RootWalk::default(),
         )
         .await
     }
@@ -1563,6 +1564,9 @@ impl<V: Vfs> BlockStore<V> {
     /// Up to `in_flight` block reads run ahead of admission. A caller whose
     /// `observe` meters or refuses work passes 1: each block's read then starts
     /// only after its [`RootReadEvent::ObjectStart`], exactly as a serial walk.
+    ///
+    /// `walk` must be fresh; it is left holding the edge-history and chain
+    /// state after the last block, for a caller that keeps it.
     async fn inspect_root_blocks_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
@@ -1570,15 +1574,16 @@ impl<V: Vfs> BlockStore<V> {
         mut keep: impl FnMut(usize, &crate::root::BlockRef, ReadRootBlock) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
         in_flight: usize,
+        walk: &mut RootWalk,
     ) -> Result<Vec<T>, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
         let mut blocks = Vec::new();
-        let mut history = crate::root::EdgeHistoryValidator::default();
-        let mut chain_heads: std::collections::BTreeMap<
-            (fgdb_types::VId, fgdb_delta_types::RelationId),
-            ObjectId,
-        > = std::collections::BTreeMap::new();
+        let RootWalk {
+            history,
+            chain_heads,
+            ..
+        } = walk;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
         for (at, reference) in root.blocks.iter().enumerate() {
@@ -1718,6 +1723,7 @@ impl<V: Vfs> BlockStore<V> {
             |at, reference, (rows, _)| retain(at, reference).then_some(rows),
             &mut |_| Ok::<(), StoreError>(()),
             OPEN_READS_IN_FLIGHT,
+            &mut RootWalk::default(),
         )
         .await
     }
@@ -1725,7 +1731,7 @@ impl<V: Vfs> BlockStore<V> {
     /// Admit every vertex patch named by `root` and keep what `keep` returns
     /// for each; every patch is proven whether or not it is kept. `in_flight`
     /// bounds the reads running ahead of admission, as for blocks; a metering
-    /// `observe` passes 1.
+    /// `observe` passes 1. `walk` is left holding the vertex-history state.
     async fn inspect_root_patches_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
@@ -1733,9 +1739,10 @@ impl<V: Vfs> BlockStore<V> {
         mut keep: impl FnMut(usize, &crate::root::PatchRef, (VertexPatchRows, Vec<u8>)) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
         in_flight: usize,
+        walk: &mut RootWalk,
     ) -> Result<Vec<T>, E> {
         let mut patches = Vec::new();
-        let mut history = crate::root::VertexHistoryValidator::default();
+        let history = &mut walk.vertex_history;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
         for (at, reference) in root.vertex_patches.iter().enumerate() {
@@ -2268,13 +2275,18 @@ impl<V: Vfs> BlockStore<V> {
     /// [`BlockStore::reopen`], also returning the sealed bytes a retained
     /// writer needs, taken from the same identity-verified reads. A caller that
     /// rebuilds a writer from a reopened partition must not read and verify
-    /// every block and patch a second time to get bytes it already had.
+    /// every block and patch a second time to get bytes it already had. The
+    /// same holds for the walk's admission state, returned as a
+    /// [`RootAdmission`].
     pub async fn reopen_sealed(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<ReopenedPartition, StoreError> {
-        let root = self.get_root(cx, id).await?;
+        let (root, segments) = self
+            .get_root_and_segments(cx, id, crate::root::MAX_ROOT_READ_BYTES)
+            .await?;
+        let mut walk = RootWalk::default();
         let read = self
             .inspect_root_blocks_observed(
                 cx,
@@ -2282,15 +2294,19 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
+                &mut walk,
             )
             .await?;
         let mut blocks = Vec::with_capacity(read.len());
         let mut block_props = Vec::with_capacity(read.len());
         let mut sealed_blocks = Vec::with_capacity(read.len());
+        let mut chains = Vec::with_capacity(read.len());
+        let mut property_patches = std::collections::BTreeSet::new();
         for (reference, read) in read {
-            let property_patch = read
-                .property_patch
-                .map(|(patch_id, bytes)| crate::writer::SealedPropertyPatch { patch_id, bytes });
+            let property_patch = read.property_patch.map(|(patch_id, bytes)| {
+                property_patches.insert(patch_id);
+                crate::writer::SealedPropertyPatch { patch_id, bytes }
+            });
             sealed_blocks.push(crate::writer::SealedBlock {
                 block_id: reference.block_id,
                 bytes: read.bytes,
@@ -2298,7 +2314,11 @@ impl<V: Vfs> BlockStore<V> {
                 last_seq: reference.last_seq,
                 property_patch,
             });
-            let (entries, props, _) = read.resolved;
+            let (entries, props, predecessor) = read.resolved;
+            chains.push((
+                entries.first().map(|entry| (entry.src, entry.relation)),
+                predecessor,
+            ));
             blocks.push(entries);
             block_props.push(props);
         }
@@ -2309,6 +2329,7 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
+                &mut walk,
             )
             .await?;
         let mut patches = Vec::with_capacity(read.len());
@@ -2322,6 +2343,15 @@ impl<V: Vfs> BlockStore<V> {
             });
             patches.push(rows);
         }
+        let admission = RootAdmission {
+            partition: root.partition,
+            blocks: root.blocks.clone(),
+            chains,
+            patches: root.vertex_patches.clone(),
+            property_patches,
+            walk,
+            segments,
+        };
         Ok(ReopenedPartition {
             root,
             blocks,
@@ -2329,6 +2359,7 @@ impl<V: Vfs> BlockStore<V> {
             patches,
             sealed_blocks,
             sealed_patches,
+            admission,
         })
     }
 
@@ -2423,26 +2454,6 @@ impl<V: Vfs> BlockStore<V> {
     }
 }
 
-/// Durability-and-verification receipts for one live publish lineage
-/// (fgdb-gieu): which block identities a [`BlockStore`] has already made
-/// durable and admitted, plus the cross-block edge-history state those
-/// admissions accumulated.
-///
-/// The receipt transfers no authority a caller could not earn on the slow
-/// path: an identity enters the map only after the store itself wrote the
-/// bytes durably ([`BlockStore::put_verified`]) or read them back from disk
-/// ([`BlockStore::put_root_verified`]'s fallback), and in both cases the
-/// entries passed the same identity, span, and edge-history checks full
-/// admission runs. What a receipt buys is memoisation, not trust: the proof
-/// already happened in this process over these immutable content-addressed
-/// bytes, so re-deriving it from disk on every subsequent publication is
-/// O(blocks) work per commit with no new information in it.
-///
-/// Scope it like the fold it accompanies: one receipts value per open
-/// database session, dropped with the session. It is never persisted —
-/// a receipt is a statement about what THIS process has proven and fsynced,
-/// and a fresh process must re-earn those proofs from disk, which the
-/// fallback path does automatically on the first publication after open.
 /// One root-named block, fully admitted: its decoded entries, its hosted
 /// property column, and its declared predecessor link (V6, fgdb-4391).
 type ResolvedBlock = (
@@ -2474,8 +2485,67 @@ pub struct ReopenedPartition {
     pub patches: Vec<VertexPatchRows>,
     pub sealed_blocks: Vec<crate::writer::SealedBlock>,
     pub sealed_patches: Vec<crate::writer::SealedPatch>,
+    pub admission: RootAdmission,
 }
 
+/// The cross-object state one root walk accumulates beside the objects it
+/// keeps: the edge-history and chain-law state after the last block, and the
+/// vertex-history state after the last patch.
+#[derive(Debug, Default)]
+struct RootWalk {
+    history: crate::root::EdgeHistoryValidator,
+    chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
+    vertex_history: crate::root::VertexHistoryValidator,
+}
+
+/// What [`BlockStore::reopen_sealed`] proved about one root, besides the
+/// objects it returned. For each named block: its identity, claimed span and
+/// chain fields. For each named vertex patch: its identity and claimed span.
+/// Also the hosted edge-property patches, the history validators after the
+/// whole root, and the root's proven V4 segments.
+///
+/// This is admission only. It says nothing about durability, so it grants
+/// nothing until [`PublishReceipts::for_published_root`] is called on it.
+#[derive(Debug)]
+pub struct RootAdmission {
+    partition: u64,
+    blocks: Vec<crate::root::BlockRef>,
+    /// Parallel to `blocks`: each block's descriptor family and declared
+    /// predecessor.
+    #[allow(clippy::type_complexity)]
+    chains: Vec<(
+        Option<(fgdb_types::VId, fgdb_delta_types::RelationId)>,
+        Option<DeltaBlockVersion>,
+    )>,
+    patches: Vec<crate::root::PatchRef>,
+    property_patches: std::collections::BTreeSet<ObjectId>,
+    walk: RootWalk,
+    segments: crate::root::SegmentCache,
+}
+
+/// Durability-and-verification receipts for one live publish lineage
+/// (fgdb-gieu): which block identities a [`BlockStore`] has already made
+/// durable and admitted, plus the cross-block edge-history state those
+/// admissions accumulated.
+///
+/// The receipt transfers no authority a caller could not earn on the slow
+/// path. An identity enters the map in one of three ways:
+/// - the store itself wrote the bytes durably ([`BlockStore::put_verified`]);
+/// - the store read them back from disk ([`BlockStore::put_root_verified`]'s
+///   fallback);
+/// - a published root named them ([`Self::for_published_root`]).
+///
+/// In every case the entries passed the same identity, span, and edge-history
+/// checks full admission runs. What a receipt buys is memoisation: the proof
+/// already happened in this process over these immutable content-addressed
+/// bytes, so re-deriving it from disk on every subsequent publication is
+/// O(blocks) work per commit with no new information in it.
+///
+/// Scope it like the fold it accompanies: one receipts value per open
+/// database session, dropped with the session. It is never persisted. A
+/// fresh process seeds it from the root it opens ([`Self::for_published_root`]),
+/// or starts empty and re-earns each proof from disk through the fallback
+/// path on its first publication.
 #[derive(Debug, Default)]
 pub struct PublishReceipts {
     validator: crate::root::EdgeHistoryValidator,
@@ -2542,6 +2612,65 @@ struct RootMemo {
 impl PublishReceipts {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Receipts for every object a published root names, built from that
+    /// root's full admission (fgdb-ibbuq; owner ruling 2026-10-06, "trust
+    /// publication").
+    ///
+    /// The admission half is already proven: the reopen walk checked every
+    /// identity, claimed span, chain link and history law that publication
+    /// checks, over the bytes on disk. The durability half is what this step
+    /// trusts, and only the caller can vouch for it: pass the admission of a
+    /// root that the root slot selected. The publish protocol syncs every
+    /// object a root names, then the root and its manifest, before the slot
+    /// names them, so they were durable before the root became reachable.
+    ///
+    /// A directory copied without a sync breaks that premise. Its objects can
+    /// still sit in the page cache only, and a commit that trusted them could
+    /// publish a root over bytes a crash then loses. Such a copy must be
+    /// adopted (every file and directory synced) before it is opened for
+    /// writing.
+    pub fn for_published_root(admission: RootAdmission) -> Self {
+        let RootAdmission {
+            partition,
+            blocks,
+            chains,
+            patches,
+            property_patches,
+            walk,
+            segments,
+        } = admission;
+        let RootWalk {
+            history,
+            chain_heads,
+            vertex_history,
+        } = walk;
+        let mut spans = BTreeMap::new();
+        let mut chain_fields = BTreeMap::new();
+        for (reference, chain) in blocks.iter().zip(chains) {
+            spans.insert(reference.block_id, (reference.first_seq, reference.last_seq));
+            chain_fields.insert(reference.block_id, chain);
+        }
+        let patch_spans = patches
+            .iter()
+            .map(|reference| (reference.patch_id, (reference.first_seq, reference.last_seq)))
+            .collect();
+        Self {
+            validator: history,
+            spans,
+            chains: chain_fields,
+            vertex_validator: vertex_history,
+            patch_spans,
+            property_patches,
+            root_memo: Some(RootMemo {
+                partition,
+                blocks,
+                chain_heads,
+                patches,
+                segments,
+            }),
+        }
     }
 
     fn admit_block(
