@@ -613,7 +613,9 @@ impl GraphIntegerExpression {
                             // merely to decide whether NULLIF should retain it.
                             numeric::check(left).map_err(failure)?;
                             numeric::check(&right).map_err(failure)?;
-                            if compare_cells(IntegerComparison::Equal, left, &right, at, control)? == Some(true) {
+                            if compare_cells(IntegerComparison::Equal, left, &right, at, control)?
+                                == Some(true)
+                            {
                                 *left = CanonicalScalar::Null.into();
                             }
                             at += 1;
@@ -897,25 +899,36 @@ impl GraphIntegerExpression {
                         bytes.extend_from_slice(&value.to_be_bytes());
                     }
                 }
-                Instruction::Unary(op) | Instruction::NumericUnary(op) => bytes.extend_from_slice(&[
-                    if matches!(instruction, Instruction::NumericUnary(_)) { 31 } else { 2 },
-                    match op {
-                        GraphIntegerUnary::Plus => 0,
-                        GraphIntegerUnary::Negate => 1,
-                        GraphIntegerUnary::Abs => 2,
-                    },
-                ]),
-                Instruction::Binary(op) | Instruction::NumericBinary(op) => bytes.extend_from_slice(&[
-                    if matches!(instruction, Instruction::NumericBinary(_)) { 32 } else { 3 },
-                    match op {
-                        GraphIntegerBinary::Add => 0,
-                        GraphIntegerBinary::Subtract => 1,
-                        GraphIntegerBinary::Multiply => 2,
-                        GraphIntegerBinary::Divide => 3,
-                        GraphIntegerBinary::Remainder => 4,
-                        GraphIntegerBinary::NullIf => 5,
-                    },
-                ]),
+                Instruction::Unary(op) | Instruction::NumericUnary(op) => {
+                    bytes.extend_from_slice(&[
+                        if matches!(instruction, Instruction::NumericUnary(_)) {
+                            31
+                        } else {
+                            2
+                        },
+                        match op {
+                            GraphIntegerUnary::Plus => 0,
+                            GraphIntegerUnary::Negate => 1,
+                            GraphIntegerUnary::Abs => 2,
+                        },
+                    ])
+                }
+                Instruction::Binary(op) | Instruction::NumericBinary(op) => bytes
+                    .extend_from_slice(&[
+                        if matches!(instruction, Instruction::NumericBinary(_)) {
+                            32
+                        } else {
+                            3
+                        },
+                        match op {
+                            GraphIntegerBinary::Add => 0,
+                            GraphIntegerBinary::Subtract => 1,
+                            GraphIntegerBinary::Multiply => 2,
+                            GraphIntegerBinary::Divide => 3,
+                            GraphIntegerBinary::Remainder => 4,
+                            GraphIntegerBinary::NullIf => 5,
+                        },
+                    ]),
                 Instruction::JumpIfPresent(target) => {
                     bytes.push(4);
                     bytes.extend_from_slice(&(*target as u64).to_be_bytes());
