@@ -1,11 +1,14 @@
 //! Checked nullable scalar expressions over a frozen, typed value row.
 //!
 //! Bounded typed postfix IR compiles to private linear bytecode. CASE and
-//! COALESCE are lazy. Integer arithmetic remains checked, with no coercions.
+//! COALESCE are lazy. Integer arithmetic remains checked. Scalar Int/Float
+//! arithmetic uses finite binary64 with integer-only rounding; exact aggregate
+//! cells never implicitly convert to float.
 //! Int/Float comparisons use exact numeric value, not storage type ranks.
 //! Text operations use Unicode scalar positions and UCS_BASIC result collation.
 
 mod compile;
+mod numeric;
 
 use crate::GlaExecutionEvent;
 use crate::algebra::{
@@ -32,9 +35,10 @@ pub enum GraphIntegerBinary {
     NullIf,
 }
 
-/// Postfix construction IR. Arithmetic operands/results are nullable integers.
-/// Scalar results never implicitly coerce between domains; Int/Float
-/// comparisons use exact numeric value while preserving each operand's kind.
+/// Postfix construction IR. The integer-root API admits nullable integers;
+/// scalar preparation additionally admits finite Int/Float arithmetic, rounding
+/// the integer operand to binary64 only when paired with a float. Int/Float
+/// comparisons remain exact and CASE/COALESCE do not convert result kinds.
 /// Case consumes (condition, then_value, else_value); only the selected
 /// result executes. Nest Case in the else operand for ordered WHEN clauses.
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
@@ -383,6 +387,7 @@ enum Instruction {
     Column(usize),
     Literal(Option<i64>),
     Unary(GraphIntegerUnary),
+    NumericUnary(GraphIntegerUnary),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
     Local(usize),
@@ -400,6 +405,7 @@ enum Instruction {
     Contains,
     InList { members: usize },
     Binary(GraphIntegerBinary),
+    NumericBinary(GraphIntegerBinary),
     JumpIfPresent(usize),
     Truth(Option<bool>),
     Compare(IntegerComparison),
@@ -571,8 +577,15 @@ impl GraphIntegerExpression {
                 }
                 Instruction::Literal(value) => stack.push(integer_scalar(*value).into()),
                 Instruction::Truth(value) => stack.push(boolean_scalar(*value).into()),
-                Instruction::Unary(op) => {
+                Instruction::Unary(op) | Instruction::NumericUnary(op) => {
                     let value = stack.last_mut().expect("validated unary stack");
+                    if matches!(self.code[at], Instruction::NumericUnary(_))
+                        && let Some(result) = numeric::unary(*op, value).map_err(failure)?
+                    {
+                        *value = result.into();
+                        at += 1;
+                        continue;
+                    }
                     let number = value.integer().map_err(failure)?;
                     let result = match number {
                         None => None,
@@ -591,9 +604,27 @@ impl GraphIntegerExpression {
                     )
                     .map_err(failure)?;
                 }
-                Instruction::Binary(op) => {
+                Instruction::Binary(op) | Instruction::NumericBinary(op) => {
                     let right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
+                    if matches!(self.code[at], Instruction::NumericBinary(_)) {
+                        if *op == GraphIntegerBinary::NullIf {
+                            // Equality stays exact; do not round an integer
+                            // merely to decide whether NULLIF should retain it.
+                            numeric::check(left).map_err(failure)?;
+                            numeric::check(&right).map_err(failure)?;
+                            if compare_cells(IntegerComparison::Equal, left, &right, at, control)? == Some(true) {
+                                *left = CanonicalScalar::Null.into();
+                            }
+                            at += 1;
+                            continue;
+                        }
+                        if let Some(result) = numeric::binary(*op, left, &right).map_err(failure)? {
+                            *left = result.into();
+                            at += 1;
+                            continue;
+                        }
+                    }
                     let a = left.integer().map_err(failure)?;
                     let b = right.integer().map_err(failure)?;
                     if *op == GraphIntegerBinary::NullIf {
@@ -854,8 +885,8 @@ impl GraphIntegerExpression {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:checked-integer-expression:v1\0".to_vec();
         bytes.extend_from_slice(&(self.code.len() as u64).to_be_bytes());
-        for op in &self.code {
-            match op {
+        for instruction in &self.code {
+            match instruction {
                 Instruction::Column(column) => {
                     bytes.push(0);
                     bytes.extend_from_slice(&(*column as u64).to_be_bytes());
@@ -866,16 +897,16 @@ impl GraphIntegerExpression {
                         bytes.extend_from_slice(&value.to_be_bytes());
                     }
                 }
-                Instruction::Unary(op) => bytes.extend_from_slice(&[
-                    2,
+                Instruction::Unary(op) | Instruction::NumericUnary(op) => bytes.extend_from_slice(&[
+                    if matches!(instruction, Instruction::NumericUnary(_)) { 31 } else { 2 },
                     match op {
                         GraphIntegerUnary::Plus => 0,
                         GraphIntegerUnary::Negate => 1,
                         GraphIntegerUnary::Abs => 2,
                     },
                 ]),
-                Instruction::Binary(op) => bytes.extend_from_slice(&[
-                    3,
+                Instruction::Binary(op) | Instruction::NumericBinary(op) => bytes.extend_from_slice(&[
+                    if matches!(instruction, Instruction::NumericBinary(_)) { 32 } else { 3 },
                     match op {
                         GraphIntegerBinary::Add => 0,
                         GraphIntegerBinary::Subtract => 1,

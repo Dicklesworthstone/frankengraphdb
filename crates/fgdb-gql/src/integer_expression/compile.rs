@@ -30,9 +30,8 @@ impl Kind {
             None
         }
     }
-    /// Comparison admission only: no cast is emitted and result branches
-    /// still use merge(), so accepting Int/Float equality cannot admit float
-    /// arithmetic or an implicit conversion of a CASE/COALESCE result.
+    /// Comparison admission does not emit a cast. Result branches still use
+    /// merge(); numeric arithmetic has its own admission and bytecode below.
     fn merge_comparison(self, other: Self) -> Option<Self> {
         if matches!(
             (self, other),
@@ -49,6 +48,8 @@ struct Node {
     children: Vec<usize>,
     kind: Kind,
     peak: usize,
+    numeric_arithmetic: bool,
+    may_float: bool,
 }
 
 pub(super) fn prepare(
@@ -126,6 +127,12 @@ fn prepare_root(
         let children = roots.split_off(roots.len() - arity);
         let child_kind = |position: usize| nodes[children[position]].kind;
         for (position, &child) in children.iter().enumerate() {
+            if !integer_root && matches!(op, Op::Unary(_) | Op::Binary(_)) {
+                if !matches!(nodes[child].kind, Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic) {
+                    return Err(wrong());
+                }
+                continue;
+            }
             let expected = match op {
                 Op::Unary(_) | Op::Binary(_) => Some(Kind::Integer),
                 Op::Not | Op::And | Op::Or => Some(Kind::Boolean),
@@ -186,6 +193,15 @@ fn prepare_root(
                 _ => return Err(wrong()),
             },
             Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
+            Op::Unary(_) | Op::Binary(_) if !integer_root => {
+                if matches!(op, Op::Binary(GraphIntegerBinary::NullIf)) {
+                    child_kind(0)
+                } else if children.iter().any(|&child| nodes[child].kind == Kind::Float) {
+                    Kind::Float
+                } else {
+                    Kind::Integer
+                }
+            }
             Op::Coalesce => merge_positions(&[0, 1], false)?,
             Op::Case => merge_positions(&[1, 2], false)?,
             Op::Compare(_) => {
@@ -218,6 +234,25 @@ fn prepare_root(
             }
             _ => Kind::Integer,
         };
+        let numeric_arithmetic = !integer_root
+            && matches!(op, Op::Unary(_) | Op::Binary(_))
+            && children.iter().any(|&child| nodes[child].may_float);
+        // Retain dynamic numeric possibilities separately from the known-kind
+        // admission above. An integer fallback cannot narrow a dynamic property
+        // load, but a Boolean/text fallback still refuses an arithmetic use.
+        let may_float = match op {
+            Op::ScalarColumn(_) | Op::Local(_) => true,
+            Op::Scalar(value) => matches!(value.value(), CanonicalScalar::Float(_)),
+            Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
+            Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
+            Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
+            Op::Case => children[1..].iter().any(|&child| nodes[child].may_float),
+            Op::SimpleCase { alternatives } => (0..*alternatives)
+                .map(|arm| children[2 + 2 * arm])
+                .chain(core::iter::once(children[arity - 1]))
+                .any(|child| nodes[child].may_float),
+            _ => false,
+        };
         let peak = match op {
             Op::Coalesce | Op::Case => children
                 .iter()
@@ -249,7 +284,7 @@ fn prepare_root(
                 || matches!(op, Op::Substring) && position != 0;
             if integer_operand {
                 let normalized = match &nodes[child].op {
-                    Op::ScalarColumn(column) => Some(Op::Column(*column)),
+                    Op::ScalarColumn(column) if !numeric_arithmetic => Some(Op::Column(*column)),
                     Op::Scalar(value) => match value.value() {
                         CanonicalScalar::Int(value) => Some(Op::Literal(Some(*value))),
                         CanonicalScalar::Null => Some(Op::Literal(None)),
@@ -268,6 +303,8 @@ fn prepare_root(
             children,
             kind,
             peak,
+            numeric_arithmetic,
+            may_float,
         });
     }
     if roots.len() != 1 {
@@ -320,7 +357,11 @@ fn prepare_root(
             Task::Visit(at) => {
                 let node = &nodes[at];
                 let unary = match &node.op {
-                    Op::Unary(op) => Some(Instruction::Unary(*op)),
+                    Op::Unary(op) => Some(if node.numeric_arithmetic {
+                        Instruction::NumericUnary(*op)
+                    } else {
+                        Instruction::Unary(*op)
+                    }),
                     Op::IsNull(is_null) => Some(Instruction::IsNull(*is_null)),
                     Op::Not => Some(Instruction::Not),
                     Op::Upper => Some(Instruction::Upper),
@@ -338,7 +379,11 @@ fn prepare_root(
                     continue;
                 }
                 let binary = match &node.op {
-                    Op::Binary(op) => Some(Instruction::Binary(*op)),
+                    Op::Binary(op) => Some(if node.numeric_arithmetic {
+                        Instruction::NumericBinary(*op)
+                    } else {
+                        Instruction::Binary(*op)
+                    }),
                     Op::Compare(op) => Some(Instruction::Compare(*op)),
                     Op::And => Some(Instruction::And),
                     Op::Or => Some(Instruction::Or),
@@ -640,10 +685,22 @@ mod tests {
                 Op::Literal(Some(1)),
                 Op::Binary(GraphIntegerBinary::Add),
             ],
+        ] {
+            assert!(matches!(prepare(&ops), Err(GraphIntegerBuildError::OperandType { .. })));
+            assert!(prepare_scalar(&ops).is_ok());
+        }
+        for ops in [
             vec![
                 floating(1.0),
                 Op::Truth(Some(true)),
                 Op::Compare(IntegerComparison::Equal),
+            ],
+            vec![
+                Op::ScalarColumn(0),
+                Op::Truth(Some(true)),
+                Op::Coalesce,
+                Op::Literal(Some(1)),
+                Op::Binary(GraphIntegerBinary::Add),
             ],
             vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
             vec![
@@ -906,7 +963,7 @@ mod tests {
         }
         assert_eq!(
             expression
-                .evaluate_with_control(&[], &mut |_| Ok::<_, ()>(()))
+                .evaluate_with_control(&[], &mut |_| Ok::<_, ()>(() ))
                 .unwrap(),
             expected
         );
