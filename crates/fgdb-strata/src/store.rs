@@ -2649,12 +2649,20 @@ impl PublishReceipts {
         let mut spans = BTreeMap::new();
         let mut chain_fields = BTreeMap::new();
         for (reference, chain) in blocks.iter().zip(chains) {
-            spans.insert(reference.block_id, (reference.first_seq, reference.last_seq));
+            spans.insert(
+                reference.block_id,
+                (reference.first_seq, reference.last_seq),
+            );
             chain_fields.insert(reference.block_id, chain);
         }
         let patch_spans = patches
             .iter()
-            .map(|reference| (reference.patch_id, (reference.first_seq, reference.last_seq)))
+            .map(|reference| {
+                (
+                    reference.patch_id,
+                    (reference.first_seq, reference.last_seq),
+                )
+            })
             .collect();
         Self {
             validator: history,
