@@ -8,8 +8,7 @@
 use super::{
     Failure, Options, QueryBudget, cell, emit, execution_failure, human_value, quoted, set_decimal,
 };
-use asupersync::fs::Vfs;
-use fgdb::{Database, QueryValue};
+use fgdb::{EmbeddedReadView, QueryValue};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::GqlQueryPolicy;
 use fgdb_gql::result_diff::GraphResultDiff;
@@ -62,8 +61,8 @@ impl DiffOptions {
     }
 }
 
-pub(super) fn run<V: Vfs + Clone>(
-    db: &Database<V>,
+pub(super) fn run(
+    view: &EmbeddedReadView,
     cx: &QueryCx,
     options: &Options,
     robot: bool,
@@ -73,7 +72,7 @@ pub(super) fn run<V: Vfs + Clone>(
     // This public API owns both revision fences, one frozen binding, full query
     // semantics and cumulative source/work/scratch admission. No write authority
     // or intermediate event stream is acquired by this command.
-    let result = db
+    let result = view
         .query_diff(
             cx,
             &options.text,
@@ -226,6 +225,26 @@ fn frame(out: &mut impl Write, line: &str, used: &mut u64, limit: u64) -> Result
     out.flush().map_err(Failure::io)?;
     *used = next;
     Ok(())
+}
+
+/// The tests drive [`run`] over a database's current generation, as the CLI
+/// drives it over a read-only open; `read_session` is that same view.
+#[cfg(test)]
+mod over_database {
+    use super::{Failure, Options};
+    use fgdb_types::QueryCx;
+    use std::io::Write;
+
+    pub(super) fn run<V: asupersync::fs::Vfs + Clone>(
+        db: &fgdb::Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        let view = db.read_session().map_err(Failure::io)?;
+        super::run(&view, cx, options, robot, out)
+    }
 }
 
 #[cfg(test)]

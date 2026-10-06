@@ -1,7 +1,8 @@
 //! Real native grouped cursors drive the same lossless CLI delivery boundary.
+use super::over_database::run;
 use super::*;
 use asupersync::lab::run_async_under_lab;
-use fgdb::{DatabaseKeys, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::stream::VertexScanState;
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};

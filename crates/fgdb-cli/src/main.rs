@@ -1089,12 +1089,26 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 } else {
                     None
                 };
-                // A plain eager read needs no writer: open only the published
-                // generation, without the fold, version heads and delta history
-                // that only writes, streams and certificates use.
-                if command == "query" && !options.fnx_call && !options.stream && options.certify_to.is_none() {
+                // Reads need no writer: open only the published generation,
+                // without the fold, version heads and delta history that writes
+                // and certified execution use. Each read runs on that view, as
+                // the database's own read entrypoints do on a fresh view.
+                if matches!(command, "diff" | "search") || (command == "query" && options.certify_to.is_none()) {
                     let view = Database::open_read_view(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?;
-                    let result = view.query(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
+                    let cx = contexts.query();
+                    if command == "diff" {
+                        return diff::run(&view, &cx, &options, robot, out);
+                    }
+                    if let Some(prepared) = analytics {
+                        return fnx::run(&view, &cx, &options.text, prepared, robot, out);
+                    }
+                    if let Some(prepared) = &retrieval {
+                        return search::run(&view, &cx, prepared, robot, out);
+                    }
+                    if options.stream {
+                        return stream::run(&view, &cx, &options, robot, out);
+                    }
+                    let result = view.query(&cx, &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
                     return render(result, view.frontier().0, "rows", robot, out);
                 }
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
@@ -1118,9 +1132,6 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 }
                 if command == "transaction" {
                     return transaction::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
-                }
-                if command == "diff" {
-                    return diff::run(&db, &contexts.query(), &options, robot, out);
                 }
                 if command == "write" {
                     if let Some(prepared) = returning {
@@ -1149,12 +1160,6 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                         (false, None) => writeln!(out, "completed at seq {seq}").map_err(Failure::io),
                     };
                 }
-                if let Some(prepared) = analytics {
-                    return fnx::run(&db, &contexts.query(), &options.text, prepared, robot, out);
-                }
-                if let Some(prepared) = &retrieval {
-                    return search::run(&db, &contexts.query(), prepared, robot, out);
-                }
                 if let Some(path) = &options.certificate {
                     contexts.query().checkpoint().map_err(Failure::io)?;
                     let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
@@ -1162,19 +1167,16 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     let result = db.replay(&contexts.query(), &certificate, &options.params, &options, options.budget.policy()).map_err(Failure::query)?;
                     return render(result, certificate.plan.snapshot_seq.0, "replayed", robot, out);
                 }
-                if let Some(path) = &options.certify_to {
-                    let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
-                    render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
-                    out.flush().map_err(Failure::io)?;
-                    contexts.query().checkpoint().map_err(Failure::io)?;
-                    return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
-                }
-                if options.stream {
-                    return stream::run(&db, &contexts.query(), &options, robot, out);
-                }
-                let result = db.query(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
-                let seq = db.frontier().map_err(Failure::io)?.0;
-                render(result, seq, "rows", robot, out)
+                // Every other command returned above; only `query --certify-to`
+                // remains.
+                let Some(path) = &options.certify_to else {
+                    return Err(Failure::usage("unknown or missing subcommand; use fgdb help"));
+                };
+                let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
+                render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
+                out.flush().map_err(Failure::io)?;
+                contexts.query().checkpoint().map_err(Failure::io)?;
+                asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io)
             })
         }
         _ => Err(Failure::usage(

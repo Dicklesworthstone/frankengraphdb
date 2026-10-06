@@ -14,15 +14,14 @@
 #[cfg(test)]
 use super::policy;
 use super::{Failure, Options, cell, emit, execution_failure, human_value, quoted, value_cell};
-use asupersync::fs::Vfs;
-use fgdb::{Database, PreparedNativeRead, QueryValue};
+use fgdb::{EmbeddedReadView, PreparedNativeRead, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot};
 use fgdb_types::QueryCx;
 use std::io::Write;
 
-pub(super) fn run<V: Vfs + Clone>(
-    db: &Database<V>,
+pub(super) fn run(
+    view: &EmbeddedReadView,
     cx: &QueryCx,
     options: &Options,
     robot: bool,
@@ -40,7 +39,7 @@ pub(super) fn run<V: Vfs + Clone>(
             | PreparedNativeRead::PipelineAggregate(_)
     ) {
         let mut cursor = prepared
-            .stream_aggregate(db, cx, &options.params, options.budget.policy())
+            .stream_aggregate_in_view(view, cx, &options.params, options.budget.policy())
             .map_err(execution_failure)?;
         let columns = cursor.columns().to_vec();
         let slots = cursor.output_slots().to_vec();
@@ -59,7 +58,7 @@ pub(super) fn run<V: Vfs + Clone>(
         return result;
     }
     let (columns, mut cursor) = prepared
-        .stream(db, cx, &options.params, options.budget.policy())
+        .stream_in_view(view, cx, &options.params, options.budget.policy())
         .map_err(execution_failure)?;
     // In particular, a temporal stream names its actual retained cut, not the
     // live writer's later frontier. No second database read supplies metadata.
@@ -225,6 +224,26 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
         "stream incomplete after {sent} fully flushed row(s); output may contain a partial final frame: {}",
         error.message,
     )))
+}
+
+/// The tests drive [`run`] over a database's current generation, as the CLI
+/// drives it over a read-only open; `read_session` is that same view.
+#[cfg(test)]
+mod over_database {
+    use super::{Failure, Options};
+    use fgdb_types::QueryCx;
+    use std::io::Write;
+
+    pub(super) fn run<V: asupersync::fs::Vfs + Clone>(
+        db: &fgdb::Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        let view = db.read_session().map_err(Failure::io)?;
+        super::run(&view, cx, options, robot, out)
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! `query 'CALL fnx.<procedure>(...) YIELD ...'`: registered Prism analytics
-//! over the admitted generation, through the embedded `Database::call_fnx`.
+//! over the admitted generation, through the embedded `EmbeddedReadView::call_fnx`
+//! on a read-only open.
 //!
 //! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
@@ -17,8 +18,7 @@
 //! never silently converted. Arguments are typed `--param` values:
 //! `int:`, `float:`, `bool:`, `null` and `vertex:<id>` for a source vertex.
 use super::{Failure, Options, float_text, render_rows};
-use asupersync::fs::Vfs;
-use fgdb::Database;
+use fgdb::EmbeddedReadView;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxArgument, FnxParameters, FnxReadOptions, FnxSelection, FnxValue,
@@ -227,15 +227,15 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     })
 }
 
-pub(super) fn run<V: Vfs + Clone>(
-    db: &Database<V>,
+pub(super) fn run(
+    view: &EmbeddedReadView,
     cx: &QueryCx,
     text: &str,
     prepared: Prepared,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let result = db
+    let result = view
         .call_fnx(cx, text, &prepared.parameters, prepared.read)
         .map_err(Failure::query)?;
     let analytics = result.analytics;

@@ -1,5 +1,6 @@
 //! `search`: Beacon text, vector and exact-RRF hybrid retrieval over one
-//! committed generation, through the embedded `Database::beacon_search`.
+//! committed generation, through the embedded `EmbeddedReadView::beacon_search`
+//! on a read-only open.
 //!
 //! The corpus is an EXPLICIT projection chosen by flags, never inferred:
 //! - `--text <query>` with `--text-property <property>` runs BM25 over that
@@ -29,8 +30,7 @@
 //! The index is built for this one call from the selected generation, so a
 //! result always describes exactly the reported `seq`.
 use super::{Failure, Options, float_text, render_rows};
-use asupersync::fs::Vfs;
-use fgdb::Database;
+use fgdb::EmbeddedReadView;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{
@@ -536,8 +536,8 @@ impl Prepared {
     }
 }
 
-pub(super) fn run<V: Vfs + Clone>(
-    db: &Database<V>,
+pub(super) fn run(
+    view: &EmbeddedReadView,
     cx: &QueryCx,
     prepared: &Prepared,
     robot: bool,
@@ -546,10 +546,7 @@ pub(super) fn run<V: Vfs + Clone>(
     // Pin the generation explicitly, so the reported seq is exactly the one
     // searched rather than a second, later read of the frontier.
     let mut read = prepared.read.clone();
-    let seq = match read.as_of {
-        Some(seq) => seq,
-        None => db.frontier().map_err(Failure::io)?,
-    };
+    let seq = read.as_of.unwrap_or(view.frontier());
     read.as_of = Some(seq);
     if let Some(graph) = &prepared.graph {
         let query = GraphHybridQuery {
@@ -568,7 +565,7 @@ pub(super) fn run<V: Vfs + Clone>(
         // The indexed sibling expands through snapshot incidence of the
         // reached vertices only; semantics are the whole-graph API's, which
         // tests/cli_robot.rs keeps as its oracle.
-        let hits = db
+        let hits = view
             .beacon_search_graph_indexed(cx, &read, query, expansion)
             .map_err(Failure::query)?;
         let columns: Vec<String> = [
@@ -601,7 +598,7 @@ pub(super) fn run<V: Vfs + Clone>(
             .collect();
         return render_rows(&columns, cells, seq.0, "searched", robot, out);
     }
-    let rows = db
+    let rows = view
         .beacon_search(cx, &read, prepared.search())
         .map_err(Failure::query)?;
     let (columns, cells): (&[&str], Vec<Vec<String>>) = match &rows {

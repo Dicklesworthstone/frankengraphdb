@@ -1,8 +1,9 @@
 //! Actual native edge cursors exercise the CLI delivery boundary. A flushed
 //! prefix is not a complete result, and transport failure must stop demand.
+use super::over_database::run;
 use super::*;
 use asupersync::lab::run_async_under_lab;
-use fgdb::{DatabaseKeys, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::edge_stream::EdgeScanError;
 use fgdb_gql::scan_stream::{ScanError, ScanKind, ScanState};
