@@ -7,11 +7,12 @@
 //! authentication and database selection are open failures (4), and
 //! transport failures or an unknown commit outcome are I/O failures (5).
 
-use super::{Failure, emit, float_text, hex, quoted, render_rows};
+use super::{Failure, emit, float_text, hex, render_rows};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
-use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireTimestamp, WireValue};
+use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::{Client, ClientError};
+use fgdb_protocol::json::{argument, cell};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -118,7 +119,8 @@ fn parameter(raw: &str) -> Result<WireValue, Failure> {
                 "invalid json parameter: expected a JSON array",
             ));
         }
-        return json_value(&json);
+        return argument(&json)
+            .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")));
     }
     match raw {
         "bool:true" => Ok(WireValue::Bool(true)),
@@ -126,35 +128,6 @@ fn parameter(raw: &str) -> Result<WireValue, Failure> {
         "null" => Ok(WireValue::Null),
         _ => Err(Failure::usage("invalid parameter type or value")),
     }
-}
-
-fn json_value(json: &Json) -> Result<WireValue, Failure> {
-    let bad = |detail: &str| Failure::usage(format!("invalid json parameter: {detail}"));
-    Ok(match json {
-        Json::Null => WireValue::Null,
-        Json::Bool(value) => WireValue::Bool(*value),
-        Json::Number(text) if text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) => {
-            let value: f64 = text.parse().map_err(|_| bad("number"))?;
-            if !value.is_finite() {
-                return Err(bad("float out of range"));
-            }
-            WireValue::Float(value)
-        }
-        Json::Number(text) => {
-            WireValue::Int(text.parse().map_err(|_| bad("integer out of range"))?)
-        }
-        Json::String(text) => WireValue::Text(text.clone()),
-        Json::Array(items) => {
-            WireValue::List(items.iter().map(json_value).collect::<Result<_, _>>()?)
-        }
-        // BTreeMap order is UTF-8 byte order: exactly the wire map's canonical order.
-        Json::Object(fields) => WireValue::Map(
-            fields
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), json_value(value)?)))
-                .collect::<Result<_, Failure>>()?,
-        ),
-    })
 }
 
 /// A bearer token is a credential: an owner-only file of hex text.
@@ -253,13 +226,7 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .map(|value| {
-                            if robot {
-                                robot_cell(value)
-                            } else {
-                                human(value)
-                            }
-                        })
+                        .map(|value| if robot { cell(value) } else { human(value) })
                         .collect()
                 })
                 .collect();
@@ -280,78 +247,6 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     }
 }
 
-/// The robot cell encoding of the local CLI, for a wire value.
-fn robot_cell(value: &WireValue) -> String {
-    let ids = |ids: &[u128]| {
-        ids.iter()
-            .map(|id| quoted(&id.to_string()))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    match value {
-        WireValue::Null => r#"{"type":"null"}"#.to_owned(),
-        WireValue::Bool(v) => format!(r#"{{"type":"bool","value":{v}}}"#),
-        WireValue::Int(v) => format!(r#"{{"type":"int","value":"{v}"}}"#),
-        WireValue::Text(v) => format!(r#"{{"type":"text","value":{}}}"#, quoted(v)),
-        WireValue::Decimal(v) => format!(r#"{{"type":"decimal","value":"{v}"}}"#),
-        WireValue::Float(v) => format!(r#"{{"type":"float","value":{}}}"#, quoted(&float_text(*v))),
-        WireValue::Timestamp(v) => format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp(v)),
-        WireValue::Bytes(v) => format!(r#"{{"type":"bytes","value":{}}}"#, quoted(&hex(v))),
-        WireValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{v}"}}"#),
-        WireValue::Edge(v) => format!(r#"{{"type":"edge","value":"{v}"}}"#),
-        WireValue::Path { start, steps } => {
-            let mut nodes = vec![quoted(&start.to_string())];
-            let mut edges = Vec::new();
-            for (edge, vertex) in steps {
-                edges.push(quoted(&edge.to_string()));
-                nodes.push(quoted(&vertex.to_string()));
-            }
-            format!(
-                r#"{{"type":"path","value":{{"nodes":[{}],"edges":[{}]}}}}"#,
-                nodes.join(","),
-                edges.join(",")
-            )
-        }
-        WireValue::Vertices(v) => format!(r#"{{"type":"vertices","value":[{}]}}"#, ids(v)),
-        WireValue::Edges(v) => format!(r#"{{"type":"edges","value":[{}]}}"#, ids(v)),
-        WireValue::List(items) => format!(
-            r#"{{"type":"list","value":[{}]}}"#,
-            items.iter().map(robot_cell).collect::<Vec<_>>().join(",")
-        ),
-        WireValue::Map(entries) => format!(
-            r#"{{"type":"map","value":{{{}}}}}"#,
-            entries
-                .iter()
-                .map(|(key, value)| format!("{}:{}", quoted(key), robot_cell(value)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        WireValue::Count(v) => format!(r#"{{"type":"count","value":"{v}"}}"#),
-        WireValue::WideInt(v) => format!(r#"{{"type":"wideint","value":"{v}"}}"#),
-        WireValue::Average {
-            numerator,
-            denominator,
-        } => format!(r#"{{"type":"average","value":"{numerator}/{denominator}"}}"#),
-    }
-}
-
-fn timestamp(value: &WireTimestamp) -> String {
-    let zone = value.zone.as_ref().map_or_else(
-        || "null".to_owned(),
-        |zone| {
-            format!(
-                r#"{{"identifier":{},"tzdb_oid":"{}"}}"#,
-                quoted(&zone.identifier),
-                hex(&zone.tzdb_oid)
-            )
-        },
-    );
-    format!(
-        r#"{{"instant_utc_nanos":"{}","utc_offset_seconds":{},"zone":{zone}}}"#,
-        value.instant_utc_nanos, value.utc_offset_seconds
-    )
-}
-
 fn human(value: &WireValue) -> String {
     let ids = |ids: &[u128]| {
         ids.iter()
@@ -366,7 +261,7 @@ fn human(value: &WireValue) -> String {
         WireValue::Text(v) => v.chars().flat_map(char::escape_default).collect(),
         WireValue::Decimal(v) => v.clone(),
         WireValue::Float(v) => float_text(*v),
-        WireValue::Timestamp(v) => timestamp(v),
+        WireValue::Timestamp(_) => cell(value),
         WireValue::Bytes(v) => format!("0x{}", hex(v)),
         WireValue::Vertex(v) => format!("vertex {v}"),
         WireValue::Edge(v) => format!("edge {v}"),

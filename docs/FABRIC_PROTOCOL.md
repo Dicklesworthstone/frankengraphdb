@@ -225,6 +225,27 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   retained, so nothing is detached); a committed write reports
   `SemanticTerminalDurable`.
 
+- **HTTP/1.1 JSON adapter.** `fgdbd serve --http-listen` adds the same
+  autocommit statements over plain HTTP: `POST /v1/databases/<name>/query`
+  or `/write` with `Authorization: Bearer <hex token>` and a body
+  `{"statement": "<gql>", "parameters": {...}}` (plain JSON arguments: an
+  integer is `int`, another number `float`, an object a map); `GET
+  /v1/health`. It is a framing over the exact FGP execution path
+  (`crates/fgdb-server/src/execute.rs`): the same capability check, the same
+  fresh authorized session per statement, the same statement and error
+  classes. A query answers `{"v":1,"columns":[...],"rows":[[cell...]],"seq":N}`
+  with the CLI robot cells; a write answers `{"v":1,"seq":N,"statements":M,
+  "committed":true|false}`; a refusal answers `{"v":1,"error":{"code","message"}}`
+  under a status that follows its class (statement/protocol 400,
+  unauthenticated 401, permission_denied 403, not_found_or_unauthorized 404,
+  conflict 409, budget 422, busy 429, draining 503, otherwise 500). A missing
+  database and an unauthorized one share one 404. Requests must name an
+  allowed `Host` (default `localhost`, `127.0.0.1`, `[::1]` and the listen IP),
+  which defeats DNS rebinding against a loopback listener. Results are
+  buffered whole: an HTTP response has no per-row flow control.
+  `fgdb_protocol::json` holds the one strict JSON grammar and the cell
+  encoding the CLI and the adapter share.
+
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
 AUTH_REFRESH, explicit multi-statement transactions with ownership and
@@ -240,8 +261,9 @@ database: the handshake, a multi-relation CREATE, a 20-map UNWIND batch, a
 22-row read through a 4-row window, parameterized pattern reads, statement
 refusals that leave the connection usable, a read-only token's write refused
 `permission_denied`, a Company-only token counting zero vertices, a foreign
-issuer's token refused `unauthenticated`, drain delivering GOODBYE, and
-committed writes surviving a server restart).
+issuer's token refused `unauthenticated`, drain delivering GOODBYE,
+committed writes surviving a server restart, and the HTTP adapter's health,
+parameterized write and read, every refusal status and the Host allow-list).
 
 ## Remaining integration
 

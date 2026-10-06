@@ -162,8 +162,9 @@ The embedded library posture is live. The CLI binary is real, but the robot cont
 - Authentication by Warden capability token (`fgdbd token`); each EXECUTE builds a fresh `authorized_read_session` or `authorized_write_session`, so scope, expiry and signed budgets are rechecked per statement and masking applies before expansion.
 - Results as ephemeral SNAPSHOT_RESULT chunks on a server-minted stream under exact byte-and-row flow credit, with QUERY_CANCEL, PING and DRAIN served while a stream waits; SIGINT/SIGTERM drain with GOODBYE.
 - Clients: `fgdb_protocol::client::Client` and the CLI's `fgdb remote query|write`.
+- An HTTP/1.1 JSON adapter (`fgdbd serve --http-listen`) over the same execution path, with a Host allow-list.
 
-Not yet: TLS, durable result retention with ACK/release/resume, PREPARE, explicit multi-statement transactions and reattachment, subscriptions, multi-tenant admission/QoS, and the HTTP/gRPC/WebSocket/Bolt adapters. Names resolve through operator-declared bindings because there is no durable catalog.
+Not yet: TLS, durable result retention with ACK/release/resume, PREPARE, explicit multi-statement transactions and reattachment, subscriptions, multi-tenant admission/QoS, and the HTTP/2, gRPC, WebSocket and Bolt adapters. Names resolve through operator-declared bindings because there is no durable catalog.
 
 ## Query evidence tower
 

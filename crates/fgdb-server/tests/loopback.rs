@@ -369,3 +369,161 @@ fn committed_writes_survive_a_server_restart() {
         server.join(cx).await.unwrap();
     });
 }
+
+/// One HTTP/1.1 exchange on a fresh connection: the status and the body.
+async fn http(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    token: Option<&[u8]>,
+    body: &str,
+) -> (u16, String) {
+    use asupersync::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = asupersync::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    if let Some(token) = token {
+        let hex: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+        request.push_str(&format!("Authorization: Bearer {hex}\r\n"));
+    }
+    request.push_str(&format!(
+        "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let status = response
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {response:?}"));
+    let body = response
+        .split_once("\r\n\r\n")
+        .map_or(String::new(), |(_, body)| body.to_owned());
+    (status, body)
+}
+
+#[test]
+fn http_adapter_serves_the_same_authorized_statements() {
+    run(async |cx| {
+        let path = scratch("http");
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        drop(
+            Database::create(&contexts.commit(), &path, keys())
+                .await
+                .unwrap(),
+        );
+        let mut server = Server::new(cx, ServerLimits::default()).unwrap();
+        let mut config = DatabaseConfig::new("social", keys(), issuer_key());
+        config.symbols = symbols();
+        server.open_database(cx, &path, config).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Arc::new(server);
+        let shutdown = server.shutdown();
+        let mut handle = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let rw = token(&grant(Rights::ReadWrite));
+        let ro = token(&grant(Rights::Read));
+        let host = "127.0.0.1";
+
+        let (status, body) = http(addr, "GET", "/v1/health", host, None, "").await;
+        assert_eq!((status, body.as_str()), (200, r#"{"v":1,"status":"ok"}"#));
+
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            host,
+            Some(&rw),
+            r#"{"statement": "UNWIND $rows AS row CREATE (:Person {name: row.name, age: row.age})",
+                "parameters": {"rows": [{"name": "Ann", "age": 30}, {"name": "Bob", "age": 25}]}}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, r#"{"v":1,"seq":1,"statements":1,"committed":true}"#);
+
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            host,
+            Some(&ro),
+            r#"{"statement": "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS name",
+                "parameters": {"min": 26}}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name"],"rows":[[{"type":"text","value":"Ann"}]],"seq":1}"#
+        );
+
+        // Typed refusals map onto statuses; none reveals a hidden fact.
+        let refusals = [
+            (
+                "/v1/databases/social/query",
+                Some(&ro),
+                r#"{"statement": "MATCH (n:Nobody) RETURN n"}"#,
+                400,
+                "statement",
+            ),
+            (
+                "/v1/databases/social/write",
+                Some(&ro),
+                r#"{"statement": "CREATE (:Person {name: 'Eve'})"}"#,
+                403,
+                "permission_denied",
+            ),
+            (
+                "/v1/databases/nope/query",
+                Some(&rw),
+                r#"{"statement": "MATCH (n) RETURN n"}"#,
+                404,
+                "not_found_or_unauthorized",
+            ),
+            (
+                "/v1/databases/social/query",
+                None,
+                r#"{"statement": "MATCH (n) RETURN n"}"#,
+                401,
+                "unauthenticated",
+            ),
+            (
+                "/v1/databases/social/query",
+                Some(&rw),
+                r#"{"statment": "typo"}"#,
+                400,
+                "protocol",
+            ),
+        ];
+        for (path, credential, body, expected, code) in refusals {
+            let (status, answer) = http(
+                addr,
+                "POST",
+                path,
+                host,
+                credential.map(Vec::as_slice),
+                body,
+            )
+            .await;
+            assert_eq!(status, expected, "{path} {body}: {answer}");
+            assert!(answer.contains(&format!(r#""code":"{code}""#)), "{answer}");
+        }
+
+        // A Host the operator did not allow is refused before routing.
+        let (status, _) = http(addr, "GET", "/v1/health", "evil.example", None, "").await;
+        assert!((400..500).contains(&status), "{status}");
+
+        shutdown.trigger();
+        handle.join(cx).await.unwrap();
+    });
+}

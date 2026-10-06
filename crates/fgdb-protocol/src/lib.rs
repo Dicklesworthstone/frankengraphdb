@@ -18,6 +18,7 @@ pub mod body;
 mod connection;
 mod flow;
 mod frame;
+pub mod json;
 
 /// Asupersync-backed, cancellation-resumable stream I/O. The pure codec and
 /// state machines remain usable without enabling a runtime dependency.

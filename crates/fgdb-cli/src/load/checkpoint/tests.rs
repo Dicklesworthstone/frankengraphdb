@@ -1,4 +1,4 @@
-use super::super::{JsonParser, Saved};
+use super::super::{Saved, parse_json};
 use super::*;
 use fgdb_types::{EId, VId};
 use std::collections::BTreeMap;
@@ -130,26 +130,26 @@ fn streamed_v1_encoding_matches_legacy_with_full_width_ids_and_escaped_keys() {
 
 #[test]
 fn decode_limits_apply_before_large_strings_numbers_and_value_trees_are_retained() {
-    assert!(JsonParser::parse_limited("[0,1]", 3, 1).is_ok());
+    assert!(parse_json("[0,1]", 3, 1).is_ok());
     assert!(
-        JsonParser::parse_limited("[0,1]", 2, 1)
+        parse_json("[0,1]", 2, 1)
             .unwrap_err()
             .contains("value limit")
     );
-    assert!(JsonParser::parse_limited("\"λ\"", 1, 2).is_ok());
+    assert!(parse_json("\"λ\"", 1, 2).is_ok());
     assert!(
-        JsonParser::parse_limited("\"λ\"", 1, 1)
+        parse_json("\"λ\"", 1, 1)
             .unwrap_err()
             .contains("string limit")
     );
-    assert!(JsonParser::parse_limited("\"\\uD83D\\uDCA1\"", 1, 4).is_ok());
+    assert!(parse_json("\"\\uD83D\\uDCA1\"", 1, 4).is_ok());
     assert!(
-        JsonParser::parse_limited("\"\\uD83D\\uDCA1\"", 1, 3)
+        parse_json("\"\\uD83D\\uDCA1\"", 1, 3)
             .unwrap_err()
             .contains("string limit")
     );
     assert!(
-        JsonParser::parse_limited("123", 1, 2)
+        parse_json("123", 1, 2)
             .unwrap_err()
             .contains("number limit")
     );

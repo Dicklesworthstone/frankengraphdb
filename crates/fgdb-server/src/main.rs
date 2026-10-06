@@ -19,7 +19,7 @@ const HELP: &str = "\
 fgdbd: the FrankenGraphDB server (FGP over TCP)
 
 USAGE:
-  fgdbd serve --listen <addr:port> DATABASE...
+  fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--policy-epoch <n>] [--write-relation <u32>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
@@ -38,9 +38,15 @@ issuer key; it can select exactly the databases whose issuer accepts it.
 Statements run through capability-authorized sessions, so a token's label,
 relation and property scope applies before expansion. Names resolve through
 the bindings given here (there is no durable catalog yet). serve prints one
-NDJSON line {\"v\":1,\"event\":\"listening\",\"addr\":...} once bound, drains on
-SIGINT/SIGTERM (in-flight statements finish, idle connections say GOODBYE),
-and exits 0.
+NDJSON line {\"v\":1,\"event\":\"listening\",\"protocol\":\"fgp\",\"addr\":...} per
+listener once bound, drains on SIGINT/SIGTERM (in-flight statements finish,
+idle connections say GOODBYE), and exits 0.
+
+--http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query
+or /write with `Authorization: Bearer <hex token>` and a JSON body
+{\"statement\": \"<gql>\", \"parameters\": {...}}; GET /v1/health. Requests must
+name an allowed Host (default localhost, 127.0.0.1, [::1] and the listen IP;
+--http-allow-host replaces that list).
 
 token prints the token as hex on stdout. Scopes default to every label,
 relation and property; any --allow-* flag restricts that kind to the listed
@@ -129,6 +135,8 @@ struct DatabaseOptions {
 
 struct ServeOptions {
     listen: String,
+    http_listen: Option<String>,
+    http_hosts: Vec<String>,
     max_connections: Option<usize>,
     databases: Vec<DatabaseOptions>,
 }
@@ -161,6 +169,8 @@ fn binding(raw: &str, flag: &str) -> Result<(String, u32), Failure> {
 impl ServeOptions {
     fn parse(args: &[String]) -> Result<Self, Failure> {
         let mut listen = None;
+        let mut http_listen = None;
+        let mut http_hosts = Vec::new();
         let mut max_connections = None;
         let mut databases: Vec<DatabaseOptions> = Vec::new();
         let mut at = 0;
@@ -170,6 +180,10 @@ impl ServeOptions {
                 "--listen" if listen.is_none() => {
                     listen = Some(value(args, &mut at, flag)?.to_owned())
                 }
+                "--http-listen" if http_listen.is_none() => {
+                    http_listen = Some(value(args, &mut at, flag)?.to_owned());
+                }
+                "--http-allow-host" => http_hosts.push(value(args, &mut at, flag)?.to_owned()),
                 "--max-connections" if max_connections.is_none() => {
                     max_connections = Some(number(value(args, &mut at, flag)?, flag)?);
                 }
@@ -240,6 +254,8 @@ impl ServeOptions {
         }
         Ok(Self {
             listen,
+            http_listen,
+            http_hosts,
             max_connections,
             databases,
         })
@@ -274,11 +290,36 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         .parse()
         .map_err(|_| Failure::usage("--listen needs <ip>:<port>"))?;
     let listener = TcpListener::bind(addr).await.map_err(Failure::io)?;
-    let bound = listener.local_addr().map_err(Failure::io)?;
+    let http = match &options.http_listen {
+        None => None,
+        Some(raw) => {
+            let addr: std::net::SocketAddr = raw
+                .parse()
+                .map_err(|_| Failure::usage("--http-listen needs <ip>:<port>"))?;
+            let mut hosts = options.http_hosts.clone();
+            if hosts.is_empty() {
+                hosts = vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into()];
+                hosts.push(addr.ip().to_string());
+            }
+            Some((TcpListener::bind(addr).await.map_err(Failure::io)?, hosts))
+        }
+    };
     {
         let mut stdout = std::io::stdout().lock();
-        writeln!(stdout, r#"{{"v":1,"event":"listening","addr":"{bound}"}}"#)
+        let bound = listener.local_addr().map_err(Failure::io)?;
+        writeln!(
+            stdout,
+            r#"{{"v":1,"event":"listening","protocol":"fgp","addr":"{bound}"}}"#
+        )
+        .map_err(Failure::io)?;
+        if let Some((http, _)) = &http {
+            let bound = http.local_addr().map_err(Failure::io)?;
+            writeln!(
+                stdout,
+                r#"{{"v":1,"event":"listening","protocol":"http","addr":"{bound}"}}"#
+            )
             .map_err(Failure::io)?;
+        }
         stdout.flush().map_err(Failure::io)?;
     }
     let server = Arc::new(server);
@@ -292,10 +333,25 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         })
         .map_err(|_| Failure::io("cannot install a signal watcher"))?;
     }
+    let http = match http {
+        None => None,
+        Some((listener, hosts)) => {
+            let server = Arc::clone(&server);
+            Some(
+                cx.spawn(move |child| async move {
+                    let _ = server.serve_http(&child, listener, hosts).await;
+                })
+                .map_err(|_| Failure::io("cannot start the HTTP listener"))?,
+            )
+        }
+    };
     Arc::clone(&server)
         .serve(cx, listener)
         .await
         .map_err(Failure::io)?;
+    if let Some(mut http) = http {
+        let _ = http.join(cx).await;
+    }
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, r#"{{"v":1,"event":"stopped"}}"#).map_err(Failure::io)
 }

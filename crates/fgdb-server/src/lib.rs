@@ -36,6 +36,8 @@
 
 mod connection;
 mod convert;
+mod execute;
+mod http;
 mod keys;
 mod shutdown;
 mod symbols;
@@ -46,8 +48,12 @@ pub use symbols::{SymbolConflict, Symbols};
 
 use asupersync::Cx;
 use asupersync::fs::UnixVfs;
-use asupersync::net::TcpListener;
+use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server};
+use asupersync::http::h1::types::Response;
+use asupersync::net::{TcpListener, TcpStream};
+use asupersync::runtime::TaskHandle;
 use asupersync::security::key::AuthKey;
+use asupersync::server::shutdown::ShutdownSignal;
 use asupersync::sync::RwLock;
 use core::future::poll_fn;
 use core::task::Poll;
@@ -61,6 +67,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// The branch every served capability is scoped to: the engine serves one
 /// trunk coordinate per database today.
@@ -201,6 +208,11 @@ impl core::fmt::Display for ServerError {
 }
 impl core::error::Error for ServerError {}
 
+/// A type-erased connection or request future: one `Send` proof per task
+/// instead of one through every nested engine future (the same reason the
+/// engine erases its commit boundary futures).
+type ConnectionFuture<T> = core::pin::Pin<Box<dyn core::future::Future<Output = T> + Send>>;
+
 /// One served database and its fixed authority inputs.
 pub(crate) struct Served {
     pub(crate) db: RwLock<Database<UnixVfs>>,
@@ -315,11 +327,85 @@ impl Server {
         self.shutdown.clone()
     }
 
-    /// Accept and serve connections until the drain signal fires or `cx` is
-    /// cancelled, then wait for every connection task to finish.
+    /// Accept and serve FGP connections until the drain signal fires or `cx`
+    /// is cancelled, then wait for every connection task to finish.
     pub async fn serve(self: Arc<Self>, cx: &Cx, listener: TcpListener) -> Result<(), ServerError> {
+        let connections = self
+            .accept(cx, &listener, |server, child, stream| {
+                Box::pin(async move {
+                    connection::run(&child, &server, stream).await;
+                })
+            })
+            .await?;
+        // Admission is closed. Every connection drains at its next receive
+        // point (an admitted statement finishes first), so this join is
+        // bounded by in-flight statements, never by an idle client.
+        self.shutdown.trigger();
+        for mut handle in connections {
+            let _ = handle.join(cx).await;
+        }
+        Ok(())
+    }
+
+    /// Serve the HTTP/1.1 JSON adapter (see the `http` module) until the drain
+    /// signal fires or `cx` is cancelled. Only requests whose `Host` names one
+    /// of `allowed_hosts` (without port) are answered, which defeats DNS
+    /// rebinding against a loopback listener.
+    pub async fn serve_http(
+        self: Arc<Self>,
+        cx: &Cx,
+        listener: TcpListener,
+        allowed_hosts: Vec<String>,
+    ) -> Result<(), ServerError> {
+        let config = Http1Config::default()
+            .max_body_size(8 << 20)
+            .host_policy(HostPolicy::allow_list(allowed_hosts))
+            .idle_timeout(Some(Duration::from_secs(30)));
+        let signal = ShutdownSignal::new();
+        let connections = {
+            let signal = signal.clone();
+            self.accept(cx, &listener, move |server, child, stream| {
+                let config = config.clone();
+                let signal = signal.clone();
+                Box::pin(async move {
+                    let handler = move |request| {
+                        let server = Arc::clone(&server);
+                        let child = child.clone();
+                        let answer: ConnectionFuture<Response> =
+                            Box::pin(async move { http::respond(&child, &server, request).await });
+                        answer
+                    };
+                    let _ = Http1Server::with_config(handler, config)
+                        .with_shutdown_signal(signal)
+                        .serve(stream)
+                        .await;
+                })
+            })
+            .await?
+        };
+        // Stop reading new requests on every keep-alive connection; a request
+        // already being answered completes first.
+        let _ = signal.begin_drain(Duration::from_secs(5));
+        for mut handle in connections {
+            let _ = handle.join(cx).await;
+        }
+        Ok(())
+    }
+
+    /// The shared admission loop: accept until the drain signal or a
+    /// cancelled context, bound the live connection count, and spawn one task
+    /// per connection. Returns the live connection tasks to join.
+    async fn accept<F>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        listener: &TcpListener,
+        connect: F,
+    ) -> Result<Vec<TaskHandle<()>>, ServerError>
+    where
+        F: Fn(Arc<Self>, Cx, TcpStream) -> ConnectionFuture<()>,
+    {
         let waiter = self.shutdown.waiter();
-        let mut connections = Vec::new();
+        let mut connections: Vec<TaskHandle<()>> = Vec::new();
         loop {
             let accepted = poll_fn(|task| {
                 if waiter.poll_triggered(task) || cx.checkpoint().is_err() {
@@ -334,28 +420,17 @@ impl Server {
             let Ok((stream, _peer)) = accepted else {
                 continue;
             };
-            connections
-                .retain(|handle: &asupersync::runtime::TaskHandle<()>| !handle.is_finished());
+            connections.retain(|handle| !handle.is_finished());
             if connections.len() >= self.limits.max_connections {
                 drop(stream);
                 continue;
             }
-            let server = Arc::clone(&self);
-            let handle = cx
-                .spawn(move |child| async move {
-                    connection::run(&child, &server, stream).await;
-                })
-                .map_err(|_| ServerError::Spawn)?;
+            let server = Arc::clone(self);
+            let task = connect(server, cx.clone(), stream);
+            let handle = cx.spawn(move |_| task).map_err(|_| ServerError::Spawn)?;
             connections.push(handle);
         }
-        // Admission is closed. Every connection drains at its next receive
-        // point (an admitted statement finishes first), so this join is
-        // bounded by in-flight statements, never by an idle client.
-        self.shutdown.trigger();
-        for mut handle in connections {
-            let _ = handle.join(cx).await;
-        }
-        Ok(())
+        Ok(connections)
     }
 }
 

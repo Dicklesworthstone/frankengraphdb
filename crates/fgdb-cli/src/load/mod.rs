@@ -13,6 +13,8 @@ use fgdb::{
 };
 use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlParameterValue;
+/// The strict, dependency-free JSON grammar now lives with the wire codecs.
+pub(crate) use fgdb_protocol::json::{Json, parse_json};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -521,7 +523,7 @@ impl Saved {
         if text.len() > limits.bytes {
             return Err("checkpoint file exceeds source admission".into());
         }
-        let json = JsonParser::parse_limited(text, limits.values(), limits.token_bytes())?;
+        let json = parse_json(text, limits.values(), limits.token_bytes())?;
         let Json::Object(mut fields) = json else {
             return Err("expected object".into());
         };
@@ -584,7 +586,7 @@ fn parse_row(
     options: &Options,
     resolver: Option<&fgdb::PinnedTzdb>,
 ) -> Result<BulkRow, String> {
-    let json = JsonParser::parse(text)?;
+    let json = parse_json(text, usize::MAX, text.len())?;
     let fields = object(&json)?;
     let key = string(field(fields, "key")?)?.to_owned();
     if key.is_empty() {
@@ -684,252 +686,4 @@ fn number(json: &Json) -> Result<u64, String> {
 }
 fn field<'a>(fields: &'a BTreeMap<String, Json>, name: &str) -> Result<&'a Json, String> {
     fields.get(name).ok_or_else(|| format!("missing {name}"))
-}
-
-// Same strict, dependency-free JSON grammar as cli_robot's contract reader;
-// production input additionally caps nesting before recursive descent.
-#[derive(Debug)]
-pub(crate) enum Json {
-    Null,
-    Bool(bool),
-    Number(String),
-    String(String),
-    Array(Vec<Json>),
-    Object(BTreeMap<String, Json>),
-}
-/// One bounded JSON document: at most `values` values and `token_bytes`
-/// bytes per string or number token, nested at most 32 deep.
-pub(crate) fn parse_json(input: &str, values: usize, token_bytes: usize) -> Result<Json, String> {
-    JsonParser::parse_limited(input, values, token_bytes)
-}
-struct JsonParser<'a> {
-    input: &'a str,
-    offset: usize,
-    depth: usize,
-    remaining_values: usize,
-    max_token_bytes: usize,
-}
-impl<'a> JsonParser<'a> {
-    fn parse(input: &'a str) -> Result<Json, String> {
-        Self::parse_limited(input, usize::MAX, input.len())
-    }
-    fn parse_limited(input: &'a str, values: usize, token_bytes: usize) -> Result<Json, String> {
-        let mut parser = Self {
-            input,
-            offset: 0,
-            depth: 0,
-            remaining_values: values,
-            max_token_bytes: token_bytes,
-        };
-        let value = parser.value()?;
-        parser.whitespace();
-        if parser.offset != input.len() {
-            return Err(format!("trailing JSON bytes at {}", parser.offset));
-        }
-        Ok(value)
-    }
-    fn peek(&self) -> Option<u8> {
-        self.input.as_bytes().get(self.offset).copied()
-    }
-    fn consume(&mut self, byte: u8) -> bool {
-        if self.peek() == Some(byte) {
-            self.offset += 1;
-            true
-        } else {
-            false
-        }
-    }
-    fn expect(&mut self, byte: u8) -> Result<(), String> {
-        if self.consume(byte) {
-            Ok(())
-        } else {
-            Err(format!(
-                "expected {:?} at {}",
-                char::from(byte),
-                self.offset
-            ))
-        }
-    }
-    fn whitespace(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
-            self.offset += 1;
-        }
-    }
-    fn value(&mut self) -> Result<Json, String> {
-        self.whitespace();
-        if self.remaining_values == 0 {
-            return Err("JSON value limit exceeded".into());
-        }
-        self.remaining_values -= 1;
-        if self.depth >= 32 {
-            return Err("JSON nesting limit exceeded".into());
-        }
-        self.depth += 1;
-        let result = match self.peek() {
-            Some(b'"') => self.string().map(Json::String),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
-            Some(b't') => self.literal("true", Json::Bool(true)),
-            Some(b'f') => self.literal("false", Json::Bool(false)),
-            Some(b'n') => self.literal("null", Json::Null),
-            Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => Err(format!("expected JSON value at {}", self.offset)),
-        };
-        self.depth -= 1;
-        result
-    }
-    fn literal(&mut self, text: &str, value: Json) -> Result<Json, String> {
-        if !self.input[self.offset..].starts_with(text) {
-            return Err("invalid JSON literal".into());
-        }
-        self.offset += text.len();
-        Ok(value)
-    }
-    fn object(&mut self) -> Result<Json, String> {
-        self.expect(b'{')?;
-        self.whitespace();
-        let mut fields = BTreeMap::new();
-        if self.consume(b'}') {
-            return Ok(Json::Object(fields));
-        }
-        loop {
-            self.whitespace();
-            let name = self.string()?;
-            self.whitespace();
-            self.expect(b':')?;
-            let value = self.value()?;
-            if fields.insert(name, value).is_some() {
-                return Err("duplicate JSON object field".into());
-            }
-            self.whitespace();
-            if self.consume(b'}') {
-                return Ok(Json::Object(fields));
-            }
-            self.expect(b',')?;
-        }
-    }
-    fn array(&mut self) -> Result<Json, String> {
-        self.expect(b'[')?;
-        self.whitespace();
-        let mut values = Vec::new();
-        if self.consume(b']') {
-            return Ok(Json::Array(values));
-        }
-        loop {
-            values.push(self.value()?);
-            self.whitespace();
-            if self.consume(b']') {
-                return Ok(Json::Array(values));
-            }
-            self.expect(b',')?;
-        }
-    }
-    fn hex_quad(&mut self) -> Result<u32, String> {
-        let mut value = 0;
-        for _ in 0..4 {
-            let digit = self
-                .peek()
-                .and_then(|byte| char::from(byte).to_digit(16))
-                .ok_or("invalid Unicode escape")?;
-            self.offset += 1;
-            value = value * 16 + digit;
-        }
-        Ok(value)
-    }
-    fn string(&mut self) -> Result<String, String> {
-        self.expect(b'"')?;
-        let mut text = String::new();
-        loop {
-            match self.peek() {
-                None => return Err("unterminated JSON string".into()),
-                Some(b'"') => {
-                    self.offset += 1;
-                    return Ok(text);
-                }
-                Some(b'\\') => {
-                    self.offset += 1;
-                    let escape = self.peek().ok_or("unterminated JSON escape")?;
-                    self.offset += 1;
-                    let ch = match escape {
-                        b'"' => '"',
-                        b'\\' => '\\',
-                        b'/' => '/',
-                        b'b' => '\u{08}',
-                        b'f' => '\u{0c}',
-                        b'n' => '\n',
-                        b'r' => '\r',
-                        b't' => '\t',
-                        b'u' => {
-                            let first = self.hex_quad()?;
-                            let scalar = if (0xd800..=0xdbff).contains(&first) {
-                                self.expect(b'\\')?;
-                                self.expect(b'u')?;
-                                let second = self.hex_quad()?;
-                                if !(0xdc00..=0xdfff).contains(&second) {
-                                    return Err("invalid low surrogate".into());
-                                }
-                                0x10000 + ((first - 0xd800) << 10) + second - 0xdc00
-                            } else {
-                                first
-                            };
-                            char::from_u32(scalar).ok_or("invalid Unicode scalar")?
-                        }
-                        _ => return Err("invalid JSON escape".into()),
-                    };
-                    self.push_character(&mut text, ch)?;
-                }
-                Some(0..=0x1f) => return Err("unescaped control character".into()),
-                Some(_) => {
-                    let ch = self.input[self.offset..]
-                        .chars()
-                        .next()
-                        .expect("remaining character");
-                    self.offset += ch.len_utf8();
-                    self.push_character(&mut text, ch)?;
-                }
-            }
-        }
-    }
-    fn push_character(&self, text: &mut String, ch: char) -> Result<(), String> {
-        if text
-            .len()
-            .checked_add(ch.len_utf8())
-            .is_none_or(|n| n > self.max_token_bytes)
-        {
-            return Err("JSON string limit exceeded".into());
-        }
-        text.push(ch);
-        Ok(())
-    }
-    fn digits(&mut self) -> Result<(), String> {
-        let start = self.offset;
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.offset += 1;
-        }
-        if self.offset == start {
-            Err("expected digit".into())
-        } else {
-            Ok(())
-        }
-    }
-    fn number(&mut self) -> Result<Json, String> {
-        let start = self.offset;
-        self.consume(b'-');
-        if !self.consume(b'0') {
-            self.digits()?;
-        }
-        if self.consume(b'.') {
-            self.digits()?;
-        }
-        if self.consume(b'e') || self.consume(b'E') {
-            if !self.consume(b'+') {
-                self.consume(b'-');
-            }
-            self.digits()?;
-        }
-        if self.offset - start > self.max_token_bytes {
-            return Err("JSON number limit exceeded".into());
-        }
-        Ok(Json::Number(self.input[start..self.offset].to_owned()))
-    }
 }
