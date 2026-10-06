@@ -126,7 +126,9 @@ fn pack(
         return Err(FloatArithmeticError::Overflow);
     }
     debug_assert!(biased > 0);
-    Ok(value(sign | ((biased as u64) << 52) | (significand as u64 & FRACTION)))
+    Ok(value(
+        sign | ((biased as u64) << 52) | (significand as u64 & FRACTION),
+    ))
 }
 
 fn add(mut a: Number, mut b: Number) -> Result<CanonicalF64, FloatArithmeticError> {
@@ -140,7 +142,10 @@ fn add(mut a: Number, mut b: Number) -> Result<CanonicalF64, FloatArithmeticErro
         core::mem::swap(&mut a, &mut b);
     }
     let left = u128::from(a.significand) << 3;
-    let right = jam(u128::from(b.significand) << 3, (a.exponent - b.exponent) as u32);
+    let right = jam(
+        u128::from(b.significand) << 3,
+        (a.exponent - b.exponent) as u32,
+    );
     let magnitude = if a.negative == b.negative {
         left + right
     } else {
@@ -189,8 +194,12 @@ impl CanonicalF64 {
         // rounding bits. A nonzero exact remainder becomes its sticky bit.
         let numerator = u128::from(a.significand) << 64;
         let denominator = u128::from(b.significand);
-        let quotient = numerator / denominator | u128::from(numerator % denominator != 0);
-        pack(a.negative != b.negative, quotient, a.exponent - b.exponent - 64)
+        let quotient = (numerator / denominator) | u128::from(numerator % denominator != 0);
+        pack(
+            a.negative != b.negative,
+            quotient,
+            a.exponent - b.exponent - 64,
+        )
     }
 
     /// Truncating remainder, with the dividend's sign. Modular exponentiation
@@ -221,7 +230,11 @@ impl CanonicalF64 {
 
     pub fn checked_neg(self) -> Result<Self, FloatArithmeticError> {
         let a = Number::read(self)?;
-        Ok(value(if a.significand == 0 { 0 } else { self.to_bits() ^ SIGN }))
+        Ok(value(if a.significand == 0 {
+            0
+        } else {
+            self.to_bits() ^ SIGN
+        }))
     }
 
     pub fn checked_abs(self) -> Result<Self, FloatArithmeticError> {
@@ -246,10 +259,16 @@ mod tests {
         let one = bits(0x3ff0_0000_0000_0000);
         let half_ulp = bits(0x3ca0_0000_0000_0000);
         assert_eq!(one.checked_add(half_ulp), Ok(one));
-        assert_eq!(bits(one.to_bits() + 1).checked_add(half_ulp), Ok(bits(one.to_bits() + 2)));
+        assert_eq!(
+            bits(one.to_bits() + 1).checked_add(half_ulp),
+            Ok(bits(one.to_bits() + 2))
+        );
         assert_eq!(bits(1).checked_div(f(2.0)), Ok(bits(0)));
         assert_eq!(bits(3).checked_div(f(2.0)), Ok(bits(2)));
-        assert_eq!(bits(0x0010_0000_0000_0000).checked_sub(bits(1)), Ok(bits(FRACTION)));
+        assert_eq!(
+            bits(0x0010_0000_0000_0000).checked_sub(bits(1)),
+            Ok(bits(FRACTION))
+        );
         assert_eq!(bits(FRACTION).checked_add(bits(1)), Ok(bits(HIDDEN)));
         assert_eq!(bits(SIGN | 1).checked_mul(f(0.5)), Ok(bits(0)));
     }
@@ -273,17 +292,32 @@ mod tests {
         let max = bits(0x7fef_ffff_ffff_ffff);
         assert_eq!(max.checked_add(max), Err(FloatArithmeticError::Overflow));
         assert_eq!(max.checked_mul(f(2.0)), Err(FloatArithmeticError::Overflow));
-        assert_eq!(f(1.0).checked_div(bits(0)), Err(FloatArithmeticError::DivisionByZero));
-        assert_eq!(bits(0).checked_rem(bits(0)), Err(FloatArithmeticError::DivisionByZero));
+        assert_eq!(
+            f(1.0).checked_div(bits(0)),
+            Err(FloatArithmeticError::DivisionByZero)
+        );
+        assert_eq!(
+            bits(0).checked_rem(bits(0)),
+            Err(FloatArithmeticError::DivisionByZero)
+        );
         assert_eq!(max.checked_sub(max), Ok(bits(0)));
         assert_eq!(f(-5.5).checked_rem(f(2.0)), Ok(f(-1.5)));
         assert_eq!(max.checked_rem(bits(1)), Ok(bits(0)));
         assert_eq!(bits(SIGN | 1).checked_abs(), Ok(bits(1)));
         assert_eq!(bits(0).checked_neg(), Ok(bits(0)));
         for nonfinite in [f(f64::INFINITY), f(f64::NEG_INFINITY), f(f64::NAN)] {
-            assert_eq!(nonfinite.checked_add(f(1.0)), Err(FloatArithmeticError::NonFinite));
-            assert_eq!(f(1.0).checked_mul(nonfinite), Err(FloatArithmeticError::NonFinite));
-            assert_eq!(nonfinite.checked_neg(), Err(FloatArithmeticError::NonFinite));
+            assert_eq!(
+                nonfinite.checked_add(f(1.0)),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                f(1.0).checked_mul(nonfinite),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                nonfinite.checked_neg(),
+                Err(FloatArithmeticError::NonFinite)
+            );
         }
     }
 
@@ -297,7 +331,9 @@ mod tests {
             // Every exponent, including subnormals, but not non-finite inputs.
             let encoded = if state & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
                 state ^ 0x0010_0000_0000_0000
-            } else { state };
+            } else {
+                state
+            };
             f(f64::from_bits(encoded))
         };
         for _ in 0..20_000 {
@@ -310,11 +346,19 @@ mod tests {
                 (a.checked_div(b), a.get() / b.get()),
                 (a.checked_rem(b), a.get() % b.get()),
             ] {
-                if b.to_bits() == 0 { continue; }
+                if b.to_bits() == 0 {
+                    continue;
+                }
                 if expected.is_infinite() {
                     assert_eq!(actual, Err(FloatArithmeticError::Overflow));
                 } else {
-                    assert_eq!(actual, Ok(f(expected)), "a={:016x} b={:016x}", a.to_bits(), b.to_bits());
+                    assert_eq!(
+                        actual,
+                        Ok(f(expected)),
+                        "a={:016x} b={:016x}",
+                        a.to_bits(),
+                        b.to_bits()
+                    );
                 }
             }
         }
