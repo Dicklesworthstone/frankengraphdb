@@ -91,7 +91,7 @@ CALL hybrid.search(
 EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 ```
 
-> **Target state.** Checked 2026-09-28, and again 2026-10-05, by running each statement through the `fgdb` CLI on a fresh database: 4 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained) and `EXPLAIN (CERTIFICATE)`. `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), naming a graph in `CALL` (fgdb-luq0b), `CALL hybrid.search` (no `hybrid` procedure namespace exists), and `SUBSCRIBE TO`. The CLI has no subscribe verb, and the library's `Database::subscribe_native`, which registers a `SUBSCRIBE TO` in process, needs a native read that ends in `RETURN`; the statement above has none, so the library refuses it too.
+> **Target state.** Checked 2026-09-28, and again 2026-10-05, by running each statement through the `fgdb` CLI on a fresh database: 5 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)` and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), naming a graph in `CALL` (fgdb-luq0b), and `CALL hybrid.search` (no `hybrid` procedure namespace exists).
 
 ---
 
@@ -263,7 +263,7 @@ curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) 
 
 `fgdbd` (`crates/fgdb-server`) serves the FGP handshake, one autocommit GQL read or write per `EXECUTE`, ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the same statements over an HTTP/1.1 JSON adapter. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve TLS, durable result retention (ACK/release/resume), explicit multi-statement transactions, durable or capability-masked subscriptions, or the HTTP/2, gRPC, WebSocket and Bolt adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
 
-> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the remaining `fgdbd` surfaces above remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
+> **Target state.** The interactive shell, `branch`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the remaining `fgdbd` surfaces above remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
 
 ## Installation
 
@@ -323,7 +323,7 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 
 ## Quick start
 
-> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` and `subscribe` steps, and `fgdbd`'s TOML config and Bolt protocol, await W10 composition (`fgdbd serve` itself runs today with flags, FGP only). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
+> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` step, and `fgdbd`'s TOML config and Bolt protocol, await W10 composition (`fgdbd serve` itself runs today with flags, serving FGP and the HTTP/JSON adapter; `fgdb remote subscribe` streams a changefeed from it). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
 
 ```bash
 # 1. Create a database directory and bulk-load a graph

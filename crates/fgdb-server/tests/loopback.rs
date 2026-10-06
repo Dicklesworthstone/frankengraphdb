@@ -681,41 +681,68 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
             .await
             .unwrap();
         let end = subscriber.join(cx).await.unwrap();
-        let changes = changes.lock().unwrap();
-        assert_eq!(changes.len(), 4);
-        assert!(!changes[1].snapshot);
-        assert_eq!(
-            (changes[1].frontier, changes[1].entries.clone()),
-            (2, vec![(1, vec![text("Bob")])])
-        );
-        assert_eq!(changes[2].frontier, 3);
-        let mut batch: Vec<_> = changes[2]
-            .entries
-            .iter()
-            .map(|(w, row)| (*w, row[0].clone()))
-            .collect();
-        batch.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-        assert_eq!(
-            batch,
-            (0..10)
-                .map(|i| (1, text(&format!("p{i}"))))
-                .collect::<Vec<_>>()
-        );
-        // The empty change at seq 4 may be coalesced into the delete's batch.
+        {
+            let changes = changes.lock().unwrap();
+            assert_eq!(changes.len(), 4);
+            assert!(!changes[1].snapshot);
+            assert_eq!(
+                (changes[1].frontier, changes[1].entries.clone()),
+                (2, vec![(1, vec![text("Bob")])])
+            );
+            assert_eq!(changes[2].frontier, 3);
+            let mut batch: Vec<_> = changes[2]
+                .entries
+                .iter()
+                .map(|(w, row)| (*w, row[0].clone()))
+                .collect();
+            batch.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+            assert_eq!(
+                batch,
+                (0..10)
+                    .map(|i| (1, text(&format!("p{i}"))))
+                    .collect::<Vec<_>>()
+            );
+            // The empty change at seq 4 may be coalesced into the delete's batch.
+            assert!(
+                matches!(changes[3].frontier, 4 | 5),
+                "{}",
+                changes[3].frontier
+            );
+            let retracted: Vec<_> = changes[3]
+                .entries
+                .iter()
+                .filter(|(w, _)| *w != 0)
+                .cloned()
+                .collect();
+            assert_eq!(retracted, [(-1, vec![text("Ann")])]);
+            assert_eq!(end, changes[3].frontier);
+        }
+
+        // A pattern with no RETURN subscribes to its bound variables.
+        let mut bare = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        bare.select(cx, "social").await.unwrap();
+        let mut bound = Vec::new();
+        let mut baseline = Vec::new();
+        bare.subscribe(
+            cx,
+            "SUBSCRIBE TO MATCH (p:Person) WHERE p.name = 'Bob';",
+            vec![],
+            |list| bound = list.to_vec(),
+            |change| {
+                baseline = change.entries;
+                Ok(false)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bound, ["p"]);
         assert!(
-            matches!(changes[3].frontier, 4 | 5),
-            "{}",
-            changes[3].frontier
+            matches!(baseline.as_slice(), [(1, row)] if matches!(row.as_slice(), [WireValue::Vertex(_)])),
+            "{baseline:?}"
         );
-        let retracted: Vec<_> = changes[3]
-            .entries
-            .iter()
-            .filter(|(w, _)| *w != 0)
-            .cloned()
-            .collect();
-        assert_eq!(retracted, [(-1, vec![text("Ann")])]);
-        assert_eq!(end, changes[3].frontier);
-        drop(changes);
+        bare.close(cx).await.unwrap();
         writer.close(cx).await.unwrap();
         shutdown.trigger();
         server.join(cx).await.unwrap();

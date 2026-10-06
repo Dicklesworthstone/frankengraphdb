@@ -114,10 +114,14 @@ fn prepared_native_reads_rebind_float_parameters_without_resolving_again() {
         db.write(&cx.commit(), seed).await.unwrap();
         let calls = AtomicUsize::new(0);
         let text = "MATCH (n:Node) WHERE n.p+$rate > 2.25 RETURN n.p*$rate AS value ORDER BY value";
-        let prepared = PreparedNativeRead::prepare(text, &parameter(float(0.5)), |kind, name| {
-            calls.fetch_add(1, Ordering::Relaxed);
-            symbols(kind, name)
-        })
+        let prepared = PreparedNativeRead::prepare(
+            text,
+            &parameter(float(0.5)),
+            |kind: GraphSymbolKind, name: &str| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                symbols(kind, name)
+            },
+        )
         .unwrap();
         let frozen_calls = calls.load(Ordering::Relaxed);
         for (rate, expected) in [(0.5, [1.0, 1.5]), (2.0, [4.0, 6.0])] {

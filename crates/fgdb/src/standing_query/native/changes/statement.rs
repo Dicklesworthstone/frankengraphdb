@@ -75,10 +75,93 @@ impl<V: Vfs + Clone> Database<V> {
                 .ok_or_else(|| StandingQueryError::Delivery(StandingQueryFailure::WorkBudget))?;
             Ok(())
         })?;
+        // A changefeed over a pattern with no RETURN of its own subscribes to
+        // the pattern's bound variables, as if it ended in `RETURN *`.
+        let completed;
+        let query = match implicit_return_at(query) {
+            None => query,
+            Some(at) => {
+                completed = format!("{}\nRETURN *{}", &query[..at], &query[at..]);
+                completed.as_str()
+            }
+        };
         let first = self.standing_queries.len();
         let registered = self.register_standing_native(cx, query, params, resolver, policy);
         finish_registration(self, cx, first, registered).map_err(SubscribeError::from)
     }
+}
+
+/// Where to complete a subscription body that has no top-level `RETURN`:
+/// just after its last significant character, before any trailing `;`,
+/// whitespace or comment. `None` when the body already returns. Strings,
+/// backtick identifiers, comments and braced subqueries are skipped, so a
+/// `RETURN` inside `EXISTS { ... }` or a literal does not count, and neither
+/// does a property named `return` (`n.return`).
+fn implicit_return_at(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    let mut depth = 0_usize;
+    let mut end = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        match byte {
+            b'\'' | b'"' | b'`' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != byte {
+                    // A backslash escapes the next byte inside quoted text.
+                    at += if bytes[at] == b'\\' && byte != b'`' {
+                        2
+                    } else {
+                        1
+                    };
+                }
+                at += 1;
+                end = at.min(bytes.len());
+                continue;
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2;
+                while at < bytes.len() && !bytes[at..].starts_with(b"*/") {
+                    at += 1;
+                }
+                at += 2;
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                at += 1;
+                continue;
+            }
+            _ if byte.is_ascii_whitespace() => {
+                at += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && bytes[at..]
+                .get(..6)
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"RETURN"))
+            && !bytes
+                .get(at + 6)
+                .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_')
+            && (at == 0
+                || !matches!(bytes[at - 1], b'.' | b'_' | b'$')
+                    && !bytes[at - 1].is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        at += 1;
+        end = at;
+    }
+    Some(end.min(bytes.len()))
 }
 
 impl PreparedNativeRead {
@@ -271,6 +354,37 @@ mod tests {
                 subscription_query(statement, &mut || Ok(())).is_err(),
                 "{statement}"
             );
+        }
+    }
+
+    #[test]
+    fn a_body_without_a_top_level_return_subscribes_to_its_bindings() {
+        let complete = |text: &str| {
+            implicit_return_at(text).map(|at| format!("{}\nRETURN *{}", &text[..at], &text[at..]))
+        };
+        assert_eq!(
+            complete("MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.born < 1800;").as_deref(),
+            Some("MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.born < 1800\nRETURN *;")
+        );
+        assert_eq!(
+            complete("MATCH (n) // tail\n").as_deref(),
+            Some("MATCH (n)\nRETURN * // tail\n")
+        );
+        for returns in [
+            "MATCH (n) RETURN n",
+            "match (n) return n.p AS p",
+            "RETURN 7 AS fixed",
+        ] {
+            assert_eq!(complete(returns), None, "{returns}");
+        }
+        for without in [
+            "MATCH (n) WHERE n.s = 'RETURN'",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) RETURN m }",
+            "MATCH (n) WHERE n.return = 1",
+            "MATCH (n) /* RETURN n */",
+            "MATCH (`RETURN`)",
+        ] {
+            assert!(complete(without).is_some(), "{without}");
         }
     }
 
