@@ -312,6 +312,13 @@ struct OrderedReads<F: Future> {
 /// A read in flight, with its result once it completes.
 type InFlightRead<F> = (std::pin::Pin<Box<F>>, Option<<F as Future>::Output>);
 
+/// A root-named block's identity-verified bytes, beside the result of decoding
+/// them (entries plus the hosted property-patch reference and locators).
+type DecodedBlockRead = (
+    Vec<u8>,
+    Result<(Vec<crate::AdjacencyEntry>, Option<(ObjectId, Vec<u8>)>), BlockError>,
+);
+
 impl<F: Future> OrderedReads<F> {
     fn new() -> Self {
         Self {
@@ -1234,6 +1241,37 @@ impl<V: Vfs> BlockStore<V> {
         Ok(bytes)
     }
 
+    /// [`BlockStore::get_bytes`] for a root walk, with its CPU-heavy proof
+    /// moved off the async task: once the bytes are read, the identity check
+    /// and the block's one decode run on the runtime's blocking pool, so a
+    /// window of reads also hashes and decodes in parallel. Without a pool
+    /// (the lab runtime) the closure runs inline, in order. The identity
+    /// refusal is `get_bytes`'s own; a decode failure comes back beside the
+    /// bytes for the root walk to attribute to its position.
+    async fn read_block_decoded(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<DecodedBlockRead, StoreError> {
+        let bytes = self
+            .read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)
+            .await?;
+        let k_oid = self.k_oid.clone();
+        let namespace = self.namespace;
+        asupersync::runtime::spawn_blocking(move || {
+            let actual = block_id(k_oid.expose(), namespace, &bytes);
+            if actual != id {
+                return Err(StoreError::IdentityMismatch {
+                    expected: id,
+                    actual,
+                });
+            }
+            let decoded = crate::decode_block_with_properties(&bytes);
+            Ok((bytes, decoded))
+        })
+        .await
+    }
+
     /// Store a vertex patch's bytes — the same derived-identity discipline and
     /// durable path as [`BlockStore::put`], under the patch object kind.
     pub async fn put_patch(
@@ -1388,47 +1426,44 @@ impl<V: Vfs> BlockStore<V> {
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
     ) -> Result<ReadRootBlock, E> {
         observe(RootReadEvent::ObjectStart)?;
-        let bytes = self
-            .get_bytes(cx, DeltaBlockVersion(reference.block_id))
-            .await;
-        self.admit_root_block(cx, at, partition, reference, bytes, observe)
+        let read = self.read_block_decoded(cx, reference.block_id).await;
+        self.admit_root_block(cx, at, partition, reference, read, observe)
             .await
     }
 
-    /// Admit one root-named block from the result of reading its bytes: every
-    /// check after the read. The serial resolver and the prefetching root walk
-    /// both admit here, so a block is accepted or refused identically however
-    /// its bytes were read.
+    /// Admit one root-named block from the result of reading and decoding it
+    /// ([`BlockStore::read_block_decoded`]): every check after the read, in
+    /// the order a serial resolver makes them. The serial resolver and the
+    /// prefetching root walk both admit here, so a block is accepted or refused
+    /// identically however its bytes were read.
     async fn admit_root_block<E: From<StoreError>>(
         &self,
         cx: &impl StorageReadCx,
         at: usize,
         partition: u64,
         reference: &crate::root::BlockRef,
-        bytes: Result<Vec<u8>, StoreError>,
+        read: Result<DecodedBlockRead, StoreError>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
     ) -> Result<ReadRootBlock, E> {
-        let bytes = bytes.map_err(|error| StoreError::RootBlockLoad {
+        let (bytes, decoded) = read.map_err(|error| StoreError::RootBlockLoad {
             at,
             error: Box::new(error),
         })?;
         observe(RootReadEvent::SourceBytes(bytes.len()))?;
-        let entries = crate::root::resolve_block_ref(
-            self.k_oid.expose(),
-            self.namespace,
-            at,
-            reference,
-            &bytes,
-        )
-        .map_err(StoreError::MalformedRoot)?;
+        // The root's proof of the block: its identity (checked with the read),
+        // its format, and the range the root declared for it.
+        let (entries, patch) = decoded
+            .map_err(|error| crate::root::RootError::Block { at, error })
+            .and_then(|(entries, patch)| {
+                crate::root::check_block_span(at, reference, &entries).map(|()| (entries, patch))
+            })
+            .map_err(StoreError::MalformedRoot)?;
         observe(RootReadEvent::Incidences(entries.len()))?;
         // The block's hosted property patch is part of the block's truth
         // (fgdb-yqor): reachability is root -> block -> patch, so admitting
         // the block admits its patch — identity, format, and the joint
         // locator bijection, with both objects in hand. The proven rows ride
         // back with the entries rather than being re-read per answer.
-        let (_, patch) =
-            crate::decode_block_with_properties(&bytes).map_err(StoreError::Malformed)?;
         // The block durably names its owning partition (V5, fgdb-da6b); a
         // transplant into a foreign partition's root refuses here, at the
         // seam where the root and the block's own bytes first meet.
@@ -1553,16 +1588,16 @@ impl<V: Vfs> BlockStore<V> {
             while let Some(next) = root.blocks.get(issued)
                 && (issued <= at || reads.len() < in_flight)
             {
-                reads.push(self.get_bytes(cx, DeltaBlockVersion(next.block_id)));
+                reads.push(self.read_block_decoded(cx, next.block_id));
                 issued += 1;
             }
-            let bytes = reads.next().await.ok_or_else(|| {
+            let fetched = reads.next().await.ok_or_else(|| {
                 StoreError::Io(std::io::Error::other(
                     "root block walk consumed a read it never issued",
                 ))
             })?;
             let read = self
-                .admit_root_block(cx, at, root.partition, reference, bytes, observe)
+                .admit_root_block(cx, at, root.partition, reference, fetched, observe)
                 .await?;
             let (entries, _, predecessor) = &read.resolved;
             // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly

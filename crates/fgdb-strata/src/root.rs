@@ -1220,10 +1220,21 @@ pub(crate) fn resolve_block_ref(
 ) -> Result<Vec<crate::AdjacencyEntry>, RootError> {
     let entries = crate::read_block(k_oid, namespace, bytes, reference.block_id)
         .map_err(|error| RootError::Block { at, error })?;
+    check_block_span(at, reference, &entries)?;
+    Ok(entries)
+}
 
+/// The root's half of proving a block: the decoded entries span exactly the
+/// range the root declared for it. Shared by [`resolve_block_ref`] and the
+/// store's root walk, which decodes off the async task.
+pub(crate) fn check_block_span(
+    at: usize,
+    reference: &BlockRef,
+    entries: &[crate::AdjacencyEntry],
+) -> Result<(), RootError> {
     // An empty block spans nothing, so it cannot honour any declared range —
     // and a root naming one is describing a block that carries no information.
-    let Some(actual) = span_of(&entries) else {
+    let Some(actual) = span_of(entries) else {
         return Err(RootError::BlockRangeMismatch {
             at,
             declared: (reference.first_seq, reference.last_seq),
@@ -1237,7 +1248,7 @@ pub(crate) fn resolve_block_ref(
             actual,
         });
     }
-    Ok(entries)
+    Ok(())
 }
 
 /// Load every block a root names, proving each is the block the root meant AND

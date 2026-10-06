@@ -1131,6 +1131,19 @@ fn a_prefetching_reopen_reports_the_first_damaged_block_in_root_order() {
         assert!(first_damage(
             store.reopen_sealed(&cx, root_id).await.map(|_| ())
         ));
+
+        // A lawful sibling block under the early block's name: it decodes, and
+        // its span, partition and (fresh) family chain all pass. Only the
+        // identity check refuses it, wherever the walk runs that check.
+        std::fs::write(
+            store.path(root.blocks[early].block_id),
+            &blocks[early + 2].bytes,
+        )
+        .expect("plants a lawful foreign block");
+        assert!(first_damage(store.reopen(&cx, root_id).await.map(|_| ())));
+        assert!(first_damage(
+            store.reopen_sealed(&cx, root_id).await.map(|_| ())
+        ));
     });
 }
 
