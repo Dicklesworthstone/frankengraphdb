@@ -6283,9 +6283,8 @@ mod publish_receipt_laws {
                     .holds(fgdb_strata::DeltaBlockVersion(reference.block_id))
             })
             && snapshot.patch_refs.iter().all(|reference| {
-                db.receipts.holds_patch(fgdb_strata::vertex::VertexPatchVersion(
-                    reference.patch_id,
-                ))
+                db.receipts
+                    .holds_patch(fgdb_strata::vertex::VertexPatchVersion(reference.patch_id))
             })
     }
 
@@ -6324,7 +6323,9 @@ mod publish_receipt_laws {
         origin.create_vertex(VId(1), vec![], vec![]);
         runtime.block_on(twin.write(&cx, origin)).unwrap();
         for commit in 1..=12 {
-            runtime.block_on(db.write(&cx, commit_batch(commit))).unwrap();
+            runtime
+                .block_on(db.write(&cx, commit_batch(commit)))
+                .unwrap();
             runtime
                 .block_on(twin.write(&cx, commit_batch(commit)))
                 .unwrap();
@@ -6344,9 +6345,7 @@ mod publish_receipt_laws {
             "the checkpoint open seeds receipts for the slot-selected root"
         );
         runtime.block_on(db.write(&cx, commit_batch(13))).unwrap();
-        runtime
-            .block_on(twin.write(&cx, commit_batch(13)))
-            .unwrap();
+        runtime.block_on(twin.write(&cx, commit_batch(13))).unwrap();
         assert_eq!(
             db.partition_root().unwrap(),
             twin.partition_root().unwrap(),
@@ -6362,7 +6361,13 @@ mod publish_receipt_laws {
         drop(db);
 
         let db = runtime
-            .block_on(Database::bind_with_vfs(&cx, vfs.clone(), &dir, keys(), true))
+            .block_on(Database::bind_with_vfs(
+                &cx,
+                vfs.clone(),
+                &dir,
+                keys(),
+                true,
+            ))
             .unwrap();
         assert!(
             receipts_cover_the_root(&db),
@@ -6409,7 +6414,9 @@ mod publish_receipt_laws {
         origin.create_vertex(VId(1), vec![], vec![]);
         runtime.block_on(db.write(&cx, origin)).unwrap();
         for commit in 1..=3 {
-            runtime.block_on(db.write(&cx, commit_batch(commit))).unwrap();
+            runtime
+                .block_on(db.write(&cx, commit_batch(commit)))
+                .unwrap();
         }
         drop(db);
 
@@ -6418,9 +6425,7 @@ mod publish_receipt_laws {
         assert!(files > 0 && directories > 1, "the fixture has a tree");
         assert_eq!(adopted, Adopted { files, directories });
 
-        let mut db = runtime
-            .block_on(Database::open(&cx, &dir, keys()))
-            .unwrap();
+        let mut db = runtime.block_on(Database::open(&cx, &dir, keys())).unwrap();
         runtime.block_on(db.write(&cx, commit_batch(4))).unwrap();
 
         let plain = dir.with_extension("plain");

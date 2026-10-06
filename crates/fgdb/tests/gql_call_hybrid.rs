@@ -410,6 +410,29 @@ fn retrieval_composes_with_property_reads_ordering_and_limits() {
     });
 }
 
+/// openCypher's standalone CALL: with no RETURN the read returns exactly the
+/// yielded columns, the same rows as an explicit `RETURN` of them.
+#[test]
+fn a_standalone_call_returns_its_yielded_columns() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        let query = |text: &str| {
+            ordered(rows(
+                db.query(cx, text, &GqlParameters::new(), symbols, policy())
+                    .unwrap(),
+            ))
+        };
+        let call = "CALL hybrid.search(text => 'engine', text_property => 'body', k => 3) \
+                    YIELD node, score AS fused";
+        let standalone = query(call);
+        assert_eq!(standalone.0, ["node", "fused"]);
+        assert_eq!(standalone.1.len(), 3);
+        assert_eq!(standalone, query(&format!("{call} RETURN node, fused")));
+        let prism = "CALL fnx.pagerank() YIELD node, score";
+        assert_eq!(query(prism), query(&format!("{prism} RETURN node, score")));
+    });
+}
+
 fn search_error(error: QueryError) -> Result<HybridCallError, QueryError> {
     match error {
         QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(

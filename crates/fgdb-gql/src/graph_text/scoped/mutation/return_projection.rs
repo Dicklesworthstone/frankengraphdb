@@ -355,7 +355,25 @@ impl<'a> Parser<'a> {
                 correlations: bound_correlations,
             });
         }
-        let pipeline = self.row_pipeline(schema)?;
+        // A standalone `CALL ... YIELD a, b` is a complete read that returns
+        // exactly its yielded columns, as `... YIELD a, b RETURN a, b` does
+        // (openCypher's standalone CALL).
+        let pipeline = if matches!(leading.as_slice(), [ReadStageTemplate::Call { .. }])
+            && matches!(self.current.kind, TokenKind::End)
+        {
+            vec![ReadStageTemplate::Project {
+                at: self.current.at,
+                projection: (schema.iter().enumerate())
+                    .map(|(index, (name, _))| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(index),
+                    })
+                    .collect(),
+                quantifier: crate::GraphSetQuantifier::All,
+            }]
+        } else {
+            self.row_pipeline(schema)?
+        };
         self.end()?;
         Ok(UnresolvedGraphText {
             statement,
