@@ -1096,20 +1096,24 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 if matches!(command, "diff" | "search") || (command == "query" && options.certify_to.is_none()) {
                     let view = Database::open_read_view(&contexts.commit(), &options.db, keys).await.map_err(open_failure)?;
                     let cx = contexts.query();
-                    if command == "diff" {
-                        return diff::run(&view, &cx, &options, robot, out);
-                    }
-                    if let Some(prepared) = analytics {
-                        return fnx::run(&view, &cx, &options.text, prepared, robot, out);
-                    }
-                    if let Some(prepared) = &retrieval {
-                        return search::run(&view, &cx, prepared, robot, out);
-                    }
-                    if options.stream {
-                        return stream::run(&view, &cx, &options, robot, out);
-                    }
-                    let result = view.query(&cx, &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
-                    return render(result, view.frontier().0, "rows", robot, out);
+                    let outcome = if command == "diff" {
+                        diff::run(&view, &cx, &options, robot, out)
+                    } else if let Some(prepared) = analytics {
+                        fnx::run(&view, &cx, &options.text, prepared, robot, out)
+                    } else if let Some(prepared) = &retrieval {
+                        search::run(&view, &cx, prepared, robot, out)
+                    } else if options.stream {
+                        stream::run(&view, &cx, &options, robot, out)
+                    } else {
+                        view.query(&cx, &options.text, &options.params, &options, options.budget.policy())
+                            .map_err(execution_failure)
+                            .and_then(|result| render(result, view.frontier().0, "rows", robot, out))
+                    };
+                    // The process exits next. A view owns only memory (no lease,
+                    // file or writer), and freeing a large generation cell by cell
+                    // is work nothing observes; the OS reclaims it whole.
+                    std::mem::forget(view);
+                    return outcome;
                 }
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
