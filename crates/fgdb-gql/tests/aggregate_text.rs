@@ -740,3 +740,48 @@ fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
         assert_eq!(calls, 0, "invalid grouping resolved symbols: {text}");
     }
 }
+
+/// A projected function as a grouping key is that function, not its
+/// variable: `type(r)` grouped by the edge `r` (one group per edge), and
+/// `labels(n)` by the vertex. It is named by the function, as in the pattern
+/// facade, and repeats of one function share one key.
+#[test]
+fn projected_function_keys_group_by_the_function_value_not_the_variable() {
+    for (text, columns) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN type(r), count(*)",
+            &["type", "count"][..],
+        ),
+        (
+            "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS c",
+            &["t", "c"][..],
+        ),
+        (
+            "MATCH (n) RETURN labels(n), count(*)",
+            &["labels", "count"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+        let pattern = prepared
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap();
+        let plan = pattern.input_pattern().plan();
+        assert!(
+            plan.projects_types() || plan.projects_labels(),
+            "{text}: the key reads the function, not the bare element"
+        );
+    }
+    let both = PreparedGraphAggregateText::prepare(
+        "MATCH (a)-[r:R]->(b) RETURN type(r), r, count(*)",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&fgdb_gql::GqlParameters::new())
+    .unwrap();
+    assert_eq!(
+        both.group_key_columns().len(),
+        2,
+        "type(r) and r are two keys"
+    );
+}

@@ -212,6 +212,16 @@ impl PreparedGraphPipelineAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, Error> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`] with a host resolver, whose
+    /// reverse catalog names `type(r)` and `labels(n)` values in row stages.
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, Error> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let multipart = crate::set_text::multipart::has_continuation(&tokens);

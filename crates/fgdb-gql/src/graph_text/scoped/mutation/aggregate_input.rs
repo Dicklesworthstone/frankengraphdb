@@ -61,20 +61,10 @@ impl<'a> Parser<'a> {
         let mut sources: Vec<_> = computed
             .sources
             .iter()
-            .map(|&(variable, property)| Projection {
+            .map(|&(variable, property, path)| Projection {
                 variable,
                 property,
-                path: if self
-                    .syntax
-                    .path
-                    .is_some_and(|path| path.text == variable.text)
-                {
-                    Some(GraphPathFunction::Value)
-                } else if self.syntax.visible_edge(variable.text).is_some() {
-                    Some(GraphPathFunction::Edge)
-                } else {
-                    None
-                },
+                path,
             })
             .collect();
         // A bound vertex, edge, or path with a literal-looking name retains its identity.
@@ -102,13 +92,14 @@ impl<'a> Parser<'a> {
         };
         computed.sources = sources
             .iter()
-            .map(|source| (source.variable, source.property))
+            .map(|source| (source.variable, source.property, source.path))
             .collect();
         if let Operand::Column(column) = operand {
             let source = sources[column];
             return Ok(Expression {
                 variable: source.variable,
                 property: source.property,
+                path: source.path,
                 computed: None,
             });
         }
@@ -140,6 +131,7 @@ impl<'a> Parser<'a> {
         Ok(Expression {
             variable: Name { text: "", at },
             property: None,
+            path: None,
             computed: Some(index),
         })
     }

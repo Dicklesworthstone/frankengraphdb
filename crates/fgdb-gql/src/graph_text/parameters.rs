@@ -185,10 +185,10 @@ impl UnresolvedGraphText<'_> {
 
     pub(crate) fn resolve(
         mut self,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl GraphSymbolResolver,
     ) -> Result<BoundSetTextInput, GraphPatternTextError> {
         for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
-            resolve_call_symbols(stage, &mut resolve)?;
+            resolve_call_symbols(stage, &mut |kind, name| resolve.resolve_symbol(kind, name))?;
         }
         let quantifier = if self.syntax.distinct {
             crate::GraphSetQuantifier::Distinct
@@ -222,7 +222,7 @@ impl UnresolvedGraphText<'_> {
                 if let Some(value) = cache.get(&key) {
                     return Ok(*value);
                 }
-                let value = resolve(kind, name.text).ok_or_else(|| {
+                let value = resolve.resolve_symbol(kind, name.text).ok_or_else(|| {
                     error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind))
                 })?;
                 if value.kind() != kind {
@@ -272,6 +272,22 @@ impl UnresolvedGraphText<'_> {
                 syntax.return_at,
                 builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
             )?;
+            // `WITH labels(n) AS l` and `WITH type(r) AS t` read catalog names,
+            // as a pattern RETURN does.
+            let reverse_catalog = columns
+                .iter()
+                .any(|column| {
+                    matches!(
+                        column.path,
+                        Some(GraphPathFunction::Labels | GraphPathFunction::Type)
+                    )
+                })
+                .then(|| {
+                    std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(
+                        &mut resolve,
+                        self.statement,
+                    ))
+                });
             // Never push public DISTINCT or pagination into these hidden input
             // rows: equal output values may arise from different input tuples.
             PreparedGraphText {
@@ -288,7 +304,7 @@ impl UnresolvedGraphText<'_> {
                 distinct: false,
                 visible_columns: None,
                 return_at: syntax.return_at,
-                reverse_catalog: None,
+                reverse_catalog,
             }
         };
         Ok(BoundSetTextInput {

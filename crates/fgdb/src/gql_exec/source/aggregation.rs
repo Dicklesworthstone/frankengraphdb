@@ -123,13 +123,22 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
         })
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-    let result = aggregate.execute_governed_with_element_properties(
+    // labels(n) and type(r) keys, arguments and row stages read the catalog
+    // names, as a pattern read does; an unmapped symbol refuses, never NULL.
+    admitted
+        .validate_and_cache_catalog_symbols()
+        .map_err(|error| {
+            GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
+        })?;
+    let result = aggregate.execute_governed_with_element_accessors(
         admitted.snapshot_records,
         admitted.vertex_ids(),
         admitted.identified_edges(),
         |vid, predicates| admitted.matches(vid, predicates),
         |vid, key| Ok(admitted.property(vid, key)),
         |eid, key| Ok(admitted.edge_property(eid, key)),
+        |vid| Ok(admitted.cached_labels.get(&vid).map(Vec::as_slice)),
+        |eid| Ok(admitted.cached_types.get(&eid)),
         usage.remaining(policy),
         checkpoint,
     );

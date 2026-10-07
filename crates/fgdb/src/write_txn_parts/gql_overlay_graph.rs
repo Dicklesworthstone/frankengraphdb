@@ -54,6 +54,18 @@ mod query_source {
                 .and_then(|key| self.property(key).map(|value| (key, value)));
             predicate.matches_borrowed(label, property)
         }
+        /// The basis labels with this transaction's staged label edits.
+        fn effective_labels(&self) -> BTreeSet<LabelId> {
+            let mut labels: BTreeSet<LabelId> = self.labels.iter().copied().collect();
+            for (&label, &present) in &self.label_edits {
+                if present {
+                    labels.insert(label);
+                } else {
+                    labels.remove(&label);
+                }
+            }
+            labels
+        }
     }
 
     struct EdgeView<'a> {
@@ -79,6 +91,20 @@ mod query_source {
         }
     }
 
+    /// Per-execution label and type names for `labels(n)` and `type(r)`.
+    pub(super) struct CatalogNames {
+        labels: BTreeMap<VId, Vec<fgdb_gql::algebra::GraphValue>>,
+        types: BTreeMap<EId, CanonicalScalar>,
+    }
+    impl CatalogNames {
+        pub(super) fn labels(&self, vid: VId) -> Option<&[fgdb_gql::algebra::GraphValue]> {
+            self.labels.get(&vid).map(Vec::as_slice)
+        }
+        pub(super) fn edge_type(&self, eid: EId) -> Option<&CanonicalScalar> {
+            self.types.get(&eid)
+        }
+    }
+
     /// One basis/template pair, with output shape carried by the checked plan.
     /// The borrowed source is the same for scalar and tuple query projections.
     pub(super) struct OverlayQuerySource<'a, Row = VId> {
@@ -101,6 +127,41 @@ mod query_source {
 
         pub(super) fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ {
             self.vertices.iter().map(|(vid, _)| *vid)
+        }
+
+        /// `labels(n)` and `type(r)` names from the plan's reverse catalog,
+        /// over staged label edits, as the snapshot source resolves them. An
+        /// unmapped symbol refuses; it never reads as NULL.
+        pub(super) fn catalog_names(&self) -> Result<CatalogNames, WriteTxnError> {
+            let reverse = self.logical.reverse_catalog.as_deref();
+            let mut labels = BTreeMap::new();
+            if self.logical.projects_labels() {
+                for (vid, view) in &self.vertices {
+                    let mut names = Vec::new();
+                    for id in view.effective_labels() {
+                        let unmapped = || WriteTxnError::Read(crate::ReadError::UnmappedLabel(id));
+                        let name = reverse
+                            .and_then(|catalog| catalog.labels.get(&id))
+                            .ok_or_else(unmapped)?;
+                        let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped())?;
+                        names.push(fgdb_gql::algebra::GraphValue::Scalar(text));
+                    }
+                    labels.insert(*vid, names);
+                }
+            }
+            let mut types = BTreeMap::new();
+            if self.logical.projects_types() {
+                for ((eid, _, relation, _), _) in &self.edges {
+                    let unmapped =
+                        || WriteTxnError::Read(crate::ReadError::UnmappedRelation(*relation));
+                    let name = reverse
+                        .and_then(|catalog| catalog.relations.get(relation))
+                        .ok_or_else(unmapped)?;
+                    let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped())?;
+                    types.insert(*eid, text);
+                }
+            }
+            Ok(CatalogNames { labels, types })
         }
         pub(super) fn identified_edges(&self) -> impl Iterator<Item = IdentifiedEdge> + '_ {
             self.edges.iter().map(|(edge, _)| *edge)
@@ -268,13 +329,18 @@ mod query_source {
                         usage.observe(policy, event)
                     },
                 )?;
-                let result = source.logical.execute_governed_with_element_properties(
+                let names = source
+                    .catalog_names()
+                    .map_err(fgdb_gql::GqlQueryError::Source)?;
+                let result = source.logical.execute_governed_with_element_accessors(
                     source.snapshot_records as u64,
                     source.vertex_ids(),
                     source.identified_edges(),
                     |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                     |vid, key| Ok(source.property(vid, key)),
                     |eid, key| Ok(source.edge_property(eid, key)),
+                    |vid| Ok(names.labels(vid)),
+                    |eid| Ok(names.edge_type(eid)),
                     usage.remaining(policy),
                     || cx.checkpoint(),
                 );

@@ -185,10 +185,10 @@ impl PreparedNativeRead {
                 }
             }
         }
-        match PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+        match PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
-            |kind, name| resolve.resolve_symbol(kind, name),
+            &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::PipelineAggregate(prepared)),
             Err(error) => consider(
@@ -198,10 +198,10 @@ impl PreparedNativeRead {
                 QueryError::PipelineText(error),
             ),
         }
-        match PreparedGraphAggregateText::prepare_with_parameter_types(
+        match PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
-            |kind, name| resolve.resolve_symbol(kind, name),
+            &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::Aggregate(prepared)),
             Err(error) => consider(

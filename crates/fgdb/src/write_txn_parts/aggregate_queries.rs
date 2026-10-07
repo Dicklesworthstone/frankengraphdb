@@ -42,13 +42,18 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let result = aggregate.execute_governed_with_element_properties(
+            let names = source
+                .catalog_names()
+                .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
+            let result = aggregate.execute_governed_with_element_accessors(
                 source.snapshot_records as u64,
                 source.vertex_ids(),
                 source.identified_edges(),
                 |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                 |vid, key| Ok(source.property(vid, key)),
                 |eid, key| Ok(source.edge_property(eid, key)),
+                |vid| Ok(names.labels(vid)),
+                |eid| Ok(names.edge_type(eid)),
                 usage.remaining(policy),
                 || cx.checkpoint(),
             );

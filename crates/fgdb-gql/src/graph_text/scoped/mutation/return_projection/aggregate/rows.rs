@@ -96,7 +96,7 @@ pub(super) fn finish<'a>(
     statement: &'a str,
     head: Head<'a>,
     stages: Vec<ReadStageTemplate>,
-    mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    mut resolve: impl GraphSymbolResolver,
 ) -> Result<BoundReadInput, GraphSetTextError> {
     let (first, continuations) = match head {
         Head::Single(head) => {
@@ -151,20 +151,17 @@ pub(super) fn finish<'a>(
     // All syntax, aliases, argument types and total depth were admitted before
     // touching the catalog. Every graph source shares this domain-aware cache.
     let mut cache = std::collections::BTreeMap::new();
-    let mut symbols = |kind, name: &str| {
-        let key = (kind, name.to_owned());
-        if let Some(symbol) = cache.get(&key) {
-            return Some(*symbol);
-        }
-        let symbol = resolve(kind, name)?;
-        cache.insert(key, symbol);
-        Some(symbol)
-    };
-    let first = first.resolve(&mut symbols)?;
+    let first = first.resolve(Cached {
+        inner: &mut resolve,
+        cache: &mut cache,
+    })?;
     let mut bound = Vec::new();
     for (input, join) in continuations {
         bound.push(BoundContinuation {
-            input: input.resolve(&mut symbols)?,
+            input: input.resolve(Cached {
+                inner: &mut resolve,
+                cache: &mut cache,
+            })?,
             join,
         });
     }
@@ -247,5 +244,28 @@ impl PreparedGraphPipelineAggregateText {
                 })?;
         }
         Ok(query)
+    }
+}
+
+/// One resolver cache shared by every graph source of a statement; the host's
+/// reverse catalog passes through for `labels(n)` and `type(r)` names.
+struct Cached<'c, R> {
+    inner: &'c mut R,
+    cache: &'c mut std::collections::BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+
+impl<R: GraphSymbolResolver> GraphSymbolResolver for Cached<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(symbol) = self.cache.get(&key) {
+            return Some(*symbol);
+        }
+        let symbol = self.inner.resolve_symbol(kind, name)?;
+        self.cache.insert(key, symbol);
+        Some(symbol)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.inner.reverse_catalog()
     }
 }

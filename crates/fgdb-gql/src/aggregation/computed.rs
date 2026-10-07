@@ -148,8 +148,40 @@ impl PreparedGraphAggregate {
     /// The caller must supply one immutable, authorized graph generation. EIds
     /// must be the real source identities, not ordinals assigned to edge triples.
     /// This is bounded materialization, not spill-backed path aggregation.
+    /// `labels(n)` and `type(r)` read NULL here; a host with the catalog uses
+    /// [`Self::execute_governed_with_element_accessors`].
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed_with_element_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_governed_with_element_accessors(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// As [`Self::execute_governed_with_element_properties`], with each
+    /// vertex's label names and each edge's type name for `labels(n)` and
+    /// `type(r)`, in grouping keys, arguments and row stages alike.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_accessors<'a, E, C>(
         &self,
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
@@ -157,11 +189,14 @@ impl PreparedGraphAggregate {
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
-        if !self.input.plan().requires_identified_edges() {
+        let plan = self.input.plan();
+        if !plan.requires_identified_edges() && !plan.projects_labels() && !plan.projects_types() {
             return self.execute_governed(
                 snapshot_records,
                 vertices,
@@ -183,13 +218,15 @@ impl PreparedGraphAggregate {
                     let (vertices, edges) = admitted
                         .take()
                         .expect("single-source aggregate preparation admits exactly one leaf");
-                    pattern.plan().execute_governed_with_element_properties(
+                    pattern.plan().execute_governed_with_element_accessors(
                         snapshot_records,
                         vertices,
                         edges,
                         &mut test_vertex,
                         &mut property,
                         &mut edge_property,
+                        &mut vertex_labels,
+                        &mut edge_type,
                         remaining,
                         || (*checkpoint.borrow_mut())(),
                     )
@@ -206,13 +243,15 @@ impl PreparedGraphAggregate {
         let source = self
             .input
             .plan()
-            .execute_governed_with_element_properties(
+            .execute_governed_with_element_accessors(
                 snapshot_records,
                 vertices,
                 edges,
                 test_vertex,
                 property,
                 edge_property,
+                vertex_labels,
+                edge_type,
                 source_policy,
                 &mut checkpoint,
             )

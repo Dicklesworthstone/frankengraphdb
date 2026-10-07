@@ -151,6 +151,17 @@ impl PreparedGraphAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphPatternTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`] with a host resolver: one
+    /// with a reverse catalog names `type(r)` and `labels(n)` keys whose
+    /// symbols the statement text never spells.
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphPatternTextError> {
         // Generated names live until from_syntax has made the child owned.
         // They are private metadata, never inserted into statement text or
         // the namespace used to resolve HAVING/ORDER BY aliases.
@@ -447,7 +458,7 @@ impl PreparedGraphAggregateText {
             parser.syntax.columns.push(Column {
                 variable: group.variable,
                 property: group.property,
-                path: column_path(&parser.syntax, group.variable),
+                path: group.path,
                 alias,
             });
         }
@@ -481,7 +492,7 @@ impl PreparedGraphAggregateText {
                     parser.syntax.columns.push(Column {
                         variable: expression.variable,
                         property: expression.property,
-                        path: column_path(&parser.syntax, expression.variable),
+                        path: expression.path,
                         alias: item.alias,
                     });
                     at
@@ -540,7 +551,7 @@ impl PreparedGraphAggregateText {
                 parser.syntax.columns.push(Column {
                     variable: expression.variable,
                     property: expression.property,
-                    path: column_path(&parser.syntax, expression.variable),
+                    path: expression.path,
                     alias,
                 });
                 at
@@ -562,10 +573,11 @@ impl PreparedGraphAggregateText {
                         let index = computed
                             .sources
                             .iter()
-                            .position(|(variable, property)| {
+                            .position(|(variable, property, path)| {
                                 variable.text == expression.variable.text
                                     && property.map(|name| name.text)
                                         == expression.property.map(|name| name.text)
+                                    && *path == expression.path
                             })
                             .expect("every plain argument registered its source");
                         ReadValueTemplate::Column(index)
@@ -579,7 +591,10 @@ impl PreparedGraphAggregateText {
             if computed.sources.is_empty() {
                 // SUM(1), COUNT(NULL), and constant grouping still visit every
                 // match, including isolates and duplicate WALK occurrences.
-                computed.sources.push((parser.syntax.variables[0], None));
+                let variable = parser.syntax.variables[0];
+                computed
+                    .sources
+                    .push((variable, None, column_path(&parser.syntax, variable)));
             }
             source_aliases.extend(
                 (0..computed.sources.len()).map(|index| format!("__aggregate_source_{index}")),
@@ -588,14 +603,14 @@ impl PreparedGraphAggregateText {
                 .sources
                 .iter()
                 .zip(&source_aliases)
-                .map(|(&(variable, property), alias)| Column {
+                .map(|(&(variable, property, path), alias)| Column {
                     variable,
                     property,
                     alias: Name {
                         text: alias.as_str(),
                         at: variable.at,
                     },
-                    path: column_path(&parser.syntax, variable),
+                    path,
                 })
                 .collect();
             Some(projection)
@@ -896,7 +911,8 @@ impl PreparedGraphAggregateText {
 /// interning programs; parameters retain their actual explicit-use counts.
 #[derive(Default)]
 pub(in crate::graph_text) struct ComputedInputs<'a> {
-    pub(in crate::graph_text) sources: Vec<(Name<'a>, Option<Name<'a>>)>,
+    /// Each read source with its path function: `type(r)` is not `r`.
+    pub(in crate::graph_text) sources: Vec<(Name<'a>, Option<Name<'a>>, Option<GraphPathFunction>)>,
     pub(in crate::graph_text) operands: Vec<ReadValueTemplate>,
 }
 
@@ -904,6 +920,9 @@ pub(in crate::graph_text) struct ComputedInputs<'a> {
 pub(in crate::graph_text) struct Expression<'a> {
     pub(in crate::graph_text) variable: Name<'a>,
     pub(in crate::graph_text) property: Option<Name<'a>>,
+    /// The projected function of the variable, e.g. `type(r)` or `labels(n)`,
+    /// or the variable's own identity (an edge, a path) for a bare reference.
+    pub(in crate::graph_text) path: Option<GraphPathFunction>,
     pub(in crate::graph_text) computed: Option<usize>,
 }
 impl Expression<'_> {
@@ -913,6 +932,7 @@ impl Expression<'_> {
             (None, None) => {
                 self.variable.text == other.variable.text
                     && self.property.map(|name| name.text) == other.property.map(|name| name.text)
+                    && self.path == other.path
             }
             _ => false,
         }
@@ -1114,6 +1134,7 @@ impl<'a> Parser<'a> {
                         OutputLeaf::Group(Expression {
                             variable,
                             property,
+                            path: column_path(&parser.syntax, variable),
                             computed: None,
                         })
                     } else {
@@ -1202,10 +1223,25 @@ impl<'a> Parser<'a> {
             )
         } else {
             let expression = self.aggregate_expression(computed)?;
-            let default = expression
-                .computed
-                .is_none()
-                .then_some(expression.property.unwrap_or(expression.variable));
+            // A projected function is named by the function, as the pattern
+            // facade names `type(r)` `type`; a reference by its property or
+            // variable.
+            let function = expression.path.is_some_and(|path| {
+                !matches!(path, GraphPathFunction::Edge | GraphPathFunction::Value)
+            });
+            let default = if function {
+                let text = self.lexer.text[at..self.current.at]
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end();
+                Some(Name { text, at })
+            } else {
+                expression
+                    .computed
+                    .is_none()
+                    .then_some(expression.property.unwrap_or(expression.variable))
+            };
             (Some(expression), None, default)
         };
         let end = self.current.at;
