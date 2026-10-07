@@ -198,7 +198,12 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   read runs on a read-only authorized session pinned to exactly the frontier
   its END reports; a write statement presented as a read is refused, never
   reinterpreted. A write is one autocommit program through an authorized write
-  session; its END reports the commit sequence. Names resolve through the
+  session; its END reports the commit sequence. A `CREATE`/`INSERT ...
+  RETURN` instead runs as one authorized insertion query (ReadWrite rights,
+  matched inputs masked before selection) whose projected rows stream before
+  the END that reports its commit: the rows come from the creation itself,
+  never a rescan, and are released only once the commit is decided. Names
+  resolve through the
   operator's bindings for that database, the CLI's `--label/--relation/
   --property` contract, because the engine has no durable catalog yet.
 - **Results.** Every result is the session-owned, ephemeral

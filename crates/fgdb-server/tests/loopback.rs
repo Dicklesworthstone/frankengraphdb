@@ -1078,3 +1078,73 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
         }
     });
 }
+
+/// `CREATE/INSERT ... RETURN` answers its projected rows with the commit,
+/// including a MATCH-selected creation; it needs ReadWrite rights, since the
+/// rows can read matched data.
+#[test]
+fn writes_that_return_answer_their_rows_with_the_commit() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "returning").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let answer = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (p:Person {name: $n, age: 41}) RETURN p.name AS name, p.age AS age",
+                vec![("n".into(), text("Ann"))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.columns, ["name", "age"]);
+        assert_eq!(answer.rows, [[text("Ann"), WireValue::Int(41)]]);
+        assert!(matches!(
+            answer.outcome,
+            Outcome::WriteCommitted { statements: 1, .. }
+        ));
+        let answer = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a:Person {name: 'Ann'}) CREATE (a)-[:KNOWS]->(b:Person {name: 'Bob'}) \
+                 RETURN a.name AS from, b.name AS to",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [[text("Ann"), text("Bob")]]);
+        // The creation is durable and visible to an ordinary read.
+        let read = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.rows, [[text("Ann"), text("Bob")]]);
+        client.close(cx).await.unwrap();
+
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::Write)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        let refused = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (p:Person {name: 'Eve'}) RETURN p.name",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}

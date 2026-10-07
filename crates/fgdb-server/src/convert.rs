@@ -25,7 +25,7 @@ pub(crate) fn cell(value: &QueryValue) -> WireValue {
     }
 }
 
-fn graph(value: &GraphValue) -> WireValue {
+pub(crate) fn graph(value: &GraphValue) -> WireValue {
     match value {
         GraphValue::Scalar(scalar) => scalar_value(scalar),
         GraphValue::Vertex(vid) => WireValue::Vertex(vid.0),

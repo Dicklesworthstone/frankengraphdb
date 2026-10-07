@@ -18,7 +18,8 @@
 //!
 //! A query answers `{"v":1,"columns":[...],"rows":[[cell,...],...],"seq":N}`
 //! with the CLI robot contract's cells; a write answers
-//! `{"v":1,"seq":N,"statements":M,"committed":true|false}`. A refusal answers
+//! `{"v":1,"seq":N,"statements":M,"committed":true|false}`, with `columns`
+//! and `rows` first when it is a `CREATE/INSERT ... RETURN`. A refusal answers
 //! `{"v":1,"error":{"code":"<class>","message":"..."}}` under a status that
 //! follows the class. A missing database and a token that may not select it
 //! share one 404, as they share one FGP refusal. The health route reveals
@@ -129,32 +130,40 @@ fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> 
 }
 
 fn answer_response(answer: &Answer) -> Response {
+    let columns = answer
+        .columns
+        .iter()
+        .map(|column| quote(column))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rows = answer
+        .rows
+        .iter()
+        .map(|row| format!("[{}]", row.iter().map(cell).collect::<Vec<_>>().join(",")))
+        .collect::<Vec<_>>()
+        .join(",");
+    // A write that RETURNs carries its rows beside the commit outcome.
+    let returned = if answer.columns.is_empty() {
+        String::new()
+    } else {
+        format!(r#""columns":[{columns}],"rows":[{rows}],"#)
+    };
     match answer.outcome {
-        Outcome::Rows { seq } => {
-            let columns = answer
-                .columns
-                .iter()
-                .map(|column| quote(column))
-                .collect::<Vec<_>>()
-                .join(",");
-            let rows = answer
-                .rows
-                .iter()
-                .map(|row| format!("[{}]", row.iter().map(cell).collect::<Vec<_>>().join(",")))
-                .collect::<Vec<_>>()
-                .join(",");
-            json_response(
-                200,
-                format!(r#"{{"v":1,"columns":[{columns}],"rows":[{rows}],"seq":{seq}}}"#),
-            )
-        }
+        Outcome::Rows { seq } => json_response(
+            200,
+            format!(r#"{{"v":1,"columns":[{columns}],"rows":[{rows}],"seq":{seq}}}"#),
+        ),
         Outcome::WriteCommitted { seq, statements } => json_response(
             200,
-            format!(r#"{{"v":1,"seq":{seq},"statements":{statements},"committed":true}}"#),
+            format!(
+                r#"{{"v":1,{returned}"seq":{seq},"statements":{statements},"committed":true}}"#
+            ),
         ),
         Outcome::ReadClosed { seq, statements } => json_response(
             200,
-            format!(r#"{{"v":1,"seq":{seq},"statements":{statements},"committed":false}}"#),
+            format!(
+                r#"{{"v":1,{returned}"seq":{seq},"statements":{statements},"committed":false}}"#
+            ),
         ),
     }
 }

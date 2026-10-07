@@ -7,7 +7,7 @@
 //! authentication and database selection are open failures (4), and
 //! transport failures or an unknown commit outcome are I/O failures (5).
 
-use super::{Failure, emit, float_text, hex, render_rows};
+use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
 use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
@@ -263,6 +263,33 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 })
                 .collect();
             render_rows(&answer.columns, rendered, seq, "rows", robot, out)
+        }
+        // A CREATE/INSERT ... RETURN answers its rows with the commit, in the
+        // same frames as the embedded write path.
+        Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements }
+            if !answer.columns.is_empty() =>
+        {
+            let rendered: Vec<Vec<String>> = answer
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|value| if robot { cell(value) } else { human(value) })
+                        .collect()
+                })
+                .collect();
+            let count = rendered.len();
+            render_row_body(&answer.columns, &rendered, robot, out)?;
+            if robot {
+                emit(
+                    out,
+                    &format!(
+                        r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"count":{count},"statements":{statements}}}"#
+                    ),
+                )
+            } else {
+                emit(out, &format!("{count} row(s), completed at seq {seq}"))
+            }
         }
         Outcome::WriteCommitted { seq, statements } | Outcome::ReadClosed { seq, statements } => {
             if robot {

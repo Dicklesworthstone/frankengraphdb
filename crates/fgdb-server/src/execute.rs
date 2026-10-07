@@ -8,7 +8,8 @@ use fgdb::{
     NativeSubscription, QueryError, QueryResult, StandingQueryError, SubscribeError,
     SubscriptionBatch, SubscriptionError,
 };
-use fgdb_gql::GqlQueryError;
+use fgdb_gql::insertion::GraphInsertPolicy;
+use fgdb_gql::{GqlQueryError, PreparedGraphInsertQueryText};
 use fgdb_protocol::body::{ErrorCode, Execute, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
@@ -136,6 +137,9 @@ async fn write_inner(
     let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    if PreparedGraphInsertQueryText::has_return_clause(&statement.statement).unwrap_or(false) {
+        return insert_returning(cx, db, token, &statement.statement, &parameters).await;
+    }
     let mut guard = db
         .db
         .write(cx)
@@ -181,6 +185,87 @@ async fn write_inner(
     Ok(Answer {
         columns: Vec::new(),
         rows: Vec::new(),
+        outcome,
+    })
+}
+
+/// Created elements one CREATE/INSERT ... RETURN statement may make.
+const MAX_CREATED: u64 = 100_000;
+
+/// `CREATE/INSERT ... RETURN`: the creation and its projected rows under one
+/// ReadWrite capability and one commit. Matched inputs are masked before
+/// selection, and the rows come from the creation itself, never a rescan.
+async fn insert_returning(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    text: &str,
+    parameters: &fgdb_gql::GqlParameters,
+) -> Result<Answer, Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
+    let declarations: Vec<_> = parameters.parameter_types().collect();
+    let statement_refusal = |error: &dyn core::fmt::Display| {
+        Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
+    };
+    let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        text,
+        db.write_relation,
+        &declarations,
+        |kind, name| db.symbols.resolve(kind, name),
+    )
+    .map_err(|error| statement_refusal(&error))?;
+    let prepared = template
+        .bind_parameters(parameters)
+        .map_err(|error| statement_refusal(&error))?;
+    let columns = prepared.columns().to_vec();
+    let mut guard = db
+        .db
+        .write(cx)
+        .await
+        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let result = guard
+        .execute_graph_insert_query_authorized(
+            &txn,
+            &query,
+            &commit,
+            &db.authority,
+            token,
+            TRUNK,
+            &prepared,
+            GraphInsertPolicy::new(db.query_policy, MAX_CREATED, MAX_CREATED),
+            unix_millis,
+        )
+        .await;
+    drop(guard);
+    let (_, execution, completion) = result.map_err(|error| {
+        if gql_budget(&error) {
+            Refusal::new(ErrorCode::Budget, error.to_string())
+        } else {
+            write_refusal(&error)
+        }
+    })?;
+    let rows = execution
+        .value
+        .iter()
+        .map(|row| row.values().iter().map(convert::graph).collect())
+        .collect();
+    let outcome = match completion {
+        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
+            db.commits.committed();
+            Outcome::WriteCommitted {
+                seq: commit_seq.0,
+                statements: 1,
+            }
+        }
+        EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => Outcome::ReadClosed {
+            seq: snapshot_seq.0,
+            statements: 1,
+        },
+    };
+    Ok(Answer {
+        columns,
+        rows,
         outcome,
     })
 }
