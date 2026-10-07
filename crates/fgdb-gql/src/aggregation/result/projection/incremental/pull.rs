@@ -107,13 +107,13 @@ impl PreparedGraphAggregate {
         self.project_complete_output(&row, control).map(Some)
     }
 
-    fn transforms_streamed_columns(&self) -> bool {
+    pub(crate) fn transforms_streamed_columns(&self) -> bool {
         self.output_projection.is_some()
             || self.key_output.is_some()
             || self.output_aggregates != self.aggregates.len()
     }
 
-    fn qualifies_streamed_output<E, C>(
+    pub(crate) fn qualifies_streamed_output<E, C>(
         &self,
         row: &GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,

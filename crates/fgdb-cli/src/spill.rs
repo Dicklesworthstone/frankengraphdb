@@ -205,12 +205,14 @@ pub(super) async fn run(
     let max_partitions = usize::try_from(append_runs)
         .map_err(|_| Failure::usage("spill partition count exceeds this platform"))?;
     let append_runs = if aggregate {
+        // Completed-group clauses can sort twice: canonical keys before
+        // HAVING, then typed user ordering before projection and pagination.
+        // Both phases retain the same shared byte/work budgets; only the
+        // finite append-attempt envelope accounts for the second sort.
         append_runs
-            .checked_add(
-                u64::try_from(max_partitions)
-                    .map_err(|_| Failure::usage("spill partition count exceeds this platform"))?,
-            )
+            .checked_mul(2)
             .and_then(|runs| runs.checked_add(32))
+            .and_then(|runs| runs.checked_add(u64::try_from(max_partitions).ok()?))
             .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
     } else {
         append_runs

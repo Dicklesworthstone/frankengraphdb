@@ -190,10 +190,9 @@ fn spill_rejects_unimplemented_semantics_and_cross_definition_states() {
         Some(0),
     )
     .unwrap();
-    assert!(matches!(
-        SpillAggregatePlan::compile(&paged),
-        Err(SpillAggregateBuildError::Unsupported)
-    ));
+    let paged = SpillAggregatePlan::compile(&paged).unwrap();
+    assert_eq!(paged.definition().result_window(), (0, Some(0)));
+    assert!(paged.definition().has_output_stage());
     let left = SpillAggregatePlan::compile(&numeric_definition()).unwrap();
     let right = SpillAggregatePlan::compile(&numeric_definition()).unwrap();
     let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(());

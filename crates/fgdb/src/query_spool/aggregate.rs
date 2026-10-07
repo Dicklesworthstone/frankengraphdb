@@ -3,6 +3,7 @@
 //! query-private and append-only, and no result handle escapes before every
 //! source occurrence, partition and final ordering pass has succeeded.
 
+use super::sort::Work;
 use super::*;
 use fgdb_gql::algebra::{GraphValue, GraphValueDecodeError, GraphValueOrder};
 use fgdb_gql::spill_aggregate::{
@@ -19,6 +20,8 @@ mod account;
 #[cfg(test)]
 #[path = "aggregate_codec_tests.rs"]
 mod codec_tests;
+#[path = "aggregate_output.rs"]
+mod output;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
 
@@ -50,7 +53,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::Execute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires plain native COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection, computed input or result clauses"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection, computed inputs or computed output expressions"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -400,30 +403,7 @@ input_adapter!(
     fgdb_gql::edge_stream::EdgeScanState::Exhausted
 );
 
-struct Work<'a> {
-    cx: &'a QueryCx,
-    used: u64,
-    limit: u64,
-}
 impl Work<'_> {
-    fn charge(&mut self, bytes: usize) -> Result<()> {
-        self.cx
-            .with_restriction(|| self.cx.checkpoint())
-            .map_err(SpillError::Interrupted)?;
-        let attempted = self
-            .used
-            .checked_add(u64::try_from(bytes).map_err(|_| SpillError::SizeOverflow)?)
-            .ok_or(SpillError::SizeOverflow)?;
-        if attempted > self.limit {
-            return Err(NativeSpoolError::SortWorkLimit {
-                attempted,
-                limit: self.limit,
-            }
-            .into());
-        }
-        self.used = attempted;
-        Ok(())
-    }
     async fn write<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
         &mut self,
         writer: &mut fgdb_strata::tiered::memory::spill::PagedSpillWriter<'_, F>,
@@ -572,22 +552,26 @@ fn open<'q>(
 }
 
 impl PreparedNativeRead {
-    /// Execute plain native grouped/global COUNT, SUM, AVG, MIN and MAX using
+    /// Execute native grouped/global COUNT, SUM, AVG, MIN and MAX using
     /// bounded grace partitions of input occurrences. This does not run the
     /// resident aggregate cursor or materialize completed groups before spill.
     ///
     /// The compiler refuses DISTINCT, COLLECT, computed/relational input and
-    /// result clauses before source opening. Every partition preserves original
-    /// occurrence order within each group. Final rows use canonical key order;
+    /// computed output expressions before source opening. Every partition
+    /// preserves original occurrence order within each group. All groups finish
+    /// before HAVING, exact typed ordering, visible projection and SKIP/LIMIT.
+    /// Hidden keys and clause-only summaries remain private until this stage.
+    /// Canonical key order determines HAVING errors and breaks ordered ties;
     /// exact u64 counts, i128 sums, rational averages and binary64 promotion are
-    /// the ordinary reducer's domains. Empty global input yields one row.
+    /// the ordinary reducer's domains. Empty global input yields one group.
     ///
     /// Three distinct append-only files should share one memory pool. At most
     /// group_capacity owned group states and max_partitions metadata entries
     /// are admitted, with conservative pool charges before decoded retention.
     /// A partition that exceeds group/memory capacity is repartitioned. A single
     /// group that cannot fit, hash-depth exhaustion, disk/run/work limits and
-    /// cancellation refuse without publishing a result. No quota is refunded
+    /// cancellation refuse without publishing a result. Completed-group clauses
+    /// may require two bounded sort passes in the same files. No quota is refunded
     /// for abandoned reduction attempts or completed intermediate runs.
     ///
     /// max_row_bytes bounds every full input frame and result envelope;
@@ -727,7 +711,7 @@ fn fixed_output_bytes(definition: &SpillAggregateDefinition) -> usize {
     // At most MAX_PATTERN_VERTICES cells: completed values, outer envelope
     // vector growth/boxing, two list cells and a fixed numeric payload per
     // aggregate coexist BEFORE the byte encoder workspace is acquired.
-    definition.aggregate_columns().len()
+    definition.evaluation_aggregate_columns().len()
         * (6 * size_of::<GraphValue>() + 2 * size_of::<GraphAggregateValue>() + 64)
         + size_of::<GraphAggregateRow>()
         + size_of::<GraphValueRow>()
@@ -1005,6 +989,7 @@ where
     .await?;
     let mut partitions = 1_usize;
     let mut largest_output = 0;
+    let mut completed_rows = 0_u64;
     let mut result_writer = destination.paged_writer(cx, page_bytes)?;
     if initial.row_count() == 0 && opened.definition.group_key_columns().is_empty() {
         let _charge = pool
@@ -1025,7 +1010,10 @@ where
             .definition
             .finish(Vec::new(), state, &mut |event| opened.input.charge(event))
             .map_err(execute_error)?;
-        opened.input.finish_result().map_err(execute_error)?;
+        if !opened.definition.has_output_stage() {
+            opened.input.finish_result().map_err(execute_error)?;
+        }
+        completed_rows = 1;
         let envelope = envelope(&row);
         let (row, _codec) = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
         largest_output = row.len();
@@ -1076,7 +1064,12 @@ where
                     .definition
                     .finish(keys, group.state, &mut |event| opened.input.charge(event))
                     .map_err(execute_error)?;
-                opened.input.finish_result().map_err(execute_error)?;
+                if !opened.definition.has_output_stage() {
+                    opened.input.finish_result().map_err(execute_error)?;
+                }
+                completed_rows = completed_rows
+                    .checked_add(1)
+                    .ok_or(SpillError::SizeOverflow)?;
                 let envelope = envelope(&row);
                 let (row, _codec) = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
                 largest_output = largest_output.max(row.len());
@@ -1129,17 +1122,35 @@ where
     let run = result_writer.finish(cx).await?;
     let mut spool = NativeResultSpool {
         columns: Arc::from([]),
-        encoded_columns: opened.definition.key_columns().len()
-            + opened.definition.aggregate_columns().len(),
+        encoded_columns: opened.definition.evaluation_key_columns().len()
+            + opened.definition.evaluation_aggregate_columns().len(),
         snapshot: opened.input.snapshot_seq(),
         kind: opened.input.kind(),
-        rows: opened.input.row_stats(),
+        rows: GqlExecutionStats {
+            snapshot_records: opened.input.row_stats().snapshot_records,
+            result_rows: completed_rows,
+        },
         evaluator: opened.input.evaluator_stats(),
         max_row_bytes: largest_output,
         run,
     };
-    drop(opened.input);
-    if !opened.definition.group_key_columns().is_empty() && spool.row_count() > 1 {
+    if opened.definition.has_output_stage() {
+        spool = output::finish(
+            &mut opened,
+            spool,
+            cx,
+            source,
+            partition,
+            destination,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            &mut work,
+            resolver,
+        )
+        .await?;
+    } else if !opened.definition.group_key_columns().is_empty() && spool.row_count() > 1 {
         let order: Vec<_> = (0..opened.definition.key_columns().len())
             .map(|at| GraphValueOrder::ascending(at).with_nulls_first(true))
             .collect();
@@ -1163,6 +1174,7 @@ where
             .ok_or(SpillError::SizeOverflow)?;
         spool = copy_result(&sorted, source, destination, page_bytes, &mut work).await?;
     }
+    drop(opened.input);
     Ok((
         NativeAggregateSpool {
             inner: spool,

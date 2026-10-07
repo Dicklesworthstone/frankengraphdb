@@ -2,8 +2,9 @@
 //!
 //! This module owns query semantics, not scratch storage or byte admission.
 //! The host reserves memory before retaining keys/cells, partitions complete
-//! input rows, and emits finished groups in canonical key order. Every input,
-//! reduction and delivery event must use the SAME input cursor's meter.
+//! input rows, and evaluates completed groups in canonical key order before
+//! ranking and pagination. Every input, reduction and delivery event must use
+//! the SAME input cursor's meter.
 
 use crate::algebra::{GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::edge_stream::EdgeScanBuildError;
@@ -12,8 +13,8 @@ use crate::stream::VertexScanBuildError;
 use crate::stream::VertexScanEvent;
 use crate::stream::aggregate::{Input, NumericState};
 use crate::{
-    GqlQueryError, GraphAggregateError, GraphAggregateFunction, GraphAggregateRow,
-    PreparedGraphAggregate,
+    GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphAggregateFunction,
+    GraphAggregateOrder, GraphAggregateRow, PreparedGraphAggregate,
 };
 use fgdb_types::CanonicalScalar;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires a plain numeric reduction")
+                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection, computed inputs or computed output expressions")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -78,7 +79,8 @@ impl SpillAggregatePlan {
     }
 }
 
-/// Sealed plain aggregate definition. Clones share immutable compiler metadata.
+/// Sealed numeric aggregate definition, including completed-group clauses.
+/// Clones share immutable compiler metadata; no source predicate is rewritten.
 #[derive(Clone)]
 pub struct SpillAggregateDefinition {
     pub(crate) aggregate: Arc<PreparedGraphAggregate>,
@@ -109,13 +111,14 @@ impl core::fmt::Debug for SpillAggregateState {
 
 impl SpillAggregateDefinition {
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        if !aggregate.supports_incremental_maintenance()
-            || aggregate.input_projection().is_some()
+        if aggregate.input_projection().is_some()
+            || aggregate.output_projection().is_some()
+            || aggregate.incremental_output_is_distinct()
             || aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
             || aggregate
-                .key_columns()
+                .evaluation_key_columns()
                 .len()
-                .saturating_add(aggregate.aggregate_columns().len())
+                .saturating_add(aggregate.evaluation_aggregate_columns().len())
                 > MAX_PATTERN_VERTICES
             || !aggregate.aggregates().iter().all(|spec| {
                 matches!(
@@ -131,8 +134,11 @@ impl SpillAggregateDefinition {
         {
             return Err(SpillAggregateBuildError::Unsupported);
         }
+        let aggregate = aggregate
+            .prepare_streamed_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
         Ok(Self {
-            aggregate: Arc::new(aggregate.clone()),
+            aggregate: Arc::new(aggregate),
         })
     }
 
@@ -147,6 +153,99 @@ impl SpillAggregateDefinition {
     }
     pub fn aggregate_columns(&self) -> &[String] {
         self.aggregate.aggregate_columns()
+    }
+
+    /// Full private schemas. Hidden keys and clause-only summaries remain in
+    /// spill frames until ranking finishes; output schemas never identify them.
+    pub fn evaluation_key_columns(&self) -> &[String] {
+        self.aggregate.evaluation_key_columns()
+    }
+    pub fn evaluation_aggregate_columns(&self) -> &[String] {
+        self.aggregate.evaluation_aggregate_columns()
+    }
+    pub fn has_output_stage(&self) -> bool {
+        self.aggregate.has_streamed_output_stage()
+    }
+    pub fn ordering(&self) -> &[GraphAggregateOrder] {
+        self.aggregate.ordering()
+    }
+    pub fn result_window(&self) -> (u64, Option<u64>) {
+        self.aggregate.incremental_result_window()
+    }
+
+    /// Conservative number of copies of any input payload in late projection.
+    /// Numeric summaries are copied once; key projection may repeat keys.
+    /// Computed output expressions are not admitted by this physical profile.
+    pub fn output_payload_copies(&self) -> usize {
+        self.key_columns().len().max(1)
+    }
+
+    fn check_complete<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        if row.keys().len() != self.evaluation_key_columns().len()
+            || row.values().len() != self.evaluation_aggregate_columns().len()
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Evaluate all HAVING operands on one complete group, even with LIMIT 0.
+    /// The host visits groups in canonical key order before any rank/window.
+    pub fn qualifies_output<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<bool, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.check_complete(row)?;
+        self.aggregate
+            .qualifies_streamed_output(row, &mut |event| control(result_event(event)))
+    }
+
+    /// Apply the checked visible key projection and aggregate prefix after
+    /// ranking. Full rows with no column transform move without payload copies.
+    /// This neither evaluates HAVING again nor charges a delivered result row.
+    pub fn project_output<E, C>(
+        &self,
+        row: GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<GraphAggregateRow, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.check_complete(&row)?;
+        if self.aggregate.transforms_streamed_columns() {
+            self.aggregate
+                .project_complete_output(&row, &mut |event| control(result_event(event)))
+        } else {
+            Ok(row)
+        }
+    }
+
+    /// The SAME exact comparator used by completed in-memory groups. Unsigned
+    /// counts, wide signed sums and rational averages are never narrowed or
+    /// compared by their serialization tags. Full ascending keys break ties.
+    pub fn compare_output<E, C>(
+        &self,
+        left: &GraphAggregateRow,
+        right: &GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.check_complete(left)?;
+        self.check_complete(right)?;
+        left.compare_incremental_order(right, self.ordering(), &mut |event| {
+            control(result_event(event))
+        })?
+        .ok_or(GqlQueryError::Source(
+            GraphAggregateError::InvalidReductionInput,
+        ))
     }
 
     /// Cells that may retain one variable-size argument value. COUNT/SUM/AVG
@@ -304,5 +403,13 @@ impl SpillAggregateDefinition {
             values.push(cell.finish_governed(control)?);
         }
         Ok(GraphAggregateRow::from_group_values(keys, values))
+    }
+}
+
+fn result_event(event: GlaExecutionEvent) -> VertexScanEvent {
+    match event {
+        GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+        // ResultRows belong to the external host's final selected-row stage.
+        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
     }
 }

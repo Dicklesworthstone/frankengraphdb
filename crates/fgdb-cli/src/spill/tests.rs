@@ -178,7 +178,7 @@ fn external_grouping_delivers_more_result_bytes_than_the_shared_pool() {
         let directory = parent();
         let mut options = options(
             &directory,
-            "MATCH (n) RETURN n AS id, min(n.note) AS note, count(*) AS count",
+            "MATCH (n) RETURN n AS id, min(n.note) AS note, count(*) AS count ORDER BY count DESC,id DESC",
         );
         options.spill.memory = Some(262_144);
         let eager = view
@@ -211,6 +211,76 @@ fn external_grouping_delivers_more_result_bytes_than_the_shared_pool() {
             }
             empty(&directory);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_group_result_clauses_keep_hidden_cells_private_and_select_final_rows() {
+    let ((), report) = run_async_under_lab(0x5b11d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        for text in [
+            "MATCH (n) RETURN n.p AS p,count(*) AS count,avg(n.p) AS mean HAVING count >= 7 ORDER BY mean DESC SKIP 1 LIMIT 3",
+            "MATCH (n) RETURN count(*) AS count GROUP BY n.p ORDER BY sum(n.p) DESC LIMIT 4",
+            "MATCH (n) RETURN n.p AS first,n.p AS again,count(*) AS count GROUP BY n.p ORDER BY count DESC LIMIT 3",
+            "MATCH (a)-[e:R]-(b) RETURN count(*) AS count GROUP BY b.p HAVING count > 0 ORDER BY sum(a.p) DESC LIMIT 2",
+            "MATCH (n) RETURN count(*) AS count HAVING count > 0 ORDER BY count LIMIT 0",
+            "MATCH (n) RETURN n.p AS p,count(*) AS count HAVING count < 0 LIMIT 1",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN count(*) AS count GROUP BY n.p ORDER BY avg(n.p) DESC SKIP 12 LIMIT 10",
+        ] {
+            let mut options = options(&directory, text);
+            options.spill.memory = Some(262_144);
+            let eager = view
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 1, "rows", true, &mut expected));
+            // Only selected result rows may consume this allowance; all 96
+            // source vertices and all complete groups still need evaluation.
+            options.budget.rows = Some(rows(&expected).len() as u64);
+            let mut output = Vec::new();
+            okay(run(&view, &cx, &options, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            let output = std::str::from_utf8(&output).unwrap();
+            assert!(output.contains(r#""event":"result""#), "{text}");
+            if text.starts_with("MATCH (n) RETURN count(*) AS count GROUP BY") {
+                assert!(
+                    output
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .contains(r#""columns":["count"]"#)
+                );
+                assert!(
+                    rows(output.as_bytes())
+                        .iter()
+                        .all(|row| row.matches(r#""type":"count""#).count() == 1)
+                );
+            }
+            empty(&directory);
+        }
+        let mut invalid = options(
+            &directory,
+            "MATCH (n) RETURN min(n.note) AS note GROUP BY n.p HAVING note > 0 OR TRUE ORDER BY count(*) DESC LIMIT 0",
+        );
+        invalid.spill.memory = Some(262_144);
+        let mut output = Vec::new();
+        let error = run(&view, &cx, &invalid, None, true, &mut output)
+            .await
+            .expect_err("HAVING must evaluate every numeric operand before an empty page");
+        assert_eq!(error.code, 3);
+        assert!(output.is_empty());
+        empty(&directory);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -258,8 +328,8 @@ fn external_grouping_enforces_full_input_and_final_result_allowances() {
         for text in [
             "MATCH (n) RETURN count(DISTINCT n.p) AS count",
             "MATCH (n) RETURN collect(n.p) AS values",
-            "MATCH (n) RETURN n.p AS p, count(*) AS count ORDER BY count DESC",
-            "MATCH (n) RETURN n.p AS p, count(*) AS count LIMIT 0",
+            "MATCH (n) RETURN DISTINCT count(*) AS count GROUP BY n.p",
+            "MATCH (n) RETURN count(*) + 1 AS count",
             "MATCH (n) RETURN n.p + 1 AS p, count(*) AS count",
         ] {
             let options = options(&directory, text);
@@ -633,6 +703,40 @@ fn aggregate_cancellation_retires_all_three_files_after_one_flushed_group() {
         let error = run(&view, &cx, &options, None, true, &mut out)
             .await
             .expect_err("cancelled aggregate delivery");
+        assert_eq!(error.code, 3);
+        assert_eq!(out.flushes, 2);
+        assert_eq!(rows(&out.bytes).len(), 1);
+        assert!(
+            !std::str::from_utf8(&out.bytes)
+                .unwrap()
+                .contains(r#""event":"result""#)
+        );
+        empty(&directory);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ranked_aggregate_cancellation_retires_both_sort_passes_before_any_success_terminal() {
+    let ((), report) = run_async_under_lab(0x5b11e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        let mut options = options(
+            &directory,
+            "MATCH (n) RETURN count(*) AS count GROUP BY n.p HAVING count > 0 ORDER BY sum(n.p) DESC LIMIT 4",
+        );
+        options.spill.memory = Some(262_144);
+        let mut out = CancelOutput {
+            bytes: Vec::new(),
+            flushes: 0,
+            cancel: || root.set_cancel_requested(true),
+        };
+        let error = run(&view, &cx, &options, None, true, &mut out)
+            .await
+            .expect_err("cancelled ranked delivery");
         assert_eq!(error.code, 3);
         assert_eq!(out.flushes, 2);
         assert_eq!(rows(&out.bytes).len(), 1);

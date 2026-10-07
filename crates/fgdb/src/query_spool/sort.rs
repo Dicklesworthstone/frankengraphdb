@@ -16,13 +16,13 @@ mod prepared;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
-struct Work<'a> {
-    cx: &'a QueryCx,
-    used: u64,
-    limit: u64,
+pub(super) struct Work<'a> {
+    pub(super) cx: &'a QueryCx,
+    pub(super) used: u64,
+    pub(super) limit: u64,
 }
 impl Work<'_> {
-    fn charge(&mut self, units: usize) -> Result<()> {
+    pub(super) fn charge(&mut self, units: usize) -> Result<()> {
         self.cx
             .with_restriction(|| self.cx.checkpoint())
             .map_err(SpillError::Interrupted)?;
@@ -39,6 +39,49 @@ impl Work<'_> {
         }
         self.used = attempted;
         Ok(())
+    }
+}
+
+/// Private semantic comparison seam. The physical sorter still owns every
+/// run, allocation, merge and byte charge. Aggregate callers retain their exact
+/// numeric domains and cumulative evaluator while supplying this comparison.
+pub(super) trait FrameOrder {
+    type Error: From<NativeSpoolError> + From<SpillError>;
+
+    fn admit(&mut self, columns: usize) -> core::result::Result<(), Self::Error>;
+    fn validate(
+        &mut self,
+        row: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> core::result::Result<(), Self::Error>;
+    fn compare(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> core::result::Result<Ordering, Self::Error>;
+}
+
+struct CanonicalOrder<'a>(&'a [GraphValueOrder]);
+impl FrameOrder for CanonicalOrder<'_> {
+    type Error = NativeSpoolError;
+
+    fn admit(&mut self, columns: usize) -> Result<()> {
+        validate_order(self.0, columns)
+    }
+    fn validate(&mut self, row: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
+        canonical::validate(row, columns, work)
+    }
+    fn compare(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> Result<Ordering> {
+        canonical::compare(left, right, self.0, columns, work)
     }
 }
 
@@ -212,6 +255,35 @@ impl NativeResultSpool {
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     {
+        self.sort_with(
+            cx,
+            source,
+            destination,
+            &mut CanonicalOrder(order),
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_work_units,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn sort_with<A, B, O: FrameOrder>(
+        &self,
+        cx: &QueryCx,
+        source: &mut SpillFile<A>,
+        destination: &mut SpillFile<B>,
+        order: &mut O,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_work_units: u64,
+    ) -> core::result::Result<(Self, u64), O::Error>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    {
         cx.with_restriction_async(self.sort_inner(
             cx,
             source,
@@ -226,17 +298,17 @@ impl NativeResultSpool {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn sort_inner<A, B>(
+    async fn sort_inner<A, B, O: FrameOrder>(
         &self,
         cx: &QueryCx,
         source: &mut SpillFile<A>,
         destination: &mut SpillFile<B>,
-        order: &[GraphValueOrder],
+        order: &mut O,
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
         max_work_units: u64,
-    ) -> Result<(Self, u64)>
+    ) -> core::result::Result<(Self, u64), O::Error>
     where
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
@@ -247,7 +319,7 @@ impl NativeResultSpool {
             limit: max_work_units,
         };
         work.charge(1)?;
-        validate_order(order, self.encoded_columns)?;
+        order.admit(self.encoded_columns)?;
         if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
             return Err(SpillError::InvalidLimits.into());
         }
@@ -257,7 +329,8 @@ impl NativeResultSpool {
             return Err(NativeSpoolError::SortRunLimit {
                 required,
                 limit: max_runs,
-            });
+            }
+            .into());
         }
         let count = usize::try_from(required).map_err(|_| SpillError::SizeOverflow)?;
         let pool = source.memory_pool().clone();
@@ -276,7 +349,7 @@ impl NativeResultSpool {
                         .next_row(cx)
                         .await?
                         .ok_or(NativeSpoolError::IncompleteCursor)?;
-                    canonical::validate(row.as_ref(), self.encoded_columns, &mut work)?;
+                    order.validate(row.as_ref(), self.encoded_columns, &mut work)?;
                     rows.values.push(row);
                 }
                 heap_sort(&mut rows.values, order, self.encoded_columns, &mut work)?;
@@ -298,7 +371,7 @@ impl NativeResultSpool {
                 }
             }
             if input.next_row(cx).await?.is_some() || input.state() != ScanState::Exhausted {
-                return Err(NativeSpoolError::IncompleteCursor);
+                return Err(NativeSpoolError::IncompleteCursor.into());
             }
         }
         let mut in_destination = true;
@@ -354,7 +427,7 @@ impl NativeResultSpool {
             .await?;
         }
         if final_run.rows != self.row_count() || final_run.pages.len() != self.encoded_len() {
-            return Err(NativeSpoolError::IncompleteCursor);
+            return Err(NativeSpoolError::IncompleteCursor.into());
         }
         work.charge(1)?;
         Ok((
@@ -386,17 +459,17 @@ async fn write_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pass<A, B>(
+async fn merge_pass<A, B, O: FrameOrder>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     runs: &[Run],
     output: &mut Vec<Run>,
     max_row_bytes: usize,
     page_bytes: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()>
+) -> core::result::Result<(), O::Error>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
@@ -423,17 +496,17 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pair<A, B>(
+async fn merge_pair<A, B, O: FrameOrder>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     left: &Run,
     right: Option<&Run>,
     max_row_bytes: usize,
     page_bytes: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<Run>
+) -> core::result::Result<Run, O::Error>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
@@ -455,8 +528,7 @@ where
         work.charge(1)?;
         let take_left = match (&a, &b) {
             (Some(a), Some(b)) => {
-                canonical::compare(a.as_ref(), b.as_ref(), order, columns, work)?
-                    != Ordering::Greater
+                order.compare(a.as_ref(), b.as_ref(), columns, work)? != Ordering::Greater
             }
             (Some(_), None) => true,
             _ => false,
@@ -473,7 +545,7 @@ where
         }
     }
     if rows != expected {
-        return Err(NativeSpoolError::IncompleteCursor);
+        return Err(NativeSpoolError::IncompleteCursor.into());
     }
     work.charge(1)?;
     Ok(Run {
@@ -484,12 +556,12 @@ where
 
 // A fallible, allocation-free sort rather than swallowing control failures in
 // std's infallible comparator. Refusal stops immediately and publishes no run.
-fn heap_sort(
+fn heap_sort<O: FrameOrder>(
     rows: &mut [TrackedBytes],
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()> {
+) -> core::result::Result<(), O::Error> {
     let len = rows.len();
     for root in (0..len / 2).rev() {
         sift(rows, root, len, order, columns, work)?;
@@ -501,34 +573,28 @@ fn heap_sort(
     }
     Ok(())
 }
-fn sift(
+fn sift<O: FrameOrder>(
     rows: &mut [TrackedBytes],
     mut root: usize,
     end: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()> {
+) -> core::result::Result<(), O::Error> {
     while root < end / 2 {
         let mut child = root * 2 + 1;
         if child + 1 < end
-            && canonical::compare(
+            && order.compare(
                 rows[child].as_ref(),
                 rows[child + 1].as_ref(),
-                order,
                 columns,
                 work,
             )? == Ordering::Less
         {
             child += 1;
         }
-        if canonical::compare(
-            rows[root].as_ref(),
-            rows[child].as_ref(),
-            order,
-            columns,
-            work,
-        )? != Ordering::Less
+        if order.compare(rows[root].as_ref(), rows[child].as_ref(), columns, work)?
+            != Ordering::Less
         {
             break;
         }

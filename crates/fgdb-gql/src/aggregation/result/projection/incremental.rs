@@ -100,7 +100,7 @@ impl PreparedGraphAggregate {
     // Both consumers validate their own complete-group source contract before
     // entering this single projection/ownership path. No maintenance admission
     // is widened to admit graph-stream edge or path input schemas.
-    fn project_complete_output<E, C>(
+    pub(crate) fn project_complete_output<E, C>(
         &self,
         row: &GraphAggregateRow,
         govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
