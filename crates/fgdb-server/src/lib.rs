@@ -8,6 +8,12 @@
 //! budgets and issuer retirement are rechecked for every statement and
 //! security applies before expansion (FG-INV-20), never as a result filter.
 //!
+//! FGP also rechecks the selected issuer's cooperative retirement fence and
+//! token expiry before every physical output write and flush, including READY,
+//! credit-delayed results, subscription batches, and resumed partial writes.
+//! These checks use the existing host clock; they do not implement the plan's
+//! durable audit release, time-authority evidence, or revocation barriers.
+//!
 //! # What is served (a subset of Appendix D, never a substitute)
 //!
 //! - The handshake `HELLO -> HELLO_ACK -> AUTH -> AUTH_OK -> SELECT_DATABASE

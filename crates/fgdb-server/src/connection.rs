@@ -26,7 +26,7 @@ use fgdb_protocol::{
     FrameLimits, Header, MAX_HEADER_LEN, Posture, ProtocolError, SendCost, SendTerminus,
     SessionBinding, StreamId,
 };
-use fgdb_warden::CapabilityToken;
+use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -71,6 +71,9 @@ struct Lane {
     initial_window: SendCost,
     maximum_window: SendCost,
     finished: VecDeque<StreamId>,
+    /// The selected issuer and bearer credential remain live while output can
+    /// wait for credit or socket readiness. A Ready binding is not authority.
+    send_authority: Option<(Arc<Served>, CapabilityToken)>,
 }
 
 pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
@@ -95,6 +98,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
             rows: server.limits.max_window_rows,
         },
         finished: VecDeque::new(),
+        send_authority: None,
     };
     let waiter = server.shutdown.waiter();
     let mut transcript: Option<[u8; 32]> = None;
@@ -297,6 +301,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
                 if lane.conn.selected(ready.binding(session)).is_err() {
                     return;
                 }
+                lane.send_authority = Some((Arc::clone(&chosen), token.clone()));
                 selected = Some(chosen);
                 if !lane
                     .send(
@@ -414,10 +419,20 @@ impl Lane {
         .await
     }
 
-    /// Queue, guard and write one frame. Every write attempt rechecks that
-    /// the frame still carries the connection's current binding, so a frame
-    /// built under a stale binding can never reach the wire.
+    /// Queue, guard and write one frame. The exact selected issuer verifies
+    /// the bearer once here, then expiry and retirement are rechecked before
+    /// every physical write/flush attempt, including a resumed partial write.
+    /// An invalidated output closes delivery; it cannot undo a decided commit.
     async fn send_frame(&mut self, cx: &Cx, frame: &Frame) -> bool {
+        let authority = self
+            .send_authority
+            .as_ref()
+            .map(|(database, token)| (&database.authority, token));
+        let Ok(authorization) =
+            OutputGuard::new(self.conn.binding(), authority, crate::unix_millis())
+        else {
+            return false;
+        };
         let Ok(ticket) = self.conn.queue_send() else {
             return false;
         };
@@ -427,8 +442,12 @@ impl Lane {
                 .send_terminal(&ticket, SendTerminus::CancelledBeforeWrite);
             return false;
         }
-        let current = self.conn.binding();
-        let result = self.writer.send(cx, |header| guard(header, current)).await;
+        let result = self
+            .writer
+            .send(cx, |header| {
+                authorization.authorize(header, crate::unix_millis())
+            })
+            .await;
         let terminus = if result.is_ok() {
             SendTerminus::Sent
         } else {
@@ -1381,5 +1400,398 @@ fn guard(header: &Header, current: Binding) -> Result<(), ProtocolError> {
         Ok(())
     } else {
         Err(ProtocolError::InvalidBinding)
+    }
+}
+
+/// One frame's live authority, independent of how long framing or flow control
+/// took. The callback clock is sampled at each I/O attempt, never at queue time.
+/// This implements Warden's cooperative expiry/retirement fence, not the
+/// unimplemented durable audit visibility or time-authority evidence machinery.
+struct OutputGuard<'a> {
+    binding: Binding,
+    authority: Option<(&'a Authority, VerifiedCapability<'a>)>,
+}
+
+impl<'a> OutputGuard<'a> {
+    fn new(
+        binding: Binding,
+        authority: Option<(&'a Authority, &CapabilityToken)>,
+        now_ms: u64,
+    ) -> Result<Self, ProtocolError> {
+        let authority = if matches!(binding, Binding::Ready(_)) {
+            let (issuer, token) = authority.ok_or(ProtocolError::InvalidBinding)?;
+            let verified = issuer
+                .verify_at(token, crate::TRUNK, now_ms)
+                .map_err(|_| ProtocolError::InvalidBinding)?;
+            Some((issuer, verified))
+        } else {
+            None
+        };
+        Ok(Self { binding, authority })
+    }
+
+    fn authorize(&self, header: &Header, now_ms: u64) -> Result<(), ProtocolError> {
+        guard(header, self.binding)?;
+        if let Some((issuer, verified)) = &self.authority {
+            issuer
+                .recheck_at(verified, crate::TRUNK, now_ms)
+                .map_err(|_| ProtocolError::InvalidBinding)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod output_guard_tests {
+    use super::*;
+    use asupersync::io::AsyncWrite;
+    use asupersync::security::key::AuthKey;
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_protocol::ReadyBinding;
+    use fgdb_protocol::transport::{SendCompletion, TransportError};
+    use fgdb_types::DatabaseSecurityNamespaceId;
+    use fgdb_warden::{Grant, QueryLimits};
+    use std::cell::{Cell, RefCell};
+    use std::io;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Waker};
+
+    const START: u64 = 100;
+    const EXPIRES: u64 = 1000;
+
+    fn authority(seed: u64) -> Authority {
+        Authority::new(
+            AuthKey::from_seed(seed),
+            DatabaseSecurityNamespaceId([7; 32]),
+            crate::GRAPH_NAME,
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn token(issuer: &Authority) -> CapabilityToken {
+        issuer
+            .issue_at(
+                &Grant::read_only(
+                    crate::TRUNK,
+                    EXPIRES,
+                    QueryLimits {
+                        max_nodes: 100,
+                        max_work: 1000,
+                        max_rows: 100,
+                    },
+                ),
+                START,
+            )
+            .unwrap()
+    }
+
+    fn binding() -> Binding {
+        Binding::Ready(ReadyBinding {
+            session: SessionBinding {
+                transcript: [1; 32],
+                auth_generation: 1,
+            },
+            namespace: [7; 32],
+            incarnation: [2; 32],
+            service_epoch: 1,
+            posture: Posture::Local,
+            authority_commitment: [3; 32],
+        })
+    }
+
+    fn limits() -> FrameLimits {
+        FrameLimits::new(4096).unwrap()
+    }
+
+    fn frame(kind: FrameKind) -> Frame {
+        let current = binding();
+        let header_binding = if kind == FrameKind::Ready {
+            Binding::Session(current.session().unwrap())
+        } else {
+            current
+        };
+        Frame::new(
+            kind,
+            1,
+            if kind == FrameKind::Ready {
+                StreamId::CONTROL
+            } else {
+                StreamId([5; 16])
+            },
+            header_binding,
+            b"protected result bytes".to_vec(),
+            limits(),
+        )
+        .unwrap()
+    }
+
+    struct Writer {
+        accepted: Rc<RefCell<Vec<u8>>>,
+        chunks: VecDeque<usize>,
+        flush_pending: bool,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl AsyncWrite for Writer {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let count = self.chunks.pop_front().unwrap_or(usize::MAX);
+            if count == 0 {
+                task.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let count = count.min(bytes.len());
+            self.accepted
+                .borrow_mut()
+                .extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flushes.set(self.flushes.get() + 1);
+            if self.flush_pending {
+                self.flush_pending = false;
+                task.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct Fixture {
+        writer: FrameWriter<Writer>,
+        accepted: Rc<RefCell<Vec<u8>>>,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl Fixture {
+        fn new(chunks: impl IntoIterator<Item = usize>, flush_pending: bool) -> Self {
+            let accepted = Rc::new(RefCell::new(Vec::new()));
+            let flushes = Rc::new(Cell::new(0));
+            Self {
+                writer: FrameWriter::new(
+                    Writer {
+                        accepted: Rc::clone(&accepted),
+                        chunks: chunks.into_iter().collect(),
+                        flush_pending,
+                        flushes: Rc::clone(&flushes),
+                    },
+                    limits(),
+                ),
+                accepted,
+                flushes,
+            }
+        }
+
+        fn poll(
+            &mut self,
+            cx: &Cx,
+            guard: &OutputGuard<'_>,
+            now: u64,
+        ) -> Poll<Result<SendCompletion, TransportError>> {
+            let mut task = Context::from_waker(Waker::noop());
+            self.writer
+                .poll_send(cx, &mut task, |header| guard.authorize(header, now))
+        }
+    }
+
+    fn with_cx(test: impl FnOnce(&Cx)) {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        test(&cx);
+    }
+
+    fn denied(result: Poll<Result<SendCompletion, TransportError>>) {
+        assert_eq!(
+            result,
+            Poll::Ready(Err(TransportError::Protocol(ProtocolError::InvalidBinding)))
+        );
+    }
+
+    #[test]
+    fn selected_output_including_ready_uses_live_exact_issuer() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let guard = OutputGuard::new(binding(), Some((&issuer, &credential)), START).unwrap();
+            for kind in [
+                FrameKind::Ready,
+                FrameKind::SnapshotResultChunk,
+                FrameKind::SnapshotResultEnd,
+                FrameKind::SubscriptionBatch,
+                FrameKind::Error,
+            ] {
+                let frame = frame(kind);
+                let mut io = Fixture::new([3, 0, 7, 0], true);
+                io.writer.queue(cx, &frame).unwrap();
+                let mut completion = None;
+                for _ in 0..8 {
+                    if let Poll::Ready(result) = io.poll(cx, &guard, EXPIRES - 1) {
+                        completion = Some(result.unwrap());
+                        break;
+                    }
+                }
+                let completion = completion.expect("bounded partial writes complete");
+                let expected = frame.encode(limits()).unwrap();
+                assert_eq!(*io.accepted.borrow(), expected);
+                assert_eq!(completion.encoded_bytes, expected.len());
+                assert_eq!(io.flushes.get(), 2);
+            }
+            assert!(OutputGuard::new(binding(), None, START).is_err());
+            let foreign = authority(42);
+            assert!(OutputGuard::new(binding(), Some((&foreign, &credential)), START).is_err());
+            assert!(OutputGuard::new(binding(), Some((&issuer, &credential)), EXPIRES).is_err());
+        });
+    }
+
+    #[test]
+    fn credit_granted_after_expiry_cannot_release_buffered_output() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let guard = OutputGuard::new(binding(), Some((&issuer, &credential)), START).unwrap();
+            for kind in [
+                FrameKind::SnapshotResultChunk,
+                FrameKind::SnapshotResultEnd,
+                FrameKind::SubscriptionBatch,
+            ] {
+                let frame = frame(kind);
+                let cost = SendCost {
+                    bytes: frame.header().frame_len() as u64,
+                    rows: 1,
+                };
+                let mut window = FlowWindow::new(SendCost { bytes: 0, rows: 0 }, cost).unwrap();
+                assert!(matches!(
+                    window.reserve(cost),
+                    Err(ProtocolError::CreditExceeded)
+                ));
+                let mut io = Fixture::new([], false);
+                io.writer.queue(cx, &frame).unwrap();
+                // Credit arrives at the exact expiry boundary. A previously
+                // verified/queued frame has no cached permission to send.
+                window
+                    .grant(CreditUpdate {
+                        sequence: 1,
+                        bytes: cost.bytes,
+                        rows: cost.rows,
+                    })
+                    .unwrap();
+                let mut reservation = window.reserve(cost).unwrap();
+                reservation.begin_write().unwrap();
+                denied(io.poll(cx, &guard, EXPIRES));
+                reservation.failed().unwrap();
+                assert!(io.accepted.borrow().is_empty());
+                assert_eq!(io.flushes.get(), 0);
+                assert_eq!(window.sent(), SendCost { bytes: 0, rows: 0 });
+                assert_eq!(window.failed_after_write(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn expiry_while_socket_pending_before_first_byte_is_terminal() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let guard = OutputGuard::new(binding(), Some((&issuer, &credential)), START).unwrap();
+            let mut io = Fixture::new([0], false);
+            io.writer
+                .queue(cx, &frame(FrameKind::SnapshotResultChunk))
+                .unwrap();
+            assert!(io.poll(cx, &guard, START).is_pending());
+            assert!(io.accepted.borrow().is_empty());
+            denied(io.poll(cx, &guard, EXPIRES));
+            assert!(io.accepted.borrow().is_empty());
+            // Neither retry nor a backwards clock can resurrect this lane.
+            assert_eq!(
+                io.poll(cx, &guard, START),
+                Poll::Ready(Err(TransportError::Closed))
+            );
+        });
+    }
+
+    #[test]
+    fn retirement_after_partial_write_never_sends_the_suffix() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let guard = OutputGuard::new(binding(), Some((&issuer, &credential)), START).unwrap();
+            let mut io = Fixture::new([7, 0], false);
+            io.writer
+                .queue(cx, &frame(FrameKind::SubscriptionBatch))
+                .unwrap();
+            assert!(io.poll(cx, &guard, START).is_pending());
+            let prefix = io.accepted.borrow().clone();
+            assert_eq!(prefix.len(), 7);
+            assert!(issuer.retire());
+            denied(io.poll(cx, &guard, START));
+            assert_eq!(*io.accepted.borrow(), prefix);
+            assert_eq!(io.flushes.get(), 0);
+            assert_eq!(
+                io.poll(cx, &guard, START),
+                Poll::Ready(Err(TransportError::Closed))
+            );
+        });
+    }
+
+    #[test]
+    fn resumed_flush_rechecks_expiry_and_retirement_before_completion() {
+        with_cx(|cx| {
+            for retire in [false, true] {
+                let issuer = authority(41);
+                let credential = token(&issuer);
+                let guard =
+                    OutputGuard::new(binding(), Some((&issuer, &credential)), START).unwrap();
+                let frame = frame(FrameKind::SnapshotResultEnd);
+                let mut io = Fixture::new([], true);
+                io.writer.queue(cx, &frame).unwrap();
+                assert!(io.poll(cx, &guard, START).is_pending());
+                let bytes = io.accepted.borrow().clone();
+                assert_eq!(bytes, frame.encode(limits()).unwrap());
+                assert_eq!(io.flushes.get(), 1);
+                let now = if retire {
+                    issuer.retire();
+                    START
+                } else {
+                    EXPIRES
+                };
+                denied(io.poll(cx, &guard, now));
+                assert_eq!(*io.accepted.borrow(), bytes);
+                assert_eq!(io.flushes.get(), 1, "no flush after invalidation");
+            }
+        });
+    }
+
+    #[test]
+    fn preselection_errors_keep_their_uniform_session_binding() {
+        let session = binding().session().unwrap();
+        let guard = OutputGuard::new(Binding::Session(session), None, EXPIRES).unwrap();
+        let refusal = Frame::new(
+            FrameKind::Error,
+            1,
+            StreamId::CONTROL,
+            Binding::Session(session),
+            b"database not found or not authorized".to_vec(),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(guard.authorize(refusal.header(), EXPIRES), Ok(()));
+        let protected = frame(FrameKind::SnapshotResultChunk);
+        assert_eq!(
+            guard.authorize(protected.header(), START),
+            Err(ProtocolError::InvalidBinding)
+        );
     }
 }
