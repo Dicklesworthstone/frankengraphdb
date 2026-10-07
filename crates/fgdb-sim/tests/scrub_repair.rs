@@ -826,16 +826,25 @@ mod publication_metadata {
 
     #[test]
     fn a_cancelled_sweep_cannot_restore_health_without_verifying_the_inventory() {
-        let ((), report) = run_async_under_lab(0x5c15, |root| async move {
-            let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let cx = contexts.commit();
+        // A runtime request context, not the lab root task: the sweep's first
+        // checkpoint acknowledges the cancellation, and a lab task that
+        // acknowledges its own cancellation completes as cancelled, so the lab
+        // discards the very outcome this law asserts.
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        runtime.block_on(async {
             let mut db = Database::open_memory(&cx, engine_keys()).await.unwrap();
             root.set_cancel_requested(true);
             assert!(matches!(db.scrub(&cx).await,
                 Err(CommitError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted));
             assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
+            // Lifting the cancellation does not let a second sweep restore it.
+            root.set_cancel_requested(false);
+            assert!(matches!(db.scrub(&cx).await, Err(CommitError::Poisoned)));
+            assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
         });
-        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 
