@@ -68,3 +68,9 @@ needless_range_loop = "allow"
 # locally with a reason. A new entry in either table needs a lint_allowance row
 # in registries/workspace_topology.toml.
 
+# Test builds keep line tables only, so backtraces still carry file:line. With
+# 889 integration-test files, full DWARF made one remote test pool 300G+
+# and filled build workers' disks (fgdb-2n5c7).
+[profile.test]
+debug = "line-tables-only"
+
