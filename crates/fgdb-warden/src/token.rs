@@ -241,6 +241,31 @@ impl Authority {
         })
     }
 
+    /// Authenticate a replacement under THIS issuer and prove that every
+    /// effective restriction is no wider than the current credential. Both
+    /// credentials must still be live at the authoritative host time. Equal
+    /// authority is allowed; expiry extension and restoring previously removed
+    /// rights are not. Public session/transcript commitments are not evidence.
+    ///
+    /// This creates no execution permit and changes no existing permit's
+    /// counters. A protocol caller must independently fence old generations
+    /// and recheck the returned capability before delivering its response.
+    pub fn verify_narrowing_at(
+        &self,
+        current: &CapabilityToken,
+        replacement: &CapabilityToken,
+        branch: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedCapability<'_>, Error> {
+        let current = self.verify_at(current, branch, now_ms)?;
+        let replacement = self.verify_at(replacement, branch, now_ms)?;
+        if !replacement.program.narrows(&current.program) {
+            return Err(Error::ScopeDenied);
+        }
+        self.check_active()?;
+        Ok(replacement)
+    }
+
     /// Recheck a preverified value received from another Rust component.
     /// A value verified by a caller-created issuer, even with an identical
     /// public identifier, is NOT evidence from this host-owned authority.

@@ -14,9 +14,9 @@ use asupersync::Cx;
 use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
-    Auth, AuthOk, Body, Credential, Empty, ErrorBody, ErrorCode, Execute, ExecuteMode, Hello,
-    HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
-    WireValue,
+    Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
+    Execute, ExecuteMode, Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd,
+    SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -240,6 +240,89 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     return;
                 }
             }
+            FrameKind::AuthRefresh => {
+                let Ok(refresh) = AuthRefresh::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed AUTH_REFRESH")
+                        .await;
+                };
+                let Some(current) = token.as_ref() else {
+                    return;
+                };
+                // Only this quiescent dispatch point may replace authority.
+                // Active children receive Busy in control(), retaining their
+                // original permits and charged work through completion.
+                if lane.conn.children_in_flight() != 0 || lane.conn.sends_in_flight() != 0 {
+                    return;
+                }
+                let Credential::WardenCapability(bytes) = refresh.credential;
+                let replacement = CapabilityToken::decode(&bytes).ok();
+                let now = crate::unix_millis();
+                let chosen = replacement.as_ref().and_then(|replacement| {
+                    let accepts = |db: &&Arc<Served>| {
+                        let binding_matches = match lane.conn.binding() {
+                            Binding::Ready(ready) => {
+                                ready.namespace == db.namespace
+                                    && ready.incarnation == db.incarnation
+                                    && ready.service_epoch == 1
+                                    && ready.posture == Posture::Local
+                                    && ready.authority_commitment == db.authority_commitment
+                            }
+                            Binding::Session(_) => true,
+                            Binding::Transport => false,
+                        };
+                        binding_matches
+                            && db
+                                .authority
+                                .verify_narrowing_at(current, replacement, crate::TRUNK, now)
+                                .is_ok()
+                    };
+                    match selected.as_ref() {
+                        Some(db) => Some(db).filter(accepts).cloned(),
+                        None => server.databases.values().find(accepts).cloned(),
+                    }
+                });
+                let (Some(chosen), Some(replacement)) = (chosen, replacement) else {
+                    let refusal = ErrorBody {
+                        code: ErrorCode::Unauthenticated,
+                        message: "replacement credential not accepted".into(),
+                    };
+                    let binding = lane.conn.binding();
+                    if !lane
+                        .send(
+                            cx,
+                            FrameKind::Error,
+                            request,
+                            StreamId::CONTROL,
+                            binding,
+                            &refusal,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                };
+                let Ok(session) = lane.conn.authority_narrowed() else {
+                    return;
+                };
+                lane.send_authority = Some((chosen, replacement.clone()));
+                token = Some(replacement);
+                let binding = lane.conn.binding();
+                if !lane
+                    .send(
+                        cx,
+                        FrameKind::AuthRefreshed,
+                        request,
+                        StreamId::CONTROL,
+                        binding,
+                        &AuthRefreshed { session },
+                    )
+                    .await
+                {
+                    return;
+                }
+            }
             FrameKind::SelectDatabase => {
                 let Ok(select) = SelectDatabase::decode(frame.payload()) else {
                     return lane
@@ -368,10 +451,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
             // Only a recently finished stream can be addressed here (header
             // validation refuses any other): its credit or cancel is moot.
             FrameKind::WindowUpdate | FrameKind::QueryCancel => {}
-            FrameKind::Prepare
-            | FrameKind::AuthRefresh
-            | FrameKind::ResultAck
-            | FrameKind::ResultRelease => {
+            FrameKind::Prepare | FrameKind::ResultAck | FrameKind::ResultRelease => {
                 let refusal = ErrorBody {
                     code: ErrorCode::Protocol,
                     message: "this server serves only autocommit EXECUTE with ephemeral results"
@@ -994,7 +1074,7 @@ impl Lane {
                     Err(Stop::Transport)
                 }
             }
-            FrameKind::Execute => {
+            FrameKind::Execute | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
                     code: ErrorCode::Busy,
                     message: "a statement is already in flight on this connection".into(),
@@ -1320,7 +1400,7 @@ impl Lane {
                     .await;
                 Err(Stop::Drain)
             }
-            FrameKind::Execute => {
+            FrameKind::Execute | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
                     code: ErrorCode::Busy,
                     message: "a statement is already in flight on this connection".into(),
@@ -1419,12 +1499,13 @@ impl<'a> OutputGuard<'a> {
         authority: Option<(&'a Authority, &CapabilityToken)>,
         now_ms: u64,
     ) -> Result<Self, ProtocolError> {
-        let authority = if matches!(binding, Binding::Ready(_)) {
-            let (issuer, token) = authority.ok_or(ProtocolError::InvalidBinding)?;
+        let authority = if let Some((issuer, token)) = authority {
             let verified = issuer
                 .verify_at(token, crate::TRUNK, now_ms)
                 .map_err(|_| ProtocolError::InvalidBinding)?;
             Some((issuer, verified))
+        } else if matches!(binding, Binding::Ready(_)) {
+            return Err(ProtocolError::InvalidBinding);
         } else {
             None
         };
@@ -1771,6 +1852,52 @@ mod output_guard_tests {
                 denied(io.poll(cx, &guard, now));
                 assert_eq!(*io.accepted.borrow(), bytes);
                 assert_eq!(io.flushes.get(), 1, "no flush after invalidation");
+            }
+        });
+    }
+
+    #[test]
+    fn refreshed_reply_rechecks_the_new_credential_even_before_database_selection() {
+        with_cx(|cx| {
+            for selected in [false, true] {
+                for retire in [false, true] {
+                    let issuer = authority(41);
+                    let credential = token(&issuer);
+                    let binding = if selected {
+                        binding()
+                    } else {
+                        Binding::Session(binding().session().unwrap())
+                    };
+                    let guard =
+                        OutputGuard::new(binding, Some((&issuer, &credential)), START).unwrap();
+                    let frame = Frame::new(
+                        FrameKind::AuthRefreshed,
+                        3,
+                        StreamId::CONTROL,
+                        binding,
+                        AuthRefreshed {
+                            session: binding.session().unwrap(),
+                        }
+                        .encode()
+                        .unwrap(),
+                        limits(),
+                    )
+                    .unwrap();
+                    let mut io = Fixture::new([7, 0], false);
+                    io.writer.queue(cx, &frame).unwrap();
+                    assert!(io.poll(cx, &guard, START).is_pending());
+                    let prefix = io.accepted.borrow().clone();
+                    assert_eq!(prefix.len(), 7);
+                    let now = if retire {
+                        issuer.retire();
+                        START
+                    } else {
+                        EXPIRES
+                    };
+                    denied(io.poll(cx, &guard, now));
+                    assert_eq!(*io.accepted.borrow(), prefix);
+                    assert_eq!(io.flushes.get(), 0);
+                }
             }
         });
     }

@@ -687,6 +687,59 @@ body!(
     }
 );
 
+/// Replace an authenticated connection's credential with equal or narrower
+/// authority. The current binding remains authoritative until AUTH_REFRESHED.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthRefresh {
+    pub credential: Credential,
+}
+
+body!(
+    AuthRefresh,
+    |s, out| {
+        match &s.credential {
+            Credential::WardenCapability(token) => {
+                check_len(token.len(), MAX_CREDENTIAL_BYTES)?;
+                out.u8(1);
+                out.bytes(token);
+            }
+        }
+    },
+    |input| {
+        match input.u8()? {
+            1 => AuthRefresh {
+                credential: Credential::WardenCapability(
+                    input.bytes(MAX_CREDENTIAL_BYTES)?.to_vec(),
+                ),
+            },
+            _ => return Err(BodyError::UnknownTag),
+        }
+    }
+);
+
+/// The unchanged transcript and its exact successor authentication generation.
+/// The reply header carries this new binding; every other Ready field stays put.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthRefreshed {
+    pub session: SessionBinding,
+}
+
+body!(
+    AuthRefreshed,
+    |s, out| {
+        out.array(&s.session.transcript);
+        out.u64(s.session.auth_generation);
+    },
+    |input| {
+        AuthRefreshed {
+            session: SessionBinding {
+                transcript: input.array()?,
+                auth_generation: input.u64()?,
+            },
+        }
+    }
+);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectDatabase {
     pub name: String,
@@ -1378,6 +1431,36 @@ mod tests {
         assert_eq!(Auth::decode(&bytes).unwrap(), auth);
         every_prefix_refuses::<Auth>(&bytes);
         assert!(!format!("{auth:?}").contains('7'));
+
+        let refresh = AuthRefresh {
+            credential: auth.credential.clone(),
+        };
+        assert_eq!(refresh.encode().unwrap(), bytes);
+        assert_eq!(AuthRefresh::decode(&bytes).unwrap(), refresh);
+        every_prefix_refuses::<AuthRefresh>(&bytes);
+        assert!(!format!("{refresh:?}").contains('7'));
+        let refreshed = AuthRefreshed {
+            session: SessionBinding {
+                transcript: [19; 32],
+                auth_generation: 42,
+            },
+        };
+        let bytes = refreshed.encode().unwrap();
+        let mut expected = vec![19; 32];
+        expected.extend_from_slice(&42_u64.to_be_bytes());
+        assert_eq!(bytes, expected);
+        assert_eq!(AuthRefreshed::decode(&bytes).unwrap(), refreshed);
+        every_prefix_refuses::<AuthRefreshed>(&bytes);
+        let mut extra = bytes;
+        extra.push(0);
+        assert_eq!(
+            AuthRefreshed::decode(&extra).unwrap_err(),
+            BodyError::TrailingBytes
+        );
+        assert_eq!(
+            AuthRefresh::decode(&[2]).unwrap_err(),
+            BodyError::UnknownTag
+        );
 
         assert_eq!(Empty.encode().unwrap(), Vec::<u8>::new());
         assert_eq!(Empty::decode(&[0]).unwrap_err(), BodyError::TrailingBytes);

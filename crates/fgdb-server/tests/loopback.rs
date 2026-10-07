@@ -132,6 +132,347 @@ fn server_code(error: ClientError) -> ErrorCode {
 }
 
 #[test]
+fn fgp_refresh_narrows_live_authority_and_rejects_restoration_without_losing_the_session() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "refresh-scope").await;
+        let original = token(&grant(Rights::ReadWrite));
+        let mut client = Client::connect(cx, addr, original.clone()).await.unwrap();
+        let selected = client.select(cx, "social").await.unwrap();
+        client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:30}), (:Company {name:'Hidden',age:99})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let narrow = token(&Grant {
+            labels: Scope::only([LabelId(1)]),
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Read)
+        });
+        let session = client.refresh_authority(cx, narrow.clone()).await.unwrap();
+        assert_eq!(session.transcript, selected.binding.session.transcript);
+        assert_eq!(
+            session.auth_generation,
+            selected.binding.session.auth_generation + 1
+        );
+        let result = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n) RETURN n.name AS name,n.age AS age ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.rows, [vec![text("Ann"), WireValue::Null]]);
+        assert_eq!(
+            server_code(
+                client
+                    .execute(
+                        cx,
+                        ExecuteMode::Write,
+                        "CREATE (:Person {name:'forbidden'})",
+                        vec![]
+                    )
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::PermissionDenied
+        );
+        for replacement in [original, vec![0xff, 0, 1]] {
+            assert_eq!(
+                server_code(client.refresh_authority(cx, replacement).await.unwrap_err()),
+                ErrorCode::Unauthenticated
+            );
+        }
+        let unchanged = client.refresh_authority(cx, narrow).await.unwrap();
+        assert_eq!(unchanged.transcript, session.transcript);
+        assert_eq!(unchanged.auth_generation, session.auth_generation + 1);
+        let result = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n) RETURN count(*) AS n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.rows, [[WireValue::Count(1)]]);
+        assert_eq!(result.outcome, Outcome::Rows { seq: 1 });
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn fgp_refresh_before_selection_preserves_the_bound_subject_and_enforces_new_row_limits() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "refresh-before-select").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann'}), (:Person {name:'Bob'})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let root = fgdb_warden::CapabilityToken::decode(&token(&grant(Rights::Read))).unwrap();
+        let narrowed = root
+            .attenuate(fgdb_warden::Restriction::MaxRows(1))
+            .unwrap()
+            .encode();
+        let mut client = Client::connect(cx, addr, root.encode()).await.unwrap();
+        let refreshed = client.refresh_authority(cx, narrowed).await.unwrap();
+        assert_eq!(refreshed.auth_generation, 2);
+        let selected = client.select(cx, "social").await.unwrap();
+        assert_eq!(selected.binding.session, refreshed);
+        assert_eq!(selected.frontier, 1);
+        assert_eq!(
+            server_code(
+                client
+                    .execute(
+                        cx,
+                        ExecuteMode::Read,
+                        "MATCH (n:Person) RETURN n.name AS name",
+                        vec![]
+                    )
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        // Each execution has its own narrowed allowance; refresh didn't mint
+        // a session-lifetime quota or leave the budget refusal as partial rows.
+        let one = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name ORDER BY name LIMIT 1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(one.rows, [[text("Ann")]]);
+        client.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn fgp_refresh_waits_for_child_quiescence_then_fences_old_headers() {
+    use asupersync::io::AsyncWrite;
+    use fgdb_protocol::body::{
+        Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, Execute,
+        Hello, Ready, SelectDatabase,
+    };
+    use fgdb_protocol::transport::{FrameReader, FrameWriter};
+    use fgdb_protocol::{Binding, Frame, FrameKind, FrameLimits, StreamId};
+
+    async fn send<W: AsyncWrite + Unpin>(
+        writer: &mut FrameWriter<W>,
+        cx: &Cx,
+        kind: FrameKind,
+        request: u64,
+        stream: StreamId,
+        binding: Binding,
+        body: &impl Body,
+    ) {
+        let frame = Frame::new(
+            kind,
+            request,
+            stream,
+            binding,
+            body.encode().unwrap(),
+            FrameLimits::new(4096).unwrap(),
+        )
+        .unwrap();
+        writer.queue(cx, &frame).unwrap();
+        writer.send(cx, |_| Ok(())).await.unwrap();
+    }
+
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "refresh-busy").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner.execute(cx, ExecuteMode::Write,
+            "CREATE (:Person {age:1}),(:Person {age:2}),(:Person {age:3}),(:Person {age:4}),(:Person {age:5}),(:Person {age:6})", vec![]).await.unwrap();
+        let original = fgdb_warden::CapabilityToken::decode(&token(&grant(Rights::Read))).unwrap();
+        let narrowed = original
+            .attenuate(fgdb_warden::Restriction::MaxRows(1))
+            .unwrap()
+            .encode();
+        let socket = asupersync::net::TcpStream::connect(addr).await.unwrap();
+        let (read, write) = socket.into_split();
+        let limits = FrameLimits::new(4096).unwrap();
+        let mut reader = FrameReader::new(read, limits);
+        let mut writer = FrameWriter::new(write, limits);
+        send(
+            &mut writer,
+            cx,
+            FrameKind::Hello,
+            1,
+            StreamId::CONTROL,
+            Binding::Transport,
+            &Hello {
+                min_version: fgdb_protocol::PROTOCOL_VERSION,
+                max_version: fgdb_protocol::PROTOCOL_VERSION,
+                client_nonce: [3; 32],
+                max_frame_len: 4096,
+            },
+        )
+        .await;
+        assert_eq!(
+            reader
+                .receive(cx, |_| Ok(()))
+                .await
+                .unwrap()
+                .unwrap()
+                .header()
+                .kind(),
+            FrameKind::HelloAck
+        );
+        send(
+            &mut writer,
+            cx,
+            FrameKind::Auth,
+            2,
+            StreamId::CONTROL,
+            Binding::Transport,
+            &Auth {
+                credential: Credential::WardenCapability(original.encode()),
+            },
+        )
+        .await;
+        let auth = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        let session = AuthOk::decode(auth.payload()).unwrap().session;
+        send(
+            &mut writer,
+            cx,
+            FrameKind::SelectDatabase,
+            3,
+            StreamId::CONTROL,
+            Binding::Session(session),
+            &SelectDatabase {
+                name: "social".into(),
+            },
+        )
+        .await;
+        let ready = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        let ready = Ready::decode(ready.payload()).unwrap().binding(session);
+        let binding = Binding::Ready(ready);
+        send(
+            &mut writer,
+            cx,
+            FrameKind::Execute,
+            4,
+            StreamId::CONTROL,
+            binding,
+            &Execute {
+                mode: ExecuteMode::Read,
+                statement: "MATCH (n:Person) RETURN n.age AS age ORDER BY age".into(),
+                parameters: vec![],
+            },
+        )
+        .await;
+        let first = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(first.header().kind(), FrameKind::SnapshotResultChunk);
+        let child = first.header().stream_id();
+        send(
+            &mut writer,
+            cx,
+            FrameKind::AuthRefresh,
+            5,
+            StreamId::CONTROL,
+            binding,
+            &AuthRefresh {
+                credential: Credential::WardenCapability(narrowed.clone()),
+            },
+        )
+        .await;
+        loop {
+            let frame = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+            assert_eq!(frame.header().binding(), binding);
+            if frame.header().request_id() == 5 {
+                assert_eq!(frame.header().kind(), FrameKind::Error);
+                assert_eq!(
+                    ErrorBody::decode(frame.payload()).unwrap().code,
+                    ErrorCode::Busy
+                );
+                break;
+            }
+            assert_eq!(frame.header().kind(), FrameKind::SnapshotResultChunk);
+        }
+        send(
+            &mut writer,
+            cx,
+            FrameKind::QueryCancel,
+            6,
+            child,
+            binding,
+            &Empty,
+        )
+        .await;
+        let cancelled = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(cancelled.header().stream_id(), child);
+        assert_eq!(
+            ErrorBody::decode(cancelled.payload()).unwrap().code,
+            ErrorCode::Cancelled
+        );
+        send(
+            &mut writer,
+            cx,
+            FrameKind::AuthRefresh,
+            7,
+            StreamId::CONTROL,
+            binding,
+            &AuthRefresh {
+                credential: Credential::WardenCapability(narrowed),
+            },
+        )
+        .await;
+        let refreshed = reader.receive(cx, |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(refreshed.header().kind(), FrameKind::AuthRefreshed);
+        let next = AuthRefreshed::decode(refreshed.payload()).unwrap().session;
+        assert_eq!(next.auth_generation, session.auth_generation + 1);
+        assert_eq!(
+            refreshed.header().binding(),
+            Binding::Ready(fgdb_protocol::ReadyBinding {
+                session: next,
+                ..ready
+            })
+        );
+        // The old header is rejected before its body can authorize anything.
+        send(
+            &mut writer,
+            cx,
+            FrameKind::Ping,
+            8,
+            StreamId::CONTROL,
+            binding,
+            &fgdb_protocol::body::Ping { nonce: 55 },
+        )
+        .await;
+        assert!(reader.receive(cx, |_| Ok(())).await.unwrap().is_none());
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn top_level_map_parameters_round_trip_and_drive_atomic_fgp_writes() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "map-parameters").await;

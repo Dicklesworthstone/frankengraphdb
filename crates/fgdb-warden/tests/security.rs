@@ -72,6 +72,183 @@ fn issue_roundtrip_and_verify() {
     assert_eq!(predicates.limits(), grant().limits);
 }
 
+#[test]
+fn refresh_proves_every_effective_axis_and_preserves_existing_permit_usage() {
+    let issuer = authority();
+    let mut unrestricted = grant();
+    unrestricted.labels = Scope::All;
+    unrestricted.relations = Scope::All;
+    unrestricted.properties = Scope::All;
+    unrestricted.rights = Rights::ReadWrite;
+    let original = issuer.issue_at(&unrestricted, START).unwrap();
+    let previous = issuer.verify_at(&original, BRANCH, START).unwrap();
+    let mut permit = previous.begin_read_at(BRANCH, START).unwrap();
+    permit.charge_rows_at(START, 2).unwrap();
+    for restriction in [
+        Restriction::Labels(Scope::only([LabelId(1), LabelId(2)])),
+        Restriction::Relations(Scope::only([RelationId(10)])),
+        Restriction::Properties(Scope::only([PropertyKeyId(100)])),
+        Restriction::DenyProperties(BTreeSet::from([PropertyKeyId(100)])),
+        Restriction::Rights(Rights::Read),
+        Restriction::MaxNodes(99),
+        Restriction::MaxWork(999),
+        Restriction::MaxRows(9),
+        Restriction::NotBefore(START + 1),
+        Restriction::ExpiresBefore(END - 1),
+    ] {
+        let narrower = original.attenuate(restriction).unwrap();
+        issuer
+            .verify_narrowing_at(&original, &narrower, BRANCH, START + 1)
+            .unwrap();
+        assert!(matches!(
+            issuer.verify_narrowing_at(&narrower, &original, BRANCH, START + 1),
+            Err(Error::ScopeDenied)
+        ));
+    }
+    issuer
+        .verify_narrowing_at(&original, &original, BRANCH, START)
+        .unwrap();
+    // A replacement does not reset the permit already issued to a statement.
+    assert_eq!(permit.usage().rows, 2);
+    assert!(
+        permit
+            .charge_rows_at(START + 1, unrestricted.limits.max_rows - 1)
+            .is_err()
+    );
+    let foreign = Authority::new(
+        key(),
+        DatabaseSecurityNamespaceId([8; 32]),
+        "graph",
+        SchemaEpoch(3),
+        9,
+    )
+    .unwrap();
+    let wrong = foreign.issue_at(&unrestricted, START).unwrap();
+    assert!(matches!(
+        issuer.verify_narrowing_at(&original, &wrong, BRANCH, START),
+        Err(Error::WrongAuthority)
+    ));
+    assert!(matches!(
+        issuer.verify_narrowing_at(&original, &original, BRANCH, END),
+        Err(Error::Expired)
+    ));
+    assert!(
+        issuer
+            .verify_narrowing_at(&original, &original, "another-branch", START)
+            .is_err()
+    );
+    issuer.retire();
+    assert!(matches!(
+        issuer.verify_narrowing_at(&original, &original, BRANCH, START),
+        Err(Error::AuthorityRetired)
+    ));
+}
+
+#[test]
+fn refresh_label_cnf_implication_matches_every_small_visible_vertex_and_label() {
+    let issuer = authority();
+    let mut unrestricted = grant();
+    unrestricted.labels = Scope::All;
+    let original = issuer.issue_at(&unrestricted, START).unwrap();
+    // Include contradictory DENY ALL, incomparable clauses, a redundant
+    // clause and disjoint clauses that a multi-label vertex can satisfy.
+    let clauses: &[&[u8]] = &[
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[3],
+        &[4],
+        &[7],
+        &[1, 2],
+        &[3, 5],
+        &[7, 3],
+    ];
+    let values: Vec<_> = clauses
+        .iter()
+        .map(|clauses| {
+            clauses.iter().fold(original.clone(), |token, mask| {
+                token
+                    .attenuate(Restriction::Labels(Scope::only(
+                        (0..3)
+                            .filter(|bit| mask & (1 << bit) != 0)
+                            .map(|bit| LabelId(bit + 1)),
+                    )))
+                    .unwrap()
+            })
+        })
+        .collect();
+    for old in &values {
+        let old_scope = issuer.verify_at(old, BRANCH, START).unwrap();
+        for next in &values {
+            let next_scope = issuer.verify_at(next, BRANCH, START).unwrap();
+            let implies = (0..16).all(|mask| {
+                let labels: Vec<_> = (0..4)
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| LabelId(bit + 1))
+                    .collect();
+                !next_scope.predicates().allows_vertex(&labels)
+                    || old_scope.predicates().allows_vertex(&labels)
+            });
+            let accepted = issuer.verify_narrowing_at(old, next, BRANCH, START).is_ok();
+            assert_eq!(accepted, implies);
+            if accepted {
+                for label in 1..=4 {
+                    assert!(
+                        !next_scope.predicates().allows_label(LabelId(label))
+                            || old_scope.predicates().allows_label(LabelId(label))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_checks_effective_property_denials_and_independent_signed_grants() {
+    let issuer = authority();
+    let mut all = grant();
+    all.properties = Scope::All;
+    let original = issuer.issue_at(&all, START).unwrap();
+    let denied = original
+        .attenuate(Restriction::DenyProperties(BTreeSet::from([
+            PropertyKeyId(100),
+        ])))
+        .unwrap();
+    let mut visible = all.clone();
+    visible.properties = Scope::only([PropertyKeyId(200)]);
+    let independent = issuer.issue_at(&visible, START).unwrap();
+    issuer
+        .verify_narrowing_at(&denied, &independent, BRANCH, START)
+        .unwrap();
+    assert!(
+        issuer
+            .verify_narrowing_at(&independent, &denied, BRANCH, START)
+            .is_err()
+    );
+    let both = original
+        .attenuate(Restriction::Properties(Scope::only([
+            PropertyKeyId(100),
+            PropertyKeyId(200),
+        ])))
+        .unwrap()
+        .attenuate(Restriction::DenyProperties(BTreeSet::from([
+            PropertyKeyId(100),
+        ])))
+        .unwrap();
+    issuer
+        .verify_narrowing_at(&independent, &both, BRANCH, START)
+        .unwrap();
+    issuer
+        .verify_narrowing_at(&both, &independent, BRANCH, START)
+        .unwrap();
+    assert!(
+        issuer
+            .verify_narrowing_at(&denied, &original, BRANCH, START)
+            .is_err()
+    );
+}
+
 /// fgdb-4iiho: whole-element and cascading write decisions ask the capability,
 /// never the data. Only a capability with no relation scope and no label
 /// clause sees all incidence; only one with no label clause, no property scope

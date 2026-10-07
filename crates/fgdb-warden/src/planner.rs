@@ -28,6 +28,44 @@ pub struct PlannerPredicates {
 }
 
 impl PlannerPredicates {
+    /// Compare authenticated effective predicates, never token spelling or
+    /// public bindings. Every axis must narrow independently; an empty visible
+    /// population does not excuse widened metadata, rights, time or budgets.
+    pub(crate) fn narrows(&self, previous: &Self) -> bool {
+        let relations = match (&self.relations, &previous.relations) {
+            (_, Scope::All) => true,
+            (Scope::Only(next), Scope::Only(old)) => next.is_subset(old),
+            (Scope::All, Scope::Only(_)) => false,
+        };
+        let properties = match (&self.properties, &previous.properties) {
+            (Scope::Only(next), _) => next
+                .iter()
+                .all(|key| self.denied_properties.contains(key) || previous.allows_property(*key)),
+            (Scope::All, Scope::All) => previous
+                .denied_properties
+                .is_subset(&self.denied_properties),
+            (Scope::All, Scope::Only(_)) => false,
+        };
+        // Positive any-label clauses are conjunctive. A new clause contained
+        // in each old clause proves implication, including DENY ALL's empty
+        // clause. Intersecting all labels would be unsound for multi-label
+        // vertices, which may satisfy different clauses with different labels.
+        let labels = previous
+            .label_clauses
+            .iter()
+            .all(|old| self.label_clauses.iter().any(|next| next.is_subset(old)));
+        self.branch == previous.branch
+            && self.rights.bits() & !previous.rights.bits() == 0
+            && self.limits.max_nodes <= previous.limits.max_nodes
+            && self.limits.max_work <= previous.limits.max_work
+            && self.limits.max_rows <= previous.limits.max_rows
+            && self.not_before_ms >= previous.not_before_ms
+            && self.expires_at_ms <= previous.expires_at_ms
+            && relations
+            && properties
+            && labels
+    }
+
     #[must_use]
     pub fn branch(&self) -> &str {
         &self.branch

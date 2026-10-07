@@ -152,6 +152,8 @@ redacted from `Debug`.
 | HELLO_ACK | `version u16`, `server_nonce [32]`, `max_frame_len u32`, `initial_window_bytes u64`, `initial_window_rows u64` |
 | AUTH | `mechanism u8` (1 = Warden capability), `credential bytes` |
 | AUTH_OK | `session_transcript [32]`, `auth_generation u64` |
+| AUTH_REFRESH | `mechanism u8` (1 = Warden capability), `replacement_credential bytes` |
+| AUTH_REFRESHED | unchanged `session_transcript [32]`, successor `auth_generation u64` |
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
@@ -174,6 +176,32 @@ offset seconds, optional zone identifier plus tzdb object id), vertex, edge
 `outcome_unknown`, `busy`, `draining` and `cancelled`.
 
 ## fgdbd: the served subset
+
+FGP connections may narrow their authority between statements with
+`Client::refresh_authority(cx, credential)`, before or after database selection.
+The replacement and current tokens must both authenticate under the same served
+database issuer and remain live. Every effective restriction must be equal or
+narrower: branch, rights, label clauses, relations, visible properties, work/node/
+row ceilings and validity window. Label clauses remain conjunctive any-of tests;
+property denials participate in the comparison. Independently issued credentials
+are accepted only when their effective authority satisfies these same checks.
+This does not renew expiry or restore a permission removed by an earlier refresh.
+
+Each accepted refresh preserves the transcript and all selected database fields,
+advances the authentication generation exactly once, and fences old headers.
+AUTH_REFRESH uses the old binding; AUTH_REFRESHED uses the successor binding in
+both header and body. The client checks that exact successor before accepting the
+body. A refused replacement receives `unauthenticated` under the old binding and
+leaves the connection unchanged. Malformed framing remains a protocol error.
+The new credential is rechecked for expiry and issuer retirement at every
+physical response write/flush, including before selection. A lost response
+requires reconnecting; this ephemeral operation has no durable retry record.
+
+An active result or subscription receives `busy` for AUTH_REFRESH. Finish or
+cancel that child before refreshing. Existing permits and their counters are
+never replaced or reset; subsequent executions use fresh per-execution permits
+under the narrowed ceilings. This quiescent profile does not claim authority
+replacement for an active child, lifetime quotas or durable revocation.
 
 `crates/fgdb-server` composes the embedded engine behind this machine over
 asupersync TCP or TLS 1.3. The `fgdbd` binary serves one or more databases; `fgdbd
@@ -331,7 +359,7 @@ application output is admitted.
 
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
-AUTH_REFRESH, explicit multi-statement transactions with ownership and
+explicit multi-statement transactions with ownership and
 reattachment, durable subscriptions with resume across reconnects, Bolt
 writes (`BoltCompatProfileV2`, post-1.0) and relationship/path values, and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered

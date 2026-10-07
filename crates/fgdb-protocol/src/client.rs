@@ -9,9 +9,9 @@
 //! arrive, so a caller can stream a large result without buffering it.
 
 use crate::body::{
-    Auth, AuthOk, Body, BodyError, Credential, Empty, ErrorBody, ErrorCode, Execute, ExecuteMode,
-    Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase,
-    SubscriptionBatch, WindowUpdate, WireValue,
+    Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
+    ErrorCode, Execute, ExecuteMode, Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd,
+    SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -207,6 +207,50 @@ impl Client {
         };
         self.selected = Some(selected);
         Ok(selected)
+    }
+
+    /// Narrow this idle connection's authority without changing its transcript,
+    /// selected database or read frontier metadata. The server authenticates
+    /// both credentials and rejects every widening, including expiry extension.
+    /// A refusal leaves the old binding usable. Existing statements must finish
+    /// or cancel before calling this; refresh neither resets their budgets nor
+    /// reauthorizes their results. A lost response requires reconnecting.
+    pub async fn refresh_authority(
+        &mut self,
+        cx: &Cx,
+        credential: Vec<u8>,
+    ) -> Result<crate::SessionBinding, ClientError> {
+        let previous = self.binding;
+        let successor = refresh_successor(previous)?;
+        let request = self
+            .send(
+                cx,
+                FrameKind::AuthRefresh,
+                StreamId::CONTROL,
+                &AuthRefresh {
+                    credential: Credential::WardenCapability(credential),
+                },
+            )
+            .await?;
+        let frame = self
+            .reader
+            .receive(cx, |header| {
+                refresh_header(header, request, previous, successor)
+            })
+            .await?
+            .ok_or(ClientError::Closed)?;
+        let refreshed: AuthRefreshed = expect(&frame, FrameKind::AuthRefreshed)?;
+        if Some(refreshed.session) != successor.session() {
+            return Err(ClientError::Protocol(
+                "AUTH_REFRESHED changed the session or skipped a generation",
+            ));
+        }
+        self.binding = successor;
+        self.expected = successor;
+        if let (Some(selected), Binding::Ready(binding)) = (&mut self.selected, successor) {
+            selected.binding = binding;
+        }
+        Ok(refreshed.session)
     }
 
     /// Run one statement, collecting its complete answer.
@@ -536,6 +580,45 @@ impl Client {
     }
 }
 
+fn refresh_successor(binding: Binding) -> Result<Binding, ClientError> {
+    let mut session = binding
+        .session()
+        .ok_or(ClientError::Protocol("not authenticated"))?;
+    session.auth_generation = session
+        .auth_generation
+        .checked_add(1)
+        .ok_or(ClientError::Protocol("authentication generation exhausted"))?;
+    Ok(match binding {
+        Binding::Session(_) => Binding::Session(session),
+        Binding::Ready(mut ready) => {
+            ready.session = session;
+            Binding::Ready(ready)
+        }
+        Binding::Transport => return Err(ClientError::Protocol("not authenticated")),
+    })
+}
+
+fn refresh_header(
+    header: &Header,
+    request: u64,
+    previous: Binding,
+    successor: Binding,
+) -> Result<(), ProtocolError> {
+    if header.request_id() != request || !header.stream_id().is_control() {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    let expected = match header.kind() {
+        FrameKind::AuthRefreshed => successor,
+        FrameKind::Error => previous,
+        _ => return Err(ProtocolError::InvalidState),
+    };
+    if header.binding() == expected {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidBinding)
+    }
+}
+
 /// Server frames: only server-to-client kinds, under the expected binding,
 /// except the handshake replies that complete a binding.
 fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError> {
@@ -575,5 +658,123 @@ fn server_error(frame: &Frame) -> ClientError {
             message: body.message,
         },
         Err(error) => ClientError::Body(error),
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_requires_the_exact_successor_before_accepting_a_body() {
+        let session = crate::SessionBinding {
+            transcript: [7; 32],
+            auth_generation: 9,
+        };
+        let ready = ReadyBinding {
+            session,
+            namespace: [1; 32],
+            incarnation: [2; 32],
+            service_epoch: 3,
+            posture: crate::Posture::Local,
+            authority_commitment: [4; 32],
+        };
+        for previous in [Binding::Session(session), Binding::Ready(ready)] {
+            let successor = refresh_successor(previous).unwrap();
+            assert_eq!(successor.session().unwrap().transcript, session.transcript);
+            assert_eq!(successor.session().unwrap().auth_generation, 10);
+            let frame = |kind, request, stream, binding| {
+                Frame::new(
+                    kind,
+                    request,
+                    stream,
+                    binding,
+                    vec![],
+                    FrameLimits::new(4096).unwrap(),
+                )
+                .unwrap()
+            };
+            let ok = frame(FrameKind::AuthRefreshed, 12, StreamId::CONTROL, successor);
+            assert_eq!(refresh_header(ok.header(), 12, previous, successor), Ok(()));
+            let refusal = frame(FrameKind::Error, 12, StreamId::CONTROL, previous);
+            assert_eq!(
+                refresh_header(refusal.header(), 12, previous, successor),
+                Ok(())
+            );
+            for bad in [
+                frame(FrameKind::AuthRefreshed, 12, StreamId::CONTROL, previous),
+                frame(
+                    FrameKind::AuthRefreshed,
+                    12,
+                    StreamId::CONTROL,
+                    refresh_successor(successor).unwrap(),
+                ),
+                frame(FrameKind::AuthRefreshed, 13, StreamId::CONTROL, successor),
+                frame(FrameKind::AuthRefreshed, 12, StreamId([1; 16]), successor),
+                frame(FrameKind::AuthOk, 12, StreamId::CONTROL, Binding::Transport),
+                frame(FrameKind::Error, 12, StreamId::CONTROL, successor),
+            ] {
+                assert!(refresh_header(bad.header(), 12, previous, successor).is_err());
+            }
+        }
+        let Binding::Ready(successor) = refresh_successor(Binding::Ready(ready)).unwrap() else {
+            panic!("Ready remains Ready")
+        };
+        assert_eq!(
+            ReadyBinding {
+                session,
+                ..successor
+            },
+            ready
+        );
+        for changed in [
+            ReadyBinding {
+                namespace: [9; 32],
+                ..successor
+            },
+            ReadyBinding {
+                incarnation: [9; 32],
+                ..successor
+            },
+            ReadyBinding {
+                authority_commitment: [9; 32],
+                ..successor
+            },
+            ReadyBinding {
+                service_epoch: 4,
+                ..successor
+            },
+            ReadyBinding {
+                posture: crate::Posture::Sharded,
+                ..successor
+            },
+        ] {
+            let frame = Frame::new(
+                FrameKind::AuthRefreshed,
+                12,
+                StreamId::CONTROL,
+                Binding::Ready(changed),
+                vec![],
+                FrameLimits::new(4096).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                refresh_header(
+                    frame.header(),
+                    12,
+                    Binding::Ready(ready),
+                    Binding::Ready(successor)
+                )
+                .is_err()
+            );
+        }
+        assert!(refresh_successor(Binding::Transport).is_err());
+        assert!(
+            refresh_successor(Binding::Session(crate::SessionBinding {
+                auth_generation: u64::MAX,
+                ..session
+            }))
+            .is_err()
+        );
     }
 }
