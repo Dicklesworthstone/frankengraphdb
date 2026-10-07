@@ -537,7 +537,7 @@ pub(super) fn admit_snapshot(
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
     for block in &snapshot.blocks {
-        for _ in block {
+        for _ in block.iter() {
             *records = records
                 .checked_add(1)
                 .ok_or(StandingQueryFailure::SnapshotBudget)?;

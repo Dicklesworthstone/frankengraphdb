@@ -22,6 +22,8 @@
 //! sequence frontier does not regress. `first_seq` remains a conservative skip
 //! bound, not an ownership claim over an exclusive slice of the commit stream.
 
+use std::borrow::Borrow;
+
 use crate::BlockError;
 use crate::root_segment::{
     SEGMENT_BYTES, SEGMENT_REFS, SegmentClass, SegmentEntry, SegmentError, SegmentRef,
@@ -1370,7 +1372,7 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// on top of the answer; it produces the identical answer, and there is a law
 /// asserting exactly that.
 pub fn merge_neighbours(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     src: fgdb_types::VId,
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
@@ -1396,7 +1398,7 @@ pub fn merge_neighbours(
 /// point-lookup companion of [`merge_neighbours`], under the identical
 /// whole-history validation and tombstone-supersede model.
 pub fn merge_edge(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<crate::AdjacencyEntry>, RootError> {
@@ -1428,7 +1430,7 @@ fn visible_statement(
 /// and pays O(entries) for it, which is the truthful cost until the reverse
 /// family lands.
 pub fn merge_in_neighbours(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     dst: fgdb_types::VId,
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
@@ -1452,8 +1454,8 @@ pub fn merge_in_neighbours(
 /// read its locator there.
 #[allow(clippy::type_complexity)]
 pub fn merge_edge_with_props(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
@@ -1464,11 +1466,11 @@ pub fn merge_edge_with_props(
     let winner = *winner;
     let winner = &winner;
     for (block_at, block) in blocks.iter().enumerate().rev() {
-        if let Some(index) = block.iter().position(|entry| entry == winner) {
+        if let Some(index) = block.as_ref().iter().position(|entry| entry == winner) {
             let props = block_props
                 .get(block_at)
                 .and_then(Option::as_ref)
-                .map(|props| props.props_of(index))
+                .map(|props| props.borrow().props_of(index))
                 .unwrap_or_default();
             return Ok(Some((*winner, props)));
         }
@@ -1483,15 +1485,15 @@ pub fn merge_edge_with_props(
 /// applies, over the hosted columns instead. Shared by the whole-graph scan
 /// and compaction so neither can drift to a second precedence rule.
 pub(crate) fn winning_edge_rows(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
 ) -> std::collections::BTreeMap<(EId, CommitSeq), crate::edge_props::EdgePropertyRow> {
     let mut rows = std::collections::BTreeMap::new();
     for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
+        for (index, entry) in block.as_ref().iter().enumerate() {
             let row = props
                 .as_ref()
-                .map(|props| props.props_of(index))
+                .map(|props| props.borrow().props_of(index))
                 .unwrap_or_default();
             rows.insert((entry.eid, entry.created_at), row);
         }
@@ -1505,8 +1507,8 @@ pub(crate) fn winning_edge_rows(
 /// whole-history validation and precedence rules as every point lookup.
 #[allow(clippy::type_complexity)]
 pub fn merge_all_edges_with_props(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
     as_of: CommitSeq,
 ) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
     if blocks.len() != block_props.len() {
@@ -1674,11 +1676,11 @@ impl EdgeHistoryValidator {
 /// that `created_at` is a version discriminator. Contiguity also guarantees
 /// at most one statement per EId is visible at any sequence.
 pub(crate) fn collapse_edge_history(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
 ) -> Result<CollapsedEdgeHistory, RootError> {
     let mut validator = EdgeHistoryValidator::default();
     for (block_at, block) in blocks.iter().enumerate() {
-        validator.observe_block(block_at, block)?;
+        validator.observe_block(block_at, block.as_ref())?;
     }
     Ok(validator.into_canonical())
 }

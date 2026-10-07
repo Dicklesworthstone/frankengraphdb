@@ -12,6 +12,7 @@ use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceEvent {
@@ -383,13 +384,13 @@ impl AdjacencyIndex {
     /// Build a generation from scratch: group rows in ordinary sorted maps,
     /// then assemble each persistent tree bottom-up. The contents equal
     /// folding every row through `apply_added`, without a path copy per row.
-    pub(crate) fn build(blocks: &[Vec<AdjacencyEntry>]) -> Self {
+    pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
         let mut work = 0;
         let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
         let mut outgoing = BTreeMap::<VId, Vec<EId>>::new();
         let mut incoming = BTreeMap::<VId, Vec<EId>>::new();
         for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.iter().enumerate() {
+            for (row, entry) in entries.as_ref().iter().enumerate() {
                 work += 1;
                 histories
                     .entry(entry.eid)
@@ -423,7 +424,7 @@ impl AdjacencyIndex {
     /// The retained writer appends sealed objects in publication order.
     /// Compaction/open replace the writer and use `build` on their replacement
     /// generation. No predecessor tree is mutated, even with a pinned reader.
-    pub(crate) fn extend(&self, blocks: &[Vec<AdjacencyEntry>], carried: usize) -> Self {
+    pub(crate) fn extend(&self, blocks: &[impl AsRef<[AdjacencyEntry]>], carried: usize) -> Self {
         let mut next = self.clone();
         next.apply_added(blocks, carried);
         next
@@ -448,10 +449,14 @@ impl AdjacencyIndex {
             && same(&self.incoming, &other.incoming)
     }
 
-    pub(crate) fn apply_added(&mut self, blocks: &[Vec<AdjacencyEntry>], added_from: usize) -> u64 {
+    pub(crate) fn apply_added(
+        &mut self,
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
+        added_from: usize,
+    ) -> u64 {
         self.work = 0;
         for (block, entries) in blocks.iter().enumerate().skip(added_from) {
-            for (row, entry) in entries.iter().enumerate() {
+            for (row, entry) in entries.as_ref().iter().enumerate() {
                 self.work += 1;
                 let history = self
                     .histories
@@ -483,7 +488,7 @@ impl AdjacencyIndex {
     /// O(incident identities · log versions) instead of O(history).
     pub(crate) fn neighbours_at(
         &self,
-        blocks: &[Vec<AdjacencyEntry>],
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
         endpoint: VId,
         relation: RelationId,
         direction: fgdb_gql::algebra::GlaDirection,
@@ -515,19 +520,21 @@ impl AdjacencyIndex {
     /// the point-lookup face of the same resolution rule.
     pub(crate) fn statement_at(
         &self,
-        blocks: &[Vec<AdjacencyEntry>],
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
         eid: EId,
         as_of: CommitSeq,
     ) -> Option<(usize, usize)> {
         let (block, row) = latest_statement(self.histories.get(&eid)?, as_of)?;
-        blocks[block][row].visible_at(as_of).then_some((block, row))
+        blocks[block].as_ref()[row]
+            .visible_at(as_of)
+            .then_some((block, row))
     }
 
     /// Visit the surviving versions of every incident identity at `as_of`,
     /// merging both faces in EId order; self loops appear once.
     fn visit<'a, E, C>(
         &'a self,
-        blocks: &'a [Vec<AdjacencyEntry>],
+        blocks: &'a [impl AsRef<[AdjacencyEntry]>],
         endpoint: VId,
         direction: fgdb_gql::algebra::GlaDirection,
         as_of: CommitSeq,
@@ -575,7 +582,7 @@ impl AdjacencyIndex {
             let Some((block, row)) = latest_statement(history, as_of) else {
                 continue;
             };
-            let entry = &blocks[block][row];
+            let entry = &blocks[block].as_ref()[row];
             let incident = match direction {
                 GlaDirection::Forward => entry.src == endpoint,
                 GlaDirection::Reverse => entry.dst == endpoint,
@@ -1366,7 +1373,7 @@ mod indexed_tests {
             }
 
             let built = AdjacencyIndex::build(&blocks);
-            let mut folded = AdjacencyIndex::build(&[]);
+            let mut folded = AdjacencyIndex::build(&[] as &[Vec<AdjacencyEntry>]);
             for carried in 0..blocks.len() {
                 folded = folded.extend(&blocks[..=carried], carried);
             }
@@ -1481,7 +1488,7 @@ mod indexed_tests {
 type BorrowedEdge<'a> = (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)]);
 
 fn edge_properties_at(
-    props: &[Option<fgdb_strata::edge_props::BlockProps>],
+    props: &[Option<Arc<fgdb_strata::edge_props::BlockProps>>],
     block: usize,
     row: usize,
 ) -> &[(PropertyKeyId, CanonicalScalar)] {
@@ -1526,7 +1533,7 @@ where
 
 #[allow(dead_code)]
 pub(crate) fn visit_edges<'a, E, C>(
-    blocks: &'a [Vec<AdjacencyEntry>],
+    blocks: &'a [impl AsRef<[AdjacencyEntry]>],
     as_of: CommitSeq,
     control: &mut C,
     mut visit: impl FnMut(&'a AdjacencyEntry, &mut C) -> Result<(), E>,
@@ -1540,7 +1547,7 @@ where
 }
 
 fn visit_edge_coordinates<'a, E, C>(
-    blocks: &'a [Vec<AdjacencyEntry>],
+    blocks: &'a [impl AsRef<[AdjacencyEntry]>],
     as_of: CommitSeq,
     control: &mut C,
     mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
@@ -1551,7 +1558,7 @@ where
     let mut winners: BTreeMap<EId, (&AdjacencyEntry, usize, usize)> = BTreeMap::new();
     for (block_at, block) in blocks.iter().enumerate() {
         control(SourceEvent::Work)?;
-        for (row_at, entry) in block.iter().enumerate() {
+        for (row_at, entry) in block.as_ref().iter().enumerate() {
             control(SourceEvent::Work)?;
             if entry.created_at > as_of {
                 continue;
@@ -1573,8 +1580,8 @@ where
     Ok(())
 }
 fn scan_edges<'a, E>(
-    blocks: &[Vec<AdjacencyEntry>],
-    props: &'a [Option<fgdb_strata::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    props: &'a [Option<Arc<fgdb_strata::edge_props::BlockProps>>],
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Vec<BorrowedEdge<'a>>, E> {
@@ -2329,6 +2336,139 @@ mod tests {
             "two EId candidates plus one visible triple, not one per version"
         );
     }
+    #[test]
+    fn shared_edge_generations_keep_exact_historical_coordinates_and_property_borrows() {
+        use fgdb_strata::edge_props::BlockProps;
+
+        let old_value = CanonicalScalar::ucs_basic_text(&"carried".repeat(1024)).unwrap();
+        let block: Arc<[AdjacencyEntry]> =
+            vec![edge(1, 1, None), edge(2, 1, None), edge(3, 1, None)].into();
+        let sidecar = Arc::new(BlockProps {
+            locators: vec![1, 0, 2],
+            rows: vec![
+                vec![(PropertyKeyId(1), old_value.clone())],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(30))],
+            ],
+        });
+        let pinned_blocks = vec![Arc::clone(&block)];
+        let pinned_props = vec![Some(Arc::clone(&sidecar))];
+        let pinned_index = AdjacencyIndex::build(&pinned_blocks);
+        let mut blocks = pinned_blocks.clone();
+        let mut props = pinned_props.clone();
+        blocks.push(vec![edge(1, 1, Some(3)), edge(1, 3, None)].into());
+        props.push(Some(Arc::new(BlockProps {
+            locators: vec![1, 2],
+            rows: vec![
+                vec![(PropertyKeyId(1), old_value.clone())],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(13))],
+            ],
+        })));
+        blocks.push(vec![edge(2, 1, Some(4))].into());
+        props.push(None);
+        blocks.push(vec![edge(4, 5, None)].into());
+        props.push(Some(Arc::new(BlockProps {
+            locators: vec![1],
+            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]],
+        })));
+        let index = pinned_index.extend(&blocks, pinned_blocks.len());
+        assert!(index.equivalent(&AdjacencyIndex::build(&blocks)));
+        assert!(Arc::ptr_eq(&pinned_blocks[0], &blocks[0]));
+        assert!(Arc::ptr_eq(
+            pinned_props[0].as_ref().unwrap(),
+            props[0].as_ref().unwrap()
+        ));
+        let block_owners = Arc::strong_count(&block);
+        let sidecar_owners = Arc::strong_count(&sidecar);
+
+        for at in 0..=6 {
+            let cut = CommitSeq(at);
+            let actual = scan_edges(&blocks, &props, cut, &mut |_| Ok::<_, ()>(())).unwrap();
+            let mut expected = Vec::new();
+            if at >= 1 {
+                expected.push((
+                    EId(1),
+                    vec![(
+                        PropertyKeyId(1),
+                        if at < 3 {
+                            old_value.clone()
+                        } else {
+                            CanonicalScalar::Int(13)
+                        },
+                    )],
+                ));
+                if at < 4 {
+                    expected.push((EId(2), Vec::new()));
+                }
+                expected.push((EId(3), vec![(PropertyKeyId(1), CanonicalScalar::Int(30))]));
+            }
+            if at >= 5 {
+                expected.push((EId(4), vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]));
+            }
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|(edge, properties)| (edge.0, *properties))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|(eid, properties)| (*eid, properties.as_slice()))
+                    .collect::<Vec<_>>(),
+                "cut {at}"
+            );
+            for ((eid, _, _, _), properties) in &actual {
+                let coordinate = index.statement_at(&blocks, *eid, cut).unwrap();
+                assert_eq!(
+                    index
+                        .statement_at_controlled(&blocks, *eid, cut, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    Some(coordinate)
+                );
+                let (block, row) = coordinate;
+                assert!(std::ptr::eq(
+                    *properties,
+                    edge_properties_at(&props, block, row)
+                ));
+            }
+            let mut borrowed = Vec::new();
+            index
+                .visit(
+                    &blocks,
+                    VId(1),
+                    fgdb_gql::algebra::GlaDirection::Forward,
+                    cut,
+                    &mut |_| Ok::<_, ()>(()),
+                    |entry, block, row, _| {
+                        assert!(std::ptr::eq(entry, &blocks[block][row]));
+                        borrowed.push(entry.eid);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                borrowed,
+                expected.iter().map(|(eid, _)| *eid).collect::<Vec<_>>()
+            );
+        }
+        // Appending newer versions cannot mutate the retained generation or
+        // move the old block's topology and property payloads.
+        let pinned = scan_edges(&pinned_blocks, &pinned_props, CommitSeq(1), &mut |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(pinned.len(), 3);
+        assert_eq!(pinned[0].1, sidecar.rows[0].as_slice());
+        assert_eq!(
+            pinned_index.statement_at(&pinned_blocks, EId(1), CommitSeq(1)),
+            Some((0, 0))
+        );
+        assert_eq!(
+            pinned_index.statement_at(&pinned_blocks, EId(4), CommitSeq(1)),
+            None
+        );
+        assert_eq!(Arc::strong_count(&block), block_owners);
+        assert_eq!(Arc::strong_count(&sidecar), sidecar_owners);
+    }
+
     #[test]
     fn every_scan_checkpoint_can_refuse_without_returning_partial_rows() {
         let patches = vec![patch(&[row(1, 1, None, 1), row(2, 1, None, 2)])];

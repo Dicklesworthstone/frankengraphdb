@@ -30,6 +30,7 @@ use crate::edge_props::{
 };
 use crate::root::{RootError, collapse_edge_history};
 use fgdb_types::CommitSeq;
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 /// The result of compacting a partition's blocks.
@@ -80,7 +81,7 @@ pub struct Compaction {
 /// patches must compact through [`compact_with_props`], or the replacement
 /// blocks silently shed their rows — this face cannot see them to carry them.
 pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Result<Compaction, RootError> {
-    compact_with_props(blocks, &vec![None; blocks.len()], floor)
+    compact_with_props(blocks, &vec![None::<BlockProps>; blocks.len()], floor)
 }
 
 /// [`compact`], carrying each retained entry's property row into the
@@ -98,8 +99,8 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Result<Compa
 /// packing splits one family into several blocks the caller must link each to
 /// its predecessor in emission order, or root admission refuses the chain.
 pub fn compact_with_props(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     floor: CommitSeq,
 ) -> Result<Compaction, RootError> {
     compact_with_limit(
@@ -112,8 +113,8 @@ pub fn compact_with_props(
 }
 
 fn compact_with_limit(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     floor: CommitSeq,
     max_entries: usize,
     max_patch_rows: usize,
@@ -350,9 +351,9 @@ mod tests {
 
     #[test]
     fn capacity_is_part_of_the_minimum_block_count() {
-        let before = vec![(1..=5).map(entry).collect()];
+        let before = vec![(1..=5).map(entry).collect::<Vec<_>>()];
 
-        let result = compact_with_limit(&before, &[None], CommitSeq(1), 2, 2)
+        let result = compact_with_limit(&before, &[None::<BlockProps>], CommitSeq(1), 2, 2)
             .expect("distinct edge identities compact");
 
         assert_eq!(
@@ -380,7 +381,7 @@ mod tests {
             vec![version(5, 4, None), version(6, 4, None)],
             vec![version(7, 7, None), version(8, 7, None)],
         ];
-        let no_props = vec![None; before.len()];
+        let no_props = vec![None::<BlockProps>; before.len()];
 
         let once = compact_with_limit(&before, &no_props, CommitSeq(1), 2, 2)
             .expect("distinct edge identities compact");

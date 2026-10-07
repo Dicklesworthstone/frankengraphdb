@@ -217,6 +217,7 @@ use fgdb_types::{
     BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObligationAcquireError,
     ObligationId, VId,
 };
+use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1628,9 +1629,13 @@ pub struct EdgeRecord {
 }
 
 /// The published tier-D snapshot a reader is served from.
+///
+/// Every decoded object is immutable and individually shared. Cloning a pinned
+/// generation copies reference/index metadata and Arc handles, never the block,
+/// vertex-row, or hosted-property payloads of its unchanged history.
 #[derive(Clone, Debug)]
 struct Snapshot {
-    blocks: Vec<Vec<AdjacencyEntry>>,
+    blocks: Vec<Arc<[AdjacencyEntry]>>,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
     /// Every writable path builds it with the generation (commits extend it
     /// incrementally); a read-only view builds it on first use, because a
@@ -1645,7 +1650,7 @@ struct Snapshot {
     /// Each block's decoded property sidecar, aligned with `blocks`
     /// (fgdb-yqor): the locator column plus the hosted patch's rows, or
     /// `None` for a propertyless block.
-    block_props: Vec<Option<BlockProps>>,
+    block_props: Vec<Option<Arc<BlockProps>>>,
     /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
     /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
     patches: Vec<VertexPatchRows>,
@@ -4079,16 +4084,17 @@ impl<V: Vfs + Clone> Database<V> {
             fresh.push((entries, props));
         }
         // A pinned read view may still own the previous Arc. `make_mut`
-        // preserves it through copy-on-write; without a live view the Arc is
-        // unique and this remains the old zero-copy move-forward path.
+        // copies the metadata and immutable object handles, preserving the old
+        // generation without recursively cloning its decoded payloads. A unique
+        // snapshot keeps the existing move-forward path.
         let previous = Arc::make_mut(&mut self.snapshot);
         let mut decoded = std::mem::take(&mut previous.blocks);
         let mut decoded_props = std::mem::take(&mut previous.block_props);
         assert_eq!(decoded.len(), block_prefix);
         assert_eq!(decoded_props.len(), block_prefix);
         for (entries, props) in fresh {
-            decoded.push(entries);
-            decoded_props.push(props);
+            decoded.push(Arc::from(entries));
+            decoded_props.push(props.map(Arc::new));
         }
         // The identical carry-forward rule for the vertex half: an unchanged
         // patch reference means an unchanged decoded patch, and new patches
@@ -5412,9 +5418,12 @@ fn current_generation(
         // Built on first use; a writable caller forces it at once.
         adjacency: std::sync::OnceLock::new(),
         property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
-        blocks,
+        blocks: blocks.into_iter().map(Arc::from).collect(),
         refs: root.blocks,
-        block_props,
+        block_props: block_props
+            .into_iter()
+            .map(|props| props.map(Arc::new))
+            .collect(),
         patches,
         patch_refs: root.vertex_patches,
         frontier: published_at,
@@ -5614,8 +5623,8 @@ fn triple_is_live(
 fn consolidated_writer(
     cx: &CommitCx,
     keys: &DatabaseKeys,
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     patches: &[VertexPatchRows],
     frontier: CommitSeq,
 ) -> Result<BlockWriter, RebuildError> {
@@ -6024,9 +6033,12 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
                 &decoded_patches,
             )),
-            blocks: decoded,
+            blocks: decoded.into_iter().map(Arc::from).collect(),
             refs: reopened_root.blocks,
-            block_props: decoded_props,
+            block_props: decoded_props
+                .into_iter()
+                .map(|props| props.map(Arc::new))
+                .collect(),
             patches: decoded_patches,
             patch_refs: reopened_root.vertex_patches,
             frontier,
@@ -7057,6 +7069,222 @@ mod point_read_index_laws {
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[cfg(test)]
+mod shared_snapshot_payload_laws {
+    use super::*;
+
+    fn assert_payload_prefix_shared(before: &Snapshot, after: &Snapshot) {
+        assert!(after.refs.starts_with(&before.refs));
+        assert!(after.patch_refs.starts_with(&before.patch_refs));
+        assert!(!before.blocks.is_empty());
+        assert!(!before.patches.is_empty());
+        let mut hosted = 0;
+        for (at, block) in before.blocks.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(block, &after.blocks[at]),
+                "unchanged adjacency object {at} was recursively cloned"
+            );
+            match (&before.block_props[at], &after.block_props[at]) {
+                (Some(left), Some(right)) => {
+                    hosted += 1;
+                    assert!(
+                        Arc::ptr_eq(left, right),
+                        "unchanged hosted property object {at} was recursively cloned"
+                    );
+                }
+                (None, None) => {}
+                _ => panic!("hosted property presence changed for an unchanged block"),
+            }
+        }
+        assert!(
+            hosted > 0,
+            "the law must exercise scalar-bearing edge objects"
+        );
+        for (at, rows) in before.patches.iter().enumerate() {
+            assert!(!rows.is_empty());
+            assert_eq!(
+                rows.as_ptr(),
+                after.patches[at].as_ptr(),
+                "unchanged vertex patch {at} was recursively cloned"
+            );
+            for (left, right) in rows.iter().zip(after.patches[at].iter()) {
+                assert_eq!(left.labels.as_ptr(), right.labels.as_ptr());
+                assert_eq!(left.props.as_ptr(), right.props.as_ptr());
+            }
+        }
+    }
+
+    fn history(snapshot: &Snapshot) -> Vec<(Vec<VertexRow>, Vec<EdgeRecord>)> {
+        (0..=snapshot.frontier.0)
+            .map(|seq| {
+                let cut = CommitSeq(seq);
+                (
+                    snapshot.vertices_at(cut).unwrap(),
+                    snapshot.edges_at(cut).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn commits_share_payloads_with_pinned_views_across_history_compaction_and_reopen() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for seed in [3_u8, 17, 91] {
+            let keys = DatabaseKeys::new(
+                [seed; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+            );
+            let mut db = runtime
+                .block_on(Database::open_memory(&cx, keys.clone()))
+                .unwrap();
+            let mut initial = WriteBatch::new(RelationId(1));
+            for vid in 1..=6 {
+                initial.create_vertex(
+                    VId(vid),
+                    vec![LabelId(1), LabelId(9)],
+                    vec![(
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![seed; 1024]).unwrap(),
+                    )],
+                );
+            }
+            for eid in 1..=5 {
+                initial.add_edge(
+                    EId(eid),
+                    VId(1),
+                    VId(eid + 1),
+                    vec![(
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![seed; 1024]).unwrap(),
+                    )],
+                );
+            }
+            initial.add_edge(
+                EId(10),
+                VId(3),
+                VId(1),
+                vec![(PropertyKeyId(3), CanonicalScalar::Int(10))],
+            );
+            initial.add_edge(
+                EId(11),
+                VId(3),
+                VId(3),
+                vec![(PropertyKeyId(3), CanonicalScalar::Int(11))],
+            );
+            runtime.block_on(db.write(&cx, initial)).unwrap();
+            let oldest_block = Arc::downgrade(&db.snapshot.blocks[0]);
+            let oldest_props = Arc::downgrade(db.snapshot.block_props[0].as_ref().unwrap());
+            let mut pinned = Vec::new();
+
+            for step in 1..=12_u64 {
+                let view = db.pinned_read_view().unwrap();
+                let expected = history(&view.snapshot);
+                // Exercise Snapshot::clone itself as well as make_mut on the
+                // real publication path. A deep-copy implementation must fail.
+                let metadata_clone = Snapshot::clone(&view.snapshot);
+                assert_payload_prefix_shared(&view.snapshot, &metadata_clone);
+                drop(metadata_clone);
+
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(3),
+                    Some(CanonicalScalar::Int(step as i64)),
+                );
+                batch.set_vertex_label(VId(1), LabelId(2), step % 2 == 0);
+                batch.set_edge_property(
+                    EId(1),
+                    PropertyKeyId(3),
+                    Some(CanonicalScalar::Int(-(step as i64))),
+                );
+                let added = VId(100 + u128::from(step));
+                batch.create_vertex(added, vec![LabelId(1)], vec![]);
+                batch.add_edge(
+                    EId(100 + u128::from(step)),
+                    VId(1),
+                    added,
+                    vec![(PropertyKeyId(3), CanonicalScalar::Int(step as i64))],
+                );
+                if step == 5 {
+                    // Both directions and a self-loop participate in this
+                    // vertex-delete cascade; earlier pinned cuts keep all three.
+                    batch.delete_vertex(VId(3));
+                }
+                if step == 7 {
+                    batch.delete_edge(EId(4));
+                }
+                runtime.block_on(db.write(&cx, batch)).unwrap();
+                assert_payload_prefix_shared(&view.snapshot, &db.snapshot);
+                assert_eq!(history(&view.snapshot), expected);
+                assert!(view.vertex(added).unwrap().is_none());
+                pinned.push((view, expected));
+
+                if step == 6 {
+                    let before = history(&db.snapshot);
+                    runtime.block_on(db.compact(&cx)).unwrap();
+                    assert_eq!(history(&db.snapshot), before);
+                }
+            }
+            assert!(db.vertex(VId(3)).unwrap().is_none());
+            for eid in [EId(2), EId(4), EId(10), EId(11)] {
+                assert!(db.edge(eid).unwrap().is_none());
+            }
+            let expected = history(&db.snapshot);
+            let latest = db.pinned_read_view().unwrap();
+            let vfs = db.vfs.clone();
+            let path = db.path().to_path_buf();
+            drop(db);
+
+            // These paths re-read the authenticated bytes and derive fresh
+            // payload allocations instead of borrowing the live generation.
+            let read_only = runtime
+                .block_on(Database::open_read_view_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                ))
+                .unwrap();
+            assert_eq!(history(&read_only.snapshot), expected);
+            drop(read_only);
+            for force_rebuild in [false, true] {
+                let reopened = runtime
+                    .block_on(Database::bind_with_vfs(
+                        &cx,
+                        vfs.clone(),
+                        &path,
+                        keys.clone(),
+                        force_rebuild,
+                    ))
+                    .unwrap();
+                assert_eq!(history(&reopened.snapshot), expected);
+                assert!(reopened.verify_snapshot_indexes().unwrap());
+            }
+
+            assert_eq!(history(&latest.snapshot), expected);
+            for (view, expected) in &pinned {
+                assert_eq!(history(&view.snapshot), *expected);
+            }
+            assert!(oldest_block.upgrade().is_some());
+            assert!(oldest_props.upgrade().is_some());
+            drop(pinned);
+            drop(latest);
+            assert!(
+                oldest_block.upgrade().is_none(),
+                "retired adjacency bytes remain owned after the last reader drops"
+            );
+            assert!(
+                oldest_props.upgrade().is_none(),
+                "retired property bytes remain owned after the last reader drops"
+            );
+        }
     }
 }
 

@@ -27,7 +27,7 @@ pub(super) struct Scope {
 /// proof does not depend on path multiplicity or the requested minimum.
 pub(super) fn collect<E>(
     index: &AdjacencyIndex,
-    blocks: &[Vec<AdjacencyEntry>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
     scope: Scope,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<BTreeMap<VId, Vec<VId>>, E> {
@@ -66,7 +66,7 @@ pub(super) fn collect<E>(
             else {
                 continue;
             };
-            let entry = &blocks[block][row];
+            let entry = &blocks[block].as_ref()[row];
             if entry.relation != scope.relation {
                 continue;
             }

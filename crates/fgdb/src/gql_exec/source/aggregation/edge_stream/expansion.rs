@@ -49,7 +49,7 @@ impl AdjacencyIndex {
     /// authorized callers must poll physical work without billing hidden rows.
     pub(crate) fn statement_at_controlled<E>(
         &self,
-        blocks: &[Vec<AdjacencyEntry>],
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
         eid: EId,
         as_of: CommitSeq,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
@@ -65,9 +65,8 @@ impl AdjacencyIndex {
                     let coordinate = history_coordinate(&current.value, as_of, control)?;
                     // The newest statement can be a retirement. Never search
                     // backwards again to substitute an older live statement.
-                    return Ok(
-                        coordinate.filter(|&(block, row)| blocks[block][row].visible_at(as_of))
-                    );
+                    return Ok(coordinate
+                        .filter(|&(block, row)| blocks[block].as_ref()[row].visible_at(as_of)));
                 }
             }
         }
@@ -81,7 +80,7 @@ impl AdjacencyIndex {
     /// This is an internal source primitive, not snapshot/visibility authority.
     fn visit_all_coordinates<'a, E, C>(
         &'a self,
-        blocks: &'a [Vec<AdjacencyEntry>],
+        blocks: &'a [impl AsRef<[AdjacencyEntry]>],
         as_of: CommitSeq,
         control: &mut C,
         mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
@@ -98,7 +97,7 @@ impl AdjacencyIndex {
         for (_, history) in self.histories.iter() {
             control(SourceEvent::Work)?;
             if let Some((block, row)) = history_coordinate(history, as_of, control)? {
-                let entry = &blocks[block][row];
+                let entry = &blocks[block].as_ref()[row];
                 if entry.visible_at(as_of) {
                     visit(entry, block, row, control)?;
                 }
@@ -487,9 +486,10 @@ mod indexed_scan_tests {
                 assert_eq!(run(usize::MAX), (expected, total));
             }
         }
-        let empty = AdjacencyIndex::build(&[]);
+        let empty_blocks: &[Vec<AdjacencyEntry>] = &[];
+        let empty = AdjacencyIndex::build(empty_blocks);
         assert_eq!(
-            empty.statement_at_controlled(&[], EId(0), CommitSeq(0), &mut |_| Err(7)),
+            empty.statement_at_controlled(empty_blocks, EId(0), CommitSeq(0), &mut |_| Err(7)),
             Err(7)
         );
     }
@@ -609,9 +609,15 @@ mod indexed_scan_tests {
             }
         }
         assert_eq!(run(usize::MAX), (Ok(()), total, rows));
-        let empty = AdjacencyIndex::build(&[]);
+        let empty_blocks: &[Vec<AdjacencyEntry>] = &[];
+        let empty = AdjacencyIndex::build(empty_blocks);
         assert_eq!(
-            empty.visit_all_coordinates(&[], CommitSeq(0), &mut |_| Err(19), |_, _, _, _| Ok(())),
+            empty.visit_all_coordinates(
+                empty_blocks,
+                CommitSeq(0),
+                &mut |_| Err(19),
+                |_, _, _, _| Ok(())
+            ),
             Err(19)
         );
     }

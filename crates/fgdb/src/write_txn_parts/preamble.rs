@@ -42,7 +42,7 @@ impl IdentityAllocation {
         for block in &snapshot.blocks {
             cx.checkpoint().map_err(crate::RebuildError::Interrupted)?;
             // One admitted block is bounded by the storage format's row cap.
-            for row in block {
+            for row in block.iter() {
                 allocation.edge = allocation.edge.max(row.eid.0);
             }
         }

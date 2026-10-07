@@ -28,6 +28,8 @@
 //! the DECODER independently refuses the same shapes, so a hand-built patch
 //! cannot smuggle an order the encoder would never emit.
 
+use std::sync::Arc;
+
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
@@ -112,6 +114,8 @@ impl VertexRow {
 
 /// Canonical patch rows, retaining the ordering proved by decoding or packing.
 /// Immutable access keeps `(vid, created_at)` ordering valid for point search.
+/// Clones share the same immutable row allocation, including labels and scalar
+/// payloads, so retaining an old generation does not copy every decoded row.
 /// This proves row shape, not content identity, root admission or authorization.
 ///
 /// ```compile_fail
@@ -122,7 +126,7 @@ impl VertexRow {
 /// }
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VertexPatchRows(Vec<VertexRow>);
+pub struct VertexPatchRows(Arc<Vec<VertexRow>>);
 
 impl core::ops::Deref for VertexPatchRows {
     type Target = [VertexRow];
@@ -146,7 +150,9 @@ impl IntoIterator for VertexPatchRows {
     type IntoIter = std::vec::IntoIter<VertexRow>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        // Consuming unique rows transfers their existing allocations. Explicit
+        // ownership while another immutable reader shares them requires a copy.
+        Arc::unwrap_or_clone(self.0).into_iter()
     }
 }
 
@@ -443,7 +449,7 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
                     .checked_add(row_bytes)
                     .is_none_or(|bytes| bytes > crate::store::MAX_STORED_OBJECT_BYTES))
         {
-            packed.push(VertexPatchRows(core::mem::take(&mut pending)));
+            packed.push(VertexPatchRows(Arc::new(core::mem::take(&mut pending))));
             pending_bytes = header_bytes as u64;
         }
         validate_succession(pending.len(), pending.last(), &row)?;
@@ -451,7 +457,7 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
         pending.push(row);
     }
     if !pending.is_empty() {
-        packed.push(VertexPatchRows(pending));
+        packed.push(VertexPatchRows(Arc::new(pending)));
     }
     Ok(packed)
 }
@@ -578,7 +584,7 @@ pub(crate) fn decode_patch_inner(
             extra: bytes.len() - cursor.at,
         });
     }
-    Ok(VertexPatchRows(rows))
+    Ok(VertexPatchRows(Arc::new(rows)))
 }
 
 /// The §5.1 logical object identity of a patch's canonical bytes, namespaced
@@ -703,4 +709,89 @@ pub(crate) fn read_patch_inner(
         });
     }
     decode_patch_inner(bytes, resolver)
+}
+
+#[cfg(test)]
+mod shared_rows_tests {
+    use super::*;
+
+    fn sample_rows() -> Vec<VertexRow> {
+        vec![
+            VertexRow {
+                vid: VId(1),
+                birth_ordinal: 7,
+                created_at: CommitSeq(2),
+                retired_at: Some(CommitSeq(5)),
+                labels: vec![LabelId(2), LabelId(9)],
+                props: vec![
+                    (
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![0x5a; 1024]).unwrap(),
+                    ),
+                    (
+                        PropertyKeyId(8),
+                        CanonicalScalar::ucs_basic_text("shared history").unwrap(),
+                    ),
+                ],
+            },
+            VertexRow {
+                vid: VId(1),
+                birth_ordinal: 7,
+                created_at: CommitSeq(5),
+                retired_at: None,
+                labels: vec![LabelId(9)],
+                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(42))],
+            },
+        ]
+    }
+
+    #[test]
+    fn decoded_and_packed_patch_clones_share_rows_and_nested_allocations() {
+        let expected = sample_rows();
+        let encoded = encode_patch(&expected).unwrap();
+        let decoded = decode_patch(&encoded).unwrap();
+        let mut packed = pack_rows(expected.clone()).unwrap();
+        assert_eq!(packed.len(), 1);
+        for rows in [decoded, packed.pop().unwrap()] {
+            assert_eq!(&*rows, expected.as_slice());
+            let cloned = rows.clone();
+            assert_eq!(
+                rows.as_ptr(),
+                cloned.as_ptr(),
+                "a retained patch must not allocate another row array"
+            );
+            for (before, after) in rows.iter().zip(cloned.iter()) {
+                assert_eq!(before.labels.as_ptr(), after.labels.as_ptr());
+                assert_eq!(before.props.as_ptr(), after.props.as_ptr());
+            }
+            assert_eq!(encode_patch(&cloned).unwrap(), encoded);
+            drop(rows);
+            assert_eq!(&*cloned, expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn consuming_unique_rows_transfers_storage_and_shared_rows_remain_independent() {
+        let expected = sample_rows();
+        let unique = VertexPatchRows(Arc::new(expected.clone()));
+        let row_address = unique.as_ptr();
+        let labels_address = unique[0].labels.as_ptr();
+        let props_address = unique[0].props.as_ptr();
+        let owned = unique.into_iter();
+        assert_eq!(owned.as_slice().as_ptr(), row_address);
+        assert_eq!(owned.as_slice()[0].labels.as_ptr(), labels_address);
+        assert_eq!(owned.as_slice()[0].props.as_ptr(), props_address);
+        assert_eq!(owned.collect::<Vec<_>>(), expected);
+
+        let shared = VertexPatchRows(Arc::new(expected.clone()));
+        let sibling = shared.clone();
+        assert_eq!(shared.as_ptr(), sibling.as_ptr());
+        let mut owned = shared.into_iter().collect::<Vec<_>>();
+        assert_ne!(owned.as_ptr(), sibling.as_ptr());
+        assert_ne!(owned[0].labels.as_ptr(), sibling[0].labels.as_ptr());
+        assert_ne!(owned[0].props.as_ptr(), sibling[0].props.as_ptr());
+        owned[0].labels.clear();
+        owned[0].props[0].1 = CanonicalScalar::Int(-1);
+        assert_eq!(&*sibling, expected.as_slice());
+    }
 }
