@@ -4144,12 +4144,17 @@ impl<V: Vfs + Clone> Database<V> {
             versions: new_versions,
             next_birth_ordinal,
         };
-        self.snapshot = Arc::new(Snapshot {
-            adjacency: std::sync::OnceLock::from(Arc::new(
-                self.snapshot
-                    .adjacency_index()
-                    .extend(&decoded, self.snapshot.refs.len()),
+        // Extend a built adjacency index. An unbuilt one (a checkpoint open
+        // that nothing has read yet) stays unbuilt: building it here would
+        // move the whole-generation cost from open into the first write.
+        let adjacency = match self.snapshot.adjacency.get() {
+            Some(index) => std::sync::OnceLock::from(Arc::new(
+                index.extend(&decoded, self.snapshot.refs.len()),
             )),
+            None => std::sync::OnceLock::new(),
+        };
+        self.snapshot = Arc::new(Snapshot {
+            adjacency,
             property_index: Arc::new(
                 self.snapshot
                     .property_index
@@ -4187,7 +4192,11 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn index_maintenance_work(&self) -> Result<(u64, u64), ReadError> {
         self.ensure_readable()?;
         Ok((
-            self.snapshot.adjacency_index().maintenance_work(),
+            // An index no read has built yet performed no maintenance.
+            self.snapshot
+                .adjacency
+                .get()
+                .map_or(0, |index| index.maintenance_work()),
             self.snapshot.property_index.maintenance_work(),
         ))
     }
@@ -5253,9 +5262,11 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         block_props,
         patches,
     );
-    // A writable handle extends the adjacency index on every commit, so it
-    // is built with the generation rather than on first read.
-    snapshot.adjacency_index();
+    // The adjacency index stays unbuilt until a read or a commit's extension
+    // needs it: a write that never reads adjacency (a pure insert) does not
+    // pay to index every published block. The first reader builds it from the
+    // whole generation, which verify_snapshot_indexes pins equal to the
+    // incremental extension chain.
     // The root slot selected this root, so publication already made every
     // object it names durable; the reopen just admitted each one. Owner
     // ruling 2026-10-06 (fgdb-ibbuq, "trust publication"): seed the receipts
@@ -5442,7 +5453,7 @@ fn current_generation(
         &manifest_bytes,
     ));
     Snapshot {
-        // Built on first use; a writable caller forces it at once.
+        // Built on first use by a reader; a commit extends it only once built.
         adjacency: std::sync::OnceLock::new(),
         property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
         blocks: blocks.into_iter().map(Arc::from).collect(),
@@ -8141,5 +8152,77 @@ mod publish_receipt_laws {
             runtime.block_on(Database::adopt(&cx, &plain)),
             Err(OpenError::NotADatabase { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod lazy_writable_adjacency_laws {
+    use super::*;
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        )
+    }
+
+    /// **A CHECKPOINT OPEN BUILDS THE ADJACENCY INDEX ONLY WHEN A READ NEEDS
+    /// IT.** A pure-insert write keeps it unbuilt and reports no adjacency
+    /// maintenance. The first read builds it equal to a fresh build of the
+    /// generation, and the next commit extends it incrementally.
+    #[test]
+    fn a_checkpoint_open_builds_adjacency_on_first_read() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=4 {
+            origin.create_vertex(VId(vid), vec![], vec![]);
+        }
+        origin.add_edge(EId(1), VId(1), VId(2), vec![]);
+        origin.add_edge(EId(2), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "open leaves it unbuilt"
+        );
+        let mut insert = WriteBatch::new(RelationId(1));
+        insert.create_vertex(VId(5), vec![], vec![]);
+        runtime.block_on(db.write(&cx, insert)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "a pure insert does not build it"
+        );
+        assert_eq!(db.index_maintenance_work().unwrap().0, 0);
+
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3)]
+        );
+        assert!(db.snapshot.adjacency.get().is_some(), "the read built it");
+        assert!(db.verify_snapshot_indexes().unwrap());
+
+        let mut edge = WriteBatch::new(RelationId(1));
+        edge.add_edge(EId(3), VId(1), VId(4), vec![]);
+        runtime.block_on(db.write(&cx, edge)).unwrap();
+        let work = db.index_maintenance_work().unwrap().0;
+        assert!(work > 0, "the commit extended the built index: {work}");
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3), VId(4)]
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
     }
 }
