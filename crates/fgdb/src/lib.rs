@@ -4506,9 +4506,11 @@ impl<V: Vfs + Clone> Database<V> {
             // This also retains existing future and genuinely retired cursor
             // refusals. A caller changing retention cannot turn that removal
             // into implicit rehydration from the commit stream.
+            // Only the refusal matters here; the cursor itself is unused.
             self.snapshot
                 .delta_index
                 .since(after)
+                .map(drop)
                 .map_err(index_error)?;
             return Ok(());
         }

@@ -394,6 +394,9 @@ fn empty_schemas_full_width_ids_and_ownership_survive_compaction_and_reopen() {
             plain(db.standing_join(&cx, &reopened).unwrap().rows()),
             wanted
         );
+        // A checkpoint-selected reopen retains only the authenticated
+        // boundary; the old-history reader requests its window (fgdb-agp1o).
+        db.ensure_delta_window(&commit, CommitSeq(0)).await.unwrap();
         assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
