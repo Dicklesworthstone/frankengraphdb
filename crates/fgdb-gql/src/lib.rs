@@ -217,12 +217,14 @@ pub use vertex_merge::{
     GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
 };
 pub use vertex_upsert::{
-    GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
-    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
-    MAX_GRAPH_VERTEX_UPSERT_ACTIONS, PreparedGraphVertexUpsert,
+    GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,
+    GraphVertexUpsertBuildError, GraphVertexUpsertError, GraphVertexUpsertPolicy,
+    GraphVertexUpsertQueryBuildError, GraphVertexUpsertStats, MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+    PreparedGraphVertexUpsert, PreparedGraphVertexUpsertQuery,
 };
 pub use vertex_upsert_text::{
-    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
+    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertQueryText,
+    PreparedGraphVertexUpsertText,
 };
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
 pub use write_query::GraphWriteQueryError;

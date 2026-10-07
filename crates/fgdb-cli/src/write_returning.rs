@@ -9,8 +9,9 @@ use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GraphMutationPolicy, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-    PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    GraphMutationPolicy, GraphVertexMergePolicy, GraphVertexUpsertPolicy, PreparedGraphInsertQuery,
+    PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
 use std::io::{self, Write};
@@ -24,12 +25,14 @@ const TERMINAL_RESERVATION: usize = 256;
 pub(super) enum Returning {
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
+    Merge(Box<PreparedGraphVertexUpsertQuery>),
 }
 impl Returning {
     fn columns(&self) -> &[String] {
         match self {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
+            Self::Merge(query) => query.columns(),
         }
     }
 }
@@ -60,6 +63,21 @@ pub(super) fn prepare(options: &Options) -> Result<Option<Returning>, Failure> {
         return template
             .bind_parameters(&options.params)
             .map(|query| Some(Returning::Mutation(Box::new(query))))
+            .map_err(Failure::query);
+    }
+    if PreparedGraphVertexUpsertQueryText::has_return_clause(&options.text)
+        .map_err(Failure::query)?
+    {
+        let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+            &options.text,
+            options.coordinate,
+            &declarations,
+            |kind, name| options.resolve(kind, name),
+        )
+        .map_err(Failure::query)?;
+        return template
+            .bind_parameters(&options.params)
+            .map(|query| Some(Returning::Merge(Box::new(query))))
             .map_err(Failure::query);
     }
     Ok(None)
@@ -119,6 +137,17 @@ pub(super) async fn run<V: Vfs + Clone>(
                     )
                     .map_err(execution_failure)?
                     .1
+            }
+            Returning::Merge(query) => {
+                transaction
+                    .execute_graph_vertex_upsert_query_engine_governed(
+                        database,
+                        &cx,
+                        query,
+                        GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(policy()), 1_000),
+                    )
+                    .map_err(execution_failure)?
+                    .2
             }
         };
         let mut rendered = Vec::with_capacity(result.value.len());

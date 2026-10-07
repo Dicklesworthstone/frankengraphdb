@@ -69,6 +69,17 @@ pub(crate) type InsertQueryResult<A> = Result<
     TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
 >;
 
+/// A staged MERGE RETURN: the upsert's statistics, the chosen vertex and the
+/// governed RETURN row, or the upsert's error with allocator error `A`.
+pub(crate) type UpsertQueryResult<A> = Result<
+    (
+        fgdb_gql::GraphVertexUpsertStats,
+        fgdb_gql::GraphVertexMergeOutcome,
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
+>;
+
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {

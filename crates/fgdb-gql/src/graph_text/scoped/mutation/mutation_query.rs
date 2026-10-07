@@ -9,7 +9,7 @@ use crate::set_text::{
 };
 use crate::{
     GraphMutationBinding, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
-    PreparedGraphMutation, PreparedGraphMutationQuery,
+    GraphSetTextError, PreparedGraphMutation, PreparedGraphMutationQuery,
 };
 
 #[derive(Clone, Copy)]
@@ -35,6 +35,134 @@ impl Binding<'_> {
             ) => a == b && ak.text == bk.text,
             _ => false,
         }
+    }
+}
+
+/// Leaf resolution for one write statement's RETURN items: a leaf is a
+/// column of the statement's private RETURN input row.
+pub(super) trait ReturnLeaves<'a> {
+    /// The binding column of the leaf at the current token, consuming it;
+    /// `None` consumes nothing and leaves the token to the expression parser.
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>;
+    /// The implicit output name of a binding column.
+    fn name(&self, column: usize) -> Name<'a>;
+    /// Every binding column's type, in column order.
+    fn types(&self) -> Vec<GraphSetColumnType>;
+}
+
+/// The parsed items of a non-star write RETURN.
+pub(super) struct ReturnItems<'a> {
+    pub projection: Vec<ReadProjectionTemplate>,
+    pub output: Vec<(Name<'a>, GraphSetColumnType)>,
+    /// The source spelling of every item, for ORDER BY.
+    pub spellings: Vec<Name<'a>>,
+}
+
+impl<'a> Parser<'a> {
+    /// The comma-separated items of a write RETURN. Output names follow a
+    /// read RETURN: an alias, a leaf's own name, or the item's source text,
+    /// with the source text replacing a name that would otherwise repeat.
+    pub(super) fn write_return_items(
+        &mut self,
+        leaves: &mut impl ReturnLeaves<'a>,
+    ) -> Result<ReturnItems<'a>, GraphSetTextError> {
+        let mut items = ReturnItems {
+            projection: Vec::new(),
+            output: Vec::new(),
+            spellings: Vec::new(),
+        };
+        let mut sources = Vec::<Option<Name<'a>>>::new();
+        loop {
+            self.capacity(
+                items.output.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let at = self.current.at;
+            let value = self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?;
+            let end = self.current.at;
+            items.spellings.push(self.source_name(at, end));
+            let (mut name, derived) = if self.take_word("AS")? {
+                (self.name()?, None)
+            } else if let ReadValueTemplate::Column(column) = &value {
+                (leaves.name(*column), Some(self.source_name(at, end)))
+            } else {
+                let derived = self.source_name(at, end);
+                (derived, Some(derived))
+            };
+            if let Some(derived) = derived
+                && let Some(previous) = items
+                    .output
+                    .iter()
+                    .position(|(old, _)| old.text == name.text)
+            {
+                if let Some(earlier) = sources[previous] {
+                    items.output[previous].0 = earlier;
+                    items.projection[previous].name = earlier.text.to_owned();
+                }
+                name = derived;
+            }
+            sources.push(derived);
+            if items.output.iter().any(|(old, _)| old.text == name.text) {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
+                )
+                .into());
+            }
+            let kind = value.column_type(&leaves.types(), &self.syntax.parameters);
+            items.projection.push(ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value,
+            });
+            items.output.push((name, kind));
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        Ok(items)
+    }
+}
+
+/// Admit a write RETURN's projection over its binding types before any
+/// catalog callback: names, value types and lazy-branch references.
+pub(super) fn admit_return(
+    projection: &[ReadProjectionTemplate],
+    types: &[GraphSetColumnType],
+    parameters: &[GqlParameterSpec],
+    at: usize,
+) -> Result<(), GraphSetTextError> {
+    let values = insertion::shape_arguments(parameters);
+    for (column, output) in projection.iter().enumerate() {
+        let value = return_projection::bind_read_value(&output.value, &values)?;
+        for result in [
+            GraphSetProjection::validate_output_name(&output.name, column),
+            GraphSetProjection::admit_output(&value, types, column).map(|_| ()),
+        ] {
+            result.map_err(|kind| GraphSetTextError {
+                offset: at,
+                kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// The mutation leaves: the parsed RETURN plus the selection it extends.
+struct MutationLeaves<'r, 'a> {
+    returning: &'r mut ParsedMutationReturn<'a>,
+    columns: &'r mut Vec<Projection<'a>>,
+    scope: ReturnScope,
+}
+impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        self.returning.leaf(parser, self.columns, self.scope)
+    }
+    fn name(&self, column: usize) -> Name<'a> {
+        self.returning.bindings[column].1
+    }
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.returning.types()
     }
 }
 
@@ -176,25 +304,20 @@ impl<'a> ParsedMutationReturn<'a> {
         .map(Some)
     }
 
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.bindings.iter().map(|(_, _, kind)| *kind).collect()
+    }
+
     pub(super) fn admit(
         &self,
         parameters: &[GqlParameterSpec],
     ) -> Result<(), GraphMutationTextError> {
-        let values = insertion::shape_arguments(parameters);
-        let types: Vec<_> = self.bindings.iter().map(|(_, _, kind)| *kind).collect();
-        for (column, output) in self.projection.iter().enumerate() {
-            let value = return_projection::bind_read_value(&output.value, &values)?;
-            for result in [
-                GraphSetProjection::validate_output_name(&output.name, column),
-                GraphSetProjection::admit_output(&value, &types, column).map(|_| ()),
-            ] {
-                result.map_err(|kind| crate::GraphSetTextError {
-                    offset: self.at,
-                    kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
-                })?;
-            }
-        }
-        Ok(())
+        Ok(admit_return(
+            &self.projection,
+            &self.types(),
+            parameters,
+            self.at,
+        )?)
     }
 
     pub(super) fn resolve(
@@ -293,62 +416,14 @@ impl<'a> Parser<'a> {
                 .into());
             }
         } else {
-            // Source text of each derived output, as in a read RETURN.
-            let mut sources = Vec::<Option<Name<'a>>>::new();
-            loop {
-                self.capacity(
-                    output.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let at = self.current.at;
-                let value = self
-                    .read_resolved_value(&mut |parser| returning.leaf(parser, columns, scope), 0)?;
-                let end = self.current.at;
-                spellings.push(self.source_name(at, end));
-                let (mut name, derived) = if self.take_word("AS")? {
-                    (self.name()?, None)
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    (
-                        returning.bindings[*column].1,
-                        Some(self.source_name(at, end)),
-                    )
-                } else {
-                    let derived = self.source_name(at, end);
-                    (derived, Some(derived))
-                };
-                if let Some(derived) = derived
-                    && let Some(previous) = output.iter().position(|(old, _)| old.text == name.text)
-                {
-                    if let Some(earlier) = sources[previous] {
-                        output[previous].0 = earlier;
-                        returning.projection[previous].name = earlier.text.to_owned();
-                    }
-                    name = derived;
-                }
-                sources.push(derived);
-                if output.iter().any(|(old, _)| old.text == name.text) {
-                    return Err(error(
-                        name.at,
-                        GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
-                    )
-                    .into());
-                }
-                let types: Vec<_> = returning
-                    .bindings
-                    .iter()
-                    .map(|(_, _, kind)| *kind)
-                    .collect();
-                let kind = value.column_type(&types, &self.syntax.parameters);
-                returning.projection.push(ReadProjectionTemplate {
-                    name: name.text.to_owned(),
-                    value,
-                });
-                output.push((name, kind));
-                if !self.take(b',')? {
-                    break;
-                }
-            }
+            let items = self.write_return_items(&mut MutationLeaves {
+                returning: &mut returning,
+                columns: &mut *columns,
+                scope,
+            })?;
+            returning.projection = items.projection;
+            output = items.output;
+            spellings = items.spellings;
         }
         if let Some(ReadStageTemplate::Page {
             order,
@@ -406,14 +481,17 @@ impl MutationReturnTemplate {
 }
 
 /// Single-statement framing on the script lexer: one terminal semicolon is
-/// accepted, and a second statement refuses before any catalog callback.
-fn statement_body(statement: &str) -> Result<&str, GraphMutationTextError> {
+/// accepted, and a second statement refuses (naming `shape`) before any
+/// catalog callback.
+pub(super) fn statement_body<'s>(
+    statement: &'s str,
+    shape: &'static str,
+) -> Result<&'s str, GraphPatternTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
         return Err(error(
             MAX_GRAPH_TEXT_BYTES,
             GraphPatternTextErrorKind::DefinitionTooLarge,
-        )
-        .into());
+        ));
     }
     let mut lexer = Lexer {
         text: statement,
@@ -428,11 +506,7 @@ fn statement_body(statement: &str) -> Result<&str, GraphMutationTextError> {
         if matches!(token.kind, TokenKind::Punct(b';')) {
             let next = script::next_script_token(&mut lexer)?;
             if !matches!(next.kind, TokenKind::End) {
-                return Err(error(
-                    next.at,
-                    GraphPatternTextErrorKind::Expected("one SET/REMOVE RETURN statement"),
-                )
-                .into());
+                return Err(error(next.at, GraphPatternTextErrorKind::Expected(shape)));
             }
             return Ok(&statement[..token.at]);
         }
@@ -522,7 +596,7 @@ impl PreparedGraphMutationQueryText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphMutationTextError> {
-        let body = statement_body(statement)?;
+        let body = statement_body(statement, "one SET/REMOVE RETURN statement")?;
         let (mutation, returning) = PreparedGraphMutationText::prepare_definition(
             body,
             relation,

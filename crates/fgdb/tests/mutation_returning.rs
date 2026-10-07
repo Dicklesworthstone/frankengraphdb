@@ -11,8 +11,10 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationError, GraphMutationPolicy,
-    GraphMutationQueryError, GraphSymbol, GraphSymbolKind, PreparedGraphMutationQuery,
-    PreparedGraphMutationQueryText,
+    GraphMutationQueryError, GraphSymbol, GraphSymbolKind, GraphVertexMergeOutcome,
+    GraphVertexMergePolicy, GraphVertexUpsertError, GraphVertexUpsertPolicy,
+    PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
+    PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
@@ -287,4 +289,104 @@ fn unknowable_post_statement_reads_refuse_at_preparation() {
     }
     // A mutation without RETURN is not this statement shape.
     assert!(!PreparedGraphMutationQueryText::has_return_clause("MATCH (n) SET n.p = 1").unwrap());
+}
+
+fn merge(text: &str) -> PreparedGraphVertexUpsertQuery {
+    PreparedGraphVertexUpsertQueryText::prepare(text, R, symbols)
+        .expect(text)
+        .bind_parameters(&GqlParameters::new())
+        .expect(text)
+}
+fn upsert_policy() -> GraphVertexUpsertPolicy {
+    GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(query_policy()), 100)
+}
+
+/// MERGE RETURN is the one chosen vertex after every clause: the matched
+/// branch's ON MATCH SET, or the created vertex with its ON CREATE SET and
+/// the trailing SET, or the vertex as it is when no clause applies.
+#[test]
+fn merge_returns_the_chosen_vertex_after_every_clause() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut execute = |db: &mut Database<fgdb::MemVfs>, text: &str| {
+            txn.execute_graph_vertex_upsert_query_engine_governed(
+                db,
+                cx,
+                &merge(text),
+                upsert_policy(),
+            )
+            .expect(text)
+        };
+        let (_, outcome, result) = execute(
+            &mut db,
+            "MERGE (n:Item {p: 4}) ON MATCH SET n.q = n.q + 1 ON CREATE SET n.q = 0 \
+             RETURN n, n.p AS p, n.q AS q, n.q * 10 AS ten",
+        );
+        assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(4)));
+        assert_eq!(
+            result.value,
+            rows(vec![vec![
+                GraphValue::Vertex(VId(4)),
+                int(4),
+                int(11),
+                int(110)
+            ]])
+        );
+        let (_, outcome, result) = execute(
+            &mut db,
+            "MERGE (n:Item {p: 9}) ON MATCH SET n.q = 100 ON CREATE SET n.q = 1 \
+             SET n.w = n.q + 1 RETURN n.p, n.q, n.w",
+        );
+        assert!(outcome.created());
+        assert_eq!(result.value, rows(vec![vec![int(9), int(1), int(2)]]));
+        // No clause at all: the vertex as it stands.
+        let (_, outcome, result) = execute(&mut db, "MERGE (n:Item {p: 1}) RETURN n.q AS q");
+        assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(1)));
+        assert_eq!(result.value, rows(vec![vec![null()]]));
+        drop(execute);
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) WHERE n.p >= 4 RETURN n.p AS p, n.q AS q, n.w AS w ORDER BY p"
+            ),
+            vec![vec![int(4), int(11), null()], vec![int(9), int(1), int(2)],]
+        );
+    });
+}
+
+/// A RETURN that fails after MERGE created its vertex stages nothing.
+#[test]
+fn a_failing_merge_return_rolls_the_upsert_back() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let failed = txn.execute_graph_vertex_upsert_query_engine_governed(
+            &mut db,
+            cx,
+            &merge("MERGE (n:Item {p: 7}) RETURN n.p / 0 AS broken"),
+            upsert_policy(),
+        );
+        assert!(matches!(
+            failed,
+            Err(GqlQueryError::Source(GraphVertexUpsertError::Returning(_)))
+        ));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(read(&db, cx, "MATCH (n:Item {p: 7}) RETURN n.p AS p").is_empty());
+        for text in [
+            "MERGE (n:Item {p: 1}) RETURN labels(n)",
+            "MERGE (n:Item {p: 1}) RETURN m.p",
+        ] {
+            assert!(
+                PreparedGraphVertexUpsertQueryText::prepare(text, R, symbols).is_err(),
+                "{text}"
+            );
+        }
+    });
 }

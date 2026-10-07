@@ -11,6 +11,11 @@ use crate::{
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use std::collections::BTreeSet;
 
+mod query;
+pub use query::{
+    GraphVertexReturnBinding, GraphVertexUpsertQueryBuildError, PreparedGraphVertexUpsertQuery,
+};
+
 pub const MAX_GRAPH_VERTEX_UPSERT_ACTIONS: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -118,6 +123,8 @@ pub enum GraphVertexUpsertError<E, A> {
         source: crate::GraphIntegerError,
     },
     Staging(E),
+    /// The MERGE RETURN projection over the chosen vertex failed.
+    Returning(crate::GraphSetExecutionError<E>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexUpsertError<E, A>
@@ -137,6 +144,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 write!(f, "MERGE clause {clause} action {action}: {source}")
             }
             Self::Staging(error) => error.fmt(f),
+            Self::Returning(error) => write!(f, "MERGE RETURN: {error}"),
         }
     }
 }
@@ -148,6 +156,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Merge(error) => Some(error),
             Self::Expression { source, .. } => Some(source),
             Self::Staging(error) => Some(error),
+            Self::Returning(error) => Some(error),
             Self::ActionLimit { .. } => None,
         }
     }

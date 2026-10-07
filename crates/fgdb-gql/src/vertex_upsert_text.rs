@@ -61,6 +61,23 @@ pub enum GraphVertexUpsertTextErrorKind {
     UpsertBuild(GraphVertexUpsertBuildError),
     Expression(GraphMutationTextErrorKind),
     DuplicateBranch,
+    /// A RETURN expression, page or projection name after MERGE.
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphVertexUpsertQueryBuildError),
+}
+impl From<crate::GraphSetTextError> for GraphVertexUpsertTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphVertexUpsertTextErrorKind::Query(kind)
+            }
+            kind => GraphVertexUpsertTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
 }
 impl From<GraphPatternTextError> for GraphVertexUpsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
@@ -101,5 +118,37 @@ impl PreparedGraphVertexUpsertText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] {
         self.merge.parameter_schema()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct VertexReturnTemplate {
+    pub bindings: Vec<crate::GraphVertexReturnBinding>,
+    pub projection: Vec<crate::set_text::ReadProjectionTemplate>,
+    pub quantifier: crate::GraphSetQuantifier,
+    pub order: Vec<crate::algebra::GraphValueOrder>,
+    pub offset: crate::set_text::ReadPageNumber,
+    pub count: Option<crate::set_text::ReadPageNumber>,
+    pub at: usize,
+}
+
+/// `MERGE (n ...) [ON MATCH SET ...] [ON CREATE SET ...] [SET ...] RETURN ...`.
+/// MERGE chooses exactly one vertex, so RETURN projects one row: the merge
+/// variable's identity and its properties after every clause, read from the
+/// staged transaction state, plus expressions, DISTINCT, ordering and paging
+/// over them. A MERGE with no SET clause is accepted here. `labels(n)` and
+/// aggregate RETURN are refused.
+#[derive(Clone)]
+pub struct PreparedGraphVertexUpsertQueryText {
+    pub(crate) statement: String,
+    pub(crate) upsert: PreparedGraphVertexUpsertText,
+    pub(crate) returning: VertexReturnTemplate,
+}
+impl core::fmt::Debug for PreparedGraphVertexUpsertQueryText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphVertexUpsertQueryText")
+            .field("output_columns", &self.returning.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }

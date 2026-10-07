@@ -3,13 +3,22 @@
 use super::*;
 use crate::insertion::{GraphInsertBuildError, GraphInsertVertex, PreparedGraphInsert};
 use crate::mutation_text::VertexMergeValueTemplate;
-use crate::vertex_upsert_text::{VertexUpsertActionTemplate, VertexUpsertValueTemplate};
-use crate::{
-    GraphMutationValue, GraphVertexMergeBuildError, GraphVertexMergeTextError,
-    GraphVertexMergeTextErrorKind, GraphVertexUpsertAction, GraphVertexUpsertBranch,
-    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexMerge,
-    PreparedGraphVertexMergeText, PreparedGraphVertexUpsert, PreparedGraphVertexUpsertText,
+use crate::set_text::{
+    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
 };
+use crate::vertex_upsert_text::{
+    PreparedGraphVertexUpsertQueryText, VertexReturnTemplate, VertexUpsertActionTemplate,
+    VertexUpsertValueTemplate,
+};
+use crate::{
+    GraphMutationValue, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
+    GraphVertexMergeBuildError, GraphVertexMergeTextError, GraphVertexMergeTextErrorKind,
+    GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,
+    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexMerge,
+    PreparedGraphVertexMergeText, PreparedGraphVertexUpsert, PreparedGraphVertexUpsertQuery,
+    PreparedGraphVertexUpsertText,
+};
+use mutation_query::ReturnLeaves;
 
 struct MergeProperty<'a> {
     key: Name<'a>,
@@ -551,20 +560,50 @@ impl PreparedGraphVertexUpsertText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphVertexUpsertTextError> {
+        Self::prepare_definition(statement, relation, declarations, resolve, false)
+            .map(|(upsert, _)| upsert)
+    }
+
+    /// The upsert and, in query mode, its terminal RETURN. A RETURN makes a
+    /// MERGE without any SET clause a statement of this shape too.
+    pub(crate) fn prepare_definition(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        returning: bool,
+    ) -> Result<(Self, Option<VertexReturnTemplate>), GraphVertexUpsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         let (variable, labels, properties) =
             parser.vertex_merge_pattern().map_err(upsert_merge_error)?;
         let (parsed_match, parsed_create, parsed_after) = parser.upsert_branch_actions(variable)?;
-        if parsed_match.is_empty() && parsed_create.is_empty() && parsed_after.is_empty() {
+        if !returning
+            && parsed_match.is_empty()
+            && parsed_create.is_empty()
+            && parsed_after.is_empty()
+        {
             return Err(error(
                 statement.len(),
                 GraphPatternTextErrorKind::Expected("ON MATCH SET, ON CREATE SET or SET"),
             )
             .into());
         }
+        let parsed_return = if returning {
+            Some(parser.vertex_return(variable)?)
+        } else {
+            None
+        };
         parser.end()?;
+        if let Some(parsed) = &parsed_return {
+            mutation_query::admit_return(
+                &parsed.projection,
+                &parsed.types(),
+                &parser.syntax.parameters,
+                parsed.at,
+            )?;
+        }
         let syntax = parser.syntax;
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
@@ -646,6 +685,9 @@ impl PreparedGraphVertexUpsertText {
         let on_create = resolve_actions(parsed_create)?;
         let after = resolve_actions(parsed_after)?;
         drop(resolve_actions);
+        let returning = parsed_return
+            .map(|parsed| parsed.resolve(&mut symbol))
+            .transpose()?;
         let merge = resolve_merge_template(
             statement,
             relation,
@@ -656,12 +698,15 @@ impl PreparedGraphVertexUpsertText {
             &mut symbol,
         )
         .map_err(upsert_merge_error)?;
-        Ok(Self {
-            merge,
-            on_match,
-            on_create,
-            after,
-        })
+        Ok((
+            Self {
+                merge,
+                on_match,
+                on_create,
+                after,
+            },
+            returning,
+        ))
     }
 
     pub fn bind_parameters(
@@ -698,5 +743,325 @@ impl PreparedGraphVertexUpsertText {
                 offset: self.merge.selection.return_at,
                 kind: GraphVertexUpsertTextErrorKind::UpsertBuild(source),
             })
+    }
+}
+
+/// RETURN after MERGE: the merge variable, its properties after every
+/// clause, and expressions over them. MERGE chooses one vertex, so there
+/// is one input row and nothing else is in scope.
+#[derive(Clone, Copy)]
+enum VertexBinding<'a> {
+    Vertex,
+    Property(Name<'a>),
+}
+
+pub(super) struct ParsedVertexReturn<'a> {
+    variable: Name<'a>,
+    bindings: Vec<(VertexBinding<'a>, Name<'a>, GraphSetColumnType)>,
+    projection: Vec<ReadProjectionTemplate>,
+    quantifier: GraphSetQuantifier,
+    order: Vec<crate::algebra::GraphValueOrder>,
+    offset: ReadPageNumber,
+    count: Option<ReadPageNumber>,
+    at: usize,
+}
+
+impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
+        if word != self.variable.text
+            || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(None);
+        }
+        let name = parser.name()?;
+        let (binding, alias, kind) = if parser.take(b'.')? {
+            let key = parser.name()?;
+            (
+                VertexBinding::Property(key),
+                key,
+                GraphSetColumnType::Scalar,
+            )
+        } else {
+            (VertexBinding::Vertex, name, GraphSetColumnType::Vertex)
+        };
+        if let Some(column) = self
+            .bindings
+            .iter()
+            .position(|(old, _, _)| match (old, binding) {
+                (VertexBinding::Vertex, VertexBinding::Vertex) => true,
+                (VertexBinding::Property(old), VertexBinding::Property(key)) => {
+                    old.text == key.text
+                }
+                _ => false,
+            })
+        {
+            self.bindings[column].1 = alias;
+            return Ok(Some(column));
+        }
+        if self.bindings.len() == MAX_PATTERN_VERTICES {
+            return Err(error(
+                alias.at,
+                GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                    dimension: crate::algebra::PatternLimitDimension::Columns,
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: self.bindings.len() + 1,
+                }),
+            ));
+        }
+        self.bindings.push((binding, alias, kind));
+        Ok(Some(self.bindings.len() - 1))
+    }
+    fn name(&self, column: usize) -> Name<'a> {
+        self.bindings[column].1
+    }
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.bindings.iter().map(|(_, _, kind)| *kind).collect()
+    }
+}
+
+impl<'a> ParsedVertexReturn<'a> {
+    fn resolve(
+        self,
+        symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
+    ) -> Result<VertexReturnTemplate, GraphPatternTextError> {
+        let mut bindings = Vec::new();
+        for (binding, _, _) in self.bindings {
+            bindings.push(match binding {
+                VertexBinding::Vertex => GraphVertexReturnBinding::Vertex,
+                VertexBinding::Property(key) => {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                        unreachable!("shared catalog resolver checked the domain")
+                    };
+                    GraphVertexReturnBinding::Property(key)
+                }
+            });
+        }
+        Ok(VertexReturnTemplate {
+            bindings,
+            projection: self.projection,
+            quantifier: self.quantifier,
+            order: self.order,
+            offset: self.offset,
+            count: self.count,
+            at: self.at,
+        })
+    }
+}
+
+impl<'a> Parser<'a> {
+    fn vertex_return(
+        &mut self,
+        variable: Name<'a>,
+    ) -> Result<ParsedVertexReturn<'a>, GraphVertexUpsertTextError> {
+        let at = self.current.at;
+        self.word("RETURN")?;
+        let quantifier = if self.take_word("DISTINCT")? {
+            GraphSetQuantifier::Distinct
+        } else {
+            self.take_all_quantifier()?;
+            GraphSetQuantifier::All
+        };
+        let mut returning = ParsedVertexReturn {
+            variable,
+            bindings: Vec::new(),
+            projection: Vec::new(),
+            quantifier,
+            order: Vec::new(),
+            offset: ReadPageNumber::Literal(0),
+            count: None,
+            at,
+        };
+        let (output, spellings) = if self.take(b'*')? {
+            returning
+                .bindings
+                .push((VertexBinding::Vertex, variable, GraphSetColumnType::Vertex));
+            returning.projection.push(ReadProjectionTemplate {
+                name: variable.text.to_owned(),
+                value: ReadValueTemplate::Column(0),
+            });
+            (vec![(variable, GraphSetColumnType::Vertex)], Vec::new())
+        } else {
+            let items = self.write_return_items(&mut returning)?;
+            returning.projection = items.projection;
+            (items.output, items.spellings)
+        };
+        if let Some(ReadStageTemplate::Page {
+            order,
+            offset,
+            count,
+            ..
+        }) = self.row_page_sourced(&output, &spellings)?
+        {
+            returning.order = order;
+            returning.offset = offset;
+            returning.count = count;
+        }
+        Ok(returning)
+    }
+}
+
+impl VertexReturnTemplate {
+    fn bind(
+        &self,
+        upsert: PreparedGraphVertexUpsert,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
+        let mut projection = Vec::new();
+        for output in &self.projection {
+            projection.push(GraphSetProjection::new(
+                &output.name,
+                return_projection::bind_read_value(&output.value, values)?,
+            ));
+        }
+        let mut query = PreparedGraphVertexUpsertQuery::prepare(
+            upsert,
+            self.bindings.clone(),
+            projection,
+            self.quantifier,
+        )
+        .map_err(|kind| GraphVertexUpsertTextError {
+            offset: self.at,
+            kind: GraphVertexUpsertTextErrorKind::ReturnBuild(kind),
+        })?;
+        if !self.order.is_empty() {
+            query = query
+                .with_order_by(&self.order)
+                .map_err(|kind| crate::GraphSetTextError {
+                    offset: self.at,
+                    kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
+                })?;
+        }
+        Ok(query.with_page(
+            return_projection::pipeline::page_value(&self.offset, values),
+            self.count
+                .as_ref()
+                .map(|count| return_projection::pipeline::page_value(count, values)),
+        ))
+    }
+}
+
+impl PreparedGraphVertexUpsertQueryText {
+    /// Classify write text with native token framing: a statement that
+    /// starts with `MERGE (` and has a top-level RETURN, in one statement.
+    /// Quoted values, property keys and aliases never become clause words.
+    /// This validates nothing and resolves no symbol; prepare owns that.
+    pub fn has_return_clause(statement: &str) -> Result<bool, GraphVertexUpsertTextError> {
+        if statement.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
+            return Err(error(
+                0,
+                GraphPatternTextErrorKind::Expected("bounded native write text"),
+            )
+            .into());
+        }
+        let mut lexer = Lexer {
+            text: statement,
+            at: 0,
+            tokens: 0,
+        };
+        let first = script::next_script_token(&mut lexer)?;
+        let opening = script::next_script_token(&mut lexer.clone())?;
+        if !matches!(first.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"))
+            || !matches!(opening.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(false);
+        }
+        let mut depth = 0_usize;
+        let mut previous = first.kind;
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word) if depth == 0 && word.eq_ignore_ascii_case("RETURN") => {
+                    let alias = matches!(previous, TokenKind::Punct(b'.'))
+                        || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
+                    if !alias {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+    }
+
+    pub fn prepare(
+        statement: &str,
+        relation: RelationId,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphVertexUpsertTextError> {
+        Self::prepare_with_parameter_types(statement, relation, &[], resolve)
+    }
+
+    pub fn prepare_with_parameter_types(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphVertexUpsertTextError> {
+        let body = mutation_query::statement_body(statement, "one MERGE RETURN statement")?;
+        let (upsert, returning) = PreparedGraphVertexUpsertText::prepare_definition(
+            body,
+            relation,
+            declarations,
+            resolve,
+            true,
+        )?;
+        let returning = returning.expect("query mode prepares a RETURN definition");
+        Ok(Self {
+            statement: statement.to_owned(),
+            upsert,
+            returning,
+        })
+    }
+
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+
+    #[must_use]
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.upsert.merge.selection.parameter_schema()
+    }
+
+    pub fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
+        let upsert = self.upsert.bind_parameters(arguments)?;
+        let values = self.upsert.merge.selection.checked_arguments(arguments)?;
+        self.returning.bind(upsert, &values)
+    }
+}
+
+#[cfg(test)]
+mod return_framing_tests {
+    use super::PreparedGraphVertexUpsertQueryText;
+
+    #[test]
+    fn only_a_merge_with_a_top_level_return_routes_here() {
+        for (text, expected) in [
+            ("MERGE (n:L {k: 1}) RETURN n", true),
+            (
+                "MERGE (n:L {k: 1}) ON CREATE SET n.p = 1 SET n.q = 2 RETURN n.p",
+                true,
+            ),
+            ("MERGE (n:L {k: 1}) SET n.p = 1", false),
+            ("MERGE (n:L {k: 'RETURN'}) SET n.p = 1", false),
+            ("MATCH (n) RETURN n", false),
+            ("MERGE (n:L {k: 1}); MATCH (m) RETURN m", false),
+            ("MERGE (n:L {k: 1}) SET n.RETURN = 1", false),
+        ] {
+            assert_eq!(
+                PreparedGraphVertexUpsertQueryText::has_return_clause(text).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
     }
 }

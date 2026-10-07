@@ -171,7 +171,8 @@ and 16 MiB encoded output. Execution budgets remain per statement/program, not b
 --write-relation u32 selects the native mutation coordinate (default 1).
 write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN and
 MATCH ... SET/REMOVE/DETACH DELETE ... RETURN (one row per matched occurrence;
-a property read sees the statement's own assignment). It buffers the complete
+a property read sees the statement's own assignment) and MERGE ... RETURN (the
+one chosen vertex after every ON/SET clause). It buffers the complete
 result before committing, then emits typed columns and rows followed by result
 kind=written at the committed sequence. DISTINCT and LIMIT affect only returned
 rows, not the writes. Encoded output is bounded to 16 MiB.
