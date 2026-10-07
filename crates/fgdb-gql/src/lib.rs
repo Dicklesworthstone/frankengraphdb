@@ -147,7 +147,7 @@ pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, Prepare
 pub use integer_expression::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,
     GraphIntegerEvaluationError, GraphIntegerExpression, GraphIntegerOp, GraphIntegerUnary,
-    MAX_GRAPH_INTEGER_INSTRUCTIONS,
+    GraphNumericFunction, MAX_GRAPH_INTEGER_INSTRUCTIONS,
 };
 pub use mutation::{
     GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,

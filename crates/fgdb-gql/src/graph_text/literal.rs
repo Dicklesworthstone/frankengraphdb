@@ -31,6 +31,7 @@ const KEYWORDS: &[&str] = &[
     "BY",
     "CALL",
     "CASE",
+    "CEIL",
     "CHAR_LENGTH",
     "CHEAPEST",
     "COALESCE",
@@ -51,6 +52,7 @@ const KEYWORDS: &[&str] = &[
     "EXCEPT",
     "EXISTS",
     "FALSE",
+    "FLOOR",
     "FIRST",
     "FOR",
     "FROM",
@@ -87,12 +89,14 @@ const KEYWORDS: &[&str] = &[
     "RELATIONSHIPS",
     "REMOVE",
     "RETURN",
+    "ROUND",
     "SEQ",
     "SET",
     "SHORTEST",
     "SIMPLE",
     "SIZE",
     "SKIP",
+    "SQRT",
     "STARTNODE",
     "STARTS",
     "SUBSTRING",
@@ -101,6 +105,7 @@ const KEYWORDS: &[&str] = &[
     "SYSTEM_TIME",
     "THEN",
     "TO",
+    "TOFLOAT",
     "TOINTEGER",
     "TOLOWER",
     "TOSTRING",
@@ -282,37 +287,96 @@ pub(in crate::graph_text) fn text_scalar(
 }
 
 impl<'a> Parser<'a> {
-    /// `0.5`: a non-negative decimal literal, `digits . digits`, as a Float
-    /// scalar (fgdb-qnqrj), so a Float value (a Prism score, a float
-    /// property) compares with a Float of the same kind. `None` consumes
-    /// nothing. The text is parsed once, to the nearest f64, and must be
-    /// finite. A sign is the ordinary unary operator, and an exponent is not
-    /// accepted here.
+    /// `0.5`, `1e5`, `1.5e-3`: a decimal literal with a fraction, an
+    /// exponent or both, as a Float scalar (fgdb-qnqrj), so a Float value (a
+    /// Prism score, a float property) compares with a Float of the same
+    /// kind. The exponent is written without spaces (`e5`, `E-3`, `e+10`). A
+    /// leading `-` makes it negative where no unary operator exists
+    /// (`n.p > -0.5`); in an expression the sign is the ordinary unary
+    /// operator. `None` consumes nothing, and plain digits stay an integer.
+    /// The text is parsed once, to the nearest f64, and must be finite.
     pub(in crate::graph_text) fn float_literal(
         &mut self,
     ) -> Result<Option<CanonicalScalar>, GraphPatternTextError> {
-        let TokenKind::Digits(whole) = self.current.kind else {
-            return Ok(None);
-        };
-        let mut lexer = self.lexer.clone();
-        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.')) {
-            return Ok(None);
-        }
-        let TokenKind::Digits(fraction) = lexer.next()?.kind else {
+        let Some((text, consumed)) = self.scan_float_literal()? else {
             return Ok(None);
         };
         let at = self.current.at;
-        let value = format!("{whole}.{fraction}")
+        let value = text
             .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
             .ok_or_else(|| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
-        for _ in 0..3 {
+        for _ in 0..consumed {
             self.advance()?;
         }
         Ok(Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
             value,
         ))))
+    }
+
+    /// The text of the float literal at the current token and how many
+    /// tokens it spans, without consuming any.
+    pub(in crate::graph_text) fn scan_float_literal(
+        &self,
+    ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let negative = self.is_punct(b'-');
+        let (whole, mut end, mut consumed) = if negative {
+            let token = lexer.next()?;
+            let TokenKind::Digits(whole) = token.kind else {
+                return Ok(None);
+            };
+            (whole, token.at + whole.len(), 2)
+        } else {
+            let TokenKind::Digits(whole) = self.current.kind else {
+                return Ok(None);
+            };
+            (whole, self.current.at + whole.len(), 1)
+        };
+        let mut text = format!("{}{whole}", if negative { "-" } else { "" });
+        let mut float = false;
+        let mut peek = lexer.clone();
+        if matches!(peek.next()?.kind, TokenKind::Punct(b'.')) {
+            let digits = peek.next()?;
+            let TokenKind::Digits(fraction) = digits.kind else {
+                return Ok(None);
+            };
+            text.push('.');
+            text.push_str(fraction);
+            end = digits.at + fraction.len();
+            consumed += 2;
+            float = true;
+            lexer = peek;
+        }
+        let mut peek = lexer;
+        let exponent = peek.next()?;
+        if let TokenKind::Word(word) = exponent.kind
+            && exponent.at == end
+            && let Some(rest) = word.strip_prefix(['e', 'E'])
+        {
+            if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                text.push('e');
+                text.push_str(rest);
+                consumed += 1;
+                float = true;
+            } else if rest.is_empty() {
+                let sign = peek.next()?;
+                let digits = peek.next()?;
+                if let (TokenKind::Punct(sign_byte @ (b'+' | b'-')), TokenKind::Digits(power)) =
+                    (sign.kind, digits.kind)
+                    && sign.at == exponent.at + 1
+                    && digits.at == sign.at + 1
+                {
+                    text.push('e');
+                    text.push(char::from(sign_byte));
+                    text.push_str(power);
+                    consumed += 3;
+                    float = true;
+                }
+            }
+        }
+        Ok(float.then_some((text, consumed)))
     }
 
     /// One predicate operand path used by the root and every positive child.

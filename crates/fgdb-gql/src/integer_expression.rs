@@ -44,6 +44,29 @@ pub enum GraphIntegerBinary {
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
 /// selector once, and selects the first nonnull equality. Conditions use eager
 /// three-valued Boolean evaluation; unselected CASE arms are not executed.
+/// A one-operand numeric function with a binary64 result (openCypher).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphNumericFunction {
+    ToFloat,
+    Floor,
+    Ceil,
+    /// Nearest integral value, exact half ties toward positive infinity.
+    Round,
+    Sqrt,
+}
+
+impl GraphNumericFunction {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::ToFloat => 0,
+            Self::Floor => 1,
+            Self::Ceil => 2,
+            Self::Round => 3,
+            Self::Sqrt => 4,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphIntegerOp {
     Column(usize),
@@ -62,8 +85,11 @@ pub enum GraphIntegerOp {
     /// openCypher toString: NULL, integer, Boolean or text to text.
     ToText,
     /// openCypher toInteger: NULL, integer, Boolean or integer text to an
-    /// integer; other text is NULL, as in openCypher.
+    /// integer; other text is NULL, as in openCypher. A float truncates
+    /// toward zero; a non-finite float is NULL.
     ToInteger,
+    /// openCypher toFloat, floor, ceil, round and sqrt over a number.
+    Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
     /// compiled once, at preparation (fgdb regex profile 1).
     Matches(Box<crate::regex::CompiledRegex>),
@@ -164,6 +190,7 @@ impl GraphIntegerOp {
             Self::CharLength => bytes.push(20),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
+            Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
                 let source = regex.source().as_bytes();
@@ -206,6 +233,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::CharLength => f.write_str("CharLength"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
+            Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
             Self::Concat => f.write_str("Concat"),
@@ -397,6 +425,7 @@ enum Instruction {
     CharLength,
     ToText,
     ToInteger,
+    Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
     Concat,
@@ -718,6 +747,11 @@ impl GraphIntegerExpression {
                     let result = convert(value, matches!(op, Instruction::ToText), at, control)?;
                     *value = result.into();
                 }
+                Instruction::Numeric(function) => {
+                    let value = stack.last_mut().expect("validated numeric operand");
+                    let result = numeric(value, *function, at, control)?;
+                    *value = result.into();
+                }
                 Instruction::Upper
                 | Instruction::Lower
                 | Instruction::Trim
@@ -985,6 +1019,7 @@ impl GraphIntegerExpression {
                 Instruction::CharLength => bytes.push(20),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
+                Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
                     let source = regex.source().as_bytes();
@@ -1107,6 +1142,19 @@ fn convert<E>(
                         .map_or(CanonicalScalar::Null, CanonicalScalar::Int))
                 };
             }
+            CanonicalScalar::Float(value) => {
+                return if to_text {
+                    make_text(&float_text(*value), instruction, control)
+                } else {
+                    match value.checked_to_i64_truncated() {
+                        Ok(integer) => Ok(CanonicalScalar::Int(integer)),
+                        Err(fgdb_types::FloatArithmeticError::Overflow) => {
+                            Err(failure(GraphIntegerErrorKind::Overflow))
+                        }
+                        Err(_) => Ok(CanonicalScalar::Null),
+                    }
+                };
+            }
             _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
         },
     };
@@ -1117,6 +1165,84 @@ fn convert<E>(
             .map(CanonicalScalar::Int)
             .map_err(|_| failure(GraphIntegerErrorKind::Overflow))
     }
+}
+
+/// openCypher toString of a float: the shortest text that reads back as the
+/// same binary64 (`1.0`, `0.1`, `1e100`), and Infinity/-Infinity/NaN.
+fn float_text(value: fgdb_types::CanonicalF64) -> String {
+    let value = value.get();
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+    } else {
+        format!("{value:?}")
+    }
+}
+
+/// toFloat, floor, ceil, round and sqrt. Integers (counts and exact averages
+/// too) become the nearest binary64 first; numeric text is toFloat's alone.
+/// Finite values use the integer-only binary64 kernel, rounding once; NaN
+/// and the infinities pass through as IEEE 754 defines (sqrt of a negative
+/// is NaN). NULL is NULL.
+fn numeric<E>(
+    cell: &ExpressionCell<'_>,
+    function: GraphNumericFunction,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    use fgdb_types::{CanonicalF64, ExactBinary64Sum};
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    let incompatible = || failure(GraphIntegerErrorKind::IncompatibleOperands);
+    let integer = |value: i128| {
+        let mut exact = ExactBinary64Sum::new();
+        exact.add_integer(value);
+        exact.sum()
+    };
+    let value = match cell {
+        ExpressionCell::Count(value) => integer(i128::from(*value)),
+        ExpressionCell::Integer(value) => integer(*value),
+        ExpressionCell::Average(average) => {
+            let mut exact = ExactBinary64Sum::new();
+            exact.add_integer(average.numerator());
+            exact
+                .mean(average.denominator())
+                .expect("an exact average has a positive denominator")
+        }
+        ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
+            CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
+            CanonicalScalar::Int(value) => integer(i128::from(*value)),
+            CanonicalScalar::Float(value) => *value,
+            CanonicalScalar::Text(text) if function == GraphNumericFunction::ToFloat => {
+                let text = text.as_str();
+                charge_payload(text.len(), false, control)?;
+                return Ok(text
+                    .trim()
+                    .parse::<f64>()
+                    .map_or(CanonicalScalar::Null, |value| {
+                        CanonicalScalar::Float(CanonicalF64::new(value))
+                    }));
+            }
+            _ => return Err(incompatible()),
+        },
+    };
+    control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
+    let finite = value.get().is_finite();
+    let result = match function {
+        GraphNumericFunction::ToFloat => value,
+        _ if !finite && function != GraphNumericFunction::Sqrt => value,
+        GraphNumericFunction::Floor => value.checked_floor().map_err(|_| incompatible())?,
+        GraphNumericFunction::Ceil => value.checked_ceil().map_err(|_| incompatible())?,
+        GraphNumericFunction::Round => value.checked_round().map_err(|_| incompatible())?,
+        GraphNumericFunction::Sqrt => match value.checked_sqrt() {
+            Ok(root) => root,
+            // +Infinity is its own root; NaN, -Infinity and negatives are NaN.
+            Err(_) if value.get() == f64::INFINITY => value,
+            Err(_) => CanonicalF64::new(f64::NAN),
+        },
+    };
+    Ok(CanonicalScalar::Float(result))
 }
 
 fn make_text<E>(

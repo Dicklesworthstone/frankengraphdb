@@ -99,6 +99,7 @@ fn prepare_root(
             | Op::CharLength
             | Op::ToText
             | Op::ToInteger
+            | Op::Numeric(_)
             | Op::Matches(_) => 1,
             Op::Binary(_)
             | Op::Coalesce
@@ -132,6 +133,17 @@ fn prepare_root(
                     nodes[child].kind,
                     Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
                 ) {
+                    return Err(wrong());
+                }
+                continue;
+            }
+            if matches!(op, Op::Numeric(_)) {
+                if !matches!(
+                    nodes[child].kind,
+                    Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
+                ) && !(matches!(op, Op::Numeric(GraphNumericFunction::ToFloat))
+                    && nodes[child].kind == Kind::Text)
+                {
                     return Err(wrong());
                 }
                 continue;
@@ -238,6 +250,7 @@ fn prepare_root(
             Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
                 Kind::Text
             }
+            Op::Numeric(_) => Kind::Float,
             _ => Kind::Integer,
         };
         let numeric_arithmetic = !integer_root
@@ -249,6 +262,7 @@ fn prepare_root(
         let may_float = match op {
             Op::ScalarColumn(_) | Op::Local(_) => true,
             Op::Scalar(value) => matches!(value.value(), CanonicalScalar::Float(_)),
+            Op::Numeric(_) => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
             Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
@@ -376,6 +390,7 @@ fn prepare_root(
                     Op::CharLength => Some(Instruction::CharLength),
                     Op::ToText => Some(Instruction::ToText),
                     Op::ToInteger => Some(Instruction::ToInteger),
+                    Op::Numeric(function) => Some(Instruction::Numeric(*function)),
                     Op::Matches(regex) => Some(Instruction::Matches(regex.clone())),
                     _ => None,
                 };
@@ -451,6 +466,7 @@ fn prepare_root(
                     | Op::CharLength
                     | Op::ToText
                     | Op::ToInteger
+                    | Op::Numeric(_)
                     | Op::Matches(_)
                     | Op::Concat
                     | Op::StartsWith

@@ -510,11 +510,11 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
         scalar("toString(n.text)", &CanonicalScalar::Null),
         CanonicalScalar::Null
     );
+    // A float converts: toString's shortest round-trip text, toInteger's
+    // truncation (numeric_functions_round_once_... covers the edges).
     let float = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5));
-    for expression in ["toString(n.text)", "toInteger(n.text)"] {
-        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
-        assert!(execute(&query, &float, policy()).is_err(), "{expression}");
-    }
+    assert_eq!(scalar("toString(n.text)", &float), text("1.5"));
+    assert_eq!(scalar("toInteger(n.text)", &float), CanonicalScalar::Int(1));
     // toString is text: adding it to an integer is the typed Concat refusal.
     assert!(
         PreparedGraphSetText::prepare("MATCH (n) RETURN 1 + toString(2) AS value", symbols)
@@ -662,5 +662,102 @@ fn opencypher_regex_match_is_a_bounded_whole_string_match() {
     assert!(
         counted_long >= counted_short + 1024 / 64,
         "{counted_long} vs {counted_short}"
+    );
+}
+
+/// openCypher toFloat, floor, ceil, round and sqrt return binary64 values
+/// rounded once by the integer-only kernel; toInteger truncates a float
+/// toward zero and toString prints its shortest round-trip text. NaN and the
+/// infinities pass through as IEEE 754 defines; NULL is NULL.
+#[test]
+fn numeric_functions_round_once_and_follow_opencypher_ties_and_specials() {
+    let float = |value: f64| CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value));
+    for (input, expression, expected) in [
+        (float(2.5), "round(n.text)", float(3.0)),
+        (float(-2.5), "round(n.text)", float(-2.0)),
+        (float(2.4), "round(n.text)", float(2.0)),
+        (float(-2.7), "floor(n.text)", float(-3.0)),
+        (float(-2.7), "ceil(n.text)", float(-2.0)),
+        (float(2.0), "sqrt(n.text)", float(core::f64::consts::SQRT_2)),
+        (float(-1.0), "sqrt(n.text)", float(f64::NAN)),
+        (float(f64::INFINITY), "sqrt(n.text)", float(f64::INFINITY)),
+        (
+            float(f64::NEG_INFINITY),
+            "floor(n.text)",
+            float(f64::NEG_INFINITY),
+        ),
+        (CanonicalScalar::Int(7), "toFloat(n.text)", float(7.0)),
+        (CanonicalScalar::Int(7), "round(n.text)", float(7.0)),
+        (text("2.5"), "toFloat(n.text)", float(2.5)),
+        (text("nope"), "toFloat(n.text)", CanonicalScalar::Null),
+        (
+            CanonicalScalar::Null,
+            "round(n.text)",
+            CanonicalScalar::Null,
+        ),
+        (float(3.7), "toInteger(n.text)", CanonicalScalar::Int(3)),
+        (float(-3.7), "toInteger(n.text)", CanonicalScalar::Int(-3)),
+        (float(f64::NAN), "toInteger(n.text)", CanonicalScalar::Null),
+        (float(1.0), "toString(n.text)", text("1.0")),
+        (float(0.1), "toString(n.text)", text("0.1")),
+        (float(1e100), "toString(n.text)", text("1e100")),
+        (
+            float(f64::NEG_INFINITY),
+            "toString(n.text)",
+            text("-Infinity"),
+        ),
+        (float(1.0), "-2.5", float(-2.5)),
+        (float(4.0), "n.text * -1.5", float(-6.0)),
+        (float(1.0), "1e5", float(1e5)),
+        (float(1.0), "1.5e-3", float(1.5e-3)),
+        (float(1.0), "2E+10", float(2e10)),
+        (float(1.0), "-4.2e1", float(-42.0)),
+        (float(3.0), "n.text * 1e2", float(300.0)),
+    ] {
+        assert_eq!(scalar(expression, &input), expected, "{expression}");
+    }
+    // An exponent literal outside binary64 is refused, never infinity.
+    assert!(PreparedGraphSetText::prepare("MATCH (n) RETURN 1e999 AS value", symbols).is_err());
+    // A float outside i64 overflows instead of wrapping or saturating.
+    let query = prepare("MATCH (n) RETURN toInteger(n.text) AS value");
+    assert!(execute(&query, &float(1e19), policy()).is_err());
+    // Numeric functions refuse text (toFloat aside) and Boolean operands.
+    for statement in [
+        "MATCH (n) RETURN round('a') AS value",
+        "MATCH (n) RETURN sqrt(TRUE) AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+    // A negative float literal also compares in a property filter.
+    let filtered = prepare("MATCH (n) WHERE n.text > -0.5 RETURN n.text AS value");
+    assert_eq!(
+        execute(&filtered, &float(-0.25), policy())
+            .unwrap()
+            .value
+            .len(),
+        1
+    );
+    assert!(
+        execute(&filtered, &float(-0.75), policy())
+            .unwrap()
+            .value
+            .is_empty()
+    );
+    let exponent = prepare("MATCH (n) WHERE n.text < 2.5e-1 RETURN n.text AS value");
+    assert_eq!(
+        execute(&exponent, &float(0.125), policy())
+            .unwrap()
+            .value
+            .len(),
+        1
+    );
+    assert!(
+        execute(&exponent, &float(0.5), policy())
+            .unwrap()
+            .value
+            .is_empty()
     );
 }

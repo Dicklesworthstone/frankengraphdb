@@ -310,6 +310,58 @@ impl CanonicalF64 {
     pub fn checked_round(self) -> Result<Self, FloatArithmeticError> {
         round_integral(self, IntegralRounding::NearestTiesPositive)
     }
+
+    /// The correctly rounded square root of a finite, nonnegative value, by
+    /// an exact integer square root and one nearest-even rounding. A negative
+    /// operand has no real root and refuses as non-finite, as does a
+    /// non-finite operand.
+    pub fn checked_sqrt(self) -> Result<Self, FloatArithmeticError> {
+        let number = Number::read(self)?;
+        if number.significand == 0 {
+            return Ok(value(0));
+        }
+        if number.negative {
+            return Err(FloatArithmeticError::NonFinite);
+        }
+        // value = significand * 2^exponent; make the exponent even, then
+        // scale by an even power so the radicand fills 126 bits.
+        let (mut significand, mut exponent) = (u128::from(number.significand), number.exponent);
+        if exponent % 2 != 0 {
+            significand <<= 1;
+            exponent -= 1;
+        }
+        let scaled = significand << 72;
+        let root = scaled.isqrt();
+        let sticky = u128::from(root * root != scaled);
+        pack(false, (root << 1) | sticky, (exponent - 72) / 2 - 1)
+    }
+
+    /// The integer part, rounding toward zero (openCypher toInteger). A value
+    /// outside i64 overflows; a non-finite value refuses.
+    pub fn checked_to_i64_truncated(self) -> Result<i64, FloatArithmeticError> {
+        let number = Number::read(self)?;
+        let magnitude = if number.exponent >= 0 {
+            if number.exponent > 11 {
+                return Err(FloatArithmeticError::Overflow);
+            }
+            u128::from(number.significand) << number.exponent
+        } else {
+            let shift = number.exponent.unsigned_abs();
+            if shift >= 64 {
+                0
+            } else {
+                u128::from(number.significand >> shift)
+            }
+        };
+        if number.negative {
+            if magnitude > 1_u128 << 63 {
+                return Err(FloatArithmeticError::Overflow);
+            }
+            Ok((magnitude as i128).wrapping_neg() as i64)
+        } else {
+            i64::try_from(magnitude).map_err(|_| FloatArithmeticError::Overflow)
+        }
+    }
 }
 
 /// Fixed-point limbs of an exact sum, in units of the least subnormal
@@ -838,6 +890,60 @@ mod tests {
             mean.add_integer(value);
         }
         assert_eq!(mean.mean(3), Some(f(7.0 / 3.0)));
+    }
+
+    #[test]
+    fn square_roots_match_ieee_sqrt_on_a_deterministic_finite_corpus() {
+        let mut state = 0x7371_7274_2d72_6f6f_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // Every exponent, including subnormals; finite and nonnegative.
+            let mut bits = state & !SIGN;
+            if bits & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
+                bits ^= 0x0010_0000_0000_0000;
+            }
+            let x = f(f64::from_bits(bits));
+            // IEEE 754 requires sqrt to be correctly rounded.
+            assert_eq!(x.checked_sqrt(), Ok(f(x.get().sqrt())), "{bits:016x}");
+        }
+        for (input, root) in [(0.0, 0.0), (4.0, 2.0), (2.0, core::f64::consts::SQRT_2)] {
+            assert_eq!(f(input).checked_sqrt(), Ok(f(root)));
+        }
+        assert_eq!(bits(1).checked_sqrt(), Ok(f(5e-324_f64.sqrt())));
+        assert_eq!(f(-1.0).checked_sqrt(), Err(FloatArithmeticError::NonFinite));
+        assert_eq!(
+            f(f64::INFINITY).checked_sqrt(),
+            Err(FloatArithmeticError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn truncation_to_i64_rounds_toward_zero_and_refuses_overflow() {
+        const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+        for (input, expected) in [
+            (3.7, 3),
+            (-3.7, -3),
+            (0.5, 0),
+            (-0.5, 0),
+            (5e-324, 0),
+            (9.007_199_254_740_993e15, 9_007_199_254_740_992),
+            (-TWO_63, i64::MIN),
+        ] {
+            assert_eq!(f(input).checked_to_i64_truncated(), Ok(expected), "{input}");
+        }
+        for input in [TWO_63, -9.3e18, 1e300] {
+            assert_eq!(
+                f(input).checked_to_i64_truncated(),
+                Err(FloatArithmeticError::Overflow),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            f(f64::NAN).checked_to_i64_truncated(),
+            Err(FloatArithmeticError::NonFinite)
+        );
     }
 
     #[test]

@@ -34,8 +34,13 @@ pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
 /// character count. A leading SIZE(...) row value keeps the list-or-text
 /// Size node instead. The Boolean lowering lookahead and the compiler read
 /// this one table, so a name cannot be known to one and not the other.
-const SCALAR_FUNCTIONS: [&str; 13] = [
+const SCALAR_FUNCTIONS: [&str; 18] = [
     "ABS",
+    "TOFLOAT",
+    "FLOOR",
+    "CEIL",
+    "ROUND",
+    "SQRT",
     "COALESCE",
     "NULLIF",
     "UPPER",

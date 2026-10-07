@@ -7,7 +7,7 @@ mod conditional;
 use super::*;
 use crate::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression, GraphIntegerOp,
-    GraphIntegerUnary, MAX_GRAPH_INTEGER_INSTRUCTIONS,
+    GraphIntegerUnary, GraphNumericFunction, MAX_GRAPH_INTEGER_INSTRUCTIONS,
 };
 use fgdb_types::CanonicalScalarKind;
 
@@ -617,9 +617,11 @@ impl<'a> Parser<'a> {
             return self.integer_case(columns, depth + 1, program, at);
         }
         // -9223372036854775808 is one legal signed literal, not negation of
-        // an unrepresentable positive integer. Other signs are checked unary IR.
-        let signed_literal =
-            self.is_punct(b'-') && matches!(self.lexer.clone().next()?.kind, TokenKind::Digits(_));
+        // an unrepresentable positive integer. Other signs are checked unary
+        // IR, including `-2.5`: negation of a float literal.
+        let signed_literal = self.is_punct(b'-')
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Digits(_))
+            && self.scan_float_literal()?.is_none();
         if (self.is_punct(b'+') || self.is_punct(b'-')) && !signed_literal {
             let op = if self.is_punct(b'+') {
                 GraphIntegerUnary::Plus
@@ -671,6 +673,23 @@ impl<'a> Parser<'a> {
             if let Some(op) = text_op {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(op), at);
+            }
+            let numeric = [
+                ("TOFLOAT", GraphNumericFunction::ToFloat),
+                ("FLOOR", GraphNumericFunction::Floor),
+                ("CEIL", GraphNumericFunction::Ceil),
+                ("ROUND", GraphNumericFunction::Round),
+                ("SQRT", GraphNumericFunction::Sqrt),
+            ]
+            .into_iter()
+            .find_map(|(name, numeric)| function.eq_ignore_ascii_case(name).then_some(numeric));
+            if let Some(numeric) = numeric {
+                self.punct(b')', ")")?;
+                return emit(
+                    program,
+                    ParsedOp::Bound(GraphIntegerOp::Numeric(numeric)),
+                    at,
+                );
             }
             if function.eq_ignore_ascii_case("SUBSTRING") {
                 let sql = self.take_word("FROM")?;
