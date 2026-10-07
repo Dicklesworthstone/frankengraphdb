@@ -7081,6 +7081,14 @@ mod shared_snapshot_payload_laws {
         assert!(after.patch_refs.starts_with(&before.patch_refs));
         assert!(!before.blocks.is_empty());
         assert!(!before.patches.is_empty());
+        assert!(!before.delta_index.is_empty());
+        for batch in before.delta_index.iter() {
+            let carried = after.delta_index.get(batch.commit_seq()).unwrap();
+            assert!(
+                core::ptr::eq(batch, carried),
+                "retaining a snapshot copied a historical delta batch"
+            );
+        }
         let mut hosted = 0;
         for (at, block) in before.blocks.iter().enumerate() {
             assert!(
