@@ -78,6 +78,20 @@ async fn start(
     fgdb_server::Shutdown,
     asupersync::runtime::TaskHandle<()>,
 ) {
+    let server = Arc::new(served(cx, name).await);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = server.shutdown();
+    let handle = cx
+        .spawn(move |child| async move {
+            server.serve(&child, listener).await.unwrap();
+        })
+        .unwrap();
+    (addr, shutdown, handle)
+}
+
+/// The fresh on-disk database every test serves, before any listener.
+async fn served(cx: &Cx, name: &str) -> Server {
     let path = scratch(name);
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     drop(
@@ -97,16 +111,7 @@ async fn start(
     let mut config = DatabaseConfig::new("social", keys(), issuer_key());
     config.symbols = symbols();
     server.open_database(cx, &path, config).await.unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = Arc::new(server);
-    let shutdown = server.shutdown();
-    let handle = cx
-        .spawn(move |child| async move {
-            server.serve(&child, listener).await.unwrap();
-        })
-        .unwrap();
-    (addr, shutdown, handle)
+    server
 }
 
 fn run(test: impl AsyncFnOnce(&Cx)) {
@@ -746,5 +751,330 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
         writer.close(cx).await.unwrap();
         shutdown.trigger();
         server.join(cx).await.unwrap();
+    });
+}
+
+/// A minimal Bolt 5.0 client over the fgdb-bolt codec.
+struct Bolt {
+    stream: asupersync::net::TcpStream,
+    dechunker: fgdb_bolt::message::Dechunker,
+}
+
+impl Bolt {
+    async fn connect(addr: SocketAddr) -> (Self, [u8; 4]) {
+        use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = asupersync::net::TcpStream::connect(addr).await.unwrap();
+        let mut hello = fgdb_bolt::message::MAGIC.to_vec();
+        // 5.0 exactly, then 4.4..4.2, as a driver would propose.
+        hello.extend_from_slice(&[0, 0, 0, 5, 0, 2, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+        stream.write_all(&hello).await.unwrap();
+        let mut version = [0_u8; 4];
+        stream.read_exact(&mut version).await.unwrap();
+        let bolt = Self {
+            stream,
+            dechunker: fgdb_bolt::message::Dechunker::new(1 << 24),
+        };
+        (bolt, version)
+    }
+
+    async fn send(&mut self, tag: u8, fields: Vec<fgdb_bolt::packstream::Value>) {
+        use asupersync::io::AsyncWriteExt;
+        let mut message = Vec::new();
+        fgdb_bolt::packstream::encode(
+            &fgdb_bolt::packstream::Value::Struct { tag, fields },
+            &mut message,
+        );
+        let mut framed = Vec::new();
+        fgdb_bolt::message::frame(&message, &mut framed);
+        self.stream.write_all(&framed).await.unwrap();
+    }
+
+    /// The next response's tag and fields, or None once the server closed.
+    async fn receive(&mut self) -> Option<(u8, Vec<fgdb_bolt::packstream::Value>)> {
+        use asupersync::io::AsyncReadExt;
+        loop {
+            if let Some(message) = self.dechunker.next_message().unwrap() {
+                let fgdb_bolt::packstream::Value::Struct { tag, fields } =
+                    fgdb_bolt::packstream::decode(&message).unwrap()
+                else {
+                    panic!("a response is a structure");
+                };
+                return Some((tag, fields));
+            }
+            let mut buffer = [0_u8; 4096];
+            let read = self.stream.read(&mut buffer).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            self.dechunker.push(&buffer[..read]);
+        }
+    }
+
+    /// Send and expect one response of `want`'s tag; returns its metadata.
+    async fn expect(
+        &mut self,
+        tag: u8,
+        fields: Vec<fgdb_bolt::packstream::Value>,
+        want: u8,
+    ) -> Vec<(String, fgdb_bolt::packstream::Value)> {
+        self.send(tag, fields).await;
+        let (got, fields) = self.receive().await.expect("a response");
+        assert_eq!(got, want, "{fields:?}");
+        match fields.into_iter().next() {
+            Some(fgdb_bolt::packstream::Value::Map(metadata)) => metadata,
+            _ => Vec::new(),
+        }
+    }
+
+    /// PULL everything: the records, then the final metadata.
+    async fn pull_all(
+        &mut self,
+    ) -> (
+        Vec<Vec<fgdb_bolt::packstream::Value>>,
+        Vec<(String, fgdb_bolt::packstream::Value)>,
+    ) {
+        use fgdb_bolt::packstream::Value;
+        self.send(0x3F, vec![Value::Map(vec![("n".into(), Value::Int(-1))])])
+            .await;
+        let mut records = Vec::new();
+        loop {
+            match self.receive().await.expect("a response") {
+                (0x71, mut fields) => {
+                    let Some(Value::List(values)) = fields.pop() else {
+                        panic!("a record holds a list");
+                    };
+                    records.push(values);
+                }
+                (0x70, mut fields) => {
+                    let Some(Value::Map(metadata)) = fields.pop() else {
+                        panic!("SUCCESS holds a map");
+                    };
+                    return (records, metadata);
+                }
+                other => panic!("unexpected response {other:?}"),
+            }
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
+    use fgdb_bolt::packstream::{Value, get};
+    const SUCCESS: u8 = 0x70;
+    const IGNORED: u8 = 0x7E;
+    const FAILURE: u8 = 0x7F;
+    let hello = |token: &[u8]| {
+        vec![Value::Map(vec![
+            ("user_agent".into(), Value::string("loopback/1")),
+            ("scheme".into(), Value::string("bearer")),
+            ("credentials".into(), Value::string(hex(token))),
+        ])]
+    };
+    let run_message = |query: &str, parameters: Vec<(String, Value)>| {
+        vec![
+            Value::string(query),
+            Value::Map(parameters),
+            Value::Map(Vec::new()),
+        ]
+    };
+    let code = |metadata: &[(String, Value)]| {
+        get(metadata, "code")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    run(async |cx| {
+        let server = Arc::new(served(cx, "bolt").await);
+        let fgp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bolt = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (fgp_addr, bolt_addr) = (fgp.local_addr().unwrap(), bolt.local_addr().unwrap());
+        let shutdown = server.shutdown();
+        let mut serving = Vec::new();
+        for (listener, as_bolt) in [(fgp, false), (bolt, true)] {
+            let server = Arc::clone(&server);
+            serving.push(
+                cx.spawn(move |child| async move {
+                    if as_bolt {
+                        server.serve_bolt(&child, listener).await.unwrap();
+                    } else {
+                        server.serve(&child, listener).await.unwrap();
+                    }
+                })
+                .unwrap(),
+            );
+        }
+        let mut writer = Client::connect(cx, fgp_addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Ann', age: 30}), (:Person {name: 'Bob'})",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // A token no database accepts is refused at HELLO and disconnected.
+        let (mut stranger, version) = Bolt::connect(bolt_addr).await;
+        assert_eq!(version, [0, 0, 0, 5]);
+        let foreign = issue_token(
+            &issuer(AuthKey::from_seed(4242), &keys(), 1).unwrap(),
+            &grant(Rights::Read),
+        )
+        .unwrap();
+        let refused = stranger.expect(0x01, hello(&foreign), FAILURE).await;
+        assert_eq!(code(&refused), "Neo.ClientError.Security.Unauthorized");
+        assert!(stranger.receive().await.is_none());
+
+        let (mut client, _) = Bolt::connect(bolt_addr).await;
+        let ready = client
+            .expect(0x01, hello(&token(&grant(Rights::Read))), SUCCESS)
+            .await;
+        assert_eq!(
+            get(&ready, "fgdb_profile").and_then(Value::as_str),
+            Some("BoltCompatProfileV1")
+        );
+
+        // A vertex comes back as a node with its labels and properties.
+        let fields = client
+            .expect(
+                0x10,
+                run_message(
+                    "MATCH (p:Person) WHERE p.name = $n RETURN p, p.age AS age",
+                    vec![("n".into(), Value::string("Ann"))],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            get(&fields, "fields"),
+            Some(&Value::List(vec![Value::string("p"), Value::string("age")]))
+        );
+        let (records, done) = client.pull_all().await;
+        let [record] = records.as_slice() else {
+            panic!("one record: {records:?}");
+        };
+        let Value::Struct { tag: 0x4E, fields } = &record[0] else {
+            panic!("a node: {record:?}");
+        };
+        assert_eq!(fields[1], Value::List(vec![Value::string("Person")]));
+        // Properties arrive in name order, deterministically.
+        assert_eq!(
+            fields[2],
+            Value::Map(vec![
+                ("age".into(), Value::Int(30)),
+                ("name".into(), Value::string("Ann")),
+            ])
+        );
+        assert_eq!(record[1], Value::Int(30));
+        assert_eq!(get(&done, "type").and_then(Value::as_str), Some("r"));
+        assert!(get(&done, "bookmark").is_some());
+
+        // A write is refused before graph access; the failure state ignores
+        // further requests until RESET.
+        let failure = client
+            .expect(
+                0x10,
+                run_message("CREATE (:Person {name: 'Eve'})", vec![]),
+                FAILURE,
+            )
+            .await;
+        assert_eq!(code(&failure), "Neo.ClientError.Statement.AccessMode");
+        client
+            .expect(0x10, run_message("RETURN 1 AS one", vec![]), IGNORED)
+            .await;
+        client.expect(0x0F, vec![], SUCCESS).await;
+
+        // An explicit transaction reads one pinned generation: a commit
+        // landing mid-transaction is invisible until the next statement
+        // outside it.
+        let count = "MATCH (p:Person) RETURN count(p) AS people";
+        client
+            .expect(0x11, vec![Value::Map(Vec::new())], SUCCESS)
+            .await;
+        client
+            .expect(0x10, run_message(count, vec![]), SUCCESS)
+            .await;
+        assert_eq!(client.pull_all().await.0, [[Value::Int(2)]]);
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Cy'})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        client
+            .expect(0x10, run_message(count, vec![]), SUCCESS)
+            .await;
+        assert_eq!(client.pull_all().await.0, [[Value::Int(2)]]);
+        let committed = client.expect(0x12, vec![], SUCCESS).await;
+        assert!(get(&committed, "bookmark").is_some());
+        client
+            .expect(0x10, run_message(count, vec![]), SUCCESS)
+            .await;
+        assert_eq!(client.pull_all().await.0, [[Value::Int(3)]]);
+
+        // A relationship value has no encoding in the profile.
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a:Person {name: 'Ann'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let failure = client
+            .expect(
+                0x10,
+                run_message("MATCH (a)-[r:KNOWS]->(b) RETURN r", vec![]),
+                FAILURE,
+            )
+            .await;
+        assert_eq!(
+            code(&failure),
+            "Neo.ClientError.Statement.FeatureNotSupported"
+        );
+        client.expect(0x0F, vec![], SUCCESS).await;
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+
+        // A capability that may not see `age` gets nodes without it.
+        let (mut scoped, _) = Bolt::connect(bolt_addr).await;
+        let narrow = Grant {
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Read)
+        };
+        scoped.expect(0x01, hello(&token(&narrow)), SUCCESS).await;
+        scoped
+            .expect(
+                0x10,
+                run_message("MATCH (p:Person) WHERE p.name = 'Ann' RETURN p", vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (records, _) = scoped.pull_all().await;
+        let Value::Struct { fields, .. } = &records[0][0] else {
+            panic!("a node");
+        };
+        assert_eq!(
+            fields[2],
+            Value::Map(vec![("name".into(), Value::string("Ann"))])
+        );
+
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        for mut handle in serving {
+            handle.join(cx).await.unwrap();
+        }
     });
 }

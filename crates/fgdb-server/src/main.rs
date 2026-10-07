@@ -19,7 +19,8 @@ const HELP: &str = "\
 fgdbd: the FrankenGraphDB server (FGP over TCP)
 
 USAGE:
-  fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...] DATABASE...
+  fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
+      [--bolt-listen <addr:port>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--policy-epoch <n>] [--write-relation <u32>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
@@ -47,6 +48,13 @@ or /write with `Authorization: Bearer <hex token>` and a JSON body
 {\"statement\": \"<gql>\", \"parameters\": {...}}; GET /v1/health. Requests must
 name an allowed Host (default localhost, 127.0.0.1, [::1] and the listen IP;
 --http-allow-host replaces that list).
+
+--bolt-listen adds the Bolt-compat adapter (BoltCompatProfileV1) for official
+Neo4j drivers: bolt:// or neo4j:// URIs, authenticated with the hex token as a
+bearer credential (or as the basic-auth password). It is read-only: every RUN
+executes on a read session, and writes refuse with
+Neo.ClientError.Statement.AccessMode. The database is the driver's database
+argument, or the only one served.
 
 token prints the token as hex on stdout. Scopes default to every label,
 relation and property; any --allow-* flag restricts that kind to the listed
@@ -137,6 +145,7 @@ struct ServeOptions {
     listen: String,
     http_listen: Option<String>,
     http_hosts: Vec<String>,
+    bolt_listen: Option<String>,
     max_connections: Option<usize>,
     databases: Vec<DatabaseOptions>,
 }
@@ -171,6 +180,7 @@ impl ServeOptions {
         let mut listen = None;
         let mut http_listen = None;
         let mut http_hosts = Vec::new();
+        let mut bolt_listen = None;
         let mut max_connections = None;
         let mut databases: Vec<DatabaseOptions> = Vec::new();
         let mut at = 0;
@@ -184,6 +194,9 @@ impl ServeOptions {
                     http_listen = Some(value(args, &mut at, flag)?.to_owned());
                 }
                 "--http-allow-host" => http_hosts.push(value(args, &mut at, flag)?.to_owned()),
+                "--bolt-listen" if bolt_listen.is_none() => {
+                    bolt_listen = Some(value(args, &mut at, flag)?.to_owned());
+                }
                 "--max-connections" if max_connections.is_none() => {
                     max_connections = Some(number(value(args, &mut at, flag)?, flag)?);
                 }
@@ -256,6 +269,7 @@ impl ServeOptions {
             listen,
             http_listen,
             http_hosts,
+            bolt_listen,
             max_connections,
             databases,
         })
@@ -304,6 +318,15 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             Some((TcpListener::bind(addr).await.map_err(Failure::io)?, hosts))
         }
     };
+    let bolt = match &options.bolt_listen {
+        None => None,
+        Some(raw) => {
+            let addr: std::net::SocketAddr = raw
+                .parse()
+                .map_err(|_| Failure::usage("--bolt-listen needs <ip>:<port>"))?;
+            Some(TcpListener::bind(addr).await.map_err(Failure::io)?)
+        }
+    };
     {
         let mut stdout = std::io::stdout().lock();
         let bound = listener.local_addr().map_err(Failure::io)?;
@@ -317,6 +340,14 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             writeln!(
                 stdout,
                 r#"{{"v":1,"event":"listening","protocol":"http","addr":"{bound}"}}"#
+            )
+            .map_err(Failure::io)?;
+        }
+        if let Some(bolt) = &bolt {
+            let bound = bolt.local_addr().map_err(Failure::io)?;
+            writeln!(
+                stdout,
+                r#"{{"v":1,"event":"listening","protocol":"bolt","addr":"{bound}"}}"#
             )
             .map_err(Failure::io)?;
         }
@@ -345,12 +376,27 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             )
         }
     };
+    let bolt = match bolt {
+        None => None,
+        Some(listener) => {
+            let server = Arc::clone(&server);
+            Some(
+                cx.spawn(move |child| async move {
+                    let _ = server.serve_bolt(&child, listener).await;
+                })
+                .map_err(|_| Failure::io("cannot start the Bolt listener"))?,
+            )
+        }
+    };
     Arc::clone(&server)
         .serve(cx, listener)
         .await
         .map_err(Failure::io)?;
     if let Some(mut http) = http {
         let _ = http.join(cx).await;
+    }
+    if let Some(mut bolt) = bolt {
+        let _ = bolt.join(cx).await;
     }
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, r#"{{"v":1,"event":"stopped"}}"#).map_err(Failure::io)

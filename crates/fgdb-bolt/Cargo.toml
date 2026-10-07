@@ -1,0 +1,11 @@
+[package]
+name = "fgdb-bolt"
+version = "0.0.1"
+edition = "2024"
+description = "The Bolt-compat subset (BoltCompatProfileV1): PackStream, chunk framing, version negotiation and typed messages"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

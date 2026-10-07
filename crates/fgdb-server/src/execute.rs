@@ -62,6 +62,42 @@ pub(crate) fn write<'a>(
     Box::pin(write_inner(cx, db, token, statement))
 }
 
+/// A read-only authorized session over one served database: it cannot
+/// express a write, pins one generation, and outlives the read lock.
+pub(crate) type ReadSession<'a> = fgdb::AuthorizedReadSession<'a, crate::Symbols, fn() -> u64>;
+
+/// Open a read session for `token` and report the generation it pinned.
+pub(crate) async fn read_session<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+) -> Result<(ReadSession<'a>, fgdb_types::CommitSeq), Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = contexts.query();
+    let guard = db
+        .db
+        .read(cx)
+        .await
+        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    // Under the read lock no write can land between these two reads, so
+    // the session's pinned generation is exactly this frontier.
+    let frontier = guard
+        .frontier()
+        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+    let session = guard
+        .authorized_read_session(
+            &query,
+            &db.authority,
+            token,
+            TRUNK,
+            db.symbols.clone(),
+            db.query_policy,
+            unix_millis as fn() -> u64,
+        )
+        .map_err(query_refusal)?;
+    Ok((session, frontier))
+}
+
 async fn read_inner(
     cx: &Cx,
     db: &Served,
@@ -72,29 +108,7 @@ async fn read_inner(
     let query = contexts.query();
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    let (session, frontier) = {
-        let guard = db
-            .db
-            .read(cx)
-            .await
-            .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
-        // Under the read lock no write can land between these two reads, so
-        // the session's pinned generation is exactly this frontier.
-        let frontier = guard
-            .frontier()
-            .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
-        let session = guard.authorized_read_session(
-            &query,
-            &db.authority,
-            token,
-            TRUNK,
-            db.symbols.clone(),
-            db.query_policy,
-            unix_millis,
-        );
-        (session, frontier)
-    };
-    let mut session = session.map_err(query_refusal)?;
+    let (mut session, frontier) = read_session(cx, db, token).await?;
     match session.query(&query, &statement.statement, &parameters) {
         Ok(QueryResult::Rows { columns, rows }) => Ok(Answer {
             columns,
@@ -200,7 +214,7 @@ fn procedure_statement<C>(
     }
 }
 
-fn query_refusal(error: QueryError) -> Refusal {
+pub(crate) fn query_refusal(error: QueryError) -> Refusal {
     let code = match &error {
         QueryError::Authorization(error) => warden_code(*error),
         QueryError::Read(_) => ErrorCode::Execution,
@@ -267,6 +281,12 @@ pub(crate) struct Subscription {
 /// label, relation and property), for which the unmasked result is exactly
 /// what it may already read. Registrations live as long as the database, so
 /// each served database admits a bounded number over the server's lifetime.
+/// Per-subscription delta backlog: retained commits, changed rows, and
+/// logical payload units. Eviction drops the oldest whole ticks first.
+const REPLAY_TICKS: usize = 1024;
+const REPLAY_ROWS: usize = 100_000;
+const REPLAY_PAYLOAD_UNITS: usize = 1 << 22;
+
 pub(crate) async fn subscribe(
     cx: &Cx,
     db: &Served,
@@ -309,7 +329,7 @@ pub(crate) async fn subscribe(
         .write(cx)
         .await
         .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
-    let consumer = guard
+    let mut consumer = guard
         .subscribe_native(
             &query,
             &statement.statement,
@@ -326,6 +346,20 @@ pub(crate) async fn subscribe(
             };
             Refusal::new(code, error.to_string())
         })?;
+    // Retain a bounded backlog of deltas, so commits that land between two
+    // polls arrive as one exact combined change instead of forcing a fresh
+    // baseline. A consumer that falls further behind than the backlog gets
+    // DeltaUnavailable and restarts from a new baseline (see `poll`).
+    consumer
+        .enable_replay(
+            &mut guard,
+            &query,
+            REPLAY_TICKS,
+            REPLAY_ROWS,
+            REPLAY_PAYLOAD_UNITS,
+            db.query_policy,
+        )
+        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
     let columns = guard
         .standing_native_columns(&query, consumer.handle())
         .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?

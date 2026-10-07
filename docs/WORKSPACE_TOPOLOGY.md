@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 71 (30 active, 40 planned, 1 reserved)
+* **Crates:** 71 (31 active, 39 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -148,7 +148,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb-protocol` | active | `forbid` | all | W10 | fgdb-w10-fgp-core-5b1 | FGP state machine |
-| 2 | `fgdb-bolt` | planned | `forbid` | all | W10 | — | The Bolt-compat subset with exact epoch/status parity. |
+| 2 | `fgdb-bolt` | active | `forbid` | all | W10 | fgdb-w10-bolt-a0s | The Bolt-compat subset with exact epoch/status parity. |
 | 3 | `fgdb-formats` | planned | `forbid` | all | W10 | — | Import/export profiles under explicit size, recursion, schema, and decompression limits. |
 | 4 | `fgdb-udf-vm` | planned | `forbid` | all | W10 | — | The deterministic UDF bytecode VM. |
 | 5 | `fgdb-observatory` | planned | `forbid` | all | W10 | — | Metrics, decision cards, replay grades, and operator-facing diagnostics. |
@@ -390,4 +390,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:038e596f60f3489a` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:714ca6dea8bd6d6b` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:fcb90ac21a190481` — every normative decision, prose excluded.

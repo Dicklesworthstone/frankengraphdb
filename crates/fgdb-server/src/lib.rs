@@ -34,6 +34,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bolt;
 mod commits;
 mod connection;
 mod convert;
@@ -218,6 +219,26 @@ impl core::error::Error for ServerError {}
 /// engine erases its commit boundary futures).
 type ConnectionFuture<T> = core::pin::Pin<Box<dyn core::future::Future<Output = T> + Send>>;
 
+/// A capability token from its hex text, decoded but not yet verified.
+pub(crate) fn capability_from_hex(hex: &str) -> Option<CapabilityToken> {
+    let hex = hex.trim();
+    if hex.is_empty() || !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let digit = |b: u8| {
+        if b.is_ascii_digit() {
+            b - b'0'
+        } else {
+            b.to_ascii_lowercase() - b'a' + 10
+        }
+    };
+    let bytes: Vec<u8> = (hex.as_bytes().as_chunks::<2>().0.iter())
+        .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
+        .collect();
+    CapabilityToken::decode(&bytes).ok()
+}
+
 /// One served database and its fixed authority inputs.
 pub(crate) struct Served {
     pub(crate) db: RwLock<Database<UnixVfs>>,
@@ -351,6 +372,28 @@ impl Server {
         // Admission is closed. Every connection drains at its next receive
         // point (an admitted statement finishes first), so this join is
         // bounded by in-flight statements, never by an idle client.
+        self.shutdown.trigger();
+        for mut handle in connections {
+            let _ = handle.join(cx).await;
+        }
+        Ok(())
+    }
+
+    /// Serve the Bolt-compat adapter (`BoltCompatProfileV1`, see the `bolt`
+    /// module) until the drain signal fires or `cx` is cancelled: official
+    /// Neo4j drivers run read-only statements under a capability token.
+    pub async fn serve_bolt(
+        self: Arc<Self>,
+        cx: &Cx,
+        listener: TcpListener,
+    ) -> Result<(), ServerError> {
+        let connections = self
+            .accept(cx, &listener, |server, child, stream| {
+                Box::pin(async move {
+                    bolt::run(&child, &server, stream).await;
+                })
+            })
+            .await?;
         self.shutdown.trigger();
         for mut handle in connections {
             let _ = handle.join(cx).await;

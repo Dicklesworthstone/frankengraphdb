@@ -90,26 +90,7 @@ fn bearer(request: &Request) -> Result<CapabilityToken, Response> {
         .strip_prefix("Bearer ")
         .ok_or_else(unauthenticated)?
         .trim();
-    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(unauthenticated());
-    }
-    let bytes: Vec<u8> = hex
-        .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| {
-            let digit = |b: u8| {
-                if b.is_ascii_digit() {
-                    b - b'0'
-                } else {
-                    b.to_ascii_lowercase() - b'a' + 10
-                }
-            };
-            (digit(pair[0]) << 4) | digit(pair[1])
-        })
-        .collect();
-    CapabilityToken::decode(&bytes).map_err(|_| unauthenticated())
+    crate::capability_from_hex(hex).ok_or_else(unauthenticated)
 }
 
 /// The statement and arguments of one request body.

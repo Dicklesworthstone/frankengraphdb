@@ -271,12 +271,31 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   buffered whole: an HTTP response has no per-row flow control.
   `fgdb_protocol::json` holds the one strict JSON grammar and the cell
   encoding the CLI and the adapter share.
+- **The Bolt-compat subset** (`fgdbd serve --bolt-listen`, crate
+  `fgdb-bolt` plus `fgdb-server/src/bolt.rs`): `BoltCompatProfileV1`, the
+  plan's read-only negotiated downgrade, at Bolt 5.0. HELLO carries the hex
+  capability token as a `bearer` credential or a `basic` password; a token no
+  served database accepts is refused (`Neo.ClientError.Security.Unauthorized`)
+  and the connection closes. RUN/PULL/DISCARD, BEGIN/COMMIT/ROLLBACK, RESET,
+  GOODBYE and ROUTE (a single-server table, so `neo4j://` works) are served.
+  Every RUN executes on an authorized read session, which cannot express a
+  write: a mutating statement refuses before graph access with
+  `Neo.ClientError.Statement.AccessMode`. An explicit transaction holds one
+  read session, so all its statements read one generation; no lock is held
+  across round trips. Vertices are returned as Bolt nodes whose labels and
+  properties are read through the same session (capability masking applies);
+  relationship and path values refuse with
+  `Neo.ClientError.Statement.FeatureNotSupported`. The FGP error classes map
+  onto Neo4j status codes, and only Busy/Draining use a retryable
+  `TransientError`. Bookmarks name the generation read and are not required
+  inputs. Results are the same ephemeral class as FGP's.
 
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
 AUTH_REFRESH, explicit multi-statement transactions with ownership and
-reattachment, durable subscriptions with resume across reconnects, TLS, and
-the HTTP/2, gRPC, WebSocket and Bolt adapters. Because results are ephemeral, a disconnect can lose undelivered
+reattachment, durable subscriptions with resume across reconnects, TLS, Bolt
+writes (`BoltCompatProfileV2`, post-1.0) and relationship/path values, and the
+HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
 
 Witnesses: `cargo test -p fgdb-protocol --all-features` (body round trips,

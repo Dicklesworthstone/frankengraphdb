@@ -16,6 +16,7 @@ members = [
     "crates/fgdb",
     "crates/fgdb-beacon",
     "crates/fgdb-bigint",
+    "crates/fgdb-bolt",
     "crates/fgdb-calibrate",
     "crates/fgdb-chronicle",
     "crates/fgdb-claim",
