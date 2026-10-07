@@ -119,8 +119,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
 }
 
 /// The local CLI's parameter spellings, as wire values: `int:`, `float:`,
-/// `text:`, `bool:true|false`, `null`, and `json:<array>` (a list whose
-/// objects are maps).
+/// `text:`, `bool:true|false`, `null`, `json:<array>` (a list whose
+/// objects are maps), `bytes:<hex>`, and `vector:<x,y,...>` (an embedding as
+/// packed little-endian f32 bytes).
 fn parameter(raw: &str) -> Result<WireValue, Failure> {
     if let Some(value) = raw.strip_prefix("int:") {
         return value
@@ -139,6 +140,14 @@ fn parameter(raw: &str) -> Result<WireValue, Failure> {
     }
     if let Some(value) = raw.strip_prefix("text:") {
         return Ok(WireValue::Text(value.to_owned()));
+    }
+    if let Some(value) = raw.strip_prefix("bytes:") {
+        return fgdb_protocol::json::bytes_from_hex(value)
+            .map(WireValue::Bytes)
+            .map_err(Failure::usage);
+    }
+    if let Some(value) = raw.strip_prefix("vector:") {
+        return packed_vector(value).map(WireValue::Bytes);
     }
     if let Some(value) = raw.strip_prefix("json:") {
         let json = parse_json(value, MAX_JSON_VALUES, MAX_JSON_TOKEN_BYTES)
@@ -468,4 +477,20 @@ fn human(value: &WireValue) -> String {
             denominator,
         } => format!("{numerator}/{denominator}"),
     }
+}
+
+/// `x,y,...` as packed little-endian f32 bytes, each coordinate finite.
+pub(crate) fn packed_vector(text: &str) -> Result<Vec<u8>, Failure> {
+    let mut bytes = Vec::new();
+    for raw in text.split(',') {
+        let value: f32 = raw
+            .trim()
+            .parse()
+            .map_err(|_| Failure::usage("vector: is comma-separated numbers"))?;
+        if !value.is_finite() {
+            return Err(Failure::usage("vector: coordinates must be finite f32"));
+        }
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
 }

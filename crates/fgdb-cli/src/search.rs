@@ -32,7 +32,7 @@
 use super::{Failure, Options, float_text, render_rows};
 use fgdb::EmbeddedReadView;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
-use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
+use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search, VectorEncoding};
 use fgdb_beacon::{
     DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
     IndexConfig, TextMatch, VectorSearch,
@@ -429,6 +429,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                 .as_ref()
                 .map(|(_, keys)| keys.clone())
                 .unwrap_or_default(),
+            encoding: VectorEncoding::Coordinates,
         },
         index,
         policy: ReadPolicy::default(),

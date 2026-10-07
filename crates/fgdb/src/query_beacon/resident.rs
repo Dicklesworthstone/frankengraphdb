@@ -168,7 +168,7 @@ fn definition(options: &Options, work: &mut impl WorkControl) -> Result<Options,
         ));
     }
     let vector = if let Some(vector) = &options.index.vector {
-        if options.projection.vector.len() != vector.dimensions {
+        if !options.projection.fits(vector.dimensions) {
             return Err(BeaconError::InvalidConfig(
                 "vector properties must match dimensions",
             ));
@@ -190,6 +190,7 @@ fn definition(options: &Options, work: &mut impl WorkControl) -> Result<Options,
         projection: Projection {
             text: options.index.text.as_ref().and(options.projection.text),
             vector,
+            encoding: options.projection.encoding,
         },
         index: options.index.clone(),
         policy: options.policy,

@@ -1,4 +1,4 @@
-use fgdb_beacon::read::{Projection, ReadOptions, Search};
+use fgdb_beacon::read::{Projection, ReadOptions, Search, VectorEncoding};
 use fgdb_beacon::{
     BeaconError, DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
     TextMatch, VectorSearch, WorkBudget, WorkControl,
@@ -15,6 +15,7 @@ fn projection() -> Projection<u8> {
     Projection {
         text: Some(0),
         vector: vec![1, 2],
+        encoding: VectorEncoding::Coordinates,
     }
 }
 fn budget() -> WorkBudget {
@@ -34,6 +35,7 @@ fn scalar_coordinates_keep_order_and_do_not_invent_missing_modalities() {
     let p = Projection {
         text: Some(0_u8),
         vector: vec![2, 1],
+        encoding: VectorEncoding::Coordinates,
     };
     let row = p
         .project(
@@ -70,6 +72,7 @@ fn exact_f32_admission_rejects_rounding_nonfinite_and_wrong_scalar_types() {
     let p = Projection {
         text: None,
         vector: vec![1_u8],
+        encoding: VectorEncoding::Coordinates,
     };
     for value in [
         CanonicalScalar::Int(i64::MAX),
@@ -243,4 +246,75 @@ fn exact_projection_budget_succeeds_but_every_shorter_allowance_refuses() {
         &mut WorkBudget::new(count.0),
     )
     .unwrap();
+}
+
+/// An embedding stored as ONE byte-string property: exactly `dimensions`
+/// little-endian binary32 values. Absent stays absent; a wrong length, a
+/// non-finite coordinate or a non-byte value refuses rather than padding,
+/// truncating or rounding.
+#[test]
+fn packed_f32_vectors_decode_exactly_or_refuse() {
+    let packed = |values: &[f32]| {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        CanonicalScalar::bytes(bytes).unwrap()
+    };
+    let mut c = config();
+    c.text = None;
+    c.vector.as_mut().unwrap().dimensions = 3;
+    let p = Projection {
+        text: None,
+        vector: vec![0_u8],
+        encoding: VectorEncoding::PackedF32Le,
+    };
+    assert!(p.fits(3) && p.fits(768) && !p.fits(0));
+    let stored = packed(&[0.25, -1.5, 3.0e-3]);
+    let row = p
+        .project(VId(1), &c, |_| Some(&stored), &mut budget())
+        .unwrap();
+    assert_eq!(row.vector, Some(vec![0.25, -1.5, 3.0e-3]));
+    let row = p.project(VId(1), &c, |_| None, &mut budget()).unwrap();
+    assert_eq!(row.vector, None);
+    for refused in [
+        packed(&[0.25, -1.5]),
+        packed(&[0.25, -1.5, 3.0, 4.0]),
+        packed(&[0.25, f32::NAN, 1.0]),
+        packed(&[f32::INFINITY, 0.0, 1.0]),
+        CanonicalScalar::Float(CanonicalF64::new(0.5)),
+        text("not a vector"),
+    ] {
+        assert!(
+            p.project(VId(1), &c, |_| Some(&refused), &mut budget())
+                .is_err()
+        );
+    }
+    // Two keys cannot be one packed vector.
+    let two = Projection {
+        text: None,
+        vector: vec![0_u8, 1],
+        encoding: VectorEncoding::PackedF32Le,
+    };
+    assert!(!two.fits(3));
+    // A packed projection searches like the coordinate form of the same
+    // values: the end-to-end read path agrees with the per-key layout.
+    let mut options = ReadOptions::<u8, u8>::text(0);
+    options.projection = Projection {
+        text: None,
+        vector: vec![0],
+        encoding: VectorEncoding::PackedF32Le,
+    };
+    options.index = IndexConfig {
+        vector: Some(HnswConfig::new(3, DistanceMetric::SquaredEuclidean)),
+        text: None,
+        ..IndexConfig::default()
+    };
+    let query = [0.25_f32, -1.5, 0.0];
+    assert!(
+        options
+            .config_for(Search::Vector {
+                query: &query,
+                k: 1,
+                mode: VectorSearch::Exact,
+            })
+            .is_ok()
+    );
 }

@@ -383,6 +383,38 @@ pub fn cell(value: &WireValue) -> String {
 /// array a list and an object a map. A non-finite or out-of-range number is
 /// refused, never rounded.
 pub fn argument(json: &Json) -> Result<WireValue, String> {
+    // JSON has no byte strings. A one-key object whose key starts with `$`
+    // (never a property name) spells one: `{"$bytes": "<hex>"}` exactly, or
+    // `{"$vector": [numbers]}` as packed little-endian f32 values, each
+    // rounded to the nearest f32 and required to stay finite: the stored
+    // form of an embedding that `hybrid.search(vector_property => ...)` reads.
+    if let Json::Object(fields) = json
+        && fields.len() == 1
+        && let Some((key, value)) = fields.iter().next()
+        && key.starts_with('$')
+    {
+        return match (key.as_str(), value) {
+            ("$bytes", Json::String(hex)) => bytes_from_hex(hex).map(WireValue::Bytes),
+            ("$vector", Json::Array(items)) => {
+                let mut bytes = Vec::with_capacity(items.len() * 4);
+                for item in items {
+                    let Json::Number(text) = item else {
+                        return Err("a $vector holds numbers".into());
+                    };
+                    let value: f64 = text.parse().map_err(|_| "invalid number".to_owned())?;
+                    let narrowed = value as f32;
+                    if !narrowed.is_finite() {
+                        return Err("a $vector coordinate is out of f32 range".into());
+                    }
+                    bytes.extend_from_slice(&narrowed.to_le_bytes());
+                }
+                Ok(WireValue::Bytes(bytes))
+            }
+            _ => Err(format!(
+                "unknown typed argument {key:?}; use $bytes or $vector"
+            )),
+        };
+    }
     Ok(match json {
         Json::Null => WireValue::Null,
         Json::Bool(value) => WireValue::Bool(*value),
@@ -410,9 +442,61 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
     })
 }
 
+/// Bytes from even-length hexadecimal text.
+pub fn bytes_from_hex(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("$bytes must be even-length hexadecimal".into());
+    }
+    let digit = |b: u8| {
+        if b.is_ascii_digit() {
+            b - b'0'
+        } else {
+            b.to_ascii_lowercase() - b'a' + 10
+        }
+    };
+    Ok(hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_arguments_spell_bytes_and_packed_vectors() {
+        let parse = |text: &str| argument(&parse_json(text, 64, 1024).unwrap());
+        assert_eq!(
+            parse(r#"{"$bytes": "00ff10"}"#),
+            Ok(WireValue::Bytes(vec![0, 255, 16]))
+        );
+        assert_eq!(
+            parse(r#"{"$vector": [0.5, -2, 1e-3]}"#),
+            Ok(WireValue::Bytes(
+                [0.5_f32, -2.0, 1e-3]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect()
+            ))
+        );
+        for refused in [
+            r#"{"$bytes": "abc"}"#,
+            r#"{"$vector": ["x"]}"#,
+            r#"{"$vector": [1e300]}"#,
+            r#"{"$other": 1}"#,
+        ] {
+            assert!(parse(refused).is_err(), "{refused}");
+        }
+        // Ordinary maps, including ones with a `$` key among others, stay maps.
+        assert!(matches!(
+            parse(r#"{"$bytes": "00", "x": 1}"#),
+            Ok(WireValue::Map(_))
+        ));
+    }
 
     #[test]
     fn documents_parse_strictly_and_within_bounds() {

@@ -591,6 +591,11 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
     }
     let scalar = if let Some(value) = raw.strip_prefix("text:") {
         CanonicalScalar::ucs_basic_text(value).map_err(Failure::query)?
+    } else if let Some(value) = raw.strip_prefix("bytes:") {
+        let bytes = fgdb_protocol::json::bytes_from_hex(value).map_err(Failure::usage)?;
+        CanonicalScalar::bytes(bytes).map_err(Failure::query)?
+    } else if let Some(value) = raw.strip_prefix("vector:") {
+        CanonicalScalar::bytes(remote::packed_vector(value)?).map_err(Failure::query)?
     } else if let Some(value) = raw.strip_prefix("timestamp:") {
         let fields: Vec<_> = value.split(',').collect();
         if fields.len() != 4 {

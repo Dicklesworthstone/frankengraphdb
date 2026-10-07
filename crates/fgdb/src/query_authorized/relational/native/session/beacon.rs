@@ -118,7 +118,7 @@ fn definition(
     }
     let mut vector_keys = Vec::new();
     if let Some(vector) = &config.vector {
-        if options.projection.vector.len() != vector.dimensions {
+        if !options.projection.fits(vector.dimensions) {
             return Err(BeaconError::InvalidConfig(
                 "vector properties must match dimensions",
             ));
@@ -144,6 +144,7 @@ fn definition(
         projection: Projection {
             text: options.projection.text.filter(|_| config.text.is_some()),
             vector: vector_keys,
+            encoding: options.projection.encoding,
         },
         index: config,
         policy: policy(options.policy, host),

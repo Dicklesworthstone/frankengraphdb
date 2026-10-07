@@ -244,6 +244,15 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property 
      vector_properties => ['x'], k => 5) YIELD node, score
    RETURN node.title, score ORDER BY score DESC"
 
+# Real embeddings live in ONE property as packed little-endian f32 bytes
+# (`--param e=vector:0.1,0.2,...`, or {"$vector": [...]} over HTTP)
+fgdb write --db mydb.fgdbdir --key-file fgdb.keys --label Doc=1 --property title=1 --property emb=3 \
+  --param 'e=vector:0.12,0.80,0.05' "CREATE (:Doc {title: 'Ada', emb: \$e})"
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property emb=3 \
+  --param 'q=json:[0.1,0.8,0.1]' \
+  "CALL hybrid.search(vector => \$q, vector_property => 'emb', metric => 'cosine', k => 5)
+     YIELD node, score RETURN node.title, score ORDER BY score DESC"
+
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 

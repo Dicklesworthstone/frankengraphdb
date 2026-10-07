@@ -17,13 +17,40 @@ use crate::{
 /// value refuses the read. Absent lanes are never filled with synthetic zeros.
 ///
 /// Numeric coordinates must be finite and exactly representable as f32. This
-/// is not an encoding for a vector-valued durable property and never silently
-/// rounds a stored f64, integer or Decimal128. Repeated keys deliberately
-/// repeat coordinates. A caller must mask keys BEFORE resolving their values.
+/// never silently rounds a stored f64, integer or Decimal128. Repeated keys
+/// deliberately repeat coordinates. A caller must mask keys BEFORE resolving
+/// their values. `encoding` says how the vector keys hold coordinates.
 #[derive(Clone, Debug)]
 pub struct Projection<K> {
     pub text: Option<K>,
     pub vector: Vec<K>,
+    pub encoding: VectorEncoding,
+}
+
+/// How a vector projection's keys hold its coordinates. Part of the index
+/// definition: the same bytes under another encoding are another vector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VectorEncoding {
+    /// One key per coordinate, each an integer or float exactly
+    /// representable as f32.
+    #[default]
+    Coordinates,
+    /// Exactly one key whose value is a byte string of `dimensions`
+    /// little-endian IEEE-754 binary32 values (4 bytes each), every one
+    /// finite: an embedding stored as one property. Any other length or a
+    /// non-byte value refuses the read rather than truncating or padding.
+    PackedF32Le,
+}
+
+impl<K> Projection<K> {
+    /// Whether the vector keys can supply exactly `dimensions` coordinates.
+    #[must_use]
+    pub fn fits(&self, dimensions: usize) -> bool {
+        match self.encoding {
+            VectorEncoding::Coordinates => self.vector.len() == dimensions,
+            VectorEncoding::PackedF32Le => self.vector.len() == 1 && dimensions > 0,
+        }
+    }
 }
 
 /// One allowance covers source traversal, scalar projection, construction,
@@ -66,6 +93,7 @@ impl<K, L> ReadOptions<K, L> {
             projection: Projection {
                 text: Some(property),
                 vector: Vec::new(),
+                encoding: VectorEncoding::Coordinates,
             },
             index: IndexConfig::default(),
             policy: ReadPolicy::default(),
@@ -94,7 +122,7 @@ impl<K, L> ReadOptions<K, L> {
                 .vector
                 .as_ref()
                 .ok_or(BeaconError::Disabled("vector"))?;
-            if self.projection.vector.len() != vector.dimensions {
+            if !self.projection.fits(vector.dimensions) {
                 return Err(BeaconError::InvalidConfig(
                     "vector properties must match dimensions",
                 ));
@@ -304,16 +332,19 @@ impl<K: Copy> Projection<K> {
             None
         };
         let vector = if let Some(vector) = &config.vector {
-            if self.vector.len() != vector.dimensions {
+            if !self.fits(vector.dimensions) {
                 return Err(BeaconError::InvalidConfig(
                     "vector properties must match dimensions",
                 ));
             }
-            if self.vector.len() > config.max_vector_values {
+            if vector.dimensions > config.max_vector_values {
                 return Err(BeaconError::ResourceLimit {
                     resource: "staged vector values",
                     limit: config.max_vector_values,
                 });
+            }
+            if self.encoding == VectorEncoding::PackedF32Le {
+                return packed(id, text, self.vector[0], vector.dimensions, property, work);
             }
             // Establish completeness before validating any coordinate. An
             // absent (including capability-masked) lane is uniformly absent.
@@ -372,4 +403,54 @@ impl<K: Copy> Projection<K> {
         work.charge(1)?;
         Ok(IndexDocument { id, vector, text })
     }
+}
+
+/// The document of a packed-vector projection: one byte-string value holding
+/// exactly `dimensions` little-endian binary32 coordinates.
+fn packed<'a, K>(
+    id: VId,
+    text: Option<String>,
+    key: K,
+    dimensions: usize,
+    mut property: impl FnMut(K) -> Option<&'a CanonicalScalar>,
+    work: &mut dyn WorkControl,
+) -> Result<IndexDocument, BeaconError> {
+    work.charge(1)?;
+    let vector = match property(key) {
+        // An absent (including capability-masked) vector omits the lane.
+        None | Some(CanonicalScalar::Null) => None,
+        Some(CanonicalScalar::Bytes(bytes)) => {
+            let bytes = bytes.as_slice();
+            if dimensions.checked_mul(4) != Some(bytes.len()) {
+                return Err(BeaconError::InvalidQuery(
+                    "packed vector byte length is not 4 * dimensions",
+                ));
+            }
+            work.charge(dimensions)?;
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(dimensions)
+                .map_err(|_| BeaconError::ResourceLimit {
+                    resource: "vector allocation",
+                    limit: dimensions,
+                })?;
+            for chunk in bytes.as_chunks::<4>().0 {
+                let value = f32::from_le_bytes(*chunk);
+                if !value.is_finite() {
+                    return Err(BeaconError::InvalidQuery(
+                        "packed vector coordinate is not finite",
+                    ));
+                }
+                values.push(value);
+            }
+            Some(values)
+        }
+        Some(_) => {
+            return Err(BeaconError::InvalidQuery(
+                "a packed vector property must be a byte string",
+            ));
+        }
+    };
+    work.charge(1)?;
+    Ok(IndexDocument { id, vector, text })
 }

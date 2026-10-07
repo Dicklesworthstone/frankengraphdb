@@ -6,7 +6,9 @@
 //! The corpus is the EXPLICIT projection the arguments name, exactly as the
 //! CLI's `search` flags do: `text` over `text_property` (BM25, `text_match`
 //! any/all/phrase/fuzzy1/fuzzy2/fuzzy1-all/fuzzy2-all, `max_expansions`),
-//! `vector` over one `vector_properties` entry per coordinate (`metric`
+//! `vector` over one `vector_properties` entry per coordinate, or over one
+//! `vector_property` holding the whole embedding as packed little-endian f32
+//! bytes (`metric`
 //! l2/cosine/dot, exact unless `ann` gives the HNSW `ef_search`), restricted
 //! to `label` when given. `seeds` with an explicit `max_hops` add the graph
 //! lane (`relation`, `direction` out/in/both, `include_seeds`,
@@ -28,7 +30,7 @@ use super::{Meter, Options, Scan};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
-use fgdb_beacon::read::{Projection, ReadError as BeaconReadError, ReadPolicy};
+use fgdb_beacon::read::{Projection, ReadError as BeaconReadError, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{
     BeaconError, DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridHit,
     GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
@@ -208,6 +210,7 @@ impl HybridSearch {
         let mut max_expansions = None;
         let mut vector = None;
         let mut vector_properties = None;
+        let mut vector_property = None;
         let mut metric = None;
         let mut ann = None;
         let mut label = None;
@@ -273,6 +276,9 @@ impl HybridSearch {
                         coordinates.push(coordinate);
                     }
                     vector = Some(coordinates);
+                }
+                "vector_property" => {
+                    vector_property = Some(PropertyKeyId(identity("vector_property", value)?));
                 }
                 "vector_properties" => {
                     let mut keys = Vec::new();
@@ -351,19 +357,29 @@ impl HybridSearch {
                 ));
             }
         };
-        let vector = match (vector, vector_properties) {
-            (Some(coordinates), Some(keys)) => {
+        // A vector is projected either one property per coordinate, or from
+        // one property holding the whole embedding as packed f32 bytes.
+        let vector = match (vector, vector_properties, vector_property) {
+            (Some(coordinates), Some(keys), None) => {
                 if coordinates.len() != keys.len() || keys.is_empty() {
                     return Err(HybridCallError::Combination(
                         "vector needs exactly one vector_properties entry per coordinate",
                     ));
                 }
-                Some((coordinates, keys))
+                Some((coordinates, keys, VectorEncoding::Coordinates))
             }
-            (None, None) => None,
+            (Some(coordinates), None, Some(key)) if !coordinates.is_empty() => {
+                Some((coordinates, vec![key], VectorEncoding::PackedF32Le))
+            }
+            (None, None, None) => None,
+            (_, Some(_), Some(_)) => {
+                return Err(HybridCallError::Combination(
+                    "vector_properties and vector_property are alternatives",
+                ));
+            }
             _ => {
                 return Err(HybridCallError::Combination(
-                    "vector and vector_properties are given together",
+                    "vector is given with vector_properties or vector_property",
                 ));
             }
         };
@@ -472,11 +488,14 @@ impl HybridSearch {
                 text: text_property,
                 vector: vector
                     .as_ref()
-                    .map(|(_, keys)| keys.clone())
+                    .map(|(_, keys, _)| keys.clone())
                     .unwrap_or_default(),
+                encoding: vector
+                    .as_ref()
+                    .map_or(VectorEncoding::Coordinates, |(_, _, encoding)| *encoding),
             },
             index: IndexConfig {
-                vector: vector.as_ref().map(|(coordinates, _)| {
+                vector: vector.as_ref().map(|(coordinates, _, _)| {
                     HnswConfig::new(
                         coordinates.len(),
                         metric.unwrap_or(DistanceMetric::SquaredEuclidean),
@@ -497,7 +516,7 @@ impl HybridSearch {
             text: text.unwrap_or_default(),
             text_mode,
             vector: vector
-                .map(|(coordinates, _)| coordinates)
+                .map(|(coordinates, _, _)| coordinates)
                 .unwrap_or_default(),
             vector_mode: ann.map_or(VectorSearch::Exact, |ef_search| VectorSearch::Approximate {
                 ef_search,

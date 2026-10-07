@@ -2245,7 +2245,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
     use asupersync::{Budget, runtime::RuntimeBuilder};
     use fgdb::{Database, DatabaseKeys};
     use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
-    use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
+    use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search, VectorEncoding};
     use fgdb_beacon::{
         DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery,
         HnswConfig, IndexConfig, TextMatch, VectorSearch,
@@ -2286,6 +2286,7 @@ fn search_lanes_equal_the_library_and_pin_history() {
             projection: Projection {
                 text: text.then_some(text_key),
                 vector: metric.map_or_else(Vec::new, |_| vec![vector_key]),
+                encoding: VectorEncoding::Coordinates,
             },
             index,
             policy: ReadPolicy::default(),

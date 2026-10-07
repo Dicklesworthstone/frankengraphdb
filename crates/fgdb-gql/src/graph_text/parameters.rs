@@ -386,7 +386,7 @@ pub(crate) fn symbol_argument(
     argument: &str,
 ) -> Option<GraphSymbolKind> {
     match (namespace, name, argument) {
-        ("hybrid", "search", "text_property" | "vector_properties") => {
+        ("hybrid", "search", "text_property" | "vector_properties" | "vector_property") => {
             Some(GraphSymbolKind::Property)
         }
         ("hybrid", "search", "label") => Some(GraphSymbolKind::Label),

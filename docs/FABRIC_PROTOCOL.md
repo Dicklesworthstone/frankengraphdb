@@ -260,7 +260,10 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   autocommit statements over plain HTTP: `POST /v1/databases/<name>/query`
   or `/write` with `Authorization: Bearer <hex token>` and a body
   `{"statement": "<gql>", "parameters": {...}}` (plain JSON arguments: an
-  integer is `int`, another number `float`, an object a map); `GET
+  integer is `int`, another number `float`, an object a map; JSON has no byte
+  strings, so the one-key objects `{"$bytes": "<hex>"}` and
+  `{"$vector": [numbers]}` spell bytes, the latter as packed little-endian
+  f32 values, the stored form of an embedding); `GET
   /v1/health`. It is a framing over the exact FGP execution path
   (`crates/fgdb-server/src/execute.rs`): the same capability check, the same
   fresh authorized session per statement, the same statement and error

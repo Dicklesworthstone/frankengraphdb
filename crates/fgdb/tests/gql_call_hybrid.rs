@@ -11,7 +11,7 @@ use fgdb::{
     QueryResult, QueryValue, WriteBatch,
 };
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
-use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy};
+use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{
     DistanceMetric, ExactHybridQuery, ExactRrfProfile, GraphHybridHit, GraphHybridQuery,
     HnswConfig, IndexConfig, TextMatch, VectorSearch,
@@ -36,6 +36,7 @@ const TITLE: PropertyKeyId = PropertyKeyId(1);
 const BODY: PropertyKeyId = PropertyKeyId(2);
 const E0: PropertyKeyId = PropertyKeyId(3);
 const E1: PropertyKeyId = PropertyKeyId(4);
+const EMB: PropertyKeyId = PropertyKeyId(5);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0x4a; 32], NS, [0x4c; 32])
@@ -49,6 +50,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "body") => Some(GraphSymbol::Property(BODY)),
         (GraphSymbolKind::Property, "e0") => Some(GraphSymbol::Property(E0)),
         (GraphSymbolKind::Property, "e1") => Some(GraphSymbol::Property(E1)),
+        (GraphSymbolKind::Property, "emb") => Some(GraphSymbol::Property(EMB)),
         _ => None,
     }
 }
@@ -63,6 +65,11 @@ fn text(value: &str) -> CanonicalScalar {
 
 fn float(value: f64) -> CanonicalScalar {
     CanonicalScalar::Float(CanonicalF64::new(value))
+}
+
+/// An embedding as one property: little-endian f32 bytes.
+fn packed(values: &[f32]) -> CanonicalScalar {
+    CanonicalScalar::bytes(values.iter().flat_map(|v| v.to_le_bytes()).collect()).unwrap()
 }
 
 /// Six documents citing in a chain 1->2->3->4->5, with exact-f32 embeddings.
@@ -110,6 +117,7 @@ fn corpus(hidden: bool) -> Vec<WriteBatch> {
                 (BODY, text(body)),
                 (E0, float(e0)),
                 (E1, float(e1)),
+                (EMB, packed(&[e0 as f32, e1 as f32])),
             ],
         );
     }
@@ -225,6 +233,7 @@ fn options(text: bool, vector: bool) -> ReadOptions<PropertyKeyId, LabelId> {
         projection: Projection {
             text: text.then_some(BODY),
             vector: if vector { vec![E0, E1] } else { Vec::new() },
+            encoding: VectorEncoding::Coordinates,
         },
         index: IndexConfig {
             vector: vector.then(|| HnswConfig::new(2, DistanceMetric::Cosine)),
@@ -357,6 +366,86 @@ fn every_lane_combination_equals_the_library_search() {
             let order: Vec<GraphValue> = ranked.into_iter().map(|row| row[0].clone()).collect();
             assert_eq!(order, best, "{arguments}");
         }
+    });
+}
+
+/// An embedding stored as ONE packed f32 byte property searches exactly like
+/// the same coordinates stored one property each: same hits, ranks, scores.
+#[test]
+fn a_packed_embedding_property_equals_its_per_coordinate_form() {
+    run(async |commit, cx| {
+        let db = open(commit, false).await;
+        let parameters = GqlParameters::new()
+            .with_list(
+                "q",
+                vec![
+                    GraphValue::Scalar(float(0.5)),
+                    GraphValue::Scalar(float(0.5)),
+                ],
+            )
+            .unwrap();
+        let search = |vector: &str| {
+            format!(
+                "CALL hybrid.search(text => 'engine', text_property => 'body', vector => $q, \
+                 {vector}, metric => 'cosine', candidates => 4, k => 5) {OUTPUTS}"
+            )
+        };
+        let coordinates = ordered(rows(
+            db.query(
+                cx,
+                &search("vector_properties => ['e0', 'e1']"),
+                &parameters,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        ));
+        let packed = ordered(rows(
+            db.query(
+                cx,
+                &search("vector_property => 'emb'"),
+                &parameters,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        ));
+        assert_eq!(coordinates.1.len(), 5);
+        assert_eq!(packed, coordinates);
+        // The two forms are alternatives, and a packed property must hold
+        // exactly 4 * dimensions bytes.
+        let both = db.query(
+            cx,
+            &search("vector_properties => ['e0', 'e1'], vector_property => 'emb'"),
+            &parameters,
+            symbols,
+            policy(),
+        );
+        assert!(matches!(
+            search_error(both.unwrap_err()),
+            Ok(HybridCallError::Combination(_))
+        ));
+        let three = GqlParameters::new()
+            .with_list(
+                "q",
+                vec![
+                    GraphValue::Scalar(float(0.5)),
+                    GraphValue::Scalar(float(0.5)),
+                    GraphValue::Scalar(float(0.5)),
+                ],
+            )
+            .unwrap();
+        let wrong = db.query(
+            cx,
+            &search("vector_property => 'emb'"),
+            &three,
+            symbols,
+            policy(),
+        );
+        assert!(matches!(
+            search_error(wrong.unwrap_err()),
+            Ok(HybridCallError::Index(_))
+        ));
     });
 }
 
