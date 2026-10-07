@@ -11,8 +11,6 @@ use crate::execute::{Answer, poll, read, subscribe, write};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
 use asupersync::Cx;
-use asupersync::net::TcpStream;
-use asupersync::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf};
 use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
@@ -20,7 +18,9 @@ use fgdb_protocol::body::{
     HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
     WireValue,
 };
-use fgdb_protocol::transport::{FrameReader, FrameWriter};
+use fgdb_protocol::transport::{
+    DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
+};
 use fgdb_protocol::{
     Binding, ChildKind, ChildTerminus, Connection, CreditUpdate, FlowWindow, Frame, FrameKind,
     FrameLimits, Header, MAX_HEADER_LEN, Posture, ProtocolError, SendCost, SendTerminus,
@@ -62,8 +62,8 @@ enum Stop {
 }
 
 struct Lane {
-    reader: FrameReader<OwnedReadHalf>,
-    writer: FrameWriter<OwnedWriteHalf>,
+    reader: FrameReader<DuplexReader<Box<dyn DuplexIo>>>,
+    writer: FrameWriter<DuplexWriter<Box<dyn DuplexIo>>>,
     conn: Connection,
     /// Never larger than the server's limit or the client's HELLO limit.
     send_limits: FrameLimits,
@@ -76,11 +76,12 @@ struct Lane {
     send_authority: Option<(Arc<Served>, CapabilityToken)>,
 }
 
-pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
-    let _ = stream.set_nodelay(true);
+pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let limits = FrameLimits::new(server.limits.max_frame_len as usize)
         .expect("server limits were validated at construction");
-    let (read, write) = stream.into_split();
+    let Ok((read, write)) = split_duplex(cx, stream) else {
+        return;
+    };
     let Ok(conn) = Connection::new(1, 64) else {
         return;
     };

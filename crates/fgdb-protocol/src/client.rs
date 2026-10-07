@@ -13,13 +13,14 @@ use crate::body::{
     Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd, SelectDatabase,
     SubscriptionBatch, WindowUpdate, WireValue,
 };
-use crate::transport::{FrameReader, FrameWriter, TransportError};
+use crate::transport::{
+    DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
+};
 use crate::{
     Binding, Frame, FrameKind, FrameLimits, Header, ProtocolError, ReadyBinding, StreamId,
 };
 use asupersync::Cx;
 use asupersync::net::TcpStream;
-use asupersync::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf};
 use std::net::SocketAddr;
 
 /// What a client can fail with. Server refusals keep their public class.
@@ -93,8 +94,8 @@ pub struct Answer {
 }
 
 pub struct Client {
-    reader: FrameReader<OwnedReadHalf>,
-    writer: FrameWriter<OwnedWriteHalf>,
+    reader: FrameReader<DuplexReader<Box<dyn DuplexIo>>>,
+    writer: FrameWriter<DuplexWriter<Box<dyn DuplexIo>>>,
     /// The binding every server frame must carry from now on.
     expected: Binding,
     /// What this client sends with: identical to `expected` once Ready.
@@ -125,9 +126,22 @@ impl Client {
             .await
             .map_err(|error| ClientError::Io(error.kind()))?;
         let _ = stream.set_nodelay(true);
+        Self::connect_stream(cx, stream, credential).await
+    }
+
+    /// Negotiate FGP and authenticate over an already established transport.
+    /// A TLS caller must complete certificate/hostname verification before
+    /// passing its foundation TlsStream here. This method has no plaintext
+    /// fallback and never sends a credential before that transport exists.
+    pub async fn connect_stream(
+        cx: &Cx,
+        stream: impl DuplexIo + 'static,
+        credential: Vec<u8>,
+    ) -> Result<Self, ClientError> {
         let limits = FrameLimits::new(CLIENT_MAX_FRAME as usize)
             .map_err(|_| ClientError::Protocol("invalid client frame limit"))?;
-        let (read, write) = stream.into_split();
+        let stream: Box<dyn DuplexIo> = Box::new(stream);
+        let (read, write) = split_duplex(cx, stream)?;
         let mut client = Self {
             reader: FrameReader::new(read, limits),
             writer: FrameWriter::new(write, limits),

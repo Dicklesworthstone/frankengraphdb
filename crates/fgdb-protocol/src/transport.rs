@@ -19,9 +19,95 @@ use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io::ErrorKind;
+use std::sync::{Arc, Mutex, TryLockError};
 
 const READ_AHEAD: usize = 4096;
 const IO_POLLS_PER_TURN: usize = 16;
+
+/// The foundation's duplex streams, including TCP, TLS and laboratory I/O.
+/// No protocol framing or encryption is implemented by this marker trait.
+pub trait DuplexIo: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> DuplexIo for T {}
+
+/// One receive handle for a duplex stream whose TLS state cannot be split.
+pub struct DuplexReader<T> {
+    io: Arc<Mutex<T>>,
+}
+
+/// The corresponding send handle. Its mutex is held for one nonblocking poll
+/// only, never across an await. Readers and writers retain independent frame
+/// state while sharing the foundation's single encryption state.
+pub struct DuplexWriter<T> {
+    io: Arc<Mutex<T>>,
+}
+
+/// Split ownership without splitting a TLS session or requiring a !Send
+/// borrowed stream. The two handles never expose the underlying stream.
+pub fn split_duplex<T: DuplexIo>(
+    cx: &Cx,
+    io: T,
+) -> Result<(DuplexReader<T>, DuplexWriter<T>), TransportError> {
+    cx.checkpoint()
+        .map_err(|_| TransportError::ContextStopped)?;
+    let io = Arc::new(Mutex::new(io));
+    Ok((
+        DuplexReader {
+            io: Arc::clone(&io),
+        },
+        DuplexWriter { io },
+    ))
+}
+
+// A different task can momentarily own the other half. Do not block a runtime
+// worker or hold a guard on Pending; arrange another bounded poll instead.
+fn duplex_poll<T, U>(
+    io: &Mutex<T>,
+    task: &mut Context<'_>,
+    poll: impl FnOnce(&mut T, &mut Context<'_>) -> Poll<std::io::Result<U>>,
+) -> Poll<std::io::Result<U>> {
+    match io.try_lock() {
+        Ok(mut io) => poll(&mut io, task),
+        Err(TryLockError::WouldBlock) => {
+            task.waker().wake_by_ref();
+            Poll::Pending
+        }
+        Err(TryLockError::Poisoned(_)) => Poll::Ready(Err(std::io::Error::other(
+            "duplex transport state is unavailable",
+        ))),
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for DuplexReader<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        duplex_poll(&self.io, task, |io, task| {
+            Pin::new(io).poll_read(task, buffer)
+        })
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for DuplexWriter<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        duplex_poll(&self.io, task, |io, task| {
+            Pin::new(io).poll_write(task, bytes)
+        })
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        duplex_poll(&self.io, task, |io, task| Pin::new(io).poll_flush(task))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        duplex_poll(&self.io, task, |io, task| Pin::new(io).poll_shutdown(task))
+    }
+}
 
 /// Redacted transport failures. OS error text and peer-controlled bytes are
 /// deliberately excluded from both Display and Debug.

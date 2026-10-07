@@ -10,6 +10,12 @@
 use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
+use asupersync::io::AsyncReadExt;
+use asupersync::net::TcpStream;
+use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder};
+use core::future::{Future, poll_fn};
+use core::pin::pin;
+use core::task::Poll;
 use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::{Client, ClientError};
 use fgdb_protocol::json::{argument, cell};
@@ -18,6 +24,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 const MAX_TOKEN_FILE_BYTES: u64 = 65_536;
+const MAX_TLS_CA_BYTES: usize = 1 << 20;
 const MAX_JSON_VALUES: usize = 65_536;
 const MAX_JSON_TOKEN_BYTES: usize = 65_536;
 
@@ -30,6 +37,12 @@ struct RemoteOptions {
     parameters: Vec<(String, WireValue)>,
     /// `subscribe` stops after this many batches (default: until interrupted).
     max_batches: Option<u64>,
+    tls: Option<RemoteTls>,
+}
+
+struct RemoteTls {
+    server_name: String,
+    ca_file: PathBuf,
 }
 
 fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
@@ -39,6 +52,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut positional = Vec::new();
     let mut parameters: Vec<(String, WireValue)> = Vec::new();
     let mut max_batches = None;
+    let mut tls_server_name = None;
+    let mut tls_ca_file = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -58,6 +73,18 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             }
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
+            "--tls-server-name" if tls_server_name.is_none() => {
+                let name = value()?;
+                if name.is_empty() || name.chars().any(char::is_whitespace) {
+                    return Err(Failure::usage(
+                        "--tls-server-name needs a DNS name or IP address",
+                    ));
+                }
+                tls_server_name = Some(name);
+            }
+            "--tls-ca-file" if tls_ca_file.is_none() => {
+                tls_ca_file = Some(PathBuf::from(value()?));
+            }
             "--max-batches" if max_batches.is_none() => {
                 let raw = value()?;
                 if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -96,6 +123,18 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
+    let tls = match (tls_server_name, tls_ca_file) {
+        (Some(server_name), Some(ca_file)) => Some(RemoteTls {
+            server_name,
+            ca_file,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(Failure::usage(
+                "TLS needs both --tls-server-name and --tls-ca-file",
+            ));
+        }
+    };
     // `subscribe` takes the read itself; the SUBSCRIBE TO header is optional.
     let statement = if mode == ExecuteMode::Subscribe
         && !statement
@@ -115,12 +154,102 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         statement,
         parameters,
         max_batches,
+        tls,
     })
 }
 
+/// Use only the explicitly supplied trust roots. The foundation validates
+/// both the chain and peer name before the FGP client receives the stream.
+fn tls_connector(pem: &[u8]) -> Result<TlsConnector, Failure> {
+    if pem.len() > MAX_TLS_CA_BYTES {
+        return Err(Failure::open("TLS CA file exceeds 1048576 bytes"));
+    }
+    let roots = Certificate::from_pem(pem)
+        .map_err(|_| Failure::open("TLS CA file contains no valid PEM certificates"))?;
+    TlsConnectorBuilder::new()
+        .add_root_certificates(roots)
+        .min_protocol_version(0x0304_u16.into())
+        .max_protocol_version(0x0304_u16.into())
+        .alpn_protocols_required(vec![b"fgp/1".to_vec()])
+        .enable_early_data(false)
+        .handshake_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| Failure::open("TLS CA file cannot establish a verified client configuration"))
+}
+
+async fn read_tls_connector(
+    cx: &asupersync::Cx,
+    path: &std::path::Path,
+) -> Result<TlsConnector, Failure> {
+    cx.checkpoint()
+        .map_err(|_| Failure::open("TLS setup cancelled"))?;
+    let mut file = asupersync::fs::File::open(path)
+        .await
+        .map_err(|_| Failure::open("cannot open TLS CA file"))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| Failure::open("cannot inspect TLS CA file"))?;
+    if !metadata.is_file() || metadata.len() > MAX_TLS_CA_BYTES as u64 {
+        return Err(Failure::open(
+            "TLS CA file must be a regular file of at most 1048576 bytes",
+        ));
+    }
+    // Bound the read itself, including growth after the metadata check. File
+    // and metadata refer to the same open handle, not two pathname lookups.
+    let mut pem = Vec::with_capacity(metadata.len() as usize);
+    let mut buffer = [0u8; 8192];
+    loop {
+        cx.checkpoint()
+            .map_err(|_| Failure::open("TLS setup cancelled"))?;
+        let remaining = (MAX_TLS_CA_BYTES - pem.len() + 1).min(buffer.len());
+        let count = file
+            .read(&mut buffer[..remaining])
+            .await
+            .map_err(|_| Failure::open("cannot read TLS CA file"))?;
+        if count == 0 {
+            break;
+        }
+        if count > MAX_TLS_CA_BYTES - pem.len() {
+            return Err(Failure::open("TLS CA file exceeds 1048576 bytes"));
+        }
+        pem.extend_from_slice(&buffer[..count]);
+    }
+    tls_connector(&pem)
+}
+
+async fn connect(cx: &asupersync::Cx, options: &RemoteOptions) -> Result<Client, Failure> {
+    let token = read_token(&options.token_file).await?;
+    let Some(tls) = &options.tls else {
+        return Client::connect(cx, options.addr, token)
+            .await
+            .map_err(failure);
+    };
+    let connector = read_tls_connector(cx, &tls.ca_file).await?;
+    let stream = TcpStream::connect(options.addr)
+        .await
+        .map_err(Failure::open)?;
+    let _ = stream.set_nodelay(true);
+    let mut handshake = pin!(connector.connect(&tls.server_name, stream));
+    let stream = poll_fn(|task| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(Failure::open("TLS handshake cancelled")));
+        }
+        handshake.as_mut().poll(task).map(|result| {
+            result.map_err(|error| Failure::open(format!("TLS handshake failed: {error}")))
+        })
+    })
+    .await?;
+    // Cancellation or a TLS error drops the transport. In particular, there
+    // is no retry that could send the credential or a write over plaintext.
+    Client::connect_stream(cx, stream, token)
+        .await
+        .map_err(failure)
+}
+
 /// The local CLI's parameter spellings, as wire values: `int:`, `float:`,
-/// `text:`, `bool:true|false`, `null`, `json:<array>` (a list whose
-/// objects are maps), `bytes:<hex>`, and `vector:<x,y,...>` (an embedding as
+/// `text:`, `bool:true|false`, `null`, `json:<array|object>` (nested lists
+/// and maps), `bytes:<hex>`, and `vector:<x,y,...>` (an embedding as
 /// packed little-endian f32 bytes).
 fn parameter(raw: &str) -> Result<WireValue, Failure> {
     if let Some(value) = raw.strip_prefix("int:") {
@@ -152,9 +281,9 @@ fn parameter(raw: &str) -> Result<WireValue, Failure> {
     if let Some(value) = raw.strip_prefix("json:") {
         let json = parse_json(value, MAX_JSON_VALUES, MAX_JSON_TOKEN_BYTES)
             .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")))?;
-        if !matches!(json, Json::Array(_)) {
+        if !matches!(json, Json::Array(_) | Json::Object(_)) {
             return Err(Failure::usage(
-                "invalid json parameter: expected a JSON array",
+                "invalid json parameter: expected a JSON array or object",
             ));
         }
         return argument(&json)
@@ -244,10 +373,7 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         return runtime.block_on(subscribe(&cx, options, robot, out));
     }
     let answer = runtime.block_on(async {
-        let token = read_token(&options.token_file).await?;
-        let mut client = Client::connect(&cx, options.addr, token)
-            .await
-            .map_err(failure)?;
+        let mut client = connect(&cx, &options).await?;
         client
             .select(&cx, &options.database)
             .await
@@ -328,10 +454,7 @@ async fn subscribe(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let token = read_token(&options.token_file).await?;
-    let mut client = Client::connect(cx, options.addr, token)
-        .await
-        .map_err(failure)?;
+    let mut client = connect(cx, &options).await?;
     client
         .select(cx, &options.database)
         .await
@@ -493,4 +616,106 @@ pub(crate) fn packed_vector(text: &str) -> Result<Vec<u8>, Failure> {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(verb: &str, flags: &[&str]) -> Result<RemoteOptions, Failure> {
+        let mut args = vec![
+            "--addr",
+            "127.0.0.1:7688",
+            "--token-file",
+            "token.hex",
+            "--database",
+            "social",
+            verb,
+            "MATCH (n) RETURN n",
+        ];
+        args.extend_from_slice(flags);
+        parse(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn tls_requires_one_explicit_name_and_trust_file_for_every_remote_mode() {
+        for verb in ["query", "write", "subscribe"] {
+            let plain = options(verb, &[]).unwrap_or_else(|error| panic!("{}", error.message));
+            assert!(plain.tls.is_none());
+            let encrypted = options(
+                verb,
+                &[
+                    "--tls-server-name",
+                    "db.example.test",
+                    "--tls-ca-file",
+                    "ca.pem",
+                ],
+            )
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let tls = encrypted.tls.expect("explicit encrypted connection");
+            assert_eq!(tls.server_name, "db.example.test");
+            assert_eq!(tls.ca_file, PathBuf::from("ca.pem"));
+            for flags in [
+                vec!["--tls-server-name", "db.example.test"],
+                vec!["--tls-ca-file", "ca.pem"],
+                vec!["--tls-server-name", "", "--tls-ca-file", "ca.pem"],
+                vec!["--tls-server-name", "db example", "--tls-ca-file", "ca.pem"],
+                vec![
+                    "--tls-server-name",
+                    "db.example.test",
+                    "--tls-ca-file",
+                    "ca.pem",
+                    "--tls-ca-file",
+                    "other.pem",
+                ],
+                vec!["--tls-insecure"],
+            ] {
+                let failure = options(verb, &flags)
+                    .err()
+                    .expect("invalid TLS flags refuse");
+                assert_eq!(failure.code, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn tls_trust_configuration_fails_closed_before_connecting() {
+        for pem in [
+            Vec::new(),
+            b"not a certificate".to_vec(),
+            vec![b'x'; MAX_TLS_CA_BYTES + 1],
+        ] {
+            let error = tls_connector(&pem)
+                .err()
+                .expect("untrusted configuration must refuse");
+            assert_eq!(error.code, 4);
+        }
+    }
+
+    #[test]
+    fn remote_json_parameters_accept_nested_objects_without_coercion() {
+        let value =
+            parameter(r#"json:{"name":"Ada","nested":{"active":true},"scores":[2,null,3.5]}"#)
+                .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            value,
+            WireValue::Map(vec![
+                ("name".into(), WireValue::Text("Ada".into())),
+                (
+                    "nested".into(),
+                    WireValue::Map(vec![("active".into(), WireValue::Bool(true))])
+                ),
+                (
+                    "scores".into(),
+                    WireValue::List(vec![
+                        WireValue::Int(2),
+                        WireValue::Null,
+                        WireValue::Float(3.5)
+                    ])
+                ),
+            ])
+        );
+        assert!(parameter("json:42").is_err());
+        assert!(parameter(r#"json:{"a":1,"a":2}"#).is_err());
+    }
 }

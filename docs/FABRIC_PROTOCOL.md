@@ -176,9 +176,35 @@ offset seconds, optional zone identifier plus tzdb object id), vertex, edge
 ## fgdbd: the served subset
 
 `crates/fgdb-server` composes the embedded engine behind this machine over
-asupersync TCP. The `fgdbd` binary serves one or more databases; `fgdbd
+asupersync TCP or TLS 1.3. The `fgdbd` binary serves one or more databases; `fgdbd
 token` mints capability tokens and `fgdbd keygen` writes owner-only key files.
 The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
+
+TLS is configured with the paired `fgdbd serve --tls-cert-file <chain.pem>
+--tls-key-file <key.pem>` options, or the embedded host's
+`TlsConfig::from_pem_files` and `Server::enable_tls`. The identity is validated
+at startup; key files must be owner-only on Unix. The setting protects every
+configured FGP, HTTP and Bolt listener, with no plaintext retry after a failed
+handshake. The foundation owns TLS 1.3, certificate parsing, record protection
+and verification; early data is disabled, handshakes have a ten-second limit,
+and server drain cancels unfinished handshakes. FGP requires ALPN `fgp/1`,
+HTTPS requires `http/1.1`, and Bolt retains its driver-compatible encrypted
+magic/version exchange without mandatory ALPN. TLS does not replace Warden.
+
+The CLI pairs `--tls-server-name <name>` and `--tls-ca-file <ca.pem>` on
+`fgdb remote`; the explicit CA bundle and hostname must verify before any FGP
+credential is sent. Hosts can pass an already verified foundation TLS stream
+to `Client::connect_stream`. No disabled-verification option is provided.
+For other clients use HTTPS or `bolt+s://`/`neo4j+s://` with normal certificate
+verification. Plain TCP remains available when the operator omits TLS config.
+
+TLS preserves physical output fencing: each outer write/flush poll permits
+at most one ciphertext write or flush, so buffered TLS records return through
+the existing capability authorizer before their next physical I/O attempt.
+Reads cannot flush pending protected ciphertext. This continues the existing
+cooperative expiry/issuer-retirement fence; it adds no durable audit release
+or time-authority evidence. The handshake is completed before protected
+application output is admitted.
 
 - **Handshake.** HELLO selects version 1 and the smaller of both frame
   limits. AUTH carries a Warden capability token; a token no served issuer
@@ -306,7 +332,7 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
 AUTH_REFRESH, explicit multi-statement transactions with ownership and
-reattachment, durable subscriptions with resume across reconnects, TLS, Bolt
+reattachment, durable subscriptions with resume across reconnects, Bolt
 writes (`BoltCompatProfileV2`, post-1.0) and relationship/path values, and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
@@ -328,7 +354,7 @@ END on cancel, and a scoped token's refusal).
 
 ## Remaining integration
 
-Authoritative frame-catalog generation, protected transport (TLS), durable
+Authoritative frame-catalog generation, durable
 result machines with ACK/release/resume, PREPARE, explicit transactions with
 ownership and reattachment, SnapshotQuery proofs, durable and capability-masked
 subscriptions, the surface

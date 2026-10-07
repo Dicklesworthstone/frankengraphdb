@@ -21,6 +21,11 @@ allow = [
   "Zlib",
 ]
 exceptions = [
+  # Plan §2.1 consumes TLS through pinned asupersync. Admit ISC only for
+  # these exact rustls/ring transitive releases; other ISC crates stay denied.
+  { crate = "ring@0.17.14", allow = ["ISC"] },
+  { crate = "rustls-webpki@0.103.15", allow = ["ISC"] },
+  { crate = "untrusted@0.9.0", allow = ["ISC"] },
   { crate = "asupersync", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
   { crate = "fnx-algorithms", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
   { crate = "fnx-cgse", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },

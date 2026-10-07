@@ -16,11 +16,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 const HELP: &str = "\
-fgdbd: the FrankenGraphDB server (FGP over TCP)
+fgdbd: the FrankenGraphDB server (FGP, HTTPS, and Bolt with optional TLS)
 
 USAGE:
   fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
-      [--bolt-listen <addr:port>] DATABASE...
+      [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--policy-epoch <n>] [--write-relation <u32>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
@@ -42,6 +42,15 @@ the bindings given here (there is no durable catalog yet). serve prints one
 NDJSON line {\"v\":1,\"event\":\"listening\",\"protocol\":\"fgp\",\"addr\":...} per
 listener once bound, drains on SIGINT/SIGTERM (in-flight statements finish,
 idle connections say GOODBYE), and exits 0.
+
+--tls-cert-file and --tls-key-file must be supplied together. They enable
+TLS 1.3 on EVERY configured listener, with no plaintext fallback. Supply a
+PEM certificate chain and an owner-only PEM private key (chmod 600 on Unix).
+The identity is validated before databases are opened or listeners are bound.
+Handshakes are bounded to 10 seconds and are cancelled during server drain;
+TLS early data is disabled. FGP clients require ALPN fgp/1; HTTPS uses
+http/1.1. Bolt clients use bolt+s:// or neo4j+s:// with normal certificate
+verification. Warden capability authentication still applies inside TLS.
 
 --http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query
 or /write with `Authorization: Bearer <hex token>` and a JSON body
@@ -146,6 +155,8 @@ struct ServeOptions {
     http_listen: Option<String>,
     http_hosts: Vec<String>,
     bolt_listen: Option<String>,
+    tls_cert_file: Option<PathBuf>,
+    tls_key_file: Option<PathBuf>,
     max_connections: Option<usize>,
     databases: Vec<DatabaseOptions>,
 }
@@ -181,6 +192,8 @@ impl ServeOptions {
         let mut http_listen = None;
         let mut http_hosts = Vec::new();
         let mut bolt_listen = None;
+        let mut tls_cert_file = None;
+        let mut tls_key_file = None;
         let mut max_connections = None;
         let mut databases: Vec<DatabaseOptions> = Vec::new();
         let mut at = 0;
@@ -196,6 +209,12 @@ impl ServeOptions {
                 "--http-allow-host" => http_hosts.push(value(args, &mut at, flag)?.to_owned()),
                 "--bolt-listen" if bolt_listen.is_none() => {
                     bolt_listen = Some(value(args, &mut at, flag)?.to_owned());
+                }
+                "--tls-cert-file" if tls_cert_file.is_none() => {
+                    tls_cert_file = Some(PathBuf::from(value(args, &mut at, flag)?));
+                }
+                "--tls-key-file" if tls_key_file.is_none() => {
+                    tls_key_file = Some(PathBuf::from(value(args, &mut at, flag)?));
                 }
                 "--max-connections" if max_connections.is_none() => {
                     max_connections = Some(number(value(args, &mut at, flag)?, flag)?);
@@ -254,6 +273,11 @@ impl ServeOptions {
             at += 1;
         }
         let listen = listen.ok_or_else(|| Failure::usage("serve needs --listen <addr:port>"))?;
+        if tls_cert_file.is_some() != tls_key_file.is_some() {
+            return Err(Failure::usage(
+                "--tls-cert-file and --tls-key-file are required together",
+            ));
+        }
         if databases.is_empty() {
             return Err(Failure::usage("serve needs at least one --database"));
         }
@@ -270,6 +294,8 @@ impl ServeOptions {
             http_listen,
             http_hosts,
             bolt_listen,
+            tls_cert_file,
+            tls_key_file,
             max_connections,
             databases,
         })
@@ -282,6 +308,13 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         limits.max_connections = max;
     }
     let mut server = Server::new(cx, limits).map_err(Failure::usage)?;
+    let tls_enabled = options.tls_cert_file.is_some();
+    if let (Some(cert), Some(key)) = (&options.tls_cert_file, &options.tls_key_file) {
+        let config = fgdb_server::TlsConfig::from_pem_files(cx, cert, key)
+            .await
+            .map_err(Failure::open)?;
+        server.enable_tls(config);
+    }
     for db in options.databases {
         let keys = fgdb_server::read_database_keys(cx, db.key_file.as_deref().expect("checked"))
             .await
@@ -332,14 +365,14 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         let bound = listener.local_addr().map_err(Failure::io)?;
         writeln!(
             stdout,
-            r#"{{"v":1,"event":"listening","protocol":"fgp","addr":"{bound}"}}"#
+            r#"{{"v":1,"event":"listening","protocol":"fgp","addr":"{bound}","tls":{tls_enabled}}}"#
         )
         .map_err(Failure::io)?;
         if let Some((http, _)) = &http {
             let bound = http.local_addr().map_err(Failure::io)?;
             writeln!(
                 stdout,
-                r#"{{"v":1,"event":"listening","protocol":"http","addr":"{bound}"}}"#
+                r#"{{"v":1,"event":"listening","protocol":"http","addr":"{bound}","tls":{tls_enabled}}}"#
             )
             .map_err(Failure::io)?;
         }
@@ -347,7 +380,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             let bound = bolt.local_addr().map_err(Failure::io)?;
             writeln!(
                 stdout,
-                r#"{{"v":1,"event":"listening","protocol":"bolt","addr":"{bound}"}}"#
+                r#"{{"v":1,"event":"listening","protocol":"bolt","addr":"{bound}","tls":{tls_enabled}}}"#
             )
             .map_err(Failure::io)?;
         }
@@ -556,4 +589,56 @@ async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
     file.write_all(text.as_bytes()).await.map_err(Failure::io)?;
     file.sync_all().await.map_err(Failure::io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_tls_identity_must_be_complete_and_unique() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "social=test-db",
+            "--key-file",
+            "database.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        assert!(
+            parse(&[])
+                .unwrap_or_else(|error| panic!("{}", error.message))
+                .tls_cert_file
+                .is_none()
+        );
+        assert!(parse(&["--tls-cert-file", "cert.pem"]).is_err());
+        assert!(parse(&["--tls-key-file", "key.pem"]).is_err());
+        let options = parse(&["--tls-cert-file", "cert.pem", "--tls-key-file", "key.pem"])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            options.tls_cert_file.as_deref(),
+            Some(std::path::Path::new("cert.pem"))
+        );
+        assert_eq!(
+            options.tls_key_file.as_deref(),
+            Some(std::path::Path::new("key.pem"))
+        );
+        assert!(
+            parse(&[
+                "--tls-cert-file",
+                "first.pem",
+                "--tls-cert-file",
+                "second.pem",
+                "--tls-key-file",
+                "key.pem"
+            ])
+            .is_err()
+        );
+    }
 }

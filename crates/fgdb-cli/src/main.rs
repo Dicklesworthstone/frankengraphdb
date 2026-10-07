@@ -68,6 +68,9 @@ remote subscribe streams a live changefeed (SUBSCRIBE TO <read>): columns, then
 per batch one change record per row (signed weight; the first batch is the
 baseline) and a progress record with the frontier. It needs a capability with
 unrestricted scope; --max-batches N cancels after N batches with a final result.
+For encrypted FGP, add --tls-server-name <certificate-name> --tls-ca-file <ca.pem>.
+Both flags are required together; the peer certificate and name are verified,
+TLS 1.3 and fgp/1 are required, and a TLS failure never retries in plaintext.
 Parameters: int:42, uint:42, float:1.5e-3, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array|object> (a list or map; integers int, other numbers float).

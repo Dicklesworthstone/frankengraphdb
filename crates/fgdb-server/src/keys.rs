@@ -64,7 +64,7 @@ fn hex_digit(b: u8) -> u8 {
     }
 }
 
-async fn read_owner_only(cx: &Cx, path: &Path) -> Result<String, KeyFileError> {
+pub(crate) async fn read_owner_only(cx: &Cx, path: &Path) -> Result<String, KeyFileError> {
     cx.checkpoint()
         .map_err(|_| KeyFileError("key file read cancelled"))?;
     let unreadable = |_| KeyFileError("cannot read key file");

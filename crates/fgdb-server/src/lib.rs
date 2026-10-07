@@ -1,7 +1,7 @@
 //! `fgdbd`: FrankenGraphDB's server posture (plan §13 item 2, Appendix D).
 //!
 //! The server composes the embedded engine behind `fgdb-protocol`'s FGP
-//! connection machine over asupersync TCP. It reimplements none of the
+//! connection machine over asupersync TCP or TLS 1.3. It reimplements none of the
 //! engine: every statement runs through the same capability-authorized
 //! sessions an embedded host would use, constructed fresh per statement from
 //! the connection's Warden capability, so signature, scope, expiry, signed
@@ -27,11 +27,14 @@
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
 //! - `QUERY_CANCEL` (sender control only), `PING`/`PONG`, `DRAIN`/`GOODBYE`.
+//! - HTTP/1.1 JSON and the read-only Bolt profile over the same authorized
+//!   execution boundary; optional TLS 1.3 protects every configured listener.
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
 //! `PREPARE`, `AUTH_REFRESH`, explicit multi-statement transactions with
-//! ownership/reattach, subscriptions, TLS, and the HTTP/gRPC/Bolt adapters.
+//! ownership/reattach, durable or masked subscriptions, and HTTP/2, gRPC
+//! and WebSocket adapters.
 //! Because every result is ephemeral, a disconnect can lose undelivered rows
 //! but never a commit: a write's outcome is decided before its first frame.
 //!
@@ -54,16 +57,18 @@ mod http;
 mod keys;
 mod shutdown;
 mod symbols;
+mod tls;
 
 pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
 pub use shutdown::Shutdown;
 pub use symbols::{SymbolConflict, Symbols};
+pub use tls::{TlsConfig, TlsConfigError};
 
 use asupersync::Cx;
 use asupersync::fs::UnixVfs;
 use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server};
 use asupersync::http::h1::types::Response;
-use asupersync::net::{TcpListener, TcpStream};
+use asupersync::net::TcpListener;
 use asupersync::runtime::TaskHandle;
 use asupersync::security::key::AuthKey;
 use asupersync::server::shutdown::ShutdownSignal;
@@ -74,6 +79,7 @@ use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{RelationId, SchemaEpoch};
 use fgdb_gql::{GqlQueryPolicy, GraphWriteProgramPolicy};
 use fgdb_protocol::MAX_HEADER_LEN;
+use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::PurposeContexts;
 use fgdb_warden::{Authority, CapabilityToken, Grant};
 use std::collections::BTreeMap;
@@ -282,6 +288,7 @@ pub struct Server {
     pub(crate) secret: [u8; 32],
     pub(crate) limits: ServerLimits,
     pub(crate) shutdown: Shutdown,
+    tls: Option<TlsConfig>,
 }
 
 impl core::fmt::Debug for Server {
@@ -305,7 +312,16 @@ impl Server {
             secret,
             limits,
             shutdown: Shutdown::new(),
+            tls: None,
         })
+    }
+
+    /// Require TLS 1.3 on every subsequently served listener, using this
+    /// identity. Configure before sharing the Server or accepting connections.
+    /// FGP requires ALPN `fgp/1`; HTTPS requires `http/1.1`; Bolt keeps its
+    /// ordinary encrypted magic/version negotiation without mandatory ALPN.
+    pub fn enable_tls(&mut self, config: TlsConfig) {
+        self.tls = Some(config);
     }
 
     /// Open the database at `path` and serve it under `config`.
@@ -374,11 +390,16 @@ impl Server {
     /// is cancelled, then wait for every connection task to finish.
     pub async fn serve(self: Arc<Self>, cx: &Cx, listener: TcpListener) -> Result<(), ServerError> {
         let connections = self
-            .accept(cx, &listener, |server, child, stream| {
-                Box::pin(async move {
-                    connection::run(&child, &server, stream).await;
-                })
-            })
+            .accept(
+                cx,
+                &listener,
+                tls::Protocol::Fgp,
+                |server, child, stream| {
+                    Box::pin(async move {
+                        connection::run(&child, &server, stream).await;
+                    })
+                },
+            )
             .await?;
         // Admission is closed. Every connection drains at its next receive
         // point (an admitted statement finishes first), so this join is
@@ -399,11 +420,16 @@ impl Server {
         listener: TcpListener,
     ) -> Result<(), ServerError> {
         let connections = self
-            .accept(cx, &listener, |server, child, stream| {
-                Box::pin(async move {
-                    bolt::run(&child, &server, stream).await;
-                })
-            })
+            .accept(
+                cx,
+                &listener,
+                tls::Protocol::Bolt,
+                |server, child, stream| {
+                    Box::pin(async move {
+                        bolt::run(&child, &server, stream).await;
+                    })
+                },
+            )
             .await?;
         self.shutdown.trigger();
         for mut handle in connections {
@@ -429,32 +455,37 @@ impl Server {
         let signal = ShutdownSignal::new();
         let connections = {
             let signal = signal.clone();
-            self.accept(cx, &listener, move |server, child, stream| {
-                let config = config.clone();
-                let signal = signal.clone();
-                Box::pin(async move {
-                    // Both the handler and transport borrow this connection's
-                    // server owner, so verified output authority survives every
-                    // pending write without a self-referential Arc container.
-                    let server = &*server;
-                    let output = Arc::new(http::OutputAuthority::new());
-                    let io = http::GuardedIo::new(stream, child.clone(), Arc::clone(&output));
-                    let handler = move |request| {
-                        let child = child.clone();
-                        let output = Arc::clone(&output);
-                        let answer: core::pin::Pin<
-                            Box<dyn core::future::Future<Output = Response> + Send + '_>,
-                        > = Box::pin(async move {
-                            http::respond(&child, server, request, &output).await
-                        });
-                        answer
-                    };
-                    let _ = Http1Server::with_config(handler, config)
-                        .with_shutdown_signal(signal)
-                        .serve(io)
-                        .await;
-                })
-            })
+            self.accept(
+                cx,
+                &listener,
+                tls::Protocol::Http,
+                move |server, child, stream| {
+                    let config = config.clone();
+                    let signal = signal.clone();
+                    Box::pin(async move {
+                        // Both the handler and transport borrow this connection's
+                        // server owner, so verified output authority survives every
+                        // pending write without a self-referential Arc container.
+                        let server = &*server;
+                        let output = Arc::new(http::OutputAuthority::new());
+                        let io = http::GuardedIo::new(stream, child.clone(), Arc::clone(&output));
+                        let handler = move |request| {
+                            let child = child.clone();
+                            let output = Arc::clone(&output);
+                            let answer: core::pin::Pin<
+                                Box<dyn core::future::Future<Output = Response> + Send + '_>,
+                            > = Box::pin(async move {
+                                http::respond(&child, server, request, &output).await
+                            });
+                            answer
+                        };
+                        let _ = Http1Server::with_config(handler, config)
+                            .with_shutdown_signal(signal)
+                            .serve(io)
+                            .await;
+                    })
+                },
+            )
             .await?
         };
         // Stop reading new requests on every keep-alive connection; a request
@@ -473,12 +504,14 @@ impl Server {
         self: &Arc<Self>,
         cx: &Cx,
         listener: &TcpListener,
+        protocol: tls::Protocol,
         connect: F,
     ) -> Result<Vec<TaskHandle<()>>, ServerError>
     where
-        F: Fn(Arc<Self>, Cx, TcpStream) -> ConnectionFuture<()>,
+        F: Fn(Arc<Self>, Cx, Box<dyn DuplexIo>) -> ConnectionFuture<()> + Send + Sync + 'static,
     {
         let waiter = self.shutdown.waiter();
+        let connect = Arc::new(connect);
         let mut connections: Vec<TaskHandle<()>> = Vec::new();
         loop {
             let accepted = poll_fn(|task| {
@@ -500,8 +533,19 @@ impl Server {
                 continue;
             }
             let server = Arc::clone(self);
-            let task = connect(server, cx.clone(), stream);
-            let handle = cx.spawn(move |_| task).map_err(|_| ServerError::Spawn)?;
+            let connect = Arc::clone(&connect);
+            let handle = cx
+                .spawn(move |child| async move {
+                    let waiter = server.shutdown.waiter();
+                    let Some(stream) =
+                        tls::establish(&child, &waiter, stream, server.tls.as_ref(), protocol)
+                            .await
+                    else {
+                        return;
+                    };
+                    connect(server, child, stream).await;
+                })
+                .map_err(|_| ServerError::Spawn)?;
             connections.push(handle);
         }
         Ok(connections)

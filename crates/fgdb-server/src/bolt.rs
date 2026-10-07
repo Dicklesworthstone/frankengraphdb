@@ -35,7 +35,6 @@ use crate::shutdown::Waiter;
 use crate::{Served, Server, convert};
 use asupersync::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::net::TcpStream;
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::Poll;
@@ -47,6 +46,7 @@ use fgdb_bolt::packstream::{Value, get};
 use fgdb_gql::GqlParameters;
 use fgdb_gql::algebra::GraphValue;
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
+use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::{CommitSeq, PurposeContexts, VId};
 use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -66,7 +66,7 @@ struct Closed;
 
 /// Buffered socket I/O. Reads stop at the drain signal while idle.
 struct Io {
-    stream: TcpStream,
+    stream: Box<dyn DuplexIo>,
     dechunker: Dechunker,
     out: Vec<u8>,
     /// A failed/cancelled partial flush cannot be restarted or followed by a
@@ -284,7 +284,7 @@ struct Transaction<'s> {
 }
 
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
-pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
+pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let waiter = server.shutdown.waiter();
     let mut io = Io {
         stream,
