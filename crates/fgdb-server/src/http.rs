@@ -90,12 +90,7 @@ impl<'s> OutputAuthority<'s> {
         true
     }
 
-    fn protected(
-        &self,
-        cx: &Cx,
-        issuer: &'s Authority,
-        verified: VerifiedCapability<'s>,
-    ) -> bool {
+    fn protected(&self, cx: &Cx, issuer: &'s Authority, verified: VerifiedCapability<'s>) -> bool {
         self.protected_at(cx, issuer, verified, crate::unix_millis())
     }
 
@@ -210,11 +205,7 @@ impl<T: AsyncWrite + Unpin> GuardedIo<'_, T> {
         }
     }
 
-    fn poll_shutdown_at(
-        &mut self,
-        task: &mut Context<'_>,
-        now: u64,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown_at(&mut self, task: &mut Context<'_>, now: u64) -> Poll<io::Result<()>> {
         if let Err(error) = self.live().and_then(|()| self.authority.authorize(now)) {
             return Poll::Ready(Err(error));
         }
@@ -228,7 +219,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GuardedIo<'_, T> {
         task: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_write_at(task, bytes, crate::unix_millis())
+        self.get_mut()
+            .poll_write_at(task, bytes, crate::unix_millis())
     }
 
     fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -817,8 +809,7 @@ mod output_tests {
             let second_token = token(&second, LIVE_EXPIRY);
             let output = Arc::new(OutputAuthority::new());
             let calls = AtomicUsize::new(0);
-            let (inner, state) =
-                MemoryIo::new(requests(3), [usize::MAX, 0, usize::MAX, 0], true);
+            let (inner, state) = MemoryIo::new(requests(3), [usize::MAX, 0, usize::MAX, 0], true);
             let io = GuardedIo::new(inner, cx.clone(), Arc::clone(&output));
             let handler = |_: Request| {
                 let request = calls.fetch_add(1, Ordering::Relaxed);

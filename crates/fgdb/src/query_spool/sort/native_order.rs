@@ -408,12 +408,8 @@ async fn write_visible_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     tail: &ScanSortTail,
     work: &mut Work<'_>,
 ) -> Result<usize> {
-    let frames = canonical::visible_prefix(
-        row,
-        tail.evaluation_width(),
-        tail.visible_width(),
-        work,
-    )?;
+    let frames =
+        canonical::visible_prefix(row, tail.evaluation_width(), tail.visible_width(), work)?;
     let header = canonical::ROW.len() + 8;
     let bytes = header
         .checked_add(frames.len())

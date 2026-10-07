@@ -393,11 +393,7 @@ fn hidden_sort_keys_rank_spilled_rows_without_entering_the_public_schema() {
         let mut db = fixture(&contexts.commit()).await;
         let mut update = WriteBatch::new(RelationId(1));
         update.set_vertex_property(VId(0), PropertyKeyId(1), None);
-        update.set_vertex_property(
-            VId(1),
-            PropertyKeyId(1),
-            Some(CanonicalScalar::Int(1000)),
-        );
+        update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(1000)));
         db.write(&contexts.commit(), update).await.unwrap();
         let view = db.read_session().unwrap();
         let cx = contexts.query();

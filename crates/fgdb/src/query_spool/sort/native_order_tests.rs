@@ -949,8 +949,15 @@ fn hidden_sort_keys_match_eager_rows_and_return_only_a_resortable_visible_schema
             assert_eq!(spool.encoded_columns, 1);
             assert_eq!(spool.row_count(), wanted.len() as u64);
             assert_eq!(spool.row_stats().snapshot_records, 36);
-            assert_eq!(spool.max_row_bytes, wanted.iter().map(Vec::len).max().unwrap());
-            assert_eq!(contents(&spool, &mut destination, &cx).await, wanted, "{text}");
+            assert_eq!(
+                spool.max_row_bytes,
+                wanted.iter().map(Vec::len).max().unwrap()
+            );
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                wanted,
+                "{text}"
+            );
             assert!(backing.0.lock().unwrap().bytes.get_ref().len() > pool.limit());
             assert_eq!(pool.used(), 0);
 
@@ -995,9 +1002,8 @@ fn hidden_payloads_spend_the_full_input_row_limit_even_when_the_visible_page_is_
         let cx = c.query();
         let db = seed(&c.commit(), 3).await;
         let pool = MemoryPool::new(32_768, 0).unwrap();
-        let visible = GraphValueRow::from_owned_values(vec![
-            fgdb_gql::algebra::GraphValue::Vertex(VId(0)),
-        ]);
+        let visible =
+            GraphValueRow::from_owned_values(vec![fgdb_gql::algebra::GraphValue::Vertex(VId(0))]);
         assert!(visible.canonical_bytes().unwrap().len() < 1024);
         for limit in [0, 1] {
             let text = format!("MATCH (n:L) RETURN n AS id ORDER BY n.q LIMIT {limit}");

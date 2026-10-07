@@ -343,13 +343,7 @@ mod sort_tail_tests {
     #[test]
     fn hidden_distinct_and_invalid_visible_widths_refuse_even_at_limit_zero() {
         for edge in [false, true] {
-            for (distinct, visible) in [
-                (false, 0),
-                (false, 4),
-                (true, 1),
-                (true, 2),
-                (true, 3),
-            ] {
+            for (distinct, visible) in [(false, 0), (false, 4), (true, 1), (true, 2), (true, 3)] {
                 let logical = plan(edge, distinct, Some(visible), Some(0));
                 assert!(ScanSortTail::compile(&logical).is_err());
                 if edge {
