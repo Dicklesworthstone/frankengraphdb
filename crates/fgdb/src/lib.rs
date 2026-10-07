@@ -5215,12 +5215,16 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
 
-    let mut writer = BlockWriter::from_published_partition(
+    // The walk above already validated and collapsed the whole published edge
+    // history; build the writer from that admission rather than validating
+    // every block a second time (fgdb-e8gr4).
+    let mut writer = BlockWriter::from_admitted_partition(
         GRAPH,
         BRANCH,
         PARTITION,
         sealed_blocks,
         sealed_patches,
+        admission.edge_statements(),
         &blocks,
         &block_props,
         &patches,

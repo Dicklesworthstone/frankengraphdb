@@ -2614,6 +2614,18 @@ pub struct RootAdmission {
     segments: crate::root::SegmentCache,
 }
 
+impl RootAdmission {
+    /// The canonical edge history this walk admitted: one row per content
+    /// statement, keyed `(eid, created_at)`, exactly the collapse of the
+    /// root's blocks in order. A writable open builds its writer from it
+    /// instead of validating every block a second time (fgdb-e8gr4).
+    pub fn edge_statements(
+        &self,
+    ) -> &std::collections::BTreeMap<(fgdb_types::EId, CommitSeq), crate::AdjacencyEntry> {
+        self.walk.history.statements()
+    }
+}
+
 /// Durability-and-verification receipts for one live publish lineage
 /// (fgdb-gieu): which block identities a [`BlockStore`] has already made
 /// durable and admitted, plus the cross-block edge-history state those

@@ -1518,12 +1518,43 @@ pub fn merge_all_edges_with_props(
         });
     }
     let (statements, _) = collapse_edge_history(blocks)?;
+    Ok(visible_with_props(&statements, blocks, block_props, as_of))
+}
+
+/// [`merge_all_edges_with_props`] over a history a root walk already admitted
+/// (its validator's canonical collapse), instead of validating every block a
+/// second time. `admitted` must be the collapse of exactly these `blocks` in
+/// order; a writable open passes the walk's own (fgdb-e8gr4).
+#[allow(clippy::type_complexity)]
+pub fn merge_admitted_edges_with_props(
+    admitted: &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
+    as_of: CommitSeq,
+) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
+    if blocks.len() != block_props.len() {
+        return Err(RootError::BlockPropsArity {
+            blocks: blocks.len(),
+            props: block_props.len(),
+        });
+    }
+    Ok(visible_with_props(admitted, blocks, block_props, as_of))
+}
+
+/// The visible statements of a collapsed history at `as_of`, each beside the
+/// row its winning statement carries, in ascending (EId, created_at) order.
+fn visible_with_props(
+    statements: &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
+    as_of: CommitSeq,
+) -> Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)> {
     let mut rows = winning_edge_rows(blocks, block_props);
-    Ok(statements
-        .into_iter()
+    statements
+        .iter()
         .filter(|(_, entry)| entry.visible_at(as_of))
-        .map(|(key, entry)| (entry, rows.remove(&key).unwrap_or_default()))
-        .collect())
+        .map(|(key, entry)| (*entry, rows.remove(key).unwrap_or_default()))
+        .collect()
 }
 
 /// Incremental proof that every block in one publication history agrees on EId
@@ -1666,6 +1697,15 @@ impl EdgeHistoryValidator {
             self.statements.insert(key, *entry);
         }
         Ok(())
+    }
+
+    /// The canonical collapsed history admitted so far, one row per content
+    /// statement: exactly what [`collapse_edge_history`] would rebuild from
+    /// the same blocks in the same order.
+    pub(crate) fn statements(
+        &self,
+    ) -> &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
+        &self.statements
     }
 
     fn into_canonical(self) -> CollapsedEdgeHistory {

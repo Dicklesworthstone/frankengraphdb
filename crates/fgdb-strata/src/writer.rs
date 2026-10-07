@@ -342,10 +342,68 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Result<Self, RootError> {
+        let live_edges = crate::root::merge_all_edges_with_props(blocks, block_props, frontier)?;
+        Ok(Self::assemble_published(
+            graph,
+            branch,
+            partition,
+            sealed,
+            sealed_patches,
+            live_edges,
+            blocks,
+            patches,
+            frontier,
+        ))
+    }
+
+    /// [`Self::from_published_partition`] over the edge history a root walk
+    /// already admitted ([`crate::store::RootAdmission::edge_statements`]),
+    /// so a writable open validates published history ONCE, in the walk,
+    /// instead of collapsing every block a second time here (fgdb-e8gr4).
+    /// `admitted` must be the collapse of exactly `blocks`, in order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_admitted_partition(
+        graph: GraphId,
+        branch: BranchId,
+        partition: u64,
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        admitted: &BTreeMap<(EId, CommitSeq), AdjacencyEntry>,
+        blocks: &[Vec<AdjacencyEntry>],
+        block_props: &[Option<crate::edge_props::BlockProps>],
+        patches: &[VertexPatchRows],
+        frontier: CommitSeq,
+    ) -> Result<Self, RootError> {
+        let live_edges =
+            crate::root::merge_admitted_edges_with_props(admitted, blocks, block_props, frontier)?;
+        Ok(Self::assemble_published(
+            graph,
+            branch,
+            partition,
+            sealed,
+            sealed_patches,
+            live_edges,
+            blocks,
+            patches,
+            frontier,
+        ))
+    }
+
+    /// The rest of a published writer, once its live edges are known.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_published(
+        graph: GraphId,
+        branch: BranchId,
+        partition: u64,
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        live_edges: Vec<(AdjacencyEntry, crate::edge_props::EdgePropertyRow)>,
+        blocks: &[Vec<AdjacencyEntry>],
+        patches: &[VertexPatchRows],
+        frontier: CommitSeq,
+    ) -> Self {
         let mut live = BTreeMap::new();
-        for (entry, props) in
-            crate::root::merge_all_edges_with_props(blocks, block_props, frontier)?
-        {
+        for (entry, props) in live_edges {
             live.insert(
                 entry.eid,
                 LiveEdge {
@@ -384,7 +442,7 @@ impl BlockWriter {
                 );
             }
         }
-        Ok(Self {
+        Self {
             graph,
             branch,
             partition,
@@ -400,7 +458,7 @@ impl BlockWriter {
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
             last_seq: (frontier.0 > 0).then_some(frontier),
-        })
+        }
     }
 
     pub fn new(graph: GraphId, branch: BranchId, partition: u64) -> Self {
@@ -2180,5 +2238,134 @@ mod tests {
             edge_ceiling - 1,
             "the planted illegal families stay; the cascade added nothing"
         );
+    }
+
+    /// fgdb-e8gr4: a writer built from a root walk's ADMITTED edge history
+    /// equals one that re-collapses every published block. The walk is an
+    /// EdgeHistoryValidator observing each block in publication order, as
+    /// `reopen_sealed` does. The history mixes two families, a retirement, a
+    /// content successor, a vertex-delete cascade and a later creation. Both
+    /// paths share property rows and vertex patches verbatim, so the law
+    /// isolates the one input that differs: where the collapse comes from.
+    #[test]
+    fn a_writer_from_the_admitted_history_equals_a_revalidated_one() {
+        let (graph, branch) = (GraphId(1), BranchId(1));
+        let vertex = |vid: u128, ordinal| DeltaRow::CreateVertex {
+            vid: VId(vid),
+            birth_ordinal: ordinal,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        };
+        let edge = |eid: u128, src: u128, relation: u64, dst: u128, ordinal| DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: ordinal,
+            src: VId(src),
+            relation: RelationId(relation),
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        };
+        let unversioned = fgdb_types::ids::ObjectId([0; 32]);
+        let commits = [
+            vec![vertex(1, 0), vertex(2, 1), vertex(3, 2)],
+            vec![
+                edge(10, 1, 1, 2, 3),
+                edge(11, 2, 1, 3, 4),
+                edge(12, 1, 2, 3, 5),
+            ],
+            vec![DeltaRow::DeleteEdge {
+                eid: EId(11),
+                before_version: unversioned,
+            }],
+            vec![DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(7),
+                before: None,
+                after: Some(CanonicalScalar::Int(4)),
+            }],
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(3),
+                before_version: unversioned,
+                sorted_retired_incident_edges: vec![EId(12)],
+            }],
+            vec![edge(13, 2, 1, 1, 6)],
+        ];
+        let mut writer = BlockWriter::new(graph, branch, 0);
+        for (index, rows) in commits.iter().enumerate() {
+            let at = CommitSeq(index as u64 + 1);
+            for row in rows {
+                writer.apply(keys(), at, row).expect("legal history folds");
+            }
+            writer.seal(keys()).expect("per-commit edge seal");
+            writer
+                .seal_vertices(keys())
+                .expect("per-commit vertex seal");
+        }
+        let frontier = CommitSeq(commits.len() as u64);
+        let (_, sealed, sealed_patches) = writer.publish(keys(), frontier).expect("publishes");
+        let blocks: Vec<Vec<AdjacencyEntry>> = sealed
+            .iter()
+            .map(|block| crate::decode_block(&block.bytes).expect("decodes"))
+            .collect();
+        let block_props: Vec<Option<crate::edge_props::BlockProps>> =
+            blocks.iter().map(|_| None).collect();
+        let walk = |count: usize| {
+            let mut validator = crate::root::EdgeHistoryValidator::default();
+            for (at, block) in blocks.iter().enumerate().take(count) {
+                validator.observe_block(at, block).expect("lawful history");
+            }
+            validator
+        };
+        let admitted = walk(blocks.len());
+        // Retirements and the content successor restate earlier statements:
+        // the collapse is not a copy of the entries.
+        let entries: usize = blocks.iter().map(Vec::len).sum();
+        assert!(admitted.statements().len() < entries, "{entries} entries");
+
+        let revalidated = BlockWriter::from_published_partition(
+            graph,
+            branch,
+            0,
+            sealed.clone(),
+            sealed_patches.clone(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("revalidated writer");
+        let from_walk = BlockWriter::from_admitted_partition(
+            graph,
+            branch,
+            0,
+            sealed.clone(),
+            sealed_patches.clone(),
+            admitted.statements(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("admitted writer");
+        assert_eq!(format!("{from_walk:?}"), format!("{revalidated:?}"));
+
+        // The comparison can fail: an admission that missed the last block
+        // yields a different writer.
+        let stale = BlockWriter::from_admitted_partition(
+            graph,
+            branch,
+            0,
+            sealed,
+            sealed_patches,
+            walk(blocks.len() - 1).statements(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("stale writer");
+        assert_ne!(format!("{stale:?}"), format!("{revalidated:?}"));
     }
 }
