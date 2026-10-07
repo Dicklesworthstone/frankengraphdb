@@ -22,8 +22,8 @@ const TERMINAL_RESERVATION: usize = 256;
 
 /// One write statement whose RETURN rows are produced with its effects.
 pub(super) enum Returning {
-    Insert(PreparedGraphInsertQuery),
-    Mutation(PreparedGraphMutationQuery),
+    Insert(Box<PreparedGraphInsertQuery>),
+    Mutation(Box<PreparedGraphMutationQuery>),
 }
 impl Returning {
     fn columns(&self) -> &[String] {
@@ -46,7 +46,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<Returning>, Failure> {
         .map_err(Failure::query)?;
         return template
             .bind_parameters(&options.params)
-            .map(|query| Some(Returning::Insert(query)))
+            .map(|query| Some(Returning::Insert(Box::new(query))))
             .map_err(Failure::query);
     }
     if PreparedGraphMutationQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
@@ -59,7 +59,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<Returning>, Failure> {
         .map_err(Failure::query)?;
         return template
             .bind_parameters(&options.params)
-            .map(|query| Some(Returning::Mutation(query)))
+            .map(|query| Some(Returning::Mutation(Box::new(query))))
             .map_err(Failure::query);
     }
     Ok(None)
