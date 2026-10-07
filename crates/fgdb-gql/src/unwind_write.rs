@@ -9,10 +9,14 @@
 //! yield null). Referenced fields must be scalar and have one exact non-null
 //! kind per column; no numeric coercion is introduced. Static nested map fields
 //! and signed list indexes select scalar leaves without copying their containers.
+//! Chained UNWIND clauses expand nested lists, retaining earlier aliases as
+//! borrowed bindings. Each stage is bounded before any native program escapes.
 //! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
 
 mod controlled;
+mod expansion;
 pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
+pub(crate) use expansion::UnwindSource;
 
 use crate::algebra::GraphValue;
 use crate::{
@@ -30,6 +34,10 @@ pub const MAX_UNWIND_BOUND_PARAMETER_BYTES: usize =
 /// Definition bound on a row-field path, including its first map key. This is
 /// independent of the caller's existing list/map value-depth admission limit.
 pub const MAX_UNWIND_FIELD_STEPS: usize = 64;
+
+/// Maximum UNWIND clauses, including the root parameter source. Each later
+/// source is a static path from an earlier alias, not a graph read or a query.
+pub const MAX_UNWIND_SOURCES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphUnwindRowError {
@@ -54,6 +62,15 @@ pub enum GraphUnwindWriteError {
         limit: usize,
         observed: usize,
     },
+    /// A nested source failed before scalar binding. `row` addresses the root
+    /// parameter list; `clause` is zero-based (the root is clause zero).
+    Expansion {
+        row: usize,
+        clause: usize,
+        offset: usize,
+        kind: GraphUnwindRowError,
+    },
+    /// A scalar field failed in the flattened, deterministic argument sequence.
     Row {
         row: usize,
         offset: usize,
@@ -77,13 +94,17 @@ impl core::fmt::Display for GraphUnwindWriteError {
             Self::Syntax(source) | Self::Definition(source) => source.fmt(f),
             Self::SourceParameter => f.write_str("UNWIND requires its named list parameter"),
             Self::ArgumentNames => f.write_str("UNWIND argument names do not match its definition"),
-            Self::Empty => f.write_str("UNWIND write batch requires at least one input row"),
+            Self::Empty => f.write_str("UNWIND write batch requires at least one expanded input row"),
             Self::TooManyRows { limit, observed } => {
                 write!(f, "UNWIND write batch has {observed} rows; limit {limit}")
             }
             Self::Row { row, offset, kind } => {
                 write!(f, "UNWIND input row {row} at byte {offset}: {kind:?}")
             }
+            Self::Expansion { row, clause, offset, kind } => write!(
+                f,
+                "UNWIND root row {row}, clause {clause} at byte {offset}: {kind:?}"
+            ),
             Self::Parameter { row, source } => {
                 write!(f, "UNWIND input row {row}: {source}")
             }
@@ -150,6 +171,7 @@ pub(crate) enum UnwindFieldAccess {
 
 #[derive(Clone)]
 pub(crate) struct UnwindField {
+    pub(crate) source: usize,
     pub(crate) path: Box<[UnwindFieldAccess]>,
     pub(crate) parameter: String,
     pub(crate) offset: usize,
@@ -168,12 +190,14 @@ pub struct GraphUnwindWriteText {
     pub(crate) lowered: String,
     pub(crate) source_parameter: String,
     pub(crate) source_offset: usize,
+    pub(crate) sources: Box<[UnwindSource]>,
     pub(crate) external_parameters: Box<[String]>,
     pub(crate) fields: Box<[UnwindField]>,
 }
 impl core::fmt::Debug for GraphUnwindWriteText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphUnwindWriteText")
+            .field("sources", &(self.sources.len() + 1))
             .field("fields", &self.fields.len())
             .field("parameters", &(self.external_parameters.len() + 1))
             .field("definition", &"[REDACTED]")
@@ -187,7 +211,8 @@ impl GraphUnwindWriteText {
         &self.original
     }
 
-    /// Admit and bind at most 64 rows into one native atomic write program.
+    /// Admit at most 64 rows at each UNWIND boundary and bind the final rows
+    /// into one native atomic write program.
     pub fn bind(
         &self,
         arguments: &GqlParameters,
@@ -213,6 +238,12 @@ impl GraphUnwindWriteText {
     /// catalog resolution. Containers and unselected siblings are never cloned.
     /// Global parameters retain their exact original types. The cap is clamped
     /// to the ordinary batch executor's 65,536-statement hard ceiling.
+    /// It applies independently at EVERY UNWIND boundary, so a later empty
+    /// list cannot conceal an unbounded intermediate expansion. Missing/null
+    /// sources and empty lists produce no child bindings; a list's null item
+    /// does produce a binding. Map items retain their earlier aliases. Scalar
+    /// items and a non-list source refuse in this bounded document profile.
+    /// An entirely empty expansion retains the explicit Empty refusal.
     ///
     /// Original UTF-8 byte offsets survive lowering, including comments and
     /// strings. Execution uses the ordinary program executor and its existing
@@ -240,13 +271,31 @@ fn scalar_field<'a, C>(
     row_index: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<Option<&'a CanonicalScalar>, GraphUnwindBindError<C>> {
-    let refusal = |kind| GraphUnwindWriteError::Row {
-        row: row_index,
-        offset: field.offset,
-        kind,
+    let Some(current) = field_value(row, &field.path, field.offset, row_index, control)? else {
+        return Ok(None);
     };
+    match current {
+        GraphValue::Scalar(value) => Ok(Some(value)),
+        _ => Err(GraphUnwindWriteError::Row {
+            row: row_index,
+            offset: field.offset,
+            kind: GraphUnwindRowError::ExpectedScalarField,
+        }.into()),
+    }
+}
+
+// One selector implementation for nested list sources and scalar leaves.
+// It borrows containers and charges before the same bounded lookups as before.
+fn field_value<'a, C>(
+    row: &'a GraphValue,
+    path: &[UnwindFieldAccess],
+    offset: usize,
+    row_index: usize,
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<Option<&'a GraphValue>, GraphUnwindBindError<C>> {
+    let refusal = |kind| GraphUnwindWriteError::Row { row: row_index, offset, kind };
     let mut current = row;
-    for access in field.path.iter() {
+    for access in path {
         // Both the admission pass and expansion pass debit the SAME host
         // allowance before each bounded lookup. No container is materialized.
         control(GraphUnwindBindEvent::Work(1)).map_err(GraphUnwindBindError::Interrupted)?;
@@ -282,10 +331,7 @@ fn scalar_field<'a, C>(
             }
         };
     }
-    match current {
-        GraphValue::Scalar(value) => Ok(Some(value)),
-        _ => Err(refusal(GraphUnwindRowError::ExpectedScalarField).into()),
-    }
+    Ok(Some(current))
 }
 
 #[cfg(test)]

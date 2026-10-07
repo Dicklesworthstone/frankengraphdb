@@ -133,10 +133,14 @@ impl GraphUnwindWriteText {
             }
         }
 
+        // Expand parameter documents, not graph state. Preserve earlier alias
+        // bindings by reference; every intermediate cardinality is admitted.
+        let rows = expansion::expand(self, rows, limit, &mut control)?;
         work(&mut control, self.fields.len() as u64 + 1)?;
         let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];
-        for (row_index, row) in rows.iter().enumerate() {
+        for row_index in 0..rows.len() {
             work(&mut control, 1)?;
+            let row = rows.at(row_index, 0);
             if !matches!(
                 row,
                 GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)
@@ -149,6 +153,7 @@ impl GraphUnwindWriteText {
                 .into());
             }
             for (field, kind) in self.fields.iter().zip(kinds.iter_mut()) {
+                let row = rows.at(row_index, field.source);
                 if let Some(value) = scalar_field(row, field, row_index, &mut control)? {
                     let actual = CanonicalScalarKind::of(value);
                     if actual == CanonicalScalarKind::Null {
@@ -189,10 +194,11 @@ impl GraphUnwindWriteText {
         work(&mut control, rows.len() as u64)?;
         let mut sets = Vec::with_capacity(rows.len());
         let mut expanded_bytes = 0_u128;
-        for (row_index, row) in rows.iter().enumerate() {
+        for row_index in 0..rows.len() {
             work(&mut control, globals.canonical_byte_len() as u64 + 1)?;
             let mut values = globals.clone();
             for field in self.fields.iter() {
+                let row = rows.at(row_index, field.source);
                 let value = scalar_field(row, field, row_index, &mut control)?;
                 reserve_scalar(value, &mut control)?;
                 values = values

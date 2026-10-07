@@ -6,7 +6,7 @@
 use super::{Lexer, Token, TokenKind, next_script_token, scan};
 use crate::unwind_write::{
     GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS,
-    UnwindField, UnwindFieldAccess,
+    MAX_UNWIND_SOURCES, UnwindField, UnwindFieldAccess, UnwindSource,
 };
 use crate::{GraphPatternTextErrorKind, GraphWriteScriptError, GraphWriteScriptErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,6 +115,8 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
         if depth == 0
             && !is_punct(index.checked_sub(1).and_then(|i| tokens.get(i)), b'.')
             && !is_punct(tokens.get(index + 1), b'.')
+            && !index.checked_sub(1).and_then(|i| tokens.get(i))
+                .is_some_and(|(previous, _)| is_word(previous, "AS"))
         {
             if is_word(token, "CREATE") || is_word(token, "INSERT") {
                 return false;
@@ -137,8 +139,9 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
 
 impl GraphUnwindWriteText {
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
-    /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter. Ordinary CREATE forms are
-    /// intentionally handled by their existing native compiler, not this path.
+    /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
+    /// `UNWIND earlier.static.path AS alias` clauses before the mutation.
+    /// Ordinary CREATE forms keep their existing native compiler.
     pub fn parse(text: &str) -> Result<Self, GraphUnwindWriteError> {
         Self::parse_if_supported(text)?.ok_or_else(|| {
             syntax(
@@ -174,7 +177,8 @@ impl GraphUnwindWriteText {
             return Ok(None);
         };
         let tail = token(&mut lexer)?;
-        if !is_word(&tail.0, "MERGE") && !is_word(&tail.0, "MATCH") {
+        if !is_word(&tail.0, "MERGE") && !is_word(&tail.0, "MATCH")
+            && !is_word(&tail.0, "UNWIND") {
             return Ok(None);
         }
 
@@ -192,6 +196,48 @@ impl GraphUnwindWriteText {
         }
         if !mutating_tail(&tokens) {
             return Ok(None);
+        }
+
+        // Resolve scope coordinates, not values. A later source may refer to
+        // ANY earlier alias (sibling expansions form the ordinary product).
+        // Inspect the mutation family first so existing CREATE pipelines with
+        // other UNWIND expression forms are never intercepted by this adapter.
+        let mut aliases = BTreeMap::from([(alias, 0usize)]);
+        let mut sources = Vec::new();
+        let mut tail_at = 0;
+        while tokens.get(tail_at).is_some_and(|(token, _)| is_word(token, "UNWIND")) {
+            let at = tokens[tail_at].0.at;
+            if sources.len() + 1 == MAX_UNWIND_SOURCES {
+                return Err(syntax(at, "at most eight UNWIND sources"));
+            }
+            let start = tail_at + 1;
+            let Some((Token { kind: TokenKind::Word(parent), .. }, _)) = tokens.get(start) else {
+                return Err(syntax(at, "a static list path from an earlier UNWIND alias"));
+            };
+            let Some(&source) = aliases.get(parent) else {
+                return Err(syntax(tokens[start].0.at, "an earlier UNWIND alias"));
+            };
+            let (path, next, _) = field_path(&tokens, start)?;
+            if path.is_empty() || !tokens.get(next).is_some_and(|(token, _)| is_word(token, "AS")) {
+                return Err(syntax(tokens[start].0.at, "a static list path followed by AS"));
+            }
+            let Some((Token { kind: TokenKind::Word(name), at: alias_at }, _)) = tokens.get(next + 1) else {
+                return Err(syntax(at, "a fresh alias after AS"));
+            };
+            if aliases.contains_key(name) {
+                return Err(syntax(*alias_at, "a fresh UNWIND alias without rebinding"));
+            }
+            sources.push(UnwindSource {
+                source,
+                path: path.into_boxed_slice(),
+                offset: tokens[start].0.at,
+            });
+            aliases.insert(*name, sources.len());
+            tail_at = next + 2;
+        }
+        let tokens = &tokens[tail_at..];
+        if !tokens.first().is_some_and(|(token, _)| is_word(token, "MERGE") || is_word(token, "MATCH")) {
+            return Err(syntax(text.len(), "MERGE or MATCH after the UNWIND sources"));
         }
         let external_parameters: Vec<String> = statements[0]
             .parameters
@@ -215,7 +261,7 @@ impl GraphUnwindWriteText {
         // is a row field use and must be lowered or refused like any other.
         let mut in_map = Vec::with_capacity(tokens.len());
         let mut braces = 0_usize;
-        for (token, _) in &tokens {
+        for (token, _) in tokens {
             in_map.push(braces > 0);
             match token.kind {
                 TokenKind::Punct(b'{') => braces += 1,
@@ -233,10 +279,14 @@ impl GraphUnwindWriteText {
                     "the UNWIND source parameter only in its prefix",
                 ));
             }
-            if !matches!(current.kind, TokenKind::Word(name) if name == alias) {
+            let TokenKind::Word(name) = current.kind else {
                 index += 1;
                 continue;
-            }
+            };
+            let Some(&source) = aliases.get(name) else {
+                index += 1;
+                continue;
+            };
             let previous = index.checked_sub(1).and_then(|i| tokens.get(i));
             if is_punct(previous, b'.') || (is_punct(previous, b':') && !in_map[index]) {
                 index += 1;
@@ -255,8 +305,9 @@ impl GraphUnwindWriteText {
                     "scalar row.field access without alias rebinding",
                 ));
             }
-            let (path, next, end) = field_path(&tokens, index)?;
-            let field = if let Some(existing) = field_index.get(&path) {
+            let (path, next, end) = field_path(tokens, index)?;
+            let identity = (source, path);
+            let field = if let Some(existing) = field_index.get(&identity) {
                 *existing
             } else {
                 if external_parameters.len() + fields.len() + 1
@@ -268,11 +319,12 @@ impl GraphUnwindWriteText {
                     .ok_or_else(|| syntax(current.at, "an available bounded parameter name"))?;
                 let field = fields.len();
                 fields.push(UnwindField {
-                    path: path.clone().into_boxed_slice(),
+                    source,
+                    path: identity.1.clone().into_boxed_slice(),
                     parameter,
                     offset: current.at,
                 });
-                field_index.insert(path, field);
+                field_index.insert(identity, field);
                 field
             };
             let start = current.at;
@@ -290,6 +342,7 @@ impl GraphUnwindWriteText {
             lowered,
             source_parameter: source_name.to_owned(),
             source_offset: source.0.at,
+            sources: sources.into_boxed_slice(),
             external_parameters: external_parameters.into_boxed_slice(),
             fields: fields.into_boxed_slice(),
         }))
