@@ -685,9 +685,7 @@ mod tests {
             b"not a certificate".to_vec(),
             vec![b'x'; MAX_TLS_CA_BYTES + 1],
         ] {
-            let error = tls_connector(&pem)
-                .err()
-                .expect("untrusted configuration must refuse");
+            let error = tls_connector(&pem).expect_err("untrusted configuration must refuse");
             assert_eq!(error.code, 4);
         }
     }
