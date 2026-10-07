@@ -8,6 +8,15 @@ use std::io;
 fn okay<T>(value: Result<T, Failure>) -> T {
     value.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
 }
+/// The cancellation laws cancel their root context. A lab task that then
+/// reaches a checkpoint acknowledges its own cancellation, completes as
+/// cancelled, and the lab discards the very outcome the law asserts, so these
+/// run on a runtime request context, which belongs to no lab task.
+fn on_request_context(body: impl AsyncFnOnce(&asupersync::Cx)) {
+    let runtime = fgdb::runtime_builder().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    runtime.block_on(body(&root));
+}
 fn parent() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -589,8 +598,8 @@ fn every_delivery_boundary_surfaces_flush_failure_and_retires_scratch() {
 
 #[test]
 fn scratch_is_private_and_only_owned_names_are_retired() {
-    let ((), report) = run_async_under_lab(0x5b114, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
+    on_request_context(async |root| {
+        let contexts = PurposeContexts::narrow_runtime_root(root);
         let cx = contexts.query();
         let directory = parent();
         let sentinel = directory.join("foreign");
@@ -625,7 +634,6 @@ fn scratch_is_private_and_only_owned_names_are_retired() {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"leave this alone");
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -714,8 +722,8 @@ impl<F: FnMut()> Write for CancelOutput<F> {
 
 #[test]
 fn cancellation_after_one_flushed_row_retires_scratch_without_a_success_terminal() {
-    let ((), report) = run_async_under_lab(0x5b115, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
+    on_request_context(async |root| {
+        let contexts = PurposeContexts::narrow_runtime_root(root);
         let db = fixture(&contexts.commit()).await;
         let view = db.read_session().unwrap();
         let cx = contexts.query();
@@ -739,13 +747,12 @@ fn cancellation_after_one_flushed_row_retires_scratch_without_a_success_terminal
         );
         empty(&directory);
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
 fn aggregate_cancellation_retires_all_three_files_after_one_flushed_group() {
-    let ((), report) = run_async_under_lab(0x5b11c, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
+    on_request_context(async |root| {
+        let contexts = PurposeContexts::narrow_runtime_root(root);
         let db = fixture(&contexts.commit()).await;
         let view = db.read_session().unwrap();
         let cx = contexts.query();
@@ -770,13 +777,12 @@ fn aggregate_cancellation_retires_all_three_files_after_one_flushed_group() {
         );
         empty(&directory);
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
 fn ranked_aggregate_cancellation_retires_both_sort_passes_before_any_success_terminal() {
-    let ((), report) = run_async_under_lab(0x5b11e, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
+    on_request_context(async |root| {
+        let contexts = PurposeContexts::narrow_runtime_root(root);
         let db = fixture(&contexts.commit()).await;
         let view = db.read_session().unwrap();
         let cx = contexts.query();
@@ -804,7 +810,6 @@ fn ranked_aggregate_cancellation_retires_both_sort_passes_before_any_success_ter
         );
         empty(&directory);
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
