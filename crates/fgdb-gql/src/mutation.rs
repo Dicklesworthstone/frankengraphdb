@@ -7,7 +7,13 @@
 //! The embedded adapter submits them through ordinary WriteTxn preparation.
 
 mod collect;
+mod query;
 mod relational;
+
+pub use query::{
+    GraphMutationQueryBatch, GraphMutationQueryBuildError, GraphMutationQueryError,
+    PreparedGraphMutationQuery,
+};
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
@@ -73,6 +79,27 @@ impl GraphMutationAction {
         }
     }
 }
+/// One private column of a mutation RETURN input row (`SET ... RETURN`).
+/// Rows are the statement's own selection, so each MATCH occurrence returns
+/// exactly once, in selection order, before any later projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphMutationBinding {
+    /// A selection column as frozen before the statement: an element
+    /// identity, a path, a metadata value or a scalar no action can change.
+    Input(usize),
+    /// `target.key` as it stands after the statement. The statement's own
+    /// assignment to that element field wins (REMOVE reads NULL); otherwise
+    /// the frozen pre-statement value in `current` is returned. Simultaneous
+    /// assignments are conflict-checked, so the value is one per element,
+    /// never an order-dependent choice. Reading an element the statement
+    /// deletes is refused, and a NULL OPTIONAL target reads NULL.
+    Property {
+        target: usize,
+        key: PropertyKeyId,
+        current: usize,
+    },
+}
+
 impl core::fmt::Debug for GraphMutationAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("GraphMutationAction([REDACTED])")
@@ -141,6 +168,11 @@ pub enum GraphMutationError<E> {
         limit: u64,
         observed: u128,
     },
+    /// A RETURN binding read a property of an element this statement deletes.
+    DeletedElementRead {
+        row: usize,
+        binding: usize,
+    },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -174,6 +206,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::EffectLimit { limit, observed } => {
                 write!(f, "mutation effect limit exceeded: {observed} > {limit}")
             }
+            Self::DeletedElementRead { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: property of an element this statement deletes"
+            ),
         }
     }
 }
@@ -403,7 +439,7 @@ impl PreparedGraphMutation {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
-        collect::execute(self, policy, source, checkpoint)
+        collect::execute(self, policy, None, source, checkpoint).map(|(batch, _)| batch)
     }
 
     /// Application transcript, not a durable format or authorization permit.

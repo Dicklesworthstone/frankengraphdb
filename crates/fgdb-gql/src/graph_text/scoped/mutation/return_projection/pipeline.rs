@@ -710,6 +710,17 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
+        self.row_page_sourced(schema, &[])
+    }
+
+    /// `row_page` where `sources[i]` is the source spelling of output `i`, so
+    /// a write RETURN may order by `n.p` whether or not the item was aliased.
+    /// A key matching an output name keeps that meaning.
+    pub(in crate::graph_text) fn row_page_sourced(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        sources: &[Name<'a>],
+    ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
         let at = self.current.at;
         let mut present = false;
         let mut order = Vec::new();
@@ -721,6 +732,8 @@ impl<'a> Parser<'a> {
                 // hidden boundary read; every other key is a visible column.
                 let key_start = self.current.at;
                 let (column, key_at) = if let Some(column) = self.boundary_read(schema.len())? {
+                    (column, key_start)
+                } else if let Some(column) = self.sourced_key(sources)? {
                     (column, key_start)
                 } else {
                     let visible = self.visible_width(schema);
@@ -785,6 +798,36 @@ impl<'a> Parser<'a> {
             offset,
             count,
         }))
+    }
+
+    /// The output whose source is spelled `alias.property` at the current
+    /// token, consuming all three tokens; `None` consumes nothing.
+    fn sourced_key(
+        &mut self,
+        sources: &[Name<'a>],
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(alias) = self.current.kind else {
+            return Ok(None);
+        };
+        let mut lookahead = self.lexer.clone();
+        if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+            return Ok(None);
+        }
+        let TokenKind::Word(property) = lookahead.next()?.kind else {
+            return Ok(None);
+        };
+        let Some(column) = sources.iter().position(|source| {
+            source
+                .text
+                .split_once('.')
+                .is_some_and(|(left, right)| left.trim() == alias && right.trim() == property)
+        }) else {
+            return Ok(None);
+        };
+        for _ in 0..3 {
+            self.advance()?;
+        }
+        Ok(Some(column))
     }
 
     fn row_page_number(&mut self) -> Result<ReadPageNumber, GraphPatternTextError> {

@@ -169,10 +169,12 @@ Query rows describe each transaction-local workspace, not a durable historical s
 Output is buffered until completion: at most 64 native statements, 100000 query rows,
 and 16 MiB encoded output. Execution budgets remain per statement/program, not byte-memory bounds.
 --write-relation u32 selects the native mutation coordinate (default 1).
-write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN. It buffers
-the complete result before committing, then emits typed columns and rows followed
-by result kind=written at the committed sequence. DISTINCT and LIMIT affect only
-returned rows, not the number of creations. Encoded output is bounded to 16 MiB.
+write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN and
+MATCH ... SET/REMOVE/DETACH DELETE ... RETURN (one row per matched occurrence;
+a property read sees the statement's own assignment). It buffers the complete
+result before committing, then emits typed columns and rows followed by result
+kind=written at the committed sequence. DISTINCT and LIMIT affect only returned
+rows, not the writes. Encoded output is bounded to 16 MiB.
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
 On Unix the key file must be a regular file with mode 0600 (no group/other bits).

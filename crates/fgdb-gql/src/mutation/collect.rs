@@ -143,15 +143,101 @@ fn reserve_copy<E>(
     Ok(())
 }
 
+/// The element a target cell names, or `None` for an absent OPTIONAL target.
+fn element(value: &crate::algebra::GraphValue) -> Option<ElementId> {
+    if let Some(vertex) = value.as_vertex() {
+        Some(ElementId::Vertex(vertex))
+    } else {
+        value.as_edge().map(ElementId::Edge)
+    }
+}
+
+/// One RETURN input row per selection row, read after every proposal is
+/// known: a property the statement assigns reads its proposal, any other
+/// reads the frozen selection value. Values are copied, never moved, since
+/// the intents still own the proposals.
+fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
+    bindings: &[GraphMutationBinding],
+    row: &GraphValueRow,
+    row_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    meter: &mut Meter<F>,
+) -> ResultOf<GraphValueRow, E, C> {
+    use crate::algebra::GraphValue;
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    let mut values = Vec::with_capacity(bindings.len());
+    for (binding_at, binding) in bindings.iter().enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        let value = match *binding {
+            GraphMutationBinding::Input(column) => {
+                row.values()[column].copy_with_control(&mut |event| meter.event(event))?
+            }
+            GraphMutationBinding::Property {
+                target,
+                key,
+                current,
+            } => match element(&row.values()[target]) {
+                None => {
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                }
+                Some(target) => {
+                    // Two ordered-map searches, charged as work like any
+                    // other proposal lookup.
+                    meter.event(GlaExecutionEvent::Work)?;
+                    if proposals.contains_key(&(target, Field::Delete)) {
+                        return Err(GqlQueryError::Source(
+                            GraphMutationError::DeletedElementRead {
+                                row: row_at,
+                                binding: binding_at,
+                            },
+                        ));
+                    }
+                    meter.event(GlaExecutionEvent::Work)?;
+                    match proposals.get(&(target, Field::Property(key))) {
+                        Some(Proposal {
+                            value: Value::Property(None),
+                            ..
+                        }) => {
+                            meter.event(GlaExecutionEvent::ScratchEntry)?;
+                            GraphValue::Scalar(CanonicalScalar::Null)
+                        }
+                        Some(Proposal {
+                            value: Value::Property(Some(scalar)),
+                            ..
+                        }) => {
+                            reserve_copy(scalar, &mut |event| meter.event(event))?;
+                            GraphValue::Scalar((*scalar).clone())
+                        }
+                        Some(Proposal {
+                            value: Value::Computed(scalar),
+                            ..
+                        }) => {
+                            reserve_copy(scalar, &mut |event| meter.event(event))?;
+                            GraphValue::Scalar(scalar.clone())
+                        }
+                        Some(_) => unreachable!("property fields hold property proposals"),
+                        None => row.values()[current]
+                            .copy_with_control(&mut |event| meter.event(event))?,
+                    }
+                }
+            },
+        };
+        values.push(value);
+    }
+    Ok(GraphValueRow::from_owned_values(values))
+}
+
 pub(super) fn execute<E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
+    bindings: Option<&[GraphMutationBinding]>,
     source: impl FnOnce(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
-) -> ResultOf<GraphMutationBatch, E, C> {
+) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
     let selected = mutation.select_governed(policy.query, source, &mut checkpoint)?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
@@ -220,14 +306,9 @@ pub(super) fn execute<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let target_value = &row.values()[action.target()];
-            let target = if let Some(vertex) = target_value.as_vertex() {
-                ElementId::Vertex(vertex)
-            } else if let Some(edge) = target_value.as_edge() {
-                ElementId::Edge(edge)
-            } else {
-                // Only canonical null can remain after the schema check. An
-                // absent OPTIONAL target does not execute an assignment RHS.
+            // Only canonical null can remain after the schema check. An
+            // absent OPTIONAL target does not execute an assignment RHS.
+            let Some(target) = element(&row.values()[action.target()]) else {
                 continue;
             };
             let (field, value) = match action {
@@ -326,6 +407,12 @@ pub(super) fn execute<E, C>(
             }
         }
     }
+    let mut returned = Vec::new();
+    if let Some(bindings) = bindings {
+        for (row_at, row) in selected.value.iter().enumerate() {
+            returned.push(returned_row(bindings, row, row_at, &proposals, &mut meter)?);
+        }
+    }
     let mut intents = Vec::new();
     let mut previous_target = None;
     let mut target_vertices = 0_u64;
@@ -373,7 +460,7 @@ pub(super) fn execute<E, C>(
         target_edges,
         effects: intents.len() as u64,
     };
-    Ok(GraphMutationBatch { intents, stats })
+    Ok((GraphMutationBatch { intents, stats }, returned))
 }
 
 #[cfg(test)]

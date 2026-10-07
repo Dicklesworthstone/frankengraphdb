@@ -51,7 +51,7 @@ type UnwindPrefix<'a> = (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnTy
 impl<'a> Parser<'a> {
     /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
     /// must not shadow a matched edge or path by silently declaring a vertex.
-    fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
+    pub(super) fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
         if self.syntax.path.is_some_and(|path| path.text == name) {
             Some(GraphSetColumnType::Path)
         } else if self.syntax.visible_edge(name).is_some() {
@@ -557,7 +557,7 @@ fn bind_fields(
 
 // These values compile the original parameterized operator's shape only.
 // They never evaluate an UNWIND list or allocate an identity.
-fn shape_arguments(parameters: &[GqlParameterSpec]) -> Vec<GqlParameterValue> {
+pub(super) fn shape_arguments(parameters: &[GqlParameterSpec]) -> Vec<GqlParameterValue> {
     parameters
         .iter()
         .map(|spec| match spec.parameter_type {

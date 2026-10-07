@@ -1,7 +1,9 @@
 //! Immutable text-prepared query-selected writes. The native graph lexer owns
 //! construction and binding; these facades cannot be executed as reads.
 
+use crate::algebra::GraphValueOrder;
 use crate::insertion::GraphInsertBuildError;
+use crate::set_text::{ReadPageNumber, ReadProjectionTemplate};
 use crate::{
     GqlScalarParameter, GraphDeleteBuildError, GraphEdgeMergeBuildError, GraphIntegerBuildError,
     GraphIntegerOp, GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
@@ -80,13 +82,30 @@ pub enum GraphMutationTextErrorKind {
     Build(GraphMutationBuildError),
     IntegerExpression(GraphIntegerBuildError),
     IntegerOperand,
-    IntegerNesting { limit: usize },
+    IntegerNesting {
+        limit: usize,
+    },
+    /// A RETURN expression, page or projection name after SET/REMOVE.
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphMutationQueryBuildError),
 }
 impl From<GraphPatternTextError> for GraphMutationTextError {
     fn from(error: GraphPatternTextError) -> Self {
         Self {
             offset: error.offset,
             kind: GraphMutationTextErrorKind::Query(error.kind),
+        }
+    }
+}
+impl From<crate::GraphSetTextError> for GraphMutationTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => GraphMutationTextErrorKind::Query(kind),
+            kind => GraphMutationTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
         }
     }
 }
@@ -100,6 +119,46 @@ impl core::fmt::Display for GraphMutationTextError {
     }
 }
 impl core::error::Error for GraphMutationTextError {}
+
+#[derive(Clone)]
+pub(crate) struct MutationReturnTemplate {
+    pub bindings: Vec<crate::GraphMutationBinding>,
+    pub projection: Vec<ReadProjectionTemplate>,
+    pub quantifier: crate::GraphSetQuantifier,
+    pub order: Vec<GraphValueOrder>,
+    pub offset: ReadPageNumber,
+    pub count: Option<ReadPageNumber>,
+    pub at: usize,
+}
+
+/// One `MATCH ... SET/REMOVE/DETACH DELETE ... RETURN ...` statement. RETURN
+/// rows are the statement's own selection occurrences: a matched element's
+/// property reads the value the statement assigns to it (REMOVE reads NULL)
+/// and otherwise its pre-statement value, so `SET n.p = n.p + 1 RETURN n.p`
+/// returns the incremented value. Assignments are simultaneous and
+/// conflict-checked, so every read has one answer, never an order-dependent
+/// one. RETURN accepts native scalar/CASE/list expressions, graph functions,
+/// DISTINCT, output-column ordering, SKIP and LIMIT; paging never limits
+/// which occurrences are updated.
+///
+/// `labels()` after a label action or DETACH DELETE, an edge property after
+/// DETACH DELETE (cascades are not visible to the statement) and aggregate
+/// RETURN are refused; a vertex property of an element the statement
+/// deletes is a typed execution error.
+#[derive(Clone)]
+pub struct PreparedGraphMutationQueryText {
+    pub(crate) statement: String,
+    pub(crate) mutation: PreparedGraphMutationText,
+    pub(crate) returning: MutationReturnTemplate,
+}
+impl core::fmt::Debug for PreparedGraphMutationQueryText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphMutationQueryText")
+            .field("output_columns", &self.returning.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
 
 /// Native MATCH ... DELETE preparation. The generated vertex projection is
 /// compiler metadata and is never inserted into the user's source text. Storage

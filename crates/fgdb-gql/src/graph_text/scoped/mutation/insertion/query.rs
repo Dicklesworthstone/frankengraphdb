@@ -311,6 +311,8 @@ impl<'a> Parser<'a> {
             at,
         };
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
+        // The source spelling of every non-star output, for ORDER BY.
+        let mut spellings = Vec::new();
         if self.take(b'*')? {
             for (index, &(name, kind)) in source.iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
@@ -391,6 +393,7 @@ impl<'a> Parser<'a> {
                 let value = self
                     .read_resolved_value(&mut |parser| returning.leaf(parser, syntax, source), 0)?;
                 let end = self.current.at;
+                spellings.push(self.source_name(at, end));
                 let (mut name, derived) = if self.take_word("AS")? {
                     (self.name()?, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
@@ -440,7 +443,7 @@ impl<'a> Parser<'a> {
             offset,
             count,
             ..
-        }) = self.row_page(&output)?
+        }) = self.row_page_sourced(&output, &spellings)?
         {
             returning.order = order;
             returning.offset = offset;

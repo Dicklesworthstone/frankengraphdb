@@ -26,7 +26,8 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
         GraphMutationTextErrorKind::IntegerNesting { limit } => {
             GraphSetTextErrorKind::IntegerNesting { limit }
         }
-        GraphMutationTextErrorKind::Build(_) => {
+        GraphMutationTextErrorKind::Relation(kind) => kind,
+        GraphMutationTextErrorKind::Build(_) | GraphMutationTextErrorKind::ReturnBuild(_) => {
             GraphSetTextErrorKind::Expected("read scalar expression")
         }
     };

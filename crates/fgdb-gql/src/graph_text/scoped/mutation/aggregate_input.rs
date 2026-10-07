@@ -17,7 +17,10 @@ fn scalar_error(source: GraphMutationTextError) -> GraphPatternTextError {
         GraphMutationTextErrorKind::IntegerExpression(_) => {
             GraphPatternTextErrorKind::Expected("valid bounded aggregate scalar expression")
         }
-        GraphMutationTextErrorKind::Build(_) => {
+        GraphMutationTextErrorKind::Relation(crate::GraphSetTextErrorKind::Pattern(kind)) => kind,
+        GraphMutationTextErrorKind::Build(_)
+        | GraphMutationTextErrorKind::Relation(_)
+        | GraphMutationTextErrorKind::ReturnBuild(_) => {
             GraphPatternTextErrorKind::Expected("aggregate scalar operand")
         }
     };

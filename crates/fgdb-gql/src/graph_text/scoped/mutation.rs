@@ -9,12 +9,15 @@ mod edge_upsert;
 mod insertion;
 mod integer;
 mod merge;
+mod mutation_query;
 mod return_projection;
 mod script;
 
 use super::*;
 use crate::graph_text::GraphPathFunction;
-use crate::mutation_text::{MutationActionTemplate, MutationIntegerTemplateOp};
+use crate::mutation_text::{
+    MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate,
+};
 use crate::{
     GqlScalarParameter, GraphMutationAction, GraphMutationBuildError, GraphMutationTextError,
     GraphMutationTextErrorKind, GraphMutationValue, MAX_GRAPH_MUTATION_ACTIONS,
@@ -310,7 +313,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.end()?;
         Ok((columns, actions))
     }
 
@@ -406,11 +408,41 @@ impl PreparedGraphMutationText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphMutationTextError> {
+        Self::prepare_definition(statement, relation, declarations, resolve, false)
+            .map(|(mutation, _)| mutation)
+    }
+
+    /// The mutation and, in query mode, its terminal RETURN, parsed in one
+    /// pass so RETURN-only reads join the same frozen selection.
+    pub(crate) fn prepare_definition(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        returning: bool,
+    ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         parser.parse_match_prefix()?;
-        let (projections, parsed_actions) = parser.mutation_actions()?;
+        let (mut projections, parsed_actions) = parser.mutation_actions()?;
+        let returning = if returning {
+            let scope = mutation_query::ReturnScope {
+                labels_changed: parsed_actions
+                    .iter()
+                    .any(|action| !matches!(action.kind, ActionKind::Property { .. })),
+                deleting: parsed_actions
+                    .iter()
+                    .any(|action| matches!(action.kind, ActionKind::Delete)),
+            };
+            Some(parser.mutation_return(&mut projections, scope)?)
+        } else {
+            None
+        };
+        parser.end()?;
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
         let syntax = parser.syntax;
         let at = syntax.return_at;
         let mut cache = BTreeMap::new();
@@ -512,6 +544,9 @@ impl PreparedGraphMutationText {
                 }
             });
         }
+        let returning = returning
+            .map(|returning| returning.resolve(&mut symbol))
+            .transpose()?;
         let mut columns = Vec::new();
         for (index, projection) in projections.into_iter().enumerate() {
             let key = if let Some(name) = projection.property {
@@ -553,11 +588,14 @@ impl PreparedGraphMutationText {
             return_at: at,
             reverse_catalog: None,
         };
-        Ok(Self {
-            selection,
-            relation,
-            actions,
-        })
+        Ok((
+            Self {
+                selection,
+                relation,
+                actions,
+            },
+            returning,
+        ))
     }
 
     #[must_use]

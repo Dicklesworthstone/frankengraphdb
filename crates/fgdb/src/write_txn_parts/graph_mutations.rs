@@ -54,6 +54,131 @@ impl WriteTxn {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, true)
     }
 
+    /// Stage `MATCH ... SET/REMOVE/DETACH DELETE ... RETURN ...` as one
+    /// atomic operation. The selection, every proposal, the RETURN bindings,
+    /// projection, DISTINCT, ordering and page are complete before anything
+    /// is staged, and a failure stages nothing. Each RETURN row is one
+    /// selection occurrence; its property reads see this statement's own
+    /// assignments (the pre-statement value otherwise), never a rescan.
+    ///
+    /// Rows are transaction-local, like the staged effects: publish them only
+    /// once finish/commit succeeds. RETURN row limits apply to the final rows
+    /// and never limit which occurrences are updated. The returned execution
+    /// counters already include the mutation phase.
+    pub fn execute_graph_mutation_query_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphMutationQuery,
+        policy: fgdb_gql::GraphMutationPolicy,
+    ) -> Result<
+        (
+            fgdb_gql::GraphMutationStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        ),
+        TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
+    > {
+        use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationQueryError};
+        let wrap = |error| GraphMutationQueryError::Mutation(GraphMutationError::Source(error));
+        let mutation = query.mutation();
+        self.admit_mutation(database, mutation.relation())
+            .map_err(|error| GqlQueryError::Source(wrap(error)))?;
+        cx.with_restriction(|| {
+            let proposal = query.execute_governed(
+                policy,
+                |pattern, budget| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
+                },
+                || cx.checkpoint(),
+            )?;
+            let (batch, returning) = proposal.into_parts();
+            let stats = batch.stats();
+            self.stage_mutation_intents(
+                database,
+                cx,
+                mutation.relation(),
+                batch.into_intents(),
+                wrap,
+            )?;
+            Ok((stats, returning))
+        })
+    }
+
+    /// Even an empty/zero-budget selection cannot bypass ownership, health,
+    /// basis or the existing relation-coordinate contract.
+    fn admit_mutation<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<(), WriteTxnError> {
+        self.ensure_database(database)?;
+        let live = database.frontier().map_err(WriteTxnError::from)?;
+        if live != self.basis {
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            });
+        }
+        if let Some(first) = self.staged.first()
+            && !self.program_multi_relation
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
+            && relation != first.relation
+        {
+            return Err(WriteTxnError::RelationMismatch {
+                expected: first.relation,
+                found: relation,
+            });
+        }
+        Ok(())
+    }
+
+    /// Append one statement's complete proposal as a single ordinary batch.
+    fn stage_mutation_intents<V: Vfs + Clone, X>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        relation: fgdb_delta_types::RelationId,
+        intents: Vec<fgdb_gql::GraphMutationIntent>,
+        source: impl Fn(WriteTxnError) -> X,
+    ) -> Result<(), TxnGqlError<X>> {
+        use fgdb_gql::{GqlQueryError, GraphMutationIntent};
+        let mut batch = WriteBatch::new(relation);
+        for intent in intents {
+            // Only a private batch is changing here. Cancellation drops it
+            // whole and cannot expose a partially appended statement.
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            match intent {
+                GraphMutationIntent::Property { vertex, key, value } => {
+                    batch.set_vertex_property(vertex, key, value);
+                }
+                GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                    batch.set_edge_property(edge, key, value);
+                }
+                GraphMutationIntent::Label {
+                    vertex,
+                    label,
+                    present,
+                } => {
+                    batch.set_vertex_label(vertex, label, present);
+                }
+                GraphMutationIntent::DetachDelete { vertex } => {
+                    batch.delete_vertex(vertex);
+                }
+            }
+        }
+        // Last cancellable boundary before synchronous atomic staging.
+        // Never report a new interruption after the workspace has changed.
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        if !batch.is_empty() {
+            self.write(database, batch)
+                .map_err(|error| GqlQueryError::Source(source(error)))?;
+        }
+        Ok(())
+    }
+
     fn execute_graph_mutation_governed_inner<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -67,32 +192,8 @@ impl WriteTxn {
     > {
         use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationIntent};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));
-        // Even an empty/zero-budget selection cannot bypass ownership, health,
-        // basis or the existing relation-coordinate contract.
-        self.ensure_database(database).map_err(source)?;
-        let live = database
-            .frontier()
-            .map_err(WriteTxnError::from)
+        self.admit_mutation(database, mutation.relation())
             .map_err(source)?;
-        if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced {
-                pinned: self.basis,
-                live,
-            }));
-        }
-        if let Some(first) = self.staged.first()
-            && !self.program_multi_relation
-            && self
-                .staged
-                .iter()
-                .all(|batch| batch.relation == first.relation)
-            && mutation.relation() != first.relation
-        {
-            return Err(source(WriteTxnError::RelationMismatch {
-                expected: first.relation,
-                found: mutation.relation(),
-            }));
-        }
         cx.with_restriction(|| {
             let proposal = mutation.execute_governed(
                 policy,
@@ -121,36 +222,13 @@ impl WriteTxn {
             } else {
                 (Vec::new(), Vec::new())
             };
-            let mut batch = WriteBatch::new(mutation.relation());
-            for intent in proposal.into_intents() {
-                // Only a private batch is changing here. Cancellation drops it
-                // whole and cannot expose a partially appended statement.
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                match intent {
-                    GraphMutationIntent::Property { vertex, key, value } => {
-                        batch.set_vertex_property(vertex, key, value);
-                    }
-                    GraphMutationIntent::EdgeProperty { edge, key, value } => {
-                        batch.set_edge_property(edge, key, value);
-                    }
-                    GraphMutationIntent::Label {
-                        vertex,
-                        label,
-                        present,
-                    } => {
-                        batch.set_vertex_label(vertex, label, present);
-                    }
-                    GraphMutationIntent::DetachDelete { vertex } => {
-                        batch.delete_vertex(vertex);
-                    }
-                }
-            }
-            // Last cancellable boundary before synchronous atomic staging.
-            // Never report a new interruption after the workspace has changed.
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if !batch.is_empty() {
-                self.write(database, batch).map_err(source)?;
-            }
+            self.stage_mutation_intents(
+                database,
+                cx,
+                mutation.relation(),
+                proposal.into_intents(),
+                GraphMutationError::Source,
+            )?;
             Ok((stats, targets, edges))
         })
     }

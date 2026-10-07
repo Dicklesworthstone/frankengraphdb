@@ -150,9 +150,10 @@ pub use integer_expression::{
     GraphNumericFunction, MAX_GRAPH_INTEGER_INSTRUCTIONS,
 };
 pub use mutation::{
-    GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
-    GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
-    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
+    GraphMutationAction, GraphMutationBatch, GraphMutationBinding, GraphMutationBuildError,
+    GraphMutationError, GraphMutationIntent, GraphMutationPolicy, GraphMutationQueryBatch,
+    GraphMutationQueryBuildError, GraphMutationQueryError, GraphMutationStats, GraphMutationValue,
+    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationQuery,
 };
 pub use mutation_program::mixed::{
     GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
@@ -173,7 +174,8 @@ pub use mutation_text::{
     GraphDeleteTextError, GraphDeleteTextErrorKind, GraphEdgeMergeTextError,
     GraphEdgeMergeTextErrorKind, GraphMutationTextError, GraphMutationTextErrorKind,
     GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphDeleteText,
-    PreparedGraphEdgeMergeText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
+    PreparedGraphEdgeMergeText, PreparedGraphMutationQueryText, PreparedGraphMutationText,
+    PreparedGraphVertexMergeText,
 };
 pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;

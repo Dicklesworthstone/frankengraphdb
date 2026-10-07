@@ -1,5 +1,6 @@
-//! Pre-open preparation for CREATE RETURN writes. A RETURN-less write,
-//! including a bounded native UNWIND, is bound by `main`'s native write path.
+//! Pre-open preparation for CREATE RETURN and SET/REMOVE/DETACH DELETE RETURN
+//! writes. A RETURN-less write, including a bounded native UNWIND, is bound by
+//! `main`'s native write path.
 
 use super::{
     Failure, Options, emit, execution_failure, human_value, policy, render_row_body, value_cell,
@@ -7,7 +8,10 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{PreparedGraphInsertQuery, PreparedGraphInsertQueryText};
+use fgdb_gql::{
+    GraphMutationPolicy, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
 use std::io::{self, Write};
 
@@ -16,22 +20,49 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 // bounded integer encodings plus the fixed terminal frame fit this reservation.
 const TERMINAL_RESERVATION: usize = 256;
 
-pub(super) fn prepare(options: &Options) -> Result<Option<PreparedGraphInsertQuery>, Failure> {
-    if !PreparedGraphInsertQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
-        return Ok(None);
+/// One write statement whose RETURN rows are produced with its effects.
+pub(super) enum Returning {
+    Insert(PreparedGraphInsertQuery),
+    Mutation(PreparedGraphMutationQuery),
+}
+impl Returning {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Insert(query) => query.columns(),
+            Self::Mutation(query) => query.columns(),
+        }
     }
+}
+
+pub(super) fn prepare(options: &Options) -> Result<Option<Returning>, Failure> {
     let declarations: Vec<_> = options.params.parameter_types().collect();
-    let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
-        &options.text,
-        options.coordinate,
-        &declarations,
-        |kind, name| options.resolve(kind, name),
-    )
-    .map_err(Failure::query)?;
-    template
-        .bind_parameters(&options.params)
-        .map(Some)
-        .map_err(Failure::query)
+    if PreparedGraphInsertQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
+        let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+            &options.text,
+            options.coordinate,
+            &declarations,
+            |kind, name| options.resolve(kind, name),
+        )
+        .map_err(Failure::query)?;
+        return template
+            .bind_parameters(&options.params)
+            .map(|query| Some(Returning::Insert(query)))
+            .map_err(Failure::query);
+    }
+    if PreparedGraphMutationQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
+        let template = PreparedGraphMutationQueryText::prepare_with_parameter_types(
+            &options.text,
+            options.coordinate,
+            &declarations,
+            |kind, name| options.resolve(kind, name),
+        )
+        .map_err(Failure::query)?;
+        return template
+            .bind_parameters(&options.params)
+            .map(|query| Some(Returning::Mutation(query)))
+            .map_err(Failure::query);
+    }
+    Ok(None)
 }
 
 struct BufferedRows {
@@ -45,7 +76,7 @@ impl Write for BufferedRows {
             .len()
             .checked_add(bytes.len())
             .filter(|end| *end <= self.limit)
-            .ok_or_else(|| io::Error::other("CREATE RETURN encoded output exceeds 16 MiB"))?;
+            .ok_or_else(|| io::Error::other("write RETURN encoded output exceeds 16 MiB"))?;
         self.bytes.extend_from_slice(bytes);
         debug_assert_eq!(self.bytes.len(), end);
         Ok(bytes.len())
@@ -59,21 +90,37 @@ impl Write for BufferedRows {
 pub(super) async fn run<V: Vfs + Clone>(
     database: &mut Database<V>,
     contexts: &PurposeContexts,
-    query: PreparedGraphInsertQuery,
+    query: Returning,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let cx = contexts.query();
     let mut transaction = database.begin(&contexts.txn()).map_err(execution_failure)?;
     let prepared = (|| {
-        let (_, result) = transaction
-            .execute_graph_insert_query_engine_governed(
-                database,
-                &cx,
-                &query,
-                GraphInsertPolicy::new(policy(), 100_000, 100_000),
-            )
-            .map_err(execution_failure)?;
+        let result = match &query {
+            Returning::Insert(query) => {
+                transaction
+                    .execute_graph_insert_query_engine_governed(
+                        database,
+                        &cx,
+                        query,
+                        GraphInsertPolicy::new(policy(), 100_000, 100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
+            }
+            Returning::Mutation(query) => {
+                transaction
+                    .execute_graph_mutation_query_governed(
+                        database,
+                        &cx,
+                        query,
+                        GraphMutationPolicy::new(policy(), 100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
+            }
+        };
         let mut rendered = Vec::with_capacity(result.value.len());
         let mut encoded_cells = 0usize;
         for row in result.value {
@@ -88,7 +135,7 @@ pub(super) async fn run<V: Vfs + Clone>(
                 encoded_cells = encoded_cells
                     .checked_add(cell.len())
                     .filter(|bytes| *bytes <= MAX_OUTPUT_BYTES - TERMINAL_RESERVATION)
-                    .ok_or_else(|| Failure::query("CREATE RETURN encoded output exceeds 16 MiB"))?;
+                    .ok_or_else(|| Failure::query("write RETURN encoded output exceeds 16 MiB"))?;
                 cells.push(cell);
             }
             rendered.push(cells);
