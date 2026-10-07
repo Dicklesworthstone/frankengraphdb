@@ -600,17 +600,17 @@ where
 impl<V, R, C> State<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
-    C: FnMut() -> u64,
+    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    C: FnMut() -> u64 + Send,
 {
     #[allow(clippy::result_large_err)]
-    async fn run<T>(
+    async fn run<T: Send>(
         &mut self,
         cx: &QueryCx,
         request: Request<'_>,
         owner: &Arc<()>,
         returning: bool,
-        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T,
+        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T + Send,
     ) -> Result<(T, EmbeddedTxnCompletion), Fault> {
         // Split the borrows explicitly. The permit/clock must remain live over
         // native completion without borrowing the database or resolver through
@@ -681,8 +681,11 @@ where
                         )?
                     }
                 };
-                database
-                    .complete_authorized_program(
+                // A second erased boundary under `run`'s (fgdb-a5y6m): one
+                // `Send` proof from the session down to here, another from the
+                // program completion down, so neither descends the whole chain.
+                let completion: crate::SendFuture<'_, _> =
+                    Box::pin(database.complete_authorized_program(
                         txn_cx,
                         cx,
                         commit_cx,
@@ -692,9 +695,8 @@ where
                         &mut execution,
                         returning,
                         receipt,
-                    )
-                    .await
-                    .map_err(|error| bound.error(error))
+                    ));
+                completion.await.map_err(|error| bound.error(error))
                 // Nothing fallible, no authorization sampling, no callback and no
                 // receipt allocation after the existing completion boundary.
             })

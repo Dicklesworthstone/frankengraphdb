@@ -239,37 +239,44 @@ impl NativeResultSpool {
     /// authenticates before use; unread corrupt pages cannot enter comparisons.
     /// There is no eager fallback, new storage authority, Warden grant, spill
     /// for the decoded graph, or full larger-than-memory query-engine claim.
+    ///
+    /// Type-erased like the spool and commit chokepoints (fgdb-a5y6m): a
+    /// caller's `Send` proof stops at `dyn Future + Send` instead of
+    /// descending the whole run/merge chain, which the aggregate finish and
+    /// ordered spill paths otherwise pushed past the recursion limit.
     #[allow(clippy::too_many_arguments)]
-    pub async fn sort_into<A, B>(
-        &self,
-        cx: &QueryCx,
-        source: &mut SpillFile<A>,
-        destination: &mut SpillFile<B>,
-        order: &[GraphValueOrder],
+    pub fn sort_into<'a, A, B>(
+        &'a self,
+        cx: &'a QueryCx,
+        source: &'a mut SpillFile<A>,
+        destination: &'a mut SpillFile<B>,
+        order: &'a [GraphValueOrder],
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
         max_work_units: u64,
-    ) -> Result<(Self, u64)>
+    ) -> crate::SendFuture<'a, Result<(Self, u64)>>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
     {
-        self.sort_with(
-            cx,
-            source,
-            destination,
-            &mut CanonicalOrder(order),
-            run_rows,
-            max_runs,
-            page_bytes,
-            max_work_units,
-        )
-        .await
+        Box::pin(async move {
+            self.sort_with(
+                cx,
+                source,
+                destination,
+                &mut CanonicalOrder(order),
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_work_units,
+            )
+            .await
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn sort_with<A, B, O: FrameOrder>(
+    pub(super) async fn sort_with<A, B, O: FrameOrder + Send>(
         &self,
         cx: &QueryCx,
         source: &mut SpillFile<A>,
@@ -281,8 +288,9 @@ impl NativeResultSpool {
         max_work_units: u64,
     ) -> core::result::Result<(Self, u64), O::Error>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        O::Error: Send,
     {
         cx.with_restriction_async(self.sort_inner(
             cx,
@@ -298,7 +306,7 @@ impl NativeResultSpool {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn sort_inner<A, B, O: FrameOrder>(
+    async fn sort_inner<A, B, O: FrameOrder + Send>(
         &self,
         cx: &QueryCx,
         source: &mut SpillFile<A>,
@@ -310,8 +318,9 @@ impl NativeResultSpool {
         max_work_units: u64,
     ) -> core::result::Result<(Self, u64), O::Error>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        O::Error: Send,
     {
         let mut work = Work {
             cx,
@@ -459,7 +468,7 @@ async fn write_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pass<A, B, O: FrameOrder>(
+async fn merge_pass<A, B, O: FrameOrder + Send>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     runs: &[Run],
@@ -471,8 +480,9 @@ async fn merge_pass<A, B, O: FrameOrder>(
     work: &mut Work<'_>,
 ) -> core::result::Result<(), O::Error>
 where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    O::Error: Send,
 {
     debug_assert!(output.is_empty() && output.capacity() >= runs.len().div_ceil(2));
     for pair in runs.chunks(2) {
@@ -495,8 +505,43 @@ where
     Ok(())
 }
 
+/// Type-erased because both merge callers cross it once per pair: a caller's
+/// `Send` proof stops at `dyn Future + Send` instead of descending through
+/// the run readers and the paged writer, which the aggregate finish and the
+/// ordered spill paths otherwise pushed past the recursion limit.
 #[allow(clippy::too_many_arguments)]
-async fn merge_pair<A, B, O: FrameOrder>(
+fn merge_pair<'a, 'w, A, B, O: FrameOrder + Send>(
+    source: &'a mut SpillFile<A>,
+    destination: &'a mut SpillFile<B>,
+    left: &'a Run,
+    right: Option<&'a Run>,
+    max_row_bytes: usize,
+    page_bytes: usize,
+    order: &'a mut O,
+    columns: usize,
+    work: &'a mut Work<'w>,
+) -> crate::SendFuture<'a, core::result::Result<Run, O::Error>>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    O::Error: Send,
+    'w: 'a,
+{
+    Box::pin(merge_pair_inner(
+        source,
+        destination,
+        left,
+        right,
+        max_row_bytes,
+        page_bytes,
+        order,
+        columns,
+        work,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn merge_pair_inner<A, B, O: FrameOrder>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     left: &Run,

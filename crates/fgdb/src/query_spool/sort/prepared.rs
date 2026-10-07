@@ -56,8 +56,8 @@ impl PreparedNativeRead {
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, V, A, B>
     where
         V: Vfs + Clone,
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = self.stream(database, cx, params, policy);
         async move {
@@ -100,8 +100,8 @@ impl PreparedNativeRead {
         max_work_units: u64,
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, A, B>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
@@ -143,8 +143,8 @@ where
     ES: EdgeScanSource<Error = ReadError>,
     VF: FnMut() -> core::result::Result<(), Cancel>,
     EF: FnMut() -> core::result::Result<(), Cancel>,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;

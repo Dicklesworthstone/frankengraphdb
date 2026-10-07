@@ -959,9 +959,9 @@ async fn execute<A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<(NativeAggregateSpool, u64)>
 where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     if group_capacity == 0
         || max_partitions == 0

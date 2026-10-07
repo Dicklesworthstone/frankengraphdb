@@ -164,8 +164,8 @@ impl PreparedNativeRead {
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, V, A, B>
     where
         V: Vfs + Clone,
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = database
             .read_session()
@@ -211,8 +211,8 @@ impl PreparedNativeRead {
         max_sort_work: u64,
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, A, B>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = open(self, view, cx, params, policy, max_input_rows);
         async move {
@@ -254,8 +254,8 @@ async fn evaluate<I, A, B>(
 ) -> Result<(NativeResultSpool, u64)>
 where
     I: SpoolInput,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;

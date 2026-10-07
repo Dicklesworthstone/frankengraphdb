@@ -3019,14 +3019,18 @@ impl<V: Vfs + Clone> Database<V> {
     /// The same prepared-write validation and publication path with an optional
     /// production crash point. Foreign-owner and missing-history refusals occur
     /// before installing a validator or changing the handle's durability state.
+    ///
+    /// Type-erased like [`Self::commit_template`]: every controlled
+    /// transaction completion awaits it, so a caller's `Send` proof stops here
+    /// instead of descending through prepared-write validation.
     #[doc(hidden)]
-    pub async fn commit_prepared_with_crash(
-        &mut self,
-        cx: &CommitCx,
+    pub fn commit_prepared_with_crash<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
         prepared: PreparedWrite,
         crash_at: Option<CrashPoint>,
-    ) -> Result<CommitSeq, WriteError> {
-        self.commit_prepared_checked(cx, prepared, crash_at).await
+    ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
+        Box::pin(self.commit_prepared_checked(cx, prepared, crash_at))
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -4518,7 +4522,19 @@ impl<V: Vfs + Clone> Database<V> {
     /// callers may use this explicit I/O boundary before their existing APIs.
     /// Prepared-write and transaction completion also call it before validating
     /// any basis that lies below the loaded floor.
-    pub async fn ensure_delta_window(
+    ///
+    /// Type-erased like [`Self::commit_template`]: every controlled
+    /// transaction completion awaits it, so a caller's `Send` proof stops here
+    /// instead of descending through the window's capsule reads.
+    pub fn ensure_delta_window<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
+        after: CommitSeq,
+    ) -> SendFuture<'a, Result<(), RebuildError>> {
+        Box::pin(self.ensure_delta_window_inner(cx, after))
+    }
+
+    async fn ensure_delta_window_inner(
         &mut self,
         cx: &CommitCx,
         after: CommitSeq,

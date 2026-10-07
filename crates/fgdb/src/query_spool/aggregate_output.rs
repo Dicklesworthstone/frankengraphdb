@@ -246,9 +246,9 @@ pub(super) async fn finish<A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<NativeResultSpool>
 where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     // Reduction visits radix partitions, not canonical groups. Establish the
     // same complete-key order as the resident result stage before HAVING.
