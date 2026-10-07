@@ -2623,6 +2623,7 @@ impl<V: Vfs + Clone> Database<V> {
             path,
             keys,
             force_rebuild,
+            ReplayRootCapacity::DURABLE,
         ))
     }
 
@@ -2632,6 +2633,7 @@ impl<V: Vfs + Clone> Database<V> {
         path: &Path,
         keys: DatabaseKeys,
         force_rebuild: bool,
+        replay_capacity: ReplayRootCapacity,
     ) -> Result<Self, OpenError> {
         let mut coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
@@ -2677,6 +2679,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &keys,
                     checkpoint.root_id,
                     &mut crypto_verification_events,
+                    replay_capacity,
                 )
                 .await?
             }
@@ -2687,6 +2690,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &store,
                     &keys,
                     &mut crypto_verification_events,
+                    replay_capacity,
                 )
                 .await?
             }
@@ -4571,9 +4575,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// republished through manifest and slot, and checkpoint-selected open
     /// lands on it after authenticating its temporal projection.
     /// The full-stream rebuild remains the AUTHORITATIVE recovery and
-    /// re-derives the uncompacted layout by design (doctrine 5: derived
-    /// state is discarded and rebuilt) — its answers are identical, and its
-    /// republication simply supersedes the compacted root again.
+    /// re-derives its layout from Chronicle (doctrine 5: derived state is
+    /// discarded and rebuilt). Replay consolidates only when its reference
+    /// count exceeds the durable root capacity; all historical answers stay
+    /// identical, and republication supersedes the previous derived root.
     ///
     /// **CRASH-SAFE BY SHAPE, not by hooks**: every durable step before the
     /// final slot publication is a content-addressed APPEND — patches,
@@ -4598,110 +4603,15 @@ impl<V: Vfs + Clone> Database<V> {
         // select it.
         let next_generation = next_slot_generation(self.slot_generation)?;
         self.retain_preparation_anchor();
-        let compaction = fgdb_strata::compact::compact_with_props(
+        let frontier = self.snapshot.frontier;
+        let writer = consolidated_writer(
+            cx,
+            &self.keys,
             &self.snapshot.blocks,
             &self.snapshot.block_props,
-            CommitSeq(0),
-        )
-        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
-
-        // Encode the replacement generation: chains RESTART per family
-        // (state-chain semantics, fgdb-4391) and multi-chunk families link
-        // in emission order — the contract compact_with_props documents.
-        let mut chain_heads: std::collections::BTreeMap<
-            (VId, RelationId),
-            fgdb_strata::DeltaBlockVersion,
-        > = std::collections::BTreeMap::new();
-        let mut sealed = Vec::with_capacity(compaction.blocks.len());
-        for (entries, props) in compaction.blocks.iter().zip(&compaction.block_props) {
-            let family = entries
-                .first()
-                .map(|entry| (entry.src, entry.relation))
-                .expect("the packer emits no empty blocks");
-            let predecessor = chain_heads.get(&family).copied();
-            let (bytes, property_patch) = match props {
-                Some(props) => {
-                    let patch_bytes = fgdb_strata::edge_props::encode_property_patch(&props.rows)
-                        .map_err(|error| {
-                        RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
-                    })?;
-                    let patch_id = fgdb_strata::edge_props::property_patch_id(
-                        self.keys.k_oid(),
-                        self.keys.namespace,
-                        &patch_bytes,
-                    );
-                    let bytes = fgdb_strata::encode_block_with_properties(
-                        PARTITION,
-                        predecessor,
-                        entries,
-                        patch_id,
-                        &props.locators,
-                        &props.rows,
-                    )
-                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
-                    (
-                        bytes,
-                        Some(fgdb_strata::writer::SealedPropertyPatch {
-                            patch_id,
-                            bytes: patch_bytes,
-                        }),
-                    )
-                }
-                None => (
-                    fgdb_strata::encode_block(PARTITION, predecessor, entries)
-                        .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
-                    None,
-                ),
-            };
-            let (first_seq, last_seq) =
-                fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
-            let block_id = fgdb_strata::block_id(self.keys.k_oid(), self.keys.namespace, &bytes);
-            chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
-            sealed.push(fgdb_strata::writer::SealedBlock {
-                block_id,
-                bytes,
-                first_seq,
-                last_seq,
-                property_patch,
-            });
-        }
-
-        // The vertex half consolidates the same way: restatements collapse,
-        // canonical repack, spans re-derived from the rows themselves.
-        let (compacted_patches, _superseded) =
-            fgdb_strata::compact::compact_vertex_patches(&self.snapshot.patches, CommitSeq(0))
-                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
-        let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
-        for rows in &compacted_patches {
-            let bytes = fgdb_strata::vertex::encode_patch(rows)
-                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
-            let (first_seq, last_seq) =
-                fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
-            sealed_patches.push(fgdb_strata::writer::SealedPatch {
-                patch_id: fgdb_strata::vertex::vertex_patch_id(
-                    self.keys.k_oid(),
-                    self.keys.namespace,
-                    &bytes,
-                ),
-                bytes,
-                first_seq,
-                last_seq,
-            });
-        }
-
-        let frontier = self.snapshot.frontier;
-        let writer = BlockWriter::from_published_partition(
-            GRAPH,
-            BRANCH,
-            PARTITION,
-            sealed,
-            sealed_patches,
-            &compaction.blocks,
-            &compaction.block_props,
-            &compacted_patches,
+            &self.snapshot.patches,
             frontier,
-        )
-        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+        )?;
 
         // The logical state is unchanged, so the handle's version heads and
         // allocator stay as they are; the shared tail republishes and reopens
@@ -5251,6 +5161,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     keys: &DatabaseKeys,
     root_id: PartitionRootVersion,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+    replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
@@ -5298,6 +5209,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             crypto_verification_events,
         },
         published_at,
+        replay_capacity,
     )
     .await?;
 
@@ -5518,6 +5430,7 @@ async fn rebuild<V: Vfs>(
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+    replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
@@ -5533,6 +5446,7 @@ async fn rebuild<V: Vfs>(
             crypto_verification_events,
         },
         CommitSeq(0),
+        replay_capacity,
     )
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
@@ -5694,6 +5608,212 @@ fn triple_is_live(
     false
 }
 
+/// Encode a zero-floor consolidation for both explicit compaction and replay.
+/// Every historical interval is retained; only redundant restatements and
+/// spare object capacity are reclaimed. Replacement chains restart per family.
+fn consolidated_writer(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    blocks: &[Vec<AdjacencyEntry>],
+    block_props: &[Option<BlockProps>],
+    patches: &[VertexPatchRows],
+    frontier: CommitSeq,
+) -> Result<BlockWriter, RebuildError> {
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let compaction =
+        fgdb_strata::compact::compact_with_props(blocks, block_props, CommitSeq::ORIGIN)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+    let mut chain_heads: std::collections::BTreeMap<
+        (VId, RelationId),
+        fgdb_strata::DeltaBlockVersion,
+    > = std::collections::BTreeMap::new();
+    let mut sealed = Vec::with_capacity(compaction.blocks.len());
+    for (entries, props) in compaction.blocks.iter().zip(&compaction.block_props) {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let family = entries
+            .first()
+            .map(|entry| (entry.src, entry.relation))
+            .expect("the packer emits no empty blocks");
+        let predecessor = chain_heads.get(&family).copied();
+        let (bytes, property_patch) = match props {
+            Some(props) => {
+                let patch_bytes = fgdb_strata::edge_props::encode_property_patch(&props.rows)
+                    .map_err(|error| {
+                        RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                    })?;
+                let patch_id = fgdb_strata::edge_props::property_patch_id(
+                    keys.k_oid(),
+                    keys.namespace,
+                    &patch_bytes,
+                );
+                let bytes = fgdb_strata::encode_block_with_properties(
+                    PARTITION,
+                    predecessor,
+                    entries,
+                    patch_id,
+                    &props.locators,
+                    &props.rows,
+                )
+                .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+                (
+                    bytes,
+                    Some(fgdb_strata::writer::SealedPropertyPatch {
+                        patch_id,
+                        bytes: patch_bytes,
+                    }),
+                )
+            }
+            None => (
+                fgdb_strata::encode_block(PARTITION, predecessor, entries)
+                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
+                None,
+            ),
+        };
+        let (first_seq, last_seq) =
+            fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
+        let block_id = fgdb_strata::block_id(keys.k_oid(), keys.namespace, &bytes);
+        chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
+        sealed.push(fgdb_strata::writer::SealedBlock {
+            block_id,
+            bytes,
+            first_seq,
+            last_seq,
+            property_patch,
+        });
+    }
+
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let (compacted_patches, _) =
+        fgdb_strata::compact::compact_vertex_patches(patches, CommitSeq::ORIGIN)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+    let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
+    for rows in &compacted_patches {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let bytes = fgdb_strata::vertex::encode_patch(rows)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+        let (first_seq, last_seq) =
+            fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
+        sealed_patches.push(fgdb_strata::writer::SealedPatch {
+            patch_id: fgdb_strata::vertex::vertex_patch_id(keys.k_oid(), keys.namespace, &bytes),
+            bytes,
+            first_seq,
+            last_seq,
+        });
+    }
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    BlockWriter::from_published_partition(
+        GRAPH,
+        BRANCH,
+        PARTITION,
+        sealed,
+        sealed_patches,
+        &compaction.blocks,
+        &compaction.block_props,
+        &compacted_patches,
+        frontier,
+    )
+    .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))
+}
+
+/// Replay uses the same immutable format ceilings as live write admission.
+/// Kept explicit so recovery laws can exercise the real bind/fold/publication
+/// path at a small capacity without changing a durable format constant.
+#[derive(Clone, Copy)]
+struct ReplayRootCapacity {
+    blocks: usize,
+    patches: usize,
+}
+
+impl ReplayRootCapacity {
+    const DURABLE: Self = Self {
+        blocks: fgdb_strata::root::MAX_ROOT_BLOCKS as usize,
+        patches: fgdb_strata::root::MAX_ROOT_PATCHES as usize,
+    };
+
+    fn overflow(self, writer: &BlockWriter) -> Option<fgdb_strata::root::RootError> {
+        if writer.sealed().len() > self.blocks {
+            Some(fgdb_strata::root::RootError::ImplausibleBlockCount {
+                declared: u32::try_from(writer.sealed().len()).unwrap_or(u32::MAX),
+            })
+        } else if writer.sealed_patches().len() > self.patches {
+            Some(fgdb_strata::root::RootError::ImplausiblePatchCount {
+                declared: u32::try_from(writer.sealed_patches().len()).unwrap_or(u32::MAX),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// A compacted live root can admit more history than its original per-commit
+/// object layout can name. Replaying that layout without consolidation made
+/// such a database permanently unrebuildable (fgdb-d5vo4). At the exact format
+/// boundary, consolidate once, without dropping history or changing logical
+/// heads. An irreducible over-capacity result returns the original root-error
+/// family; it never retries indefinitely or publishes a truncated generation.
+fn consolidate_replay_if_needed(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    writer: &mut BlockWriter,
+    frontier: CommitSeq,
+    capacity: ReplayRootCapacity,
+) -> Result<(), RebuildError> {
+    if capacity.overflow(writer).is_none() {
+        return Ok(());
+    }
+    let mut blocks = Vec::with_capacity(writer.sealed().len());
+    let mut block_props = Vec::with_capacity(writer.sealed().len());
+    for sealed in writer.sealed() {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let (entries, hosted) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
+            .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+        let props = match hosted {
+            Some((_, locators)) => {
+                let patch = sealed
+                    .property_patch
+                    .as_ref()
+                    .expect("a replay-sealed block declaring a hosted patch carries that patch");
+                let rows = match keys.scalar_resolver.as_deref() {
+                    Some(resolver) => fgdb_strata::edge_props::decode_property_patch_with_resolver(
+                        &patch.bytes,
+                        resolver,
+                    ),
+                    None => fgdb_strata::edge_props::decode_property_patch(&patch.bytes),
+                }
+                .map_err(|error| {
+                    RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                })?;
+                Some(BlockProps { locators, rows })
+            }
+            None => None,
+        };
+        blocks.push(entries);
+        block_props.push(props);
+    }
+    let mut patches = Vec::with_capacity(writer.sealed_patches().len());
+    for sealed in writer.sealed_patches() {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        patches.push(
+            match keys.scalar_resolver.as_deref() {
+                Some(resolver) => {
+                    fgdb_strata::vertex::decode_patch_with_resolver(&sealed.bytes, resolver)
+                }
+                None => fgdb_strata::vertex::decode_patch(&sealed.bytes),
+            }
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?,
+        );
+    }
+    let replacement = consolidated_writer(cx, keys, &blocks, &block_props, &patches, frontier)?;
+    if let Some(error) = capacity.overflow(&replacement) {
+        return Err(RebuildError::Fold {
+            commit_seq: frontier.0,
+            error: fgdb_strata::writer::WriteError::Root(error),
+        });
+    }
+    *writer = replacement;
+    Ok(())
+}
+
 /// Fold every committed template with `commit_seq > after` into the writer,
 /// versions map, and birth-ordinal allocator — the one stream fold shared by
 /// the from-scratch rebuild (`after = 0`) and the selected checkpoint's suffix
@@ -5711,6 +5831,7 @@ async fn fold_stream<V: Vfs>(
     keys: &DatabaseKeys,
     state: &mut FoldState<'_>,
     after: CommitSeq,
+    capacity: ReplayRootCapacity,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
@@ -5808,6 +5929,7 @@ async fn fold_stream<V: Vfs>(
                 commit_seq: commit_seq.0,
                 error,
             })?;
+        consolidate_replay_if_needed(cx, keys, state.writer, commit_seq, capacity)?;
     }
     Ok(frontier)
 }
@@ -6941,6 +7063,344 @@ mod point_read_index_laws {
 #[cfg(test)]
 mod root_capacity_laws {
     use super::*;
+
+    fn assert_recovered_history_matches(actual: &Database<MemVfs>, expected: &Database<MemVfs>) {
+        assert_eq!(actual.snapshot.frontier, expected.snapshot.frontier);
+        assert_eq!(actual.heads.versions, expected.heads.versions);
+        assert_eq!(
+            actual.heads.next_birth_ordinal,
+            expected.heads.next_birth_ordinal
+        );
+        for seq in 0..=expected.snapshot.frontier.0 {
+            let cut = CommitSeq(seq);
+            assert_eq!(
+                fgdb_strata::root::merge_all_edges_with_props(
+                    &actual.snapshot.blocks,
+                    &actual.snapshot.block_props,
+                    cut,
+                )
+                .unwrap(),
+                fgdb_strata::root::merge_all_edges_with_props(
+                    &expected.snapshot.blocks,
+                    &expected.snapshot.block_props,
+                    cut,
+                )
+                .unwrap(),
+                "edge history at {seq}",
+            );
+            assert_eq!(
+                fgdb_strata::vertex::merge_all_vertices(&actual.snapshot.patches, cut),
+                fgdb_strata::vertex::merge_all_vertices(&expected.snapshot.patches, cut),
+                "vertex history at {seq}",
+            );
+        }
+    }
+
+    #[test]
+    fn replay_consolidates_at_capacity_without_losing_history_or_write_state() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let capacity = ReplayRootCapacity {
+            blocks: 4,
+            patches: 4,
+        };
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=3 {
+            initial.create_vertex(VId(vid), vec![LabelId(1)], vec![]);
+        }
+        initial.add_edge(EId(1), VId(1), VId(2), vec![]);
+        initial.add_edge(EId(2), VId(2), VId(3), vec![]);
+        initial.add_edge(EId(3), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, initial.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, initial)).unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+
+        for turn in 1..=16 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            let value = match turn % 3 {
+                0 => None,
+                1 => Some(CanonicalScalar::Null),
+                _ => Some(CanonicalScalar::Int(turn)),
+            };
+            batch.set_edge_property(EId(1), PropertyKeyId(1), value.clone());
+            batch.set_vertex_property(VId(1), PropertyKeyId(1), value);
+            batch.set_vertex_label(VId(1), LabelId(2), turn % 2 == 0);
+            if turn == 4 {
+                batch.delete_edge(EId(2));
+            }
+            if turn == 8 {
+                batch.delete_vertex(VId(3));
+            }
+            if turn == 10 {
+                batch.create_vertex(VId(4), vec![LabelId(4)], vec![]);
+                batch.add_edge(
+                    EId(4),
+                    VId(1),
+                    VId(4),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(10))],
+                );
+            }
+            runtime.block_on(db.write(&cx, batch.clone())).unwrap();
+            runtime.block_on(oracle.write(&cx, batch)).unwrap();
+            if turn % 4 == 0 {
+                runtime.block_on(db.compact(&cx)).unwrap();
+                assert!(capacity.overflow(&db.writer).is_none());
+            }
+        }
+        assert!(oracle.writer.sealed().len() > capacity.blocks);
+        assert!(oracle.writer.sealed_patches().len() > capacity.patches);
+        assert_recovered_history_matches(&db, &oracle);
+        let uncompacted_root = oracle.partition_root().unwrap();
+        let path = db.path().to_path_buf();
+        let vfs = db.vfs.clone();
+        drop(db);
+
+        // The ordinary durable capacity preserves the original per-commit
+        // root byte-for-byte, even when the selected live root was compacted.
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                ReplayRootCapacity::DURABLE,
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), uncompacted_root);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ))
+            .unwrap();
+        assert!(capacity.overflow(&db.writer).is_none());
+        assert_recovered_history_matches(&db, &oracle);
+        let rebuilt_root = db.partition_root().unwrap();
+        assert_ne!(rebuilt_root, uncompacted_root);
+        drop(db);
+
+        // Same stream and capacity produce the same physical generation.
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), rebuilt_root);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+
+        // Reopen the published replacement through ordinary checkpoint
+        // selection, then continue both folds with new identities and a
+        // cascade. This checks live maps, chain heads, allocation and heads.
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), rebuilt_root);
+        let mut reused = WriteBatch::new(RelationId(1));
+        reused.create_vertex(VId(3), vec![], vec![]);
+        assert!(matches!(
+            runtime.block_on(db.write(&cx, reused)),
+            Err(WriteError::IdentitySpent {
+                elem: ElementId::Vertex(VId(3))
+            })
+        ));
+        let mut next = WriteBatch::new(RelationId(1));
+        next.create_vertex(VId(5), vec![LabelId(5)], vec![]);
+        next.add_edge(EId(5), VId(1), VId(5), vec![]);
+        next.delete_vertex(VId(2));
+        runtime.block_on(db.write(&cx, next.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, next)).unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+        assert_eq!(pinned.vertices().unwrap().len(), 3);
+        assert!(pinned.edge(EId(2)).unwrap().is_some());
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx, vfs, &path, keys, true, capacity,
+            ))
+            .unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+    }
+
+    #[test]
+    fn checkpoint_suffix_consolidates_before_publishing_the_recovered_commit() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        initial.create_vertex(VId(1), vec![], vec![]);
+        initial.create_vertex(VId(2), vec![], vec![]);
+        initial.add_edge(EId(1), VId(1), VId(2), vec![]);
+        runtime.block_on(db.write(&cx, initial.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, initial)).unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        runtime.block_on(oracle.write(&cx, update.clone())).unwrap();
+        assert!(matches!(
+            runtime.block_on(db.write_with_publication_failure(
+                &cx,
+                update,
+                DerivedPublicationStage::PublishEdgeBlocks,
+            )),
+            Err(WriteError::CommittedNeedsRecovery { .. })
+        ));
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        let capacity = ReplayRootCapacity {
+            blocks: 1,
+            patches: 1,
+        };
+        let mut db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                false,
+                capacity,
+            ))
+            .unwrap();
+        assert!(capacity.overflow(&db.writer).is_none());
+        assert_recovered_history_matches(&db, &oracle);
+        let mut next = WriteBatch::new(RelationId(1));
+        next.delete_vertex(VId(2));
+        runtime.block_on(db.write(&cx, next.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, next)).unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+        let db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &path, keys))
+            .unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+    }
+
+    #[test]
+    fn irreducible_replay_capacity_refusal_preserves_the_selected_generation() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=4 {
+            initial.create_vertex(VId(vid), vec![], vec![]);
+        }
+        for src in 1..=3 {
+            initial.add_edge(EId(src), VId(src), VId(4), vec![]);
+        }
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        let selected = db.partition_root().unwrap();
+        let generation = db.slot_generation;
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        for capacity in [
+            ReplayRootCapacity {
+                blocks: 2,
+                patches: 1,
+            },
+            ReplayRootCapacity {
+                blocks: 3,
+                patches: 0,
+            },
+        ] {
+            let result = runtime.block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ));
+            if capacity.blocks == 2 {
+                assert!(matches!(
+                    result,
+                    Err(OpenError::Rebuild(RebuildError::Fold {
+                        commit_seq: 1,
+                        error: BlockWriteError::Root(
+                            fgdb_strata::root::RootError::ImplausibleBlockCount { declared: 3 },
+                        ),
+                    }))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(OpenError::Rebuild(RebuildError::Fold {
+                        commit_seq: 1,
+                        error: BlockWriteError::Root(
+                            fgdb_strata::root::RootError::ImplausiblePatchCount { declared: 1 },
+                        ),
+                    }))
+                ));
+            }
+            let db = runtime
+                .block_on(Database::open_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                ))
+                .unwrap();
+            assert_eq!(db.partition_root().unwrap(), selected);
+            assert_eq!(db.slot_generation, generation);
+            assert_eq!(db.vertices().unwrap().len(), 4);
+            assert_eq!(db.edges().unwrap().len(), 3);
+            drop(db);
+        }
+    }
 
     struct Lcg(u64);
     impl Lcg {

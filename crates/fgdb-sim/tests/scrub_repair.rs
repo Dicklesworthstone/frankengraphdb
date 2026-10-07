@@ -578,18 +578,40 @@ mod publication_metadata {
             let bytes = vfs.read(&store.path(record.root.0)).await.unwrap();
             if let RootFrame::V4(frame) = fgdb_strata::root::decode_root_frame(&bytes).unwrap() {
                 for reference in frame.block_segments.iter().chain(&frame.patch_segments) {
-                    remember(&mut objects, vfs, store, reference.segment_id, Kind::Segment).await;
+                    remember(
+                        &mut objects,
+                        vfs,
+                        store,
+                        reference.segment_id,
+                        Kind::Segment,
+                    )
+                    .await;
                 }
             }
             for reference in root.blocks {
                 let bytes = vfs.read(&store.path(reference.block_id)).await.unwrap();
-                if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1 {
+                if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1
+                {
                     remember(&mut objects, vfs, store, id, Kind::EdgeProperties).await;
                 }
-                remember(&mut objects, vfs, store, reference.block_id, Kind::EdgeBlock).await;
+                remember(
+                    &mut objects,
+                    vfs,
+                    store,
+                    reference.block_id,
+                    Kind::EdgeBlock,
+                )
+                .await;
             }
             for reference in root.vertex_patches {
-                remember(&mut objects, vfs, store, reference.patch_id, Kind::VertexPatch).await;
+                remember(
+                    &mut objects,
+                    vfs,
+                    store,
+                    reference.patch_id,
+                    Kind::VertexPatch,
+                )
+                .await;
             }
         }
         objects
@@ -623,7 +645,8 @@ mod publication_metadata {
                 .copied()
                 .filter(|id| lost.contains(id))
                 .collect();
-            let expected_clean: BTreeSet<_> = expected.difference(&expected_lost).copied().collect();
+            let expected_clean: BTreeSet<_> =
+                expected.difference(&expected_lost).copied().collect();
             assert_eq!(clean.len(), expected_clean.len());
             assert_eq!(id_set(clean), expected_clean);
             assert_eq!(failures.len(), expected_lost.len());
