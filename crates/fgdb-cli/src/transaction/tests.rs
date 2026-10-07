@@ -374,5 +374,168 @@ fn parser_refuses_unscoped_parameters_empty_steps_and_inapplicable_options() {
         args.extend(["--query".to_owned(), "MATCH (n) RETURN n".to_owned()]);
     }
     assert!(crate::parse(&args, "transaction").is_err());
-    assert!(validate_input(&[Step::new(false, "x".repeat(MAX_INPUT_BYTES + 1))]).is_err());
+    assert!(
+        validate_input(&[Step::new(StepKind::Query, "x".repeat(MAX_INPUT_BYTES + 1))]).is_err()
+    );
+}
+
+fn committed_values(db: &Database<impl Vfs + Clone>) -> Vec<i64> {
+    let mut values: Vec<_> = db
+        .vertices_at(db.frontier().unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|row| match &row.props[0].1 {
+            CanonicalScalar::Int(value) => *value,
+            other => panic!("unexpected property {other:?}"),
+        })
+        .collect();
+    values.sort_unstable();
+    values
+}
+
+#[test]
+fn rollback_to_a_savepoint_rewinds_later_effects_and_the_rows_they_buffered() {
+    let ((), report) = run_async_under_lab(0x7478_6308, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let options = options(&[
+            "--write",
+            "CREATE (n:Person {p: 1})",
+            "--savepoint",
+            "s",
+            "--write",
+            "CREATE (n:Person {p: 2})",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--rollback-to",
+            "s",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--write",
+            "CREATE (n:Person {p: 3})",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &options, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(
+            text.contains(
+                r#""index":2,"kind":"savepoint","view":"transaction_local","basis":0,"name":"s"}"#
+            ),
+            "{text}"
+        );
+        assert!(text.contains(r#""index":5,"kind":"rollback_to""#), "{text}");
+        // Steps 3 and 4 previewed discarded effects: their records and rows go.
+        assert!(!text.contains(r#""index":3,"#), "{text}");
+        assert!(!text.contains(r#""statement":4"#), "{text}");
+        assert!(
+            text.contains(r#""statement":6,"cells":[{"type":"int","value":"1"}]"#),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches(r#""statement":6,"cells""#).count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":1,\"statements\":5}\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(committed_values(&db), vec![1, 3]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn release_keeps_effects_and_a_reused_name_shadows_until_released() {
+    let ((), report) = run_async_under_lab(0x7478_6309, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let release = options(&[
+            "--write",
+            "CREATE (n:Person {p: 1})",
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 2})",
+            "--release",
+            "a",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &release, None, false, &mut bytes).await);
+        let text = output(bytes);
+        assert!(text.contains("statement 2: savepoint a\n"), "{text}");
+        assert!(text.contains("statement 4: release a\n"), "{text}");
+        assert_eq!(committed_values(&db), vec![1, 2]);
+
+        // The younger "a" shadows the older one: the first rollback discards
+        // only p 6; once released, the next rollback reaches the older "a"
+        // and discards p 5 as well.
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let shadowed = options(&[
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 5})",
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 6})",
+            "--rollback-to",
+            "a",
+            "--release",
+            "a",
+            "--rollback-to",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 7})",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &shadowed, None, true, &mut bytes).await);
+        assert_eq!(committed_values(&db), vec![7]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn savepoint_steps_refuse_unknown_names_parameters_and_empty_names_before_running() {
+    for tail in [
+        vec!["--write", "CREATE (n)", "--rollback-to", "a"],
+        vec!["--write", "CREATE (n)", "--release", "a"],
+        vec!["--savepoint", "a", "--release", "a", "--rollback-to", "a"],
+        vec!["--savepoint", "a", "--rollback-to", "A"],
+        vec!["--savepoint", "a", "--param", "p=int:4"],
+        vec!["--savepoint", ""],
+    ] {
+        let mut args = vec!["--db", "x", "--key-file", "y"];
+        args.extend(tail.iter().copied());
+        let refused = crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "transaction",
+        );
+        assert!(
+            matches!(&refused, Err(error) if error.code == 2),
+            "{tail:?} must be a usage error"
+        );
+    }
+    // Rolling back to a savepoint keeps it live: it can be the target again.
+    let again = options(&[
+        "--savepoint",
+        "a",
+        "--rollback-to",
+        "a",
+        "--rollback-to",
+        "a",
+    ]);
+    assert!(validate_input(&again.steps).is_ok());
 }

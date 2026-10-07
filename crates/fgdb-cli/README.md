@@ -21,7 +21,7 @@ machine-readable contract that the tests freeze.
 | `query 'CALL fnx.<procedure>(…) YIELD …'` | A registered Prism analytics procedure over an explicit projection of one committed sequence (see Analytics). |
 | `replay --certificate <file>` | Re-execute a certified query at its recorded sequence, byte for byte. |
 | `diff --before <seq> --after <seq> <gql>` | Net bag difference of one query's complete results at two committed sequences. |
-| `transaction --write <gql> --query <gql> …` | Ordered steps in ONE native transaction; `--rollback` discards everything. |
+| `transaction --write <gql> --query <gql> …` | Ordered steps in ONE native transaction; `--rollback` discards everything. `--savepoint <name>`, `--rollback-to <name>` and `--release <name>` steps rewind or keep the effects staged after a savepoint; rolling back also drops the rows and records those later steps buffered. |
 | `load --input <file.ndjson>` | Chunked bulk load with an optional resumable `--checkpoint`. |
 | `import-csv --input <file.csv\|-> (--query-file <f> \| <gql>)` | Bind a native write script once per CSV record, and commit every record in ONE transaction or none. |
 | `compact` | Publish a consolidated storage generation. Answers at every retained sequence are unchanged, and the frontier does not move. |

@@ -13,6 +13,13 @@
 //! row/output allowances with --query results. All RETURN expressions and
 //! output admission precede the sole completion boundary; LIMIT affects rows,
 //! never creations. Other write steps retain their multi-statement programs.
+//!
+//! --savepoint, --rollback-to and --release steps drive WriteTxn's savepoints.
+//! Names follow its rules: case-sensitive, a reused name shadows the older one
+//! until released, and an unknown name is refused before any step runs.
+//! Rolling back to a savepoint discards the effects of later steps and, like
+//! --rollback, the rows and records they buffered; their reads remain conflict
+//! witnesses and identities they issued are not reclaimed.
 
 use super::{
     Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted, value_cell,
@@ -31,31 +38,82 @@ use std::io::Write;
 pub(super) const MAX_STATEMENTS: usize = 64;
 const MAX_INPUT_BYTES: usize = 1_048_576;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum StepKind {
+    Query,
+    Write,
+    Savepoint,
+    RollbackTo,
+    Release,
+}
+impl StepKind {
+    /// The step flag this kind is spelled with, if any.
+    pub(super) fn of_flag(flag: &str) -> Option<Self> {
+        Some(match flag {
+            "--query" => Self::Query,
+            "--write" => Self::Write,
+            "--savepoint" => Self::Savepoint,
+            "--rollback-to" => Self::RollbackTo,
+            "--release" => Self::Release,
+            _ => return None,
+        })
+    }
+}
+
 pub(super) struct Step {
-    write: bool,
+    kind: StepKind,
+    /// GQL text for a query or write; the savepoint name otherwise.
     text: String,
     pub(super) raw_params: Vec<(String, String)>,
 }
 impl Step {
-    pub(super) fn new(write: bool, text: String) -> Self {
+    pub(super) fn new(kind: StepKind, text: String) -> Self {
         Self {
-            write,
+            kind,
             text,
             raw_params: Vec::new(),
         }
+    }
+    /// Only GQL steps bind parameters.
+    pub(super) fn takes_params(&self) -> bool {
+        SavepointOp::of(self.kind).is_none()
     }
 }
 
 pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
     if steps.is_empty() || steps.len() > MAX_STATEMENTS {
         return Err(Failure::usage(
-            "transaction requires 1..=64 --write/--query steps",
+            "transaction requires 1..=64 --write/--query/savepoint steps",
         ));
     }
+    // Replay WriteTxn's savepoint stack over the names alone, so an unknown
+    // name is a usage error before the transaction begins rather than a
+    // refusal after earlier steps have staged effects.
+    let mut live: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
     for step in steps {
         if step.text.trim().is_empty() {
             return Err(Failure::usage("transaction step must not be empty"));
+        }
+        if !step.takes_params() && !step.raw_params.is_empty() {
+            return Err(Failure::usage(
+                "transaction --param must follow --query or --write",
+            ));
+        }
+        match step.kind {
+            StepKind::Savepoint => live.push(&step.text),
+            StepKind::RollbackTo | StepKind::Release => {
+                let index = live
+                    .iter()
+                    .rposition(|name| *name == step.text)
+                    .ok_or_else(|| Failure::usage("transaction names an unknown savepoint"))?;
+                live.truncate(if step.kind == StepKind::RollbackTo {
+                    index + 1
+                } else {
+                    index
+                });
+            }
+            StepKind::Query | StepKind::Write => {}
         }
         for size in std::iter::once(step.text.len()).chain(
             step.raw_params
@@ -90,6 +148,31 @@ enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
     Write(Box<BoundNativeGraphWrite>),
     Returning(Box<PreparedGraphInsertQuery>),
+    /// A --savepoint, --rollback-to or --release step and its name.
+    Savepoint(SavepointOp, String),
+}
+#[derive(Clone, Copy)]
+enum SavepointOp {
+    Save,
+    RollbackTo,
+    Release,
+}
+impl SavepointOp {
+    fn of(kind: StepKind) -> Option<Self> {
+        match kind {
+            StepKind::Savepoint => Some(Self::Save),
+            StepKind::RollbackTo => Some(Self::RollbackTo),
+            StepKind::Release => Some(Self::Release),
+            StepKind::Query | StepKind::Write => None,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Save => "savepoint",
+            Self::RollbackTo => "rollback_to",
+            Self::Release => "release",
+        }
+    }
 }
 fn prepare(
     options: &Options,
@@ -102,13 +185,17 @@ fn prepare(
     for (index, step) in options.steps.iter().enumerate() {
         cx.checkpoint().map_err(Failure::query)?;
         let prepared_step = (|| {
+            if let Some(op) = SavepointOp::of(step.kind) {
+                // Not a native statement: it counts toward the step cap only.
+                return Ok(PreparedStep::Savepoint(op, step.text.clone()));
+            }
             let mut params = GqlParameters::new();
             for (name, raw) in &step.raw_params {
                 params
                     .insert(name, parameter(raw, resolver)?)
                     .map_err(Failure::query)?;
             }
-            if step.write {
+            if step.kind == StepKind::Write {
                 // Native token framing, never substring matching or a failed
                 // read retried as a write. Each step keeps its own argument map.
                 if PreparedGraphInsertQueryText::has_return_clause(&step.text)
@@ -361,6 +448,9 @@ async fn run_with_limits<V: Vfs + Clone>(
         limit: limits.output_bytes,
     };
     let mut count = 0u64;
+    // Parallel to WriteTxn's savepoint stack: each live savepoint's name, and
+    // the buffered output length and row count just after its own record.
+    let mut marks: Vec<(String, usize, u64)> = Vec::new();
     let staged = (|| {
         for (index, step) in steps.iter().enumerate() {
             let result = (|| {
@@ -439,6 +529,56 @@ async fn run_with_limits<V: Vfs + Clone>(
                                 index + 1,
                                 stats.completed_statements
                             ))?;
+                        }
+                    }
+                    PreparedStep::Savepoint(op, name) => {
+                        let live = |marks: &[(String, usize, u64)]| {
+                            marks
+                                .iter()
+                                .rposition(|(saved, ..)| saved == name)
+                                .ok_or_else(|| {
+                                    Failure::usage("transaction names an unknown savepoint")
+                                })
+                        };
+                        match op {
+                            SavepointOp::Save => {
+                                txn.savepoint(db, name).map_err(execution_failure)?;
+                            }
+                            SavepointOp::RollbackTo => {
+                                let at = live(&marks)?;
+                                txn.rollback_to_savepoint(db, name)
+                                    .map_err(execution_failure)?;
+                                // Later steps' rows and records are previews of
+                                // discarded effects, so they go too.
+                                output.bytes.truncate(marks[at].1);
+                                count = marks[at].2;
+                                marks.truncate(at + 1);
+                            }
+                            SavepointOp::Release => {
+                                let at = live(&marks)?;
+                                txn.release_savepoint(db, name).map_err(execution_failure)?;
+                                marks.truncate(at);
+                            }
+                        }
+                        if robot {
+                            output.line(&format!(
+                                r#"{{"v":1,"event":"statement","index":{},"kind":"{}","view":"transaction_local","basis":{basis},"name":{}}}"#,
+                                index + 1,
+                                op.label(),
+                                quoted(name),
+                            ))?;
+                        } else {
+                            output.line(&format!(
+                                "statement {}: {} {}",
+                                index + 1,
+                                op.label(),
+                                name.chars()
+                                    .flat_map(char::escape_default)
+                                    .collect::<String>()
+                            ))?;
+                        }
+                        if matches!(op, SavepointOp::Save) {
+                            marks.push((name.clone(), output.bytes.len(), count));
                         }
                     }
                 }
