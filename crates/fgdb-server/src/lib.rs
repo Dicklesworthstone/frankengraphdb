@@ -39,6 +39,11 @@
 //! names through operator-declared [`Symbols`], exactly like the CLI flags.
 
 #![forbid(unsafe_code)]
+// The authorized write path's future (execute::write -> AuthorizedWriteSession
+// -> native script session -> RestrictedFuture) nests deeper than the default
+// limit of 128 when proving it Send, which the recursion_depth_exceeding_limit
+// future-incompatibility lint (rust-lang/rust#159228) rejects under -D warnings.
+#![recursion_limit = "256"]
 
 mod bolt;
 mod commits;
