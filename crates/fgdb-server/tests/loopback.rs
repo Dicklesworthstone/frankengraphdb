@@ -375,6 +375,107 @@ fn committed_writes_survive_a_server_restart() {
     });
 }
 
+#[test]
+fn mutation_returning_is_atomic_and_capability_masked_over_fgp() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "mutation-returning").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Ann', age: 30}), (:Person {name: 'Bob', age: 25})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let answer = owner.execute(cx, ExecuteMode::Write,
+            "MATCH (p:Person) SET p.age = p.age + 1 RETURN p.name AS name, p.age AS age ORDER BY name", vec![])
+            .await.unwrap();
+        assert_eq!(answer.columns, ["name", "age"]);
+        assert_eq!(
+            answer.rows,
+            [
+                vec![text("Ann"), WireValue::Int(31)],
+                vec![text("Bob"), WireValue::Int(26)]
+            ]
+        );
+        assert!(matches!(
+            answer.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        ));
+
+        let mut scope = grant(Rights::ReadWrite);
+        scope.properties = Scope::only([PropertyKeyId(1)]);
+        let mut scoped = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        scoped.select(cx, "social").await.unwrap();
+        let answer = scoped.execute(cx, ExecuteMode::Write,
+            "MATCH (p:Person) WHERE p.name = 'Ann' SET p.name = 'Anne' RETURN p.name AS name, p.age AS age", vec![])
+            .await.unwrap();
+        assert_eq!(answer.rows, [vec![text("Anne"), WireValue::Null]]);
+        let refused = scoped.execute(cx, ExecuteMode::Write,
+            "MATCH (p:Person) WHERE p.name = 'Anne' SET p.name = 'Lost', p.age = 99 RETURN p.name", vec![])
+            .await.unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+        scoped.close(cx).await.unwrap();
+
+        let mut limited = grant(Rights::ReadWrite);
+        limited.limits.max_rows = 0;
+        let mut limited = Client::connect(cx, addr, token(&limited)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
+        let refused = limited
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (p:Person) SET p.age = 0 RETURN p.age",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::Budget);
+        let answer = limited
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (p:Person) WHERE p.name = 'Bob' SET p.age = 27 RETURN p.age LIMIT 0",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(answer.rows.is_empty());
+        assert!(matches!(
+            answer.outcome,
+            Outcome::WriteCommitted { seq: 4, .. }
+        ));
+        limited.close(cx).await.unwrap();
+        let answer = owner
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            answer.rows,
+            [
+                vec![text("Anne"), WireValue::Int(31)],
+                vec![text("Bob"), WireValue::Int(27)]
+            ]
+        );
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
 /// One HTTP/1.1 exchange on a fresh connection: the status and the body.
 async fn http(
     addr: SocketAddr,
@@ -513,6 +614,40 @@ fn http_adapter_serves_the_same_authorized_statements() {
         assert_eq!(
             body,
             r#"{"v":1,"columns":["name"],"rows":[[{"type":"text","value":"Ann"}]],"seq":1}"#
+        );
+
+        let (status, body) = http(
+            addr, "POST", "/v1/databases/social/write", host, Some(&rw),
+            r#"{"statement":"MATCH (p:Person) WHERE p.name = 'Ann' SET p.age = p.age + 1 RETURN p.name AS name, p.age AS age"}"#,
+        ).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","age"],"rows":[[{"type":"text","value":"Ann"},{"type":"int","value":"31"}]],"seq":2,"statements":1,"committed":true}"#
+        );
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            host,
+            Some(&rw),
+            r#"{"statement":"MATCH (p:Person) WHERE p.name = 'Ann' SET p.age = 99 RETURN 1 / 0"}"#,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            host,
+            Some(&ro),
+            r#"{"statement":"MATCH (p:Person) WHERE p.name = 'Ann' RETURN p.age AS age"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"31"}]],"seq":2}"#
         );
 
         // Typed refusals map onto statuses; none reveals a hidden fact.

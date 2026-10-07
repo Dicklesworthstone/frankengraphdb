@@ -21,6 +21,9 @@ const Q: PropertyKeyId = PropertyKeyId(3);
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x51; 32]);
 const NOW: u64 = 100;
 
+#[path = "mutation_query_tests.rs"]
+mod projected;
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0x50; 32], NS, [0x52; 32])
 }

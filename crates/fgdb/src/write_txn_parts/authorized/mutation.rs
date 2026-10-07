@@ -6,7 +6,7 @@ use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
 use fgdb_delta_types::ElementId;
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
-    GraphMutationStats, PreparedGraphMutation,
+    GraphMutationQueryError, GraphMutationStats, PreparedGraphMutation, PreparedGraphMutationQuery,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
@@ -18,6 +18,7 @@ mod program;
 pub use program::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 
 type Fault = GqlQueryError<GraphMutationError<WriteTxnError>, WriteTxnError>;
+type QueryFault = GqlQueryError<GraphMutationQueryError<WriteTxnError>, WriteTxnError>;
 type Receipt = (
     GraphMutationStats,
     Vec<VId>,
@@ -30,6 +31,124 @@ fn source(error: WriteTxnError) -> Fault {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Execute a mutation and its RETURN projection under one ReadWrite permit.
+    ///
+    /// The native collector reads the masked selection once and computes the
+    /// post-statement values, DISTINCT, ordering and page before staging. Every
+    /// original intent still passes before/after image authorization, including
+    /// hidden-field writes and restricted DETACH DELETE. Hidden fields read as
+    /// NULL; RETURN never rescans the graph or observes another generation.
+    ///
+    /// Only final projected rows consume the signed result allowance. LIMIT 0
+    /// therefore suppresses rows without suppressing effects. Query, quota,
+    /// authorization and cancellation failures discard the private workspace.
+    /// Native completion alone publishes the effects and releases the rows;
+    /// committed/unknown/recovery outcomes are never rewritten by a later check.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_mutation_query_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphMutationQuery,
+        policy: GraphMutationPolicy,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<
+        (
+            GraphMutationStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        QueryFault,
+    > {
+        let query_source = |error| {
+            GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::Source(error),
+            ))
+        };
+        if authority.namespace() != self.keys.namespace {
+            return Err(query_source(WriteTxnError::Authorization(
+                Error::WrongAuthority,
+            )));
+        }
+        let now = clock();
+        let verified = authority
+            .verify_at(token, branch, now)
+            .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+        let permit = verified
+            .begin_write_at(branch, now)
+            .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+        if !verified.predicates().rights().can_read() {
+            return Err(query_source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
+        }
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(query_source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| query_source(WriteTxnError::Write(error)))?,
+                ));
+                let proposal = query_cx.with_restriction(|| {
+                    let controls = RefCell::new(&mut execution);
+                    query.execute_governed(
+                        policy,
+                        |pattern, allowance| {
+                            selection::select_overlay(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                pattern,
+                                verified.predicates(),
+                                allowance,
+                                &controls,
+                            )
+                        },
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                    )
+                })?;
+                let (mutation, result) = proposal.into_parts();
+                let rows = u64::try_from(result.value.len())
+                    .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+                let (stats, _, _) = stage_proposal(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.mutation(),
+                    mutation,
+                    &mut execution,
+                    false,
+                )
+                .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(query_source)?;
+                Ok((stats, result, completion))
+            })
+            .await
+    }
+
     /// Execute MATCH-selected SET, REMOVE, or DETACH DELETE under one capability.
     ///
     /// ReadWrite rights are required before database access, including empty
@@ -204,6 +323,29 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             },
         )
     })?;
+    stage_proposal(
+        transaction,
+        database,
+        query_cx,
+        mutation,
+        proposal,
+        execution,
+        returning,
+    )
+}
+
+// Both mutation surfaces authorize the same original intents. The projected
+// RETURN path charges its final rows instead of internal target identities.
+#[allow(clippy::too_many_arguments)]
+fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    mutation: &PreparedGraphMutation,
+    proposal: fgdb_gql::GraphMutationBatch,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
     let stats = proposal.stats();
     let mut targets = BTreeSet::new();
     for intent in proposal.into_intents() {
