@@ -125,15 +125,29 @@ impl DeliveryRow for AggregateDeliveryRow<'_> {
         self.slots.len()
     }
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
-        match self.slots.get(column).ok_or_else(invalid_layout)? {
-            GraphAggregateTextSlot::Aggregate(at) => self.row.encode(*at, robot),
-            GraphAggregateTextSlot::GroupKey(at) => {
-                let key = self.row.keys().get(*at).ok_or_else(invalid_layout)?;
-                if robot {
-                    value_cell(key)
-                } else {
-                    human_value(key)
-                }
+        aggregate_cell(
+            &self.row,
+            self.slots.get(column).ok_or_else(invalid_layout)?,
+            robot,
+        )
+    }
+}
+
+// Both live aggregate cursors and authenticated external aggregate rows keep
+// counts, wide sums and exact averages in their original result domain.
+pub(super) fn aggregate_cell(
+    row: &GraphAggregateRow,
+    slot: &GraphAggregateTextSlot,
+    robot: bool,
+) -> Result<String, Failure> {
+    match slot {
+        GraphAggregateTextSlot::Aggregate(at) => row.encode(*at, robot),
+        GraphAggregateTextSlot::GroupKey(at) => {
+            let key = row.keys().get(*at).ok_or_else(invalid_layout)?;
+            if robot {
+                value_cell(key)
+            } else {
+                human_value(key)
             }
         }
     }

@@ -14,6 +14,9 @@ use crate::stream::aggregate::{Input, NumericState};
 use crate::{GraphAggregateError, GraphAggregateRow, PreparedGraphAggregate};
 use std::collections::{BTreeMap, btree_map};
 
+mod spill;
+pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeAggregateBuildError {
     RequiresPlainGlobalAggregate,

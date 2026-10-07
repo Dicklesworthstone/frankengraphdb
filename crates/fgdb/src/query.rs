@@ -39,7 +39,10 @@ pub use prism::ProcedureError;
 pub(crate) use prism::{
     bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
 };
-pub use view::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
+pub use view::{
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
+    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
+};
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.

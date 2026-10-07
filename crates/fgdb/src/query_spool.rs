@@ -10,8 +10,14 @@ use fgdb_strata::tiered::memory::spill::PagedSpillRun;
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::sync::Arc;
 
+#[path = "query_spool/aggregate.rs"]
+mod aggregate;
 #[path = "query_spool/sort.rs"]
 mod sort;
+pub use aggregate::{
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
+    NativeAggregateSpoolRow,
+};
 
 #[derive(Debug)]
 pub enum NativeSpoolError {

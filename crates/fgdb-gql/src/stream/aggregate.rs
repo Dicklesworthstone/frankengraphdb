@@ -14,7 +14,9 @@
 
 mod collection;
 mod distinct;
+mod spill;
 use distinct::DistinctState;
+pub use spill::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};

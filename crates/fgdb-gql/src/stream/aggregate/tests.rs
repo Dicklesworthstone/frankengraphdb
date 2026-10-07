@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 mod distinct_tests;
+mod spill_tests;
 
 const KEY: PropertyKeyId = PropertyKeyId(7);
 const LABEL: LabelId = LabelId(3);

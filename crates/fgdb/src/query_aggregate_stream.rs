@@ -381,7 +381,7 @@ fn compile(
     })
 }
 
-fn valid_layout(
+pub(super) fn valid_layout(
     columns: &[String],
     slots: &[GraphAggregateTextSlot],
     keys: &[String],

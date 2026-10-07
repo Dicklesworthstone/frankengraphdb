@@ -1,0 +1,308 @@
+//! Checked inputs and shared numeric cells for a host-owned external reducer.
+//!
+//! This module owns query semantics, not scratch storage or byte admission.
+//! The host reserves memory before retaining keys/cells, partitions complete
+//! input rows, and emits finished groups in canonical key order. Every input,
+//! reduction and delivery event must use the SAME input cursor's meter.
+
+use crate::algebra::{GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
+use crate::edge_stream::EdgeScanBuildError;
+use crate::scan_stream::ScanKind;
+use crate::stream::VertexScanBuildError;
+use crate::stream::VertexScanEvent;
+use crate::stream::aggregate::{Input, NumericState};
+use crate::{
+    GqlQueryError, GraphAggregateError, GraphAggregateFunction, GraphAggregateRow,
+    PreparedGraphAggregate,
+};
+use fgdb_types::CanonicalScalar;
+use std::sync::Arc;
+
+pub use crate::edge_stream::aggregate::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
+pub use crate::stream::aggregate::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpillAggregateBuildError {
+    Unsupported,
+    Vertex(VertexScanBuildError),
+    Edge(EdgeScanBuildError),
+}
+impl core::fmt::Display for SpillAggregateBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unsupported => {
+                f.write_str("external aggregation requires a plain numeric reduction")
+            }
+            Self::Vertex(error) => error.fmt(f),
+            Self::Edge(error) => error.fmt(f),
+        }
+    }
+}
+impl core::error::Error for SpillAggregateBuildError {}
+
+/// A source shape selected before opening a snapshot or reading input.
+#[derive(Clone, Debug)]
+pub enum SpillAggregatePlan {
+    Vertex(VertexSpillAggregatePlan),
+    Edge(EdgeSpillAggregatePlan),
+}
+impl SpillAggregatePlan {
+    pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        let definition = SpillAggregateDefinition::compile(aggregate)?;
+        if matches!(
+            aggregate.input_pattern().plan().operators().first(),
+            Some(GlaOperator::ScanEdges { .. })
+        ) {
+            EdgeSpillAggregatePlan::compile(definition)
+                .map(Self::Edge)
+                .map_err(SpillAggregateBuildError::Edge)
+        } else {
+            VertexSpillAggregatePlan::compile(definition)
+                .map(Self::Vertex)
+                .map_err(SpillAggregateBuildError::Vertex)
+        }
+    }
+
+    pub fn definition(&self) -> &SpillAggregateDefinition {
+        match self {
+            Self::Vertex(plan) => plan.definition(),
+            Self::Edge(plan) => plan.definition(),
+        }
+    }
+
+    pub fn kind(&self) -> ScanKind {
+        match self {
+            Self::Vertex(_) => ScanKind::Vertex,
+            Self::Edge(_) => ScanKind::Edge,
+        }
+    }
+}
+
+/// Sealed plain aggregate definition. Clones share immutable compiler metadata.
+#[derive(Clone)]
+pub struct SpillAggregateDefinition {
+    pub(crate) aggregate: Arc<PreparedGraphAggregate>,
+}
+impl core::fmt::Debug for SpillAggregateDefinition {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillAggregateDefinition")
+            .field("input_width", &self.input_width())
+            .field("key_columns", &self.key_columns().len())
+            .field("aggregate_columns", &self.aggregate_columns().len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One group's existing exact cells. A host must admit storage before creating
+/// this state and before updating an extremum with an owned input payload.
+pub struct SpillAggregateState {
+    definition: SpillAggregateDefinition,
+    cells: Vec<NumericState>,
+}
+impl core::fmt::Debug for SpillAggregateState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillAggregateState")
+            .field("cells", &self.cells.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpillAggregateDefinition {
+    fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        if !aggregate.supports_incremental_maintenance()
+            || aggregate.input_projection().is_some()
+            || aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
+            || aggregate
+                .key_columns()
+                .len()
+                .saturating_add(aggregate.aggregate_columns().len())
+                > MAX_PATTERN_VERTICES
+            || !aggregate.aggregates().iter().all(|spec| {
+                matches!(
+                    spec.function(),
+                    GraphAggregateFunction::CountRows
+                        | GraphAggregateFunction::Count
+                        | GraphAggregateFunction::SumInt
+                        | GraphAggregateFunction::AverageInt
+                        | GraphAggregateFunction::Min
+                        | GraphAggregateFunction::Max
+                )
+            })
+        {
+            return Err(SpillAggregateBuildError::Unsupported);
+        }
+        Ok(Self {
+            aggregate: Arc::new(aggregate.clone()),
+        })
+    }
+
+    pub fn input_width(&self) -> usize {
+        self.aggregate.input_pattern().columns().len()
+    }
+    pub fn group_key_columns(&self) -> &[usize] {
+        self.aggregate.group_key_columns()
+    }
+    pub fn key_columns(&self) -> &[String] {
+        self.aggregate.key_columns()
+    }
+    pub fn aggregate_columns(&self) -> &[String] {
+        self.aggregate.aggregate_columns()
+    }
+
+    /// Cells that may retain one variable-size argument value. COUNT/SUM/AVG
+    /// own only the fixed storage covered by state_resident_bytes().
+    pub fn extremum_count(&self) -> usize {
+        self.aggregate
+            .aggregates()
+            .iter()
+            .filter(|spec| {
+                matches!(
+                    spec.function(),
+                    GraphAggregateFunction::Min | GraphAggregateFunction::Max
+                )
+            })
+            .count()
+    }
+
+    /// Fixed retained cell storage, including possible binary64 promotion.
+    /// The host separately reserves keys, variable extremum payloads, allocator
+    /// overhead and transient decoded/projected rows before taking ownership.
+    pub fn state_resident_bytes(&self) -> usize {
+        core::mem::size_of::<SpillAggregateState>()
+            .saturating_add(
+                self.aggregate
+                    .aggregates()
+                    .len()
+                    .saturating_mul(core::mem::size_of::<NumericState>()),
+            )
+            .saturating_add(
+                self.aggregate
+                    .aggregates()
+                    .iter()
+                    .filter(|spec| {
+                        matches!(
+                            spec.function(),
+                            GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt
+                        )
+                    })
+                    .count()
+                    .saturating_mul(core::mem::size_of::<fgdb_types::ExactBinary64Sum>()),
+            )
+    }
+
+    /// Validate every numeric argument while the original source is drained.
+    /// Partition order must never select a different first domain error.
+    pub fn validate_input<E, C>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        if row.values().len() != self.input_width() {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        for (aggregate, spec) in self.aggregate.aggregates().iter().enumerate() {
+            control(VertexScanEvent::Work)?;
+            let error = match spec.function() {
+                GraphAggregateFunction::SumInt => GraphAggregateError::NonIntegerSum { aggregate },
+                GraphAggregateFunction::AverageInt => {
+                    GraphAggregateError::NonIntegerAverage { aggregate }
+                }
+                _ => continue,
+            };
+            let Some(column) = spec.argument_column() else {
+                return Err(GqlQueryError::Source(
+                    GraphAggregateError::InvalidReductionInput,
+                ));
+            };
+            if !matches!(
+                &row.values()[column],
+                GraphValue::Scalar(
+                    CanonicalScalar::Null | CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
+                )
+            ) {
+                return Err(GqlQueryError::Source(error));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn new_state<E, C>(
+        &self,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<SpillAggregateState, GqlQueryError<GraphAggregateError<E>, C>> {
+        control(VertexScanEvent::ScratchEntry)?;
+        for _ in self.aggregate.aggregates() {
+            control(VertexScanEvent::ScratchEntry)?;
+        }
+        let mut cells = Vec::with_capacity(self.aggregate.aggregates().len());
+        for spec in self.aggregate.aggregates() {
+            cells.push(NumericState::new_governed(spec.function(), control)?);
+        }
+        Ok(SpillAggregateState {
+            definition: self.clone(),
+            cells,
+        })
+    }
+
+    pub fn update<E, C>(
+        &self,
+        state: &mut SpillAggregateState,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        if !Arc::ptr_eq(&self.aggregate, &state.definition.aggregate) {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        self.validate_input(row, control)?;
+        for (aggregate, (spec, cell)) in self
+            .aggregate
+            .aggregates()
+            .iter()
+            .zip(&mut state.cells)
+            .enumerate()
+        {
+            control(VertexScanEvent::Work)?;
+            let input = spec.argument_column().map_or(Input::Identity, |column| {
+                Input::from_value(&row.values()[column])
+            });
+            cell.update_governed(input, aggregate, control)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish<E, C>(
+        &self,
+        keys: Vec<GraphValue>,
+        state: SpillAggregateState,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<GraphAggregateRow, GqlQueryError<GraphAggregateError<E>, C>> {
+        if keys.len() != self.group_key_columns().len()
+            || !Arc::ptr_eq(&self.aggregate, &state.definition.aggregate)
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        control(VertexScanEvent::ScratchEntry)?;
+        for _ in &state.cells {
+            control(VertexScanEvent::ScratchEntry)?;
+        }
+        let mut values = Vec::with_capacity(state.cells.len());
+        for cell in state.cells {
+            values.push(cell.finish_governed(control)?);
+        }
+        Ok(GraphAggregateRow::from_group_values(keys, values))
+    }
+}

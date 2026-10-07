@@ -85,14 +85,20 @@ Unsupported plans refuse; no eager fallback. --stream cannot use --certify-to.
 An error can follow delivered rows; only the terminal result marks a complete stream.
 The stream pins decoded source state, not out-of-core storage or a resumable cursor.
 query --spill-dir <existing-dir> externally orders native vertex/fixed-edge scans,
-including property-only output, DISTINCT, SKIP/LIMIT and temporal cuts. ORDER BY
-keys must be projected. Aggregates, optional/variable-length joins, maps, and
-unsupported native instructions refuse; no eager retry. This flag cannot combine
+including property-only output, hidden ORDER BY keys, DISTINCT, SKIP/LIMIT and
+temporal cuts. DISTINCT requires projected sort keys. Plain numeric grouping
+uses partitioned scratch for count/sum/avg/min/max over vertex/fixed-edge inputs;
+counts, wide sums and exact averages keep their native types. Aggregate DISTINCT,
+COLLECT, computed inputs and aggregate result clauses currently refuse, as do
+optional/variable-length joins, maps and unsupported instructions; no eager retry.
+This flag cannot combine
 with --stream, --certify-to or a standalone CALL fnx. Sorting completes before output.
 --spill-memory-bytes (default 67108864) bounds the shared scratch pool;
---spill-disk-bytes (default 1073741824) is split equally across two append-only files.
+--spill-disk-bytes (default 1073741824) is split across two append-only files for
+ordering or three for grouping. Every intermediate pass spends the allowance.
 --max-spill-rows (default 1000000) bounds intermediate rows independently of final
---max-result-rows; --max-sort-work (default 1000000000) bounds additional sort work.
+--max-result-rows; --max-sort-work (default 1000000000) bounds additional partition,
+reduction and sort work. Completed results are canonically ordered before output.
 All are decimal u64. Scratch files are private and retired before final success.
 Each encoded row is at most 1 MiB; delivery decodes/encodes one row at a time.
 Decoded graph storage, one native row and its encoding remain outside the pool.

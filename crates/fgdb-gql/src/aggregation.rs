@@ -242,6 +242,8 @@ pub enum GraphAggregateError<E> {
     MultiplicityUnavailable,
     /// A physical path violated its ascending, contiguous root-group contract.
     NonMonotonicGroups,
+    /// A private partition row, state or key did not match its checked reducer.
+    InvalidReductionInput,
 }
 
 impl<E> GraphAggregateError<E> {
@@ -268,6 +270,7 @@ impl<E> GraphAggregateError<E> {
             Self::ResultCountOverflow => GraphAggregateError::ResultCountOverflow,
             Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
             Self::NonMonotonicGroups => GraphAggregateError::NonMonotonicGroups,
+            Self::InvalidReductionInput => GraphAggregateError::InvalidReductionInput,
         }
     }
 }
@@ -304,6 +307,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             }
             Self::NonMonotonicGroups => {
                 f.write_str("aggregate input violated its root-group ordering contract")
+            }
+            Self::InvalidReductionInput => {
+                f.write_str("aggregate partition input does not match its checked definition")
             }
         }
     }

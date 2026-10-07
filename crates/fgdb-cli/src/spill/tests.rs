@@ -83,6 +83,235 @@ fn rows(bytes: &[u8]) -> Vec<&str> {
 }
 
 #[test]
+fn external_grouping_matches_eager_rows_for_vertices_edges_nulls_and_history() {
+    let ((), report) = run_async_under_lab(0x5b118, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = fixture(&contexts.commit()).await;
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_vertex_property(VId(0), PropertyKeyId(1), None);
+        changes.set_vertex_property(
+            VId(1),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(i64::MAX)),
+        );
+        changes.set_vertex_property(
+            VId(2),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(i64::MAX)),
+        );
+        db.write(&contexts.commit(), changes).await.unwrap();
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        for (text, seq) in [
+            (
+                "MATCH (n) RETURN n.p AS p, count(*) AS count, sum(n.p) AS total, avg(n.p) AS mean, min(n.p) AS lo, max(n.p) AS hi",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN count(*) AS count, count(n.p) AS present, sum(n.p) AS total, avg(n.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p, count(*) AS count, sum(n.p) AS total, avg(n.p) AS mean",
+                1,
+            ),
+            (
+                "MATCH (a)-[e:R]->(b) RETURN a.p AS p, count(*) AS count, sum(b.p) AS total, avg(b.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (a)-[e:R]-(b) RETURN b.p AS p, count(*) AS count, min(a.p) AS lo, max(a.p) AS hi",
+                2,
+            ),
+            (
+                "MATCH (n) WHERE n.p < 0 RETURN count(*) AS count, sum(n.p) AS total, avg(n.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (n) WHERE n.p < 0 RETURN n.p AS p, count(*) AS count",
+                2,
+            ),
+        ] {
+            let mut options = options(&directory, text);
+            // This derives one resident group, forcing repeated partitioning
+            // for the multi-group cases instead of keeping the input catalog.
+            options.spill.memory = Some(262_144);
+            let eager = view
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, seq, "rows", true, &mut expected));
+            let mut output = Vec::new();
+            okay(run(&view, &cx, &options, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            assert!(
+                std::str::from_utf8(&output)
+                    .unwrap()
+                    .contains(&format!(r#""stream":true,"seq":{seq}"#))
+            );
+            if text.starts_with("MATCH (n) RETURN count(*)") {
+                let text = std::str::from_utf8(&output).unwrap();
+                assert!(text.contains(r#""type":"wideint""#));
+                assert!(text.contains(r#""type":"average""#));
+                assert!(text.contains(r#""type":"count""#));
+            }
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_grouping_delivers_more_result_bytes_than_the_shared_pool() {
+    let ((), report) = run_async_under_lab(0x5b119, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        let mut options = options(
+            &directory,
+            "MATCH (n) RETURN n AS id, min(n.note) AS note, count(*) AS count",
+        );
+        options.spill.memory = Some(262_144);
+        let eager = view
+            .query(
+                &cx,
+                &options.text,
+                &options.params,
+                &options,
+                options.budget.policy(),
+            )
+            .unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        for robot in [true, false] {
+            let mut output = Vec::new();
+            okay(run(&view, &cx, &options, None, robot, &mut output).await);
+            assert!(output.len() > 262_144);
+            if robot {
+                assert_eq!(rows(&output), rows(&expected));
+                assert_eq!(rows(&output).len(), 96);
+            } else {
+                let text = std::str::from_utf8(&output).unwrap();
+                assert_eq!(text.lines().next(), Some("id\tnote\tcount"));
+                assert!(
+                    text.lines()
+                        .skip(1)
+                        .take(96)
+                        .all(|line| line.split('\t').count() == 3)
+                );
+            }
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_grouping_enforces_full_input_and_final_result_allowances() {
+    let ((), report) = run_async_under_lab(0x5b11a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        let mut allowed = options(&directory, "MATCH (n) RETURN count(*) AS count");
+        allowed.spill.memory = Some(262_144);
+        allowed.spill.rows = Some(96);
+        allowed.budget.rows = Some(1);
+        let mut output = Vec::new();
+        okay(run(&view, &cx, &allowed, None, true, &mut output).await);
+        assert_eq!(
+            rows(&output),
+            [r#"{"v":1,"event":"row","cells":[{"type":"count","value":"96"}]}"#]
+        );
+        empty(&directory);
+        for case in 0..5 {
+            let mut options = options(&directory, "MATCH (n) RETURN n.p AS p, count(*) AS count");
+            options.spill.memory = Some(262_144);
+            match case {
+                0 => options.spill.rows = Some(95),
+                1 => options.budget.rows = Some(12),
+                2 => options.spill.work = Some(0),
+                3 => options.spill.disk = Some(3),
+                _ => options.spill.memory = Some(1),
+            }
+            let mut output = Vec::new();
+            let error = run(&view, &cx, &options, None, true, &mut output)
+                .await
+                .expect_err("aggregate refusal");
+            assert_eq!(error.code, 3, "{}", error.message);
+            assert!(
+                output.is_empty(),
+                "aggregate failure must precede the header"
+            );
+            empty(&directory);
+        }
+        for text in [
+            "MATCH (n) RETURN count(DISTINCT n.p) AS count",
+            "MATCH (n) RETURN collect(n.p) AS values",
+            "MATCH (n) RETURN n.p AS p, count(*) AS count ORDER BY count DESC",
+            "MATCH (n) RETURN n.p AS p, count(*) AS count LIMIT 0",
+            "MATCH (n) RETURN n.p + 1 AS p, count(*) AS count",
+        ] {
+            let options = options(&directory, text);
+            let mut output = Vec::new();
+            assert!(
+                run(&view, &cx, &options, None, true, &mut output)
+                    .await
+                    .is_err(),
+                "{text}"
+            );
+            assert!(output.is_empty(), "{text}");
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_grouping_flush_failure_retires_every_partition_file() {
+    let ((), report) = run_async_under_lab(0x5b11b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        let mut options = options(&directory, "MATCH (n) RETURN n.p AS p, count(*) AS count");
+        options.spill.memory = Some(262_144);
+        for fail_at in [1, 2, 14, 15] {
+            let mut output = FlushFailure {
+                bytes: Vec::new(),
+                flushes: 0,
+                fail_at,
+            };
+            let error = run(&view, &cx, &options, None, true, &mut output)
+                .await
+                .expect_err("aggregate flush failure");
+            assert_eq!(error.code, 5, "{}", error.message);
+            assert_eq!(output.flushes, fail_at);
+            if fail_at < 15 {
+                assert!(
+                    !std::str::from_utf8(&output.bytes)
+                        .unwrap()
+                        .contains(r#""event":"result""#)
+                );
+            }
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn external_order_matches_native_results_across_runs_distinct_windows_and_history() {
     let ((), report) = run_async_under_lab(0x5b111, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -161,7 +390,7 @@ fn refusal_cleans_scratch_and_emits_no_accepted_result() {
                 2 => options.spill.memory = Some(0),
                 3 => options.spill.disk = Some(2),
                 4 => options.budget.rows = Some(1),
-                _ => options.text = "MATCH (n) RETURN count(*) AS count".into(),
+                _ => options.text = "MATCH (n) RETURN collect(n) AS nodes".into(),
             }
             let mut out = Vec::new();
             let error = run(&view, &cx, &options, None, true, &mut out)
@@ -373,6 +602,37 @@ fn cancellation_after_one_flushed_row_retires_scratch_without_a_success_terminal
         let error = run(&view, &cx, &options, None, true, &mut out)
             .await
             .expect_err("cancelled delivery");
+        assert_eq!(error.code, 3);
+        assert_eq!(out.flushes, 2);
+        assert_eq!(rows(&out.bytes).len(), 1);
+        assert!(
+            !std::str::from_utf8(&out.bytes)
+                .unwrap()
+                .contains(r#""event":"result""#)
+        );
+        empty(&directory);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn aggregate_cancellation_retires_all_three_files_after_one_flushed_group() {
+    let ((), report) = run_async_under_lab(0x5b11c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        let mut options = options(&directory, "MATCH (n) RETURN n.p AS p, count(*) AS count");
+        options.spill.memory = Some(262_144);
+        let mut out = CancelOutput {
+            bytes: Vec::new(),
+            flushes: 0,
+            cancel: || root.set_cancel_requested(true),
+        };
+        let error = run(&view, &cx, &options, None, true, &mut out)
+            .await
+            .expect_err("cancelled aggregate delivery");
         assert_eq!(error.code, 3);
         assert_eq!(out.flushes, 2);
         assert_eq!(rows(&out.bytes).len(), 1);

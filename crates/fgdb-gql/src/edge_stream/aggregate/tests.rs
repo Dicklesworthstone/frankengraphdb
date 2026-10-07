@@ -3,6 +3,7 @@ mod computed;
 mod grouped;
 mod groups;
 mod output;
+mod spill;
 use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,

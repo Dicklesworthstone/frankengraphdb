@@ -631,6 +631,15 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
     where
         F: FnMut() -> Result<(), C>,
     {
+        self.advance_inner::<true, C>()
+    }
+
+    // Aggregate input is a private occurrence, not a delivered result row.
+    // Keep source, predicates and projection in this same governed loop.
+    fn advance_inner<const EMIT: bool, C>(&mut self) -> ScanResult<Option<Row>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         let meter = &mut self.meter;
         meter.event(VertexScanEvent::Work)?;
         if self.plan.empty || self.plan.count == Some(0) {
@@ -677,11 +686,17 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             }
             // Refuse an exhausted output budget before copying any property
             // payload; count delivery only after the whole row is complete.
-            let _ = meter.next_result_count()?;
+            if EMIT {
+                let _ = meter.next_result_count()?;
+            }
             let value = Row::project(vid, row, &self.plan.projection, &mut |event| {
                 meter.event(event)
             })?;
-            meter.emit()?;
+            if EMIT {
+                meter.emit()?;
+            } else {
+                meter.event(VertexScanEvent::Work)?;
+            }
             return Ok(Some(value));
         }
     }
