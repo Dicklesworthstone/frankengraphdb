@@ -149,14 +149,17 @@ fn canonical_decode_vec<T>(count: usize) -> Result<Vec<T>, GraphValueDecodeError
 fn canonical_child_bounds(
     count: usize,
     depth: usize,
-    remaining: usize,
+    remaining: &mut usize,
 ) -> Result<(), GraphValueDecodeError> {
     if count != 0 && depth == GraphValue::MAX_LIST_DEPTH {
         return Err(GraphValueDecodeError::DepthLimit);
     }
-    if count > remaining {
+    if count > *remaining {
         return Err(GraphValueDecodeError::NodeLimit);
     }
+    // Claim every child, including unvisited siblings, before reserving the
+    // collection's vectors. Descendants may spend only the unclaimed budget.
+    *remaining -= count;
     Ok(())
 }
 
@@ -169,10 +172,8 @@ fn decode_graph_value(
     if depth > GraphValue::MAX_LIST_DEPTH {
         return Err(GraphValueDecodeError::DepthLimit);
     }
-    if *remaining == 0 {
-        return Err(GraphValueDecodeError::NodeLimit);
-    }
-    *remaining -= 1;
+    // This cell was already claimed by its parent, or as the row's root.
+    // A zero remaining budget still permits a leaf or empty collection.
     let mut body = input.frame()?;
     let [tag] = body.array()?;
     let value = match tag {
@@ -214,7 +215,7 @@ fn decode_graph_value(
         5 => GraphValue::Edge(EId(body.u128()?)),
         6 => {
             let count = body.count(8 + 1)?;
-            canonical_child_bounds(count, depth, *remaining)?;
+            canonical_child_bounds(count, depth, remaining)?;
             let mut values = canonical_decode_vec(count)?;
             for _ in 0..count {
                 values.push(decode_graph_value(
@@ -228,7 +229,7 @@ fn decode_graph_value(
         }
         7 => {
             let count = body.count(8 + 8 + 1)?;
-            canonical_child_bounds(count, depth, *remaining)?;
+            canonical_child_bounds(count, depth, remaining)?;
             let mut keys: Vec<Box<str>> = canonical_decode_vec(count)?;
             let mut values = canonical_decode_vec(count)?;
             for _ in 0..count {
@@ -851,7 +852,9 @@ impl GraphValueRow {
         for _ in 0..count {
             let mut column = row.frame()?;
             column.domain(CANONICAL_GRAPH_VALUE_DOMAIN)?;
-            let mut remaining = GraphValue::MAX_LIST_NODES;
+            // Claim the root once; collections claim their complete child
+            // inventories before allocating, rather than as visits occur.
+            let mut remaining = GraphValue::MAX_LIST_NODES - 1;
             values.push(decode_graph_value(
                 &mut column,
                 0,
@@ -1539,6 +1542,39 @@ mod tests {
             GraphValueRow::decode_canonical(&too_many.canonical_bytes().unwrap()),
             Err(GraphValueDecodeError::NodeLimit),
         );
+    }
+
+    #[test]
+    fn canonical_row_decoder_reserves_sibling_nodes_before_descending() {
+        let count = GraphValue::MAX_LIST_NODES / 2;
+        for (outer_tag, outer_minimum) in [(6_u8, 9_usize), (7, 17)] {
+            for (inner_tag, inner_minimum) in [(6_u8, 9_usize), (7, 17)] {
+                // Each collection separately fits the node ceiling, and its
+                // byte envelope can hold its declared immediate children.
+                // Together, root + outer siblings + inner descendants cannot.
+                let mut inner = vec![inner_tag];
+                inner.extend_from_slice(&(count as u64).to_be_bytes());
+                inner.resize(inner.len() + count * inner_minimum, 0);
+                let mut outer = vec![outer_tag];
+                outer.extend_from_slice(&(count as u64).to_be_bytes());
+                if outer_tag == 7 {
+                    outer.extend_from_slice(&0_u64.to_be_bytes());
+                }
+                outer.extend_from_slice(&canonical_test_frame(&inner));
+                outer.resize(outer.len().max(1 + 8 + count * outer_minimum), 0);
+                let row = canonical_test_row_from_body(&outer);
+                assert!(row.len() < 1024 * 1024);
+                // The zero-filled descendants are deliberately malformed.
+                // Charging only visited nodes allocates the inner inventory
+                // and reaches Truncated there. Refuse the overclaimed nodes
+                // before reserving that vector or descending into its bytes.
+                assert_eq!(
+                    GraphValueRow::decode_canonical(&row),
+                    Err(GraphValueDecodeError::NodeLimit),
+                    "outer tag {outer_tag}, inner tag {inner_tag}",
+                );
+            }
+        }
     }
 
     struct RowScalarResolver {

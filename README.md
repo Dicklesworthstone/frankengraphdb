@@ -215,6 +215,11 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --stream "<gql>"
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --certify-to result.cert "<gql>"
 
+# External ORDER BY/DISTINCT with private query scratch in an existing directory
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property score=1 \
+  --spill-dir /tmp --spill-memory-bytes 67108864 --spill-disk-bytes 1073741824 \
+  "MATCH (n) RETURN n.score AS score ORDER BY score DESC LIMIT 100"
+
 # Commit a write, then compare two committed revisions of one query
 fgdb write --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
 fgdb diff  --db mydb.fgdbdir --key-file fgdb.keys --before <seq> --after <seq> "<gql>"
@@ -279,6 +284,12 @@ python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
 ```
+
+`query --spill-dir <existing-directory>` uses the native external sorter for vertex and fixed-edge scans, including property-only projections, `DISTINCT`, terminal `SKIP`/`LIMIT`, and historical cuts. Sort keys must be projected; aggregates, optional or variable-length joins, maps, and other unsupported native instructions refuse without an eager retry. It cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`.
+
+The scratch files share one memory allowance (`--spill-memory-bytes`, default 64 MiB), and split one append-only disk allowance (`--spill-disk-bytes`, default 1 GiB) equally. Every intermediate pass and metadata write spends disk quota. `--max-spill-rows` (default 1,000,000) bounds input occurrences independently of final `--max-result-rows`; `--max-sort-work` (default 1,000,000,000) bounds additional sort work independently of the query's source budget. Encoded rows are capped at 1 MiB. The decoded source generation, one native row and scalar/output encoding are outside the scratch pool, so this is external result ordering, not a whole-engine memory bound.
+
+Sorting finishes before delivery begins. Rows are decoded and flushed individually with the ordinary native cell types and streaming completion contract. Each invocation creates a private scratch directory and exclusive files, then retires its own files before the success result; failures and cancellation also clean them up. Process death can leave that invocation's private directory, which later invocations never reuse or sweep. An error, unsuccessful exit, or missing terminal result means incomplete delivery.
 
 `fgdbd` (`crates/fgdb-server`) serves the FGP handshake, one autocommit GQL read or write per `EXECUTE` (a `CREATE ... RETURN` answers its rows with the commit), ephemeral flow-controlled result streams, and live `SUBSCRIBE TO` changefeeds (a baseline, then one exact delta per commit), plus the same statements over an HTTP/1.1 JSON adapter, and the read-only Bolt-compat subset (`BoltCompatProfileV1`, `--bolt-listen`) that official Neo4j drivers connect to with `bolt://` or `neo4j://`: autocommit and explicit read transactions (each transaction reads one pinned generation), nodes returned with their labels and properties, and writes refused with `Neo.ClientError.Statement.AccessMode`. Every statement runs through a capability-authorized session built from the connection's Warden token, so a token's label/relation/property scope applies before expansion. It does not yet serve TLS, durable result retention (ACK/release/resume), explicit multi-statement write transactions, Bolt writes or relationship/path values, durable or capability-masked subscriptions, or the HTTP/2, gRPC and WebSocket adapters; [docs/FABRIC_PROTOCOL.md](docs/FABRIC_PROTOCOL.md) lists exactly what is served.
 

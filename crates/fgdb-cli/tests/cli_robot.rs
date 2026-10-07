@@ -3096,3 +3096,53 @@ fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
     )
     .failure(3, "query");
 }
+
+#[test]
+fn external_order_delivers_the_native_page_and_retires_private_scratch() {
+    let db = TestDb::new("external-order");
+    db.create();
+    let seq = db.write(&[
+        "CREATE (:Person {name:'C'}), (:Person {name:'A'}), (:Person {name:'B'}), (:Person {name:'B'})",
+    ]);
+    let directory = scratch("external-order-files");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    let text = "MATCH (n:Person) RETURN DISTINCT n.name AS name ORDER BY name DESC SKIP 1 LIMIT 1";
+    let output = db.command(
+        "query",
+        &[
+            "--spill-dir",
+            spill,
+            "--spill-memory-bytes",
+            "131072",
+            "--spill-disk-bytes",
+            "1048576",
+            "--max-spill-rows",
+            "4",
+            "--max-sort-work",
+            "1000000",
+            "--max-result-rows",
+            "1",
+            text,
+        ],
+    );
+    assert_rows(&output, r#"[[{"type":"text","value":"B"}]]"#);
+    assert_eq!(output.sequence("rows"), seq);
+    assert_eq!(output.terminal().get("stream"), &Json::Bool(true));
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    db.command(
+        "query",
+        &["--spill-dir", spill, "--max-sort-work", "0", text],
+    )
+    .failure(3, "query");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    db.command(
+        "query",
+        &["--spill-dir", spill, "--max-spill-rows", "3", text],
+    )
+    .failure(3, "query");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    db.command("query", &["--spill-dir", spill, "--stream", text])
+        .failure(2, "usage");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+}
