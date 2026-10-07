@@ -187,6 +187,14 @@ pub enum QueryWriteError<A> {
     /// CREATE/INSERT RETURN is a single native query, not a no-result script.
     InsertText(GraphInsertTextError),
     Insert(GqlQueryError<GraphInsertQueryError<WriteTxnError, A>, Cancel>),
+    /// MATCH-selected SET/REMOVE/DETACH DELETE RETURN retains the mutation
+    /// query's preparation and execution errors, never a script fallback.
+    MutationText(GraphMutationTextError),
+    Mutation(GqlQueryError<GraphMutationQueryError<WriteTxnError>, Cancel>),
+    /// Vertex MERGE RETURN includes the selected branch, trailing actions and
+    /// post-clause result. Completion errors retain their original meaning.
+    VertexUpsertText(GraphVertexUpsertTextError),
+    VertexUpsert(GqlQueryError<GraphVertexUpsertError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -196,6 +204,10 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::Execute(e) => e.fmt(f),
             Self::InsertText(e) => e.fmt(f),
             Self::Insert(e) => e.fmt(f),
+            Self::MutationText(e) => e.fmt(f),
+            Self::Mutation(e) => e.fmt(f),
+            Self::VertexUpsertText(e) => e.fmt(f),
+            Self::VertexUpsert(e) => e.fmt(f),
         }
     }
 }
@@ -207,6 +219,10 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::Execute(error) => Some(error),
             Self::InsertText(error) => Some(error),
             Self::Insert(error) => Some(error),
+            Self::MutationText(error) => Some(error),
+            Self::Mutation(error) => Some(error),
+            Self::VertexUpsertText(error) => Some(error),
+            Self::VertexUpsert(error) => Some(error),
         }
     }
 }
@@ -224,15 +240,10 @@ impl<A> From<NativeGraphWriteBindError> for QueryWriteError<A> {
 
 // Both public write entrypoints must bind the same native query. The parser,
 // not a text rewrite, owns statement framing, scopes and parameter occurrence
-// tables. List parameters may appear only in RETURN, without any UNWIND use
-// that would otherwise infer their kind.
-fn prepare_insert_return(
-    text: &str,
-    params: &GqlParameters,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
-    relation: RelationId,
-) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
-    let declarations: Vec<(&str, GqlParameterType)> = params
+// tables. Scalar and collection arguments may appear only in RETURN. Keep
+// their declared kinds, while numeric and pagination roles retain inference.
+fn write_return_declarations(params: &GqlParameters) -> Vec<(&str, GqlParameterType)> {
+    params
         .parameter_types()
         .filter(|(_, kind)| {
             matches!(
@@ -240,8 +251,49 @@ fn prepare_insert_return(
                 GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
             )
         })
-        .collect();
+        .collect()
+}
+
+fn prepare_insert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    relation: RelationId,
+) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
+    let declarations = write_return_declarations(params);
     PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_mutation_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    relation: RelationId,
+) -> Result<PreparedGraphMutationQuery, GraphMutationTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphMutationQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_vertex_upsert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    relation: RelationId,
+) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
         text,
         relation,
         &declarations,
@@ -329,9 +381,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
     /// allocator remain explicit, exactly as in the existing native script API.
     /// Ordinary scripts and expanded UNWIND batches share one work budget.
-    /// CREATE/INSERT RETURN produces Rows only after native transaction finish
-    /// succeeds. Writes without RETURN retain their Write receipt. A RETURN
-    /// failure is never retried as a script or as a read. Multi-statement RETURN
+    /// CREATE/INSERT, MATCH-selected mutation and vertex MERGE RETURN produce
+    /// Rows only after native transaction finish succeeds. Writes without RETURN
+    /// retain their Write receipt. Statement-specific native classifiers own
+    /// dispatch; comments, literals and names are never substring-scanned here.
+    /// A RETURN failure is never retried as a script or as a read. Multi-statement RETURN
     /// scripts are refused rather than executing a prefix and dropping rows.
     /// One bounded UNWIND MERGE/MATCH mutation binds every map row before the
     /// ordinary atomic executor starts. Its rows share the whole program budget
@@ -376,6 +430,43 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
         }
+        if PreparedGraphMutationQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::MutationText)?
+        {
+            let query = prepare_mutation_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::MutationText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_mutation_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.mutations,
+                )
+                .await
+                .map_err(QueryWriteError::Mutation)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::VertexUpsertText)?
+        {
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, _, rows, _) = self
+                .execute_graph_vertex_upsert_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.vertex_upsert_policy(),
+                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                )
+                .await
+                .map_err(QueryWriteError::VertexUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
         let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
             .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
@@ -399,9 +490,11 @@ impl<V: Vfs + Clone> Database<V> {
 impl WriteTxn {
     /// Stage a native statement/script atomically inside this transaction.
     /// The caller alone decides when to finish the outer transaction. Explicit
-    /// CREATE/INSERT RETURN produces transaction-local Rows, not a durability
-    /// acknowledgment. Its complete result is admitted before atomic staging;
+    /// CREATE/INSERT, MATCH-selected mutation and vertex MERGE RETURN produce
+    /// transaction-local Rows, not a durability acknowledgment. Native query
+    /// engines admit the complete result before accepting the statement;
     /// errors preserve earlier staged effects and their read dependencies.
+    /// Result pagination never limits effects or hides a failing expression.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
@@ -435,6 +528,34 @@ impl WriteTxn {
                     },
                 )
                 .map_err(QueryWriteError::Insert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphMutationQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::MutationText)?
+        {
+            let query = prepare_mutation_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::MutationText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_mutation_query_governed(database, cx, &query, budget.mutations)
+                .map_err(QueryWriteError::Mutation)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::VertexUpsertText)?
+        {
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, _, rows) = self
+                .execute_graph_vertex_upsert_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.vertex_upsert_policy(),
+                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                )
+                .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
         let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
