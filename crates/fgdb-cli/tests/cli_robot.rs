@@ -436,6 +436,10 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
     assert!(events.len() >= 2, "invocation and terminal required");
     assert_eq!(events[0].get("event").string(), "invocation");
     let mut columns = None;
+    // The row-wise stream contract (`query --stream`, and spill delivery,
+    // which reuses it): columns carry stream=true and the exact seq, and the
+    // rows result carries stream=true.
+    let mut streamed = false;
     let mut rows = 0;
     let mut terminals = 0;
     let mut repaired = 0;
@@ -456,7 +460,14 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
             }
             "columns" => {
                 assert_eq!(index, 1, "columns immediately follow invocation");
-                exact_fields(event, &["v", "event", "columns"]);
+                streamed = event.object().contains_key("stream");
+                if streamed {
+                    exact_fields(event, &["v", "event", "columns", "stream", "seq"]);
+                    assert_eq!(event.get("stream"), &Json::Bool(true));
+                    event.get("seq").unsigned();
+                } else {
+                    exact_fields(event, &["v", "event", "columns"]);
+                }
                 let names = event.get("columns").array();
                 for name in names {
                     name.string();
@@ -522,7 +533,13 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 );
                 match event.get("kind").string() {
                     "rows" | "replayed" | "searched" => {
-                        exact_fields(event, &["v", "event", "kind", "seq", "count"]);
+                        if streamed {
+                            exact_fields(event, &["v", "event", "kind", "seq", "count", "stream"]);
+                            assert_eq!(event.get("kind").string(), "rows");
+                            assert_eq!(event.get("stream"), &Json::Bool(true));
+                        } else {
+                            exact_fields(event, &["v", "event", "kind", "seq", "count"]);
+                        }
                         assert!(columns.is_some());
                         assert_eq!(event.get("count").unsigned(), rows);
                         event.get("seq").unsigned();
@@ -531,6 +548,13 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         exact_fields(event, &["v", "event", "kind", "seq", "count", "statements"]);
                         event.get("seq").unsigned();
                         event.get("count").unsigned();
+                        event.get("statements").unsigned();
+                    }
+                    "written" if columns.is_some() => {
+                        // A write with RETURN delivers its rows, then counts them.
+                        exact_fields(event, &["v", "event", "kind", "seq", "count", "statements"]);
+                        assert_eq!(event.get("count").unsigned(), rows);
+                        event.get("seq").unsigned();
                         event.get("statements").unsigned();
                     }
                     "written" => {
