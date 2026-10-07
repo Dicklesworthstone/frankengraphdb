@@ -473,7 +473,7 @@ fn execute_shortest_at<C>(
 ) -> Result<GqlQueryExecution<VId>, GqlQueryError<GqlError, C>> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
     let mut usage = AdmissionUsage::default();
-    let exists = super::find_vertex(&snapshot.patches, source, as_of, &mut |event| {
+    let exists = super::find_vertex(snapshot, source, as_of, &mut |event| {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<GqlError, C>(policy, event)
     })?

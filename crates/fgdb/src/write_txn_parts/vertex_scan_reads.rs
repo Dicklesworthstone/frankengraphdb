@@ -303,17 +303,15 @@ impl PointReads {
                 // sequences are positive; inspect both sides of EACH commit,
                 // not just the current head (which would miss enter-then-leave).
                 let before = crate::gql_exec::source::find_vertex(
-                    &database.snapshot.patches,
+                    &database.snapshot,
                     vid,
                     CommitSeq(at.0 - 1),
                     &mut |_| checkpoint(),
                 )?;
-                let after = crate::gql_exec::source::find_vertex(
-                    &database.snapshot.patches,
-                    vid,
-                    at,
-                    &mut |_| checkpoint(),
-                )?;
+                let after =
+                    crate::gql_exec::source::find_vertex(&database.snapshot, vid, at, &mut |_| {
+                        checkpoint()
+                    })?;
                 images = Some((before, after));
             }
             let (before, after) = images.expect("historical images selected above");

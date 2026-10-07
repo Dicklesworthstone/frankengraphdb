@@ -574,9 +574,7 @@ mod query_source {
                 }
                 for &vid in &candidates {
                     self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
-                    if let Some(row) =
-                        source::find_vertex(&snapshot.patches, vid, self.basis, control)?
-                    {
+                    if let Some(row) = source::find_vertex(snapshot, vid, self.basis, control)? {
                         control(SourceEvent::ScratchEntry)?;
                         vertices.insert(vid, VertexView::new(&row.labels, &row.props));
                     }

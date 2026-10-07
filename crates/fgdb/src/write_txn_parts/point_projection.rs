@@ -149,15 +149,13 @@ impl WriteTxn {
             .map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut projected = match element {
-            ElementId::Vertex(vid) => {
-                match find_vertex(&snapshot.patches, vid, self.basis, control)? {
-                    Some(row) => {
-                        control(SourceEvent::SnapshotRecord)?;
-                        PointProjection::from_fields(field, &row.labels, &row.props, control)?
-                    }
-                    None => PointProjection::default(),
+            ElementId::Vertex(vid) => match find_vertex(snapshot, vid, self.basis, control)? {
+                Some(row) => {
+                    control(SourceEvent::SnapshotRecord)?;
+                    PointProjection::from_fields(field, &row.labels, &row.props, control)?
                 }
-            }
+                None => PointProjection::default(),
+            },
             ElementId::Edge(eid) => {
                 // Topology and payload use the SAME winning historical
                 // coordinate, including retirement restatements. This is the

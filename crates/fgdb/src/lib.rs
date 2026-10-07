@@ -205,7 +205,7 @@ use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_all_edges_with_props};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
-use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices, merge_vertex};
+use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
@@ -1775,7 +1775,10 @@ impl Snapshot {
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         self.check_frontier(as_of)?;
-        Ok(merge_vertex(&self.patches, vid, as_of))
+        let Ok(row) = gql_exec::source::find_vertex(self, vid, as_of, &mut |_| {
+            Ok::<_, core::convert::Infallible>(())
+        });
+        Ok(row.cloned())
     }
 
     fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
@@ -5029,9 +5032,11 @@ fn vertex_content_entry<'content>(
     vid: VId,
 ) -> &'content mut VertexContent {
     prefix_content.entry(vid).or_insert_with(|| {
-        let row = merge_vertex(&snapshot.patches, vid, snapshot.frontier)
-            .expect("liveness was proven before content is materialized");
-        (row.labels, row.props)
+        let Ok(row) = gql_exec::source::find_vertex(snapshot, vid, snapshot.frontier, &mut |_| {
+            Ok::<_, core::convert::Infallible>(())
+        });
+        let row = row.expect("liveness was proven before content is materialized");
+        (row.labels.clone(), row.props.clone())
     })
 }
 
@@ -6690,10 +6695,10 @@ mod version_transcript_laws {
     }
 }
 
-/// Point reads answer from the maintained adjacency index. These laws hold it
-/// to the whole-history merge — the reference semantics — for every vertex,
-/// relation, direction, EId and sequence of a randomized history with
-/// parallel edges, tombstones, content-version successors and compaction.
+/// Point reads answer from maintained adjacency and vertex-history indexes.
+/// These laws hold them to the independent whole-history merges for every
+/// vertex, relation, direction, EId and sequence, including tombstones,
+/// content-version successors, pinned generations, compaction and recovery.
 #[cfg(test)]
 mod point_read_index_laws {
     use super::*;
@@ -6716,6 +6721,11 @@ mod point_read_index_laws {
         for as_of in 0..=snapshot.frontier.0 {
             let as_of = CommitSeq(as_of);
             for &vid in vids {
+                assert_eq!(
+                    snapshot.vertex_at(vid, as_of).unwrap(),
+                    fgdb_strata::vertex::merge_vertex(&snapshot.patches, vid, as_of),
+                    "{label}: vertex({vid:?}) at {as_of:?}"
+                );
                 for relation in relations {
                     assert_eq!(
                         snapshot.neighbours_at(vid, relation, as_of).unwrap(),
@@ -6821,6 +6831,110 @@ mod point_read_index_laws {
                 "maintained index drifted from a rebuild"
             );
         }
+    }
+
+    #[test]
+    fn vertex_point_reads_preserve_versions_labels_deletes_and_pinned_recovered_cuts() {
+        let ((), report) = asupersync::lab::run_async_under_lab(0x761d_0101, |root| async move {
+            let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for seed in [1_u64, 0x5eed, 0xfeed_beef] {
+                let keys = DatabaseKeys::new(
+                    [0x71; 32],
+                    DatabaseSecurityNamespaceId([0x72; 32]),
+                    [0x73; 32],
+                );
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys.clone())
+                    .await
+                    .unwrap();
+                let mut live = vec![VId(0), VId(1), VId(u128::MAX)];
+                let mut vids = live.clone();
+                // Lookup misses on either side of the actual domain are
+                // ordinary IDs, never successor arithmetic or sentinels.
+                vids.extend([VId(99_999), VId(u128::MAX - 1)]);
+                let mut initial = WriteBatch::new(RelationId(1));
+                for &vid in &live {
+                    initial.create_vertex(
+                        vid,
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+                    );
+                }
+                db.write(&cx, initial).await.unwrap();
+                let pinned = db.pinned_read_view().unwrap();
+                let original = pinned.vertices().unwrap();
+                let mut random = Lcg(seed);
+                for step in 1..=32_u64 {
+                    let mut batch = WriteBatch::new(RelationId(1));
+                    let touched = live[random.below(live.len())];
+                    let value = match step % 3 {
+                        0 => None,
+                        1 => Some(CanonicalScalar::Null),
+                        _ => Some(CanonicalScalar::Int(-(step as i64))),
+                    };
+                    batch.set_vertex_property(touched, PropertyKeyId(1), value);
+                    batch.set_vertex_label(touched, LabelId(2), step % 2 == 0);
+                    // An additional update in this same commit must not
+                    // create a competing equal-sequence visible statement.
+                    batch.set_vertex_property(
+                        touched,
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(step as i64)),
+                    );
+                    if step % 4 == 0 {
+                        let doomed = random.below(live.len());
+                        batch.delete_vertex(live.remove(doomed));
+                    }
+                    let added = VId(100 + u128::from(step));
+                    batch.create_vertex(added, vec![LabelId(1)], vec![]);
+                    live.push(added);
+                    vids.push(added);
+                    db.write(&cx, batch).await.unwrap();
+                    if step == 16 {
+                        db.compact(&cx).await.unwrap();
+                    }
+                    assert_index_matches_merge(
+                        &db,
+                        &vids,
+                        &[],
+                        &format!("seed {seed}, step {step}"),
+                    );
+                    for row in &original {
+                        assert_eq!(pinned.vertex(row.vid).unwrap(), Some(row.clone()));
+                    }
+                    assert_eq!(pinned.vertex(added).unwrap(), None);
+                }
+                let frontier = db.frontier().unwrap();
+                assert!(matches!(
+                    db.vertex_at(VId(0), CommitSeq(frontier.0 + 1)),
+                    Err(ReadError::BeyondFrontier { .. })
+                ));
+                assert!(db.verify_snapshot_indexes().unwrap());
+                drop(db);
+                for force_rebuild in [false, true] {
+                    let reopened = Database::bind_with_vfs(
+                        &cx,
+                        vfs.clone(),
+                        &path,
+                        keys.clone(),
+                        force_rebuild,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(reopened.frontier().unwrap(), frontier);
+                    assert_index_matches_merge(
+                        &reopened,
+                        &vids,
+                        &[],
+                        &format!("seed {seed}, force_rebuild {force_rebuild}"),
+                    );
+                    assert_eq!(pinned.vertices().unwrap(), original);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 

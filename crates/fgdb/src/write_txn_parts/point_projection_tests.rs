@@ -168,7 +168,7 @@ fn requested_payload_is_borrowed_from_its_actual_snapshot_or_prepared_effect() {
                 )
                 .unwrap();
             let row = crate::gql_exec::source::find_vertex(
-                &db.snapshot.patches,
+                &db.snapshot,
                 VId(0),
                 txn.basis(),
                 &mut |_| Ok::<_, ()>(()),

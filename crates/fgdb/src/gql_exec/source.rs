@@ -764,8 +764,11 @@ impl PropertyEqualityIndex {
         Ok(())
     }
 
-    /// Latest statement at the cut, with later patches winning equal creation
-    /// sequences exactly as in visit_vertices. Retirements remain authoritative.
+    /// Resolve a borrowed vertex row in O(log identities + log versions),
+    /// charging every node on both search paths. Later patches win equal
+    /// creation sequences exactly as in visit_vertices; a retirement winner
+    /// never falls back to an older live row. Even an empty or absent lookup
+    /// crosses the caller's control boundary before returning.
     fn visible_row<'a, E>(
         &self,
         patches: &'a [VertexPatchRows],
@@ -773,24 +776,40 @@ impl PropertyEqualityIndex {
         as_of: CommitSeq,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<&'a VertexRow>, E> {
-        let Some(history) = self.histories.get(&vid) else {
-            return Ok(None);
-        };
-        let (mut low, mut high) = (0, history.len());
-        while low < high {
+        control(SourceEvent::Work)?;
+        let mut node = self.histories.0.as_deref();
+        let mut history = None;
+        while let Some(current) = node {
             control(SourceEvent::Work)?;
-            let middle = low + (high - low) / 2;
-            if history.at(middle).expect("history rank").0.0 <= as_of {
-                low = middle + 1;
-            } else {
-                high = middle;
+            match vid.cmp(&current.key) {
+                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                core::cmp::Ordering::Equal => {
+                    history = Some(&current.value);
+                    break;
+                }
             }
         }
-        Ok(low.checked_sub(1).and_then(|at| {
-            let (&(_, patch, row), _) = history.at(at).expect("history rank");
-            let row = &patches[patch][row];
-            row.visible_at(as_of).then_some(row)
-        }))
+        let Some(history) = history else {
+            return Ok(None);
+        };
+        let mut node = history.0.as_deref();
+        let mut winner = None;
+        while let Some(current) = node {
+            control(SourceEvent::Work)?;
+            if current.key.0 <= as_of {
+                winner = Some(current.key);
+                node = current.right.0.as_deref();
+            } else {
+                node = current.left.0.as_deref();
+            }
+        }
+        let Some((_, patch, row)) = winner else {
+            return Ok(None);
+        };
+        control(SourceEvent::Work)?;
+        let row = &patches[patch][row];
+        Ok(row.visible_at(as_of).then_some(row))
     }
 }
 
@@ -1633,34 +1652,18 @@ pub(crate) fn scan_vertices<'a, E>(
     Ok(rows)
 }
 
+/// Resolve one row from the generation's maintained history index. Callers
+/// own health/cut admission, logical record charges, and transaction witnesses;
+/// this borrowed lookup meters only the physical searches it performs.
 pub(crate) fn find_vertex<'a, E>(
-    patches: &'a [VertexPatchRows],
+    snapshot: &'a Snapshot,
     vid: VId,
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<&'a VertexRow>, E> {
-    let mut winner: Option<&'a VertexRow> = None;
-    for patch in patches {
-        control(SourceEvent::Work)?;
-        let (mut low, mut high) = (0, patch.len());
-        while low < high {
-            control(SourceEvent::Work)?;
-            let middle = low + (high - low) / 2;
-            let row = &patch[middle];
-            if (row.vid, row.created_at) <= (vid, as_of) {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        if low > 0 {
-            let row = &patch[low - 1];
-            if row.vid == vid && winner.is_none_or(|old| old.created_at <= row.created_at) {
-                winner = Some(row);
-            }
-        }
-    }
-    Ok(winner.filter(|row| row.visible_at(as_of)))
+    snapshot
+        .property_index
+        .visible_row(&snapshot.patches, vid, as_of, control)
 }
 
 pub(super) struct BorrowedTables<'a> {
@@ -2015,7 +2018,7 @@ pub(super) fn admit<'a, E, Row>(
             }
         }
         for vid in candidates {
-            if let Some(row) = find_vertex(&snapshot.patches, vid, as_of, control)? {
+            if let Some(row) = find_vertex(snapshot, vid, as_of, control)? {
                 control(SourceEvent::ScratchEntry)?;
                 vertices.push(row);
             }
@@ -2188,13 +2191,15 @@ mod tests {
             patch(&[row(1, 2, Some(4), 2), row(2, 3, None, 3)]),
             patch(&[row(high, 1, Some(5), 8)]),
         ];
+        let index = PropertyEqualityIndex::build(&patches);
         for at in 0..=6 {
             let expected = fgdb_strata::vertex::merge_all_vertices(&patches, CommitSeq(at));
             let actual = scan_vertices(&patches, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
             assert_eq!(actual, expected.iter().collect::<Vec<_>>());
             for vid in [VId(1), VId(2), VId(99), VId(high)] {
-                let actual =
-                    find_vertex(&patches, vid, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
+                let actual = index
+                    .visible_row(&patches, vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
                 let expected = fgdb_strata::vertex::merge_vertex(&patches, vid, CommitSeq(at));
                 assert_eq!(actual, expected.as_ref());
             }
@@ -2204,6 +2209,82 @@ mod tests {
                     .any(|patch| patch.iter().any(|original| std::ptr::eq(*found, original)))
             }));
         }
+    }
+
+    #[test]
+    fn vertex_point_lookup_skips_unrelated_history_and_refuses_at_every_search_step() {
+        let mut patches = vec![patch(&[row(1, 1, None, 7), row(2, 1, None, 8)])];
+        let initial = PropertyEqualityIndex::build(&patches);
+        let mut early_work = 0;
+        assert_eq!(
+            initial
+                .visible_row(&patches, VId(1), CommitSeq(1), &mut |event| {
+                    assert_eq!(event, SourceEvent::Work);
+                    early_work += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            Some(&patches[0][0])
+        );
+        // Only vertex 2 changes. Vertex 1's lookup must never walk these
+        // patches, even though its requested sequence is beyond all of them.
+        for seq in 2..=1_024 {
+            patches.push(patch(&[
+                row(2, seq - 1, Some(seq), seq as i64 + 6),
+                row(2, seq, None, seq as i64 + 7),
+            ]));
+        }
+        patches.push(patch(&[row(2, 1_024, Some(1_025), 1_031)]));
+        let index = initial.extend(&patches, 1);
+        let mut late_work = 0;
+        let found = index
+            .visible_row(&patches, VId(1), CommitSeq(1_025), &mut |event| {
+                assert_eq!(event, SourceEvent::Work);
+                late_work += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(found, Some(&patches[0][0]));
+        assert!(core::ptr::eq(found.unwrap(), &patches[0][0]));
+        assert_eq!(late_work, early_work, "unrelated histories were inspected");
+        assert!(late_work >= 3, "both search paths must be charged");
+
+        for (vid, as_of) in [
+            (VId(1), CommitSeq(1_025)),
+            (VId(2), CommitSeq(511)),
+            (VId(2), CommitSeq(1_025)),
+            (VId(1), CommitSeq::ORIGIN),
+            (VId(3), CommitSeq(1_025)),
+        ] {
+            let run = |stop| {
+                let mut seen = 0;
+                let result = index.visible_row(&patches, vid, as_of, &mut |event| {
+                    assert_eq!(event, SourceEvent::Work);
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                });
+                (result, seen)
+            };
+            let (result, total) = run(usize::MAX);
+            let expected = fgdb_strata::vertex::merge_vertex(&patches, vid, as_of);
+            assert_eq!(result.unwrap(), expected.as_ref(), "{vid:?} at {as_of:?}");
+            assert!(
+                total > 0,
+                "a missing row still crosses the control boundary"
+            );
+            for stop in 1..=total {
+                assert_eq!(run(stop), (Err(stop), stop));
+            }
+        }
+        assert_eq!(
+            PropertyEqualityIndex::build(&[]).visible_row(
+                &[],
+                VId(0),
+                CommitSeq::ORIGIN,
+                &mut |_| Err(7),
+            ),
+            Err(7)
+        );
     }
     fn edge(id: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
         AdjacencyEntry {

@@ -178,12 +178,11 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
             let mut borrowed = 0;
             owner
                 .visit_vertices(VertexScanDomain::All, &mut |_| Ok::<_, ()>(()), |row, _| {
-                    let basis =
-                        source::find_vertex(&db.snapshot.patches, row.vid, txn.basis, &mut |_| {
-                            Ok::<_, ()>(())
-                        })
-                        .unwrap()
-                        .unwrap();
+                    let basis = source::find_vertex(&db.snapshot, row.vid, txn.basis, &mut |_| {
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
                     if row.vid == VId(2) {
                         assert!(!std::ptr::eq(row, basis));
                         assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11))]);
