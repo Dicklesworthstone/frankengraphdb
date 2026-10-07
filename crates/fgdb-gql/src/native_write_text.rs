@@ -91,11 +91,16 @@ impl BoundNativeGraphWrite {
                 .map_err(NativeGraphWriteBindError::Unwind)?;
             return Ok(Self(BoundInput::Unwind(batch)));
         }
-        // Preserve native script inference: integer/pagination/list roles are
-        // resolved by the existing parser; canonical scalar kinds are explicit.
+        // Preserve numeric inference while declaring collection/scalar roles.
+        // Collections may occur outside UNWIND, which otherwise infers List.
         let declarations: Vec<_> = arguments
             .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
+            })
             .collect();
         let script = PreparedGraphWriteScript::prepare_with_parameter_types(
             text,

@@ -124,6 +124,9 @@ fn native_plan_digest(prepared: &impl NativeCertificatePlan) -> Digest {
             fgdb_gql::GqlParameterType::List => {
                 hasher.update(&[3]);
             }
+            fgdb_gql::GqlParameterType::Map => {
+                hasher.update(&[4]);
+            }
         }
         hasher.update(&[u8::from(spec.requires_positive)]);
         hasher.update(&(spec.occurrences as u64).to_be_bytes());

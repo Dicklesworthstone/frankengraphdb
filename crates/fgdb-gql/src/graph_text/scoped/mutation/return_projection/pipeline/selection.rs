@@ -70,6 +70,10 @@ impl<'a> Parser<'a> {
                         GqlParameterValue::List(
                             GqlListParameter::new(Vec::new()).expect("empty list is bounded"),
                         )
+                    } else if spec.parameter_type == GqlParameterType::Map {
+                        GqlParameterValue::Map(
+                            crate::GqlMapParameter::new(Vec::new()).expect("empty map is bounded"),
+                        )
                     } else {
                         GqlParameterValue::Scalar(null.clone())
                     }
@@ -450,7 +454,10 @@ impl<'a> Parser<'a> {
             ReadValueTemplate::Column(column) => ReadFilterOperand::Column(column),
             ReadValueTemplate::Literal(value) => ReadFilterOperand::Literal(value),
             ReadValueTemplate::Parameter { index, at }
-                if self.syntax.parameters[index].parameter_type != GqlParameterType::List =>
+                if !matches!(
+                    self.syntax.parameters[index].parameter_type,
+                    GqlParameterType::List | GqlParameterType::Map
+                ) =>
             {
                 ReadFilterOperand::Parameter { index, at }
             }

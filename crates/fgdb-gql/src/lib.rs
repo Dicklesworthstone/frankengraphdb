@@ -181,8 +181,8 @@ pub use mutation_text::{
 pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
-    GqlListParameter, GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,
-    GqlParameters, GqlScalarParameter, PreparedGqlTemplate,
+    GqlListParameter, GqlMapParameter, GqlParameterError, GqlParameterSpec, GqlParameterType,
+    GqlParameterValue, GqlParameters, GqlScalarParameter, PreparedGqlTemplate,
 };
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,

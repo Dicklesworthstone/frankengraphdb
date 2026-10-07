@@ -117,7 +117,14 @@ impl WriteTxn {
         })?;
         let declarations: Vec<(&str, fgdb_gql::GqlParameterType)> = params
             .parameter_types()
-            .filter(|(_, kind)| matches!(kind, fgdb_gql::GqlParameterType::Scalar(_)))
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    fgdb_gql::GqlParameterType::Scalar(_)
+                        | fgdb_gql::GqlParameterType::List
+                        | fgdb_gql::GqlParameterType::Map
+                )
+            })
             .collect();
         let script = fgdb_gql::PreparedGraphWriteScript::prepare_with_parameter_types(
             text,

@@ -189,6 +189,11 @@ impl ReadValueTemplate {
             {
                 GraphSetColumnType::List
             }
+            Self::Parameter { index, .. }
+                if parameters[*index].parameter_type == GqlParameterType::Map =>
+            {
+                GraphSetColumnType::Any
+            }
             _ => GraphSetColumnType::Scalar,
         }
     }
@@ -592,6 +597,9 @@ fn parameter_type_tag(kind: GqlParameterType) -> u8 {
         GqlParameterType::UInt64 => 1,
         GqlParameterType::List => 2,
         GqlParameterType::Scalar(kind) => 3 + kind as u8,
+        // Keep every existing parameter tag unchanged; canonical scalar kinds
+        // occupy tags 3..=10.
+        GqlParameterType::Map => 11,
     }
 }
 

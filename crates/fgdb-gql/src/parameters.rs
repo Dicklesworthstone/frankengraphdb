@@ -32,6 +32,7 @@ pub enum GqlParameterType {
     /// Exact canonical kind or canonical null; no cross-kind numeric coercion.
     Scalar(CanonicalScalarKind),
     List,
+    Map,
 }
 
 /// Scalar arguments own shared bounded storage. This enum is Clone, not Copy;
@@ -42,6 +43,7 @@ pub enum GqlParameterValue {
     UInt64(u64),
     Scalar(GqlScalarParameter),
     List(GqlListParameter),
+    Map(GqlMapParameter),
 }
 
 impl GqlParameterValue {
@@ -52,6 +54,7 @@ impl GqlParameterValue {
             Self::UInt64(_) => GqlParameterType::UInt64,
             Self::Scalar(value) => GqlParameterType::Scalar(value.kind()),
             Self::List(_) => GqlParameterType::List,
+            Self::Map(_) => GqlParameterType::Map,
         }
     }
 
@@ -59,7 +62,7 @@ impl GqlParameterValue {
         match self {
             Self::Int64(value) => value.to_string(),
             Self::UInt64(value) => value.to_string(),
-            Self::Scalar(_) | Self::List(_) => {
+            Self::Scalar(_) | Self::List(_) | Self::Map(_) => {
                 unreachable!("legacy template validation admits only numeric arguments")
             }
         }
@@ -72,6 +75,7 @@ impl GqlParameterValue {
             Self::Int64(_) | Self::UInt64(_) => 8,
             Self::Scalar(value) => 8_usize.checked_add(value.canonical_bytes().len())?,
             Self::List(value) => 8_usize.checked_add(value.canonical_bytes().len())?,
+            Self::Map(value) => 8_usize.checked_add(value.canonical_bytes().len())?,
         };
         8_usize
             .checked_add(name_bytes)?
@@ -128,10 +132,66 @@ impl core::fmt::Debug for GqlListParameter {
     }
 }
 
+/// Checked immutable map storage with the graph value's canonical key order.
+/// The keys are data, never statement text or catalog names. Construction
+/// refuses duplicates and the same recursive bounds as list parameters.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GqlMapParameter {
+    value: std::sync::Arc<crate::algebra::GraphValue>,
+    canonical: std::sync::Arc<[u8]>,
+}
+impl GqlMapParameter {
+    pub fn new(
+        entries: Vec<(Box<str>, crate::algebra::GraphValue)>,
+    ) -> Result<Self, GqlParameterError> {
+        if entries.len() >= crate::algebra::GraphValue::MAX_LIST_NODES {
+            return Err(GqlParameterError::MapLiteral);
+        }
+        let value =
+            crate::algebra::GraphValue::map(entries).ok_or(GqlParameterError::MapLiteral)?;
+        // The existing payload walker bounds variable storage before encoding,
+        // including keys and deeply nested text/bytes. Its units are a lower
+        // bound on encoded bytes; the exact framed byte cap follows below.
+        if !value.validate_bounds()
+            || value.payload_units() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES
+        {
+            return Err(GqlParameterError::MapLiteral);
+        }
+        let canonical = value
+            .canonical_bytes()
+            .map_err(|_| GqlParameterError::MapLiteral)?;
+        if canonical.len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES {
+            return Err(GqlParameterError::MapLiteral);
+        }
+        Ok(Self {
+            value: std::sync::Arc::new(value),
+            canonical: canonical.into(),
+        })
+    }
+    #[must_use]
+    pub fn value(&self) -> &crate::algebra::GraphValue {
+        &self.value
+    }
+    #[must_use]
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &crate::algebra::GraphValue)> {
+        let (keys, values) = self.value.as_map().expect("checked map storage");
+        keys.iter().map(AsRef::as_ref).zip(values)
+    }
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+}
+impl core::fmt::Debug for GqlMapParameter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("GqlMapParameter([REDACTED])")
+    }
+}
+
 /// Exact, case-sensitive argument names without their leading `$`.
 /// Duplicate or over-budget insertion refuses without changing the map.
 /// Retained entries and their complete canonical transcript are bounded before
-/// insertion; scalar/list payloads also retain their individual admission caps.
+/// insertion; scalar/list/map payloads also retain their individual admission caps.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct GqlParameters {
     values: BTreeMap<String, GqlParameterValue>,
@@ -217,6 +277,15 @@ impl GqlParameters {
         Ok(self)
     }
 
+    pub fn with_map(
+        mut self,
+        name: impl Into<String>,
+        entries: Vec<(Box<str>, crate::algebra::GraphValue)>,
+    ) -> Result<Self, GqlParameterError> {
+        self.insert(name, GqlParameterValue::Map(GqlMapParameter::new(entries)?))?;
+        Ok(self)
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<GqlParameterValue> {
         self.values.get(name).cloned()
@@ -274,6 +343,10 @@ impl GqlParameters {
                     bytes.push(3);
                     append_bytes(&mut bytes, value.canonical_bytes());
                 }
+                GqlParameterValue::Map(value) => {
+                    bytes.push(4);
+                    append_bytes(&mut bytes, value.canonical_bytes());
+                }
             }
         }
         debug_assert_eq!(bytes.len(), self.canonical_byte_len());
@@ -307,6 +380,8 @@ pub enum GqlParameterError {
     ScalarLiteral,
     /// List depth, node count, scalar encoding or aggregate payload exceeded admission.
     ListLiteral,
+    /// Duplicate keys, recursive structure or canonical payload exceeded admission.
+    MapLiteral,
     ArgumentNameTooLong {
         observed: usize,
         limit: usize,
@@ -360,6 +435,10 @@ impl core::fmt::Display for GqlParameterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::ListLiteral => write!(f, "list parameter exceeds canonical admission bounds"),
+            Self::MapLiteral => write!(
+                f,
+                "map parameter has duplicate keys or exceeds canonical admission bounds"
+            ),
             Self::Bind(error) => core::fmt::Display::fmt(error, f),
             Self::ScalarLiteral => {
                 f.write_str("scalar argument exceeds canonical operand admission bounds")
@@ -1157,10 +1236,145 @@ mod tests {
             .with_null("null")
             .unwrap()
             .with_list("list", Vec::new())
+            .unwrap()
+            .with_map("map", Vec::new())
             .unwrap();
         assert_eq!(args.canonical_byte_len(), args.canonical_bytes().len());
         let clone = args.clone().with_int64("extra", 1).unwrap();
         assert_eq!(clone.canonical_byte_len(), clone.canonical_bytes().len());
         assert!(clone.canonical_byte_len() > args.canonical_byte_len());
+    }
+
+    #[test]
+    fn map_parameters_share_storage_and_have_canonical_distinct_transcripts() {
+        use crate::algebra::GraphValue;
+        use fgdb_types::CanonicalScalar;
+        let int = |n| GraphValue::Scalar(CanonicalScalar::Int(n));
+        let first = GqlMapParameter::new(vec![("z".into(), int(2)), ("a".into(), int(1))]).unwrap();
+        let second =
+            GqlMapParameter::new(vec![("a".into(), int(1)), ("z".into(), int(2))]).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.entries().map(|(key, _)| key).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        let clone = first.clone();
+        assert!(std::ptr::eq(first.value(), clone.value()));
+        assert!(std::ptr::eq(
+            first.canonical_bytes(),
+            clone.canonical_bytes()
+        ));
+        let mut arguments = GqlParameters::new();
+        arguments
+            .insert("m", GqlParameterValue::Map(first.clone()))
+            .unwrap();
+        let mut expected = PARAMETER_TRANSCRIPT_HEADER.to_vec();
+        expected.extend_from_slice(&1_u64.to_be_bytes());
+        append_bytes(&mut expected, b"m");
+        expected.push(4);
+        append_bytes(&mut expected, first.canonical_bytes());
+        assert_eq!(arguments.canonical_bytes(), expected);
+        let frozen = arguments.clone();
+        assert!(matches!(
+            arguments.insert("m", GqlParameterValue::Map(second)),
+            Err(GqlParameterError::Duplicate { .. })
+        ));
+        assert_eq!(arguments, frozen);
+        assert_ne!(
+            GqlParameters::new()
+                .with_map("m", vec![])
+                .unwrap()
+                .canonical_bytes(),
+            GqlParameters::new()
+                .with_list("m", vec![])
+                .unwrap()
+                .canonical_bytes(),
+        );
+        assert_ne!(
+            GqlParameters::new()
+                .with_map("m", vec![])
+                .unwrap()
+                .canonical_bytes(),
+            GqlParameters::new()
+                .with_null("m")
+                .unwrap()
+                .canonical_bytes(),
+        );
+        assert!(GqlParameterType::Map.accepts(GqlParameterType::Scalar(CanonicalScalarKind::Null)));
+        assert!(!GqlParameterType::Map.accepts(GqlParameterType::List));
+    }
+
+    #[test]
+    fn map_parameters_refuse_duplicate_nested_structure_and_payload_overflow() {
+        use crate::algebra::GraphValue;
+        use fgdb_types::CanonicalScalar;
+        let null = || GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            GqlMapParameter::new(vec![("secret".into(), null()), ("secret".into(), null())]),
+            Err(GqlParameterError::MapLiteral),
+        );
+        let malformed = GraphValue::Map {
+            keys: vec!["a".into(), "a".into()].into(),
+            values: vec![null(), null()].into(),
+        };
+        assert!(GqlMapParameter::new(vec![("outer".into(), malformed)]).is_err());
+        let mut nested = null();
+        for _ in 0..=GraphValue::MAX_LIST_DEPTH {
+            nested = GraphValue::List(vec![nested].into());
+        }
+        assert!(GqlMapParameter::new(vec![("deep".into(), nested)]).is_err());
+        assert!(
+            GqlMapParameter::new(vec![(
+                "x".repeat(crate::algebra::MAX_SCALAR_PREDICATE_BYTES)
+                    .into(),
+                null(),
+            )])
+            .is_err()
+        );
+        assert!(
+            GqlMapParameter::new(vec![(
+                "payload".into(),
+                GraphValue::Scalar(
+                    CanonicalScalar::bytes(vec![0xab; crate::algebra::MAX_SCALAR_PREDICATE_BYTES])
+                        .unwrap()
+                ),
+            )])
+            .is_err()
+        );
+        let argument = GqlMapParameter::new(vec![("secret".into(), null())]).unwrap();
+        assert!(!format!("{argument:?}").contains("secret"));
+        assert!(!format!("{:?}", GqlParameterValue::Map(argument)).contains("secret"));
+    }
+
+    #[test]
+    fn map_transcript_limit_charges_every_shared_binding_before_retention() {
+        use crate::algebra::GraphValue;
+        let map = GqlMapParameter::new(vec![(
+            "payload".into(),
+            GraphValue::Scalar(fgdb_types::CanonicalScalar::bytes(vec![0xab; 32_768]).unwrap()),
+        )])
+        .unwrap();
+        let mut args = GqlParameters::new();
+        for index in 0..MAX_GQL_PARAMETER_COUNT {
+            let name = format!("m{index}");
+            let value = GqlParameterValue::Map(map.clone());
+            let next =
+                args.canonical_byte_len() + value.transcript_entry_bytes(name.len()).unwrap();
+            if next > MAX_GQL_PARAMETER_TRANSCRIPT_BYTES {
+                let frozen = args.clone();
+                assert_eq!(
+                    args.insert(name, value),
+                    Err(GqlParameterError::TranscriptBytesExceeded {
+                        observed: next,
+                        limit: MAX_GQL_PARAMETER_TRANSCRIPT_BYTES,
+                    })
+                );
+                assert_eq!(args, frozen);
+                assert_eq!(args.canonical_byte_len(), args.canonical_bytes().len());
+                return;
+            }
+            args.insert(name, value).unwrap();
+        }
+        panic!("map payloads must reach the transcript cap before the count cap");
     }
 }

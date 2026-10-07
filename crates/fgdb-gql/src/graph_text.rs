@@ -984,10 +984,12 @@ impl<'a> Parser<'a> {
                         .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
                 )
             }
-            GqlParameterType::List => {
+            GqlParameterType::List | GqlParameterType::Map => {
                 return Err(error(
                     at,
-                    GraphPatternTextErrorKind::Expected("list parameters are not scalar operands"),
+                    GraphPatternTextErrorKind::Expected(
+                        "collection parameters are not scalar operands",
+                    ),
                 ));
             }
         };

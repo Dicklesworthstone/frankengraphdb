@@ -193,6 +193,9 @@ impl<'a> Parser<'a> {
                 GqlParameterType::List => GqlParameterValue::List(
                     crate::GqlListParameter::new(Vec::new()).expect("bounded empty list"),
                 ),
+                GqlParameterType::Map => GqlParameterValue::Map(
+                    crate::GqlMapParameter::new(Vec::new()).expect("bounded empty map"),
+                ),
             })
             .collect();
         let bound = bind_read_value(&value, &values)?;

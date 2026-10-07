@@ -103,6 +103,13 @@ fn arguments(schema: &[GqlParameterSpec], variant: usize, frontier: u64) -> GqlP
                     ),
                 ],
             ),
+            GqlParameterType::Map => args.with_map(
+                &spec.name,
+                vec![(
+                    "value".into(),
+                    GraphValue::Scalar(CanonicalScalar::Int(variant as i64)),
+                )],
+            ),
         }
         .expect("generated parameter names originate in the admitted schema");
     }

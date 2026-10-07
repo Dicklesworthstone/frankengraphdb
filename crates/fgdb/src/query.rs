@@ -234,7 +234,12 @@ fn prepare_insert_return(
 ) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
     let declarations: Vec<(&str, GqlParameterType)> = params
         .parameter_types()
-        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List))
+        .filter(|(_, kind)| {
+            matches!(
+                kind,
+                GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+            )
+        })
         .collect();
     PreparedGraphInsertQueryText::prepare_with_parameter_types(
         text,

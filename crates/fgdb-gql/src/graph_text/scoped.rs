@@ -422,7 +422,7 @@ pub(super) fn bind_builder(
             }
             // List declarations refuse at the typed number parser, matching the
             // scalar property admission invariant; a List value cannot bind.
-            GqlParameterValue::List(_) => {
+            GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
                 unreachable!("property arguments were type-checked at preparation")
             }
         };

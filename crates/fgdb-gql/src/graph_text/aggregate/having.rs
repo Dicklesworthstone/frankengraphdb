@@ -30,8 +30,8 @@ impl Operand {
                 }
                 // List declarations refuse at the typed number parser; bind is
                 // infallible over the admitted operand domain.
-                GqlParameterValue::List(_) => {
-                    unreachable!("list parameters never become HAVING operands")
+                GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
+                    unreachable!("collection parameters never become HAVING operands")
                 }
             },
         }

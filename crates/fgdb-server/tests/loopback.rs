@@ -132,6 +132,133 @@ fn server_code(error: ClientError) -> ErrorCode {
 }
 
 #[test]
+fn top_level_map_parameters_round_trip_and_drive_atomic_fgp_writes() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "map-parameters").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let payload = WireValue::Map(vec![
+            ("label".into(), text("input")),
+            (
+                "rows".into(),
+                WireValue::List(vec![
+                    WireValue::Map(vec![
+                        ("age".into(), WireValue::Int(30)),
+                        ("name".into(), text("Ann")),
+                    ]),
+                    WireValue::Map(vec![
+                        ("age".into(), WireValue::Int(25)),
+                        ("name".into(), text("Bob")),
+                    ]),
+                ]),
+            ),
+        ]);
+        let read = client.execute(cx, ExecuteMode::Read,
+            "RETURN $payload AS payload, $payload.rows[0].name AS name, $payload.missing AS absent",
+            vec![("payload".into(), payload.clone())]).await.unwrap();
+        assert_eq!(
+            read.rows,
+            [vec![payload.clone(), text("Ann"), WireValue::Null]]
+        );
+        let statement = "UNWIND $payload.rows AS row CREATE (n:Person {name:row.name, age:row.age}) RETURN n.name AS name, $payload.label AS label ORDER BY name";
+        let result = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                statement,
+                vec![("payload".into(), payload)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.rows,
+            [
+                vec![text("Ann"), text("input")],
+                vec![text("Bob"), text("input")]
+            ]
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        );
+        let bad = WireValue::Map(vec![
+            ("label".into(), text("refused")),
+            (
+                "rows".into(),
+                WireValue::List(vec![
+                    WireValue::Map(vec![("name".into(), text("must not commit"))]),
+                    WireValue::Map(vec![("name".into(), WireValue::Map(vec![]))]),
+                ]),
+            ),
+        ]);
+        let error = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                statement,
+                vec![("payload".into(), bad)],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Statement);
+        let count = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN count(n) AS n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.rows, [[WireValue::Count(2)]]);
+        assert_eq!(count.outcome, Outcome::Rows { seq: 1 });
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_map_parameters_bind_nested_bulk_input_and_return_typed_maps() {
+    run(async |cx| {
+        let server = Arc::new(served(cx, "map-http").await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let mut task = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let rw = token(&grant(Rights::ReadWrite));
+        let (status, body) = http(addr, "POST", "/v1/databases/social/write", "127.0.0.1", Some(&rw),
+            r#"{"statement":"UNWIND $payload.rows AS row CREATE (n:Person {name:row.name,age:row.age}) RETURN n.name AS name, $payload.meta AS meta ORDER BY name","parameters":{"payload":{"rows":[{"name":"Ann","age":30},{"name":"Bob","age":25}],"meta":{"z":2,"a":1}}}}"#).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","meta"],"rows":[[{"type":"text","value":"Ann"},{"type":"map","value":{"a":{"type":"int","value":"1"},"z":{"type":"int","value":"2"}}}],[{"type":"text","value":"Bob"},{"type":"map","value":{"a":{"type":"int","value":"1"},"z":{"type":"int","value":"2"}}}]],"seq":1,"statements":1,"committed":true}"#
+        );
+        let (status, body) = http(addr, "POST", "/v1/databases/social/query", "127.0.0.1", Some(&rw),
+            r#"{"statement":"MATCH (n:Person) RETURN n.name AS name, $payload.meta.value AS value ORDER BY name","parameters":{"payload":{"meta":{"value":7}}}}"#).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","value"],"rows":[[{"type":"text","value":"Ann"},{"type":"int","value":"7"}],[{"type":"text","value":"Bob"},{"type":"int","value":"7"}]],"seq":1}"#
+        );
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn writes_and_reads_round_trip_with_flow_control_refusals_and_drain() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "roundtrip").await;

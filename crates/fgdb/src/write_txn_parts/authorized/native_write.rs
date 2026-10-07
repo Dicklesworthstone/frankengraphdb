@@ -84,7 +84,10 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
         checkpoint(cx, execution).map_err(admission)?;
         // Keep the native query_write inference convention. Integer and
         // pagination roles are inferred by the shared typed parser.
-        if matches!(kind, GqlParameterType::Scalar(_)) {
+        if matches!(
+            kind,
+            GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+        ) {
             declarations.push((name, kind));
         }
     }

@@ -251,6 +251,15 @@ impl<'a> Parser<'a> {
                     return Err(expected(at, "scalar CREATE property expression"));
                 }
                 value
+            } else if matches!(self.current.kind, TokenKind::Parameter(name)
+                if self.parameter_types.get(name) == Some(&GqlParameterType::Map))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            {
+                // A map argument's selected field uses the same composite
+                // value compiler as UNWIND input fields. No row source is
+                // needed for an immutable bound argument; the final property
+                // still passes the native scalar-only write admission.
+                self.insertion_source_value(inputs, &[])?
             } else {
                 match self.mutation_expression(inputs)? {
                     Operand::Column(column) => ReadValueTemplate::Column(column),
@@ -568,6 +577,9 @@ pub(super) fn shape_arguments(parameters: &[GqlParameterSpec]) -> Vec<GqlParamet
             ),
             GqlParameterType::List => GqlParameterValue::List(
                 crate::GqlListParameter::new(Vec::new()).expect("bounded empty list"),
+            ),
+            GqlParameterType::Map => GqlParameterValue::Map(
+                crate::GqlMapParameter::new(Vec::new()).expect("bounded empty map"),
             ),
         })
         .collect()

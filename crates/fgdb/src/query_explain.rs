@@ -99,7 +99,10 @@ impl PreparedNativeRead {
         let declarations: Vec<(&str, GqlParameterType)> = params
             .parameter_types()
             .filter(|(_, kind)| {
-                matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List)
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
             })
             .collect();
         let mut best = None;

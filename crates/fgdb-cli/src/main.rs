@@ -63,14 +63,14 @@ Usage: fgdb [--robot] <command>
 remote runs one statement on an fgdbd server over FGP, authenticated by the hex
 capability token in --token-file (owner-only; minted by `fgdbd token`). Output and
 exit codes are query/write's; the server's own name bindings apply. Remote
-parameters: int:, float:, text:, bool:true|false, null, json:<array>.
+parameters: int:, float:, text:, bool:true|false, null, json:<array|object>.
 remote subscribe streams a live changefeed (SUBSCRIBE TO <read>): columns, then
 per batch one change record per row (signed weight; the first batch is the
 baseline) and a progress record with the frontier. It needs a capability with
 unrestricted scope; --max-batches N cancels after N batches with a final result.
 Parameters: int:42, uint:42, float:1.5e-3, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
-json:<array> (a list: objects are maps, integers int, other numbers float).
+json:<array|object> (a list or map; integers int, other numbers float).
 write --rows json:[{...},...] binds the statement's parameters once per object
 and commits every row as ONE atomic program (MERGE sees earlier rows).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
@@ -614,7 +614,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
     if let Some(value) = raw.strip_prefix("json:") {
-        return json_list(value);
+        return json_parameter(value);
     }
     if let Some(value) = raw.strip_prefix("int:") {
         return value
@@ -690,34 +690,35 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
         .map(GqlParameterValue::Scalar)
         .map_err(Failure::query)
 }
-/// Bounds on one `json:` parameter document, before the list parameter's own
+/// Bounds on one `json:` parameter document, before the collection parameter's own
 /// canonical-size cap.
 const MAX_JSON_PARAMETER_VALUES: usize = 65_536;
 const MAX_JSON_PARAMETER_TOKEN_BYTES: usize = 65_536;
 
-/// `json:<array>` binds a list parameter, e.g. the rows of
+/// `json:<array|object>` binds a collection parameter, e.g. the rows of
 /// `UNWIND $rows AS row CREATE (:Person {name: row.name})`. Objects are maps,
 /// strings text, integers int, other finite numbers float, true/false bool,
-/// null null. Anything else, including a top-level non-array, is a usage error.
-fn json_list(text: &str) -> Result<GqlParameterValue, Failure> {
+/// null null. A top-level scalar uses the CLI's explicit scalar spellings.
+fn json_parameter(text: &str) -> Result<GqlParameterValue, Failure> {
     let json = load::parse_json(
         text,
         MAX_JSON_PARAMETER_VALUES,
         MAX_JSON_PARAMETER_TOKEN_BYTES,
     )
     .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")))?;
-    let load::Json::Array(items) = json else {
-        return Err(Failure::usage(
-            "invalid json parameter: expected a JSON array",
-        ));
-    };
-    let values = items
-        .iter()
-        .map(json_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    fgdb_gql::GqlListParameter::new(values)
-        .map(GqlParameterValue::List)
-        .map_err(Failure::usage)
+    match json_value(&json)? {
+        GraphValue::List(values) => fgdb_gql::GqlListParameter::new(values.into_vec())
+            .map(GqlParameterValue::List)
+            .map_err(Failure::usage),
+        GraphValue::Map { keys, values } => {
+            fgdb_gql::GqlMapParameter::new(keys.into_vec().into_iter().zip(values).collect())
+                .map(GqlParameterValue::Map)
+                .map_err(Failure::usage)
+        }
+        _ => Err(Failure::usage(
+            "invalid json parameter: expected a JSON array or object",
+        )),
+    }
 }
 fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
     let bad = |detail: &str| Failure::usage(format!("invalid json parameter: {detail}"));
@@ -793,9 +794,6 @@ fn prepare_rows(
             }
             let value = match value {
                 load::Json::Null => None,
-                load::Json::Object(_) => {
-                    return Err(bad(format!("row {at} key {key}: a map is not a parameter")));
-                }
                 load::Json::Number(text)
                     if !text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) =>
                 {
@@ -807,6 +805,12 @@ fn prepare_rows(
                     GraphValue::List(values) => GqlParameterValue::List(
                         fgdb_gql::GqlListParameter::new(values.into_vec())
                             .map_err(Failure::usage)?,
+                    ),
+                    GraphValue::Map { keys, values } => GqlParameterValue::Map(
+                        fgdb_gql::GqlMapParameter::new(
+                            keys.into_vec().into_iter().zip(values).collect(),
+                        )
+                        .map_err(Failure::usage)?,
                     ),
                     GraphValue::Scalar(scalar) => GqlParameterValue::Scalar(
                         GqlScalarParameter::new(scalar).map_err(Failure::usage)?,
@@ -857,17 +861,26 @@ fn prepare_rows(
             }
         }
     }
-    // The write path's convention: scalar kinds are declared; integers and
-    // lists keep the statement's own parameter types.
+    // Numeric roles retain inference; collection/scalar kinds are explicit.
     let mut declarations: Vec<(&str, GqlParameterType)> = options
         .params
         .parameter_types()
-        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+        .filter(|(_, kind)| {
+            matches!(
+                kind,
+                GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+            )
+        })
         .collect();
     declarations.extend(
         kinds
             .iter()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
+            })
             .map(|(key, kind)| (key.as_str(), *kind)),
     );
     let script = PreparedGraphWriteScript::prepare_with_parameter_types(
@@ -896,7 +909,7 @@ fn prepare_rows(
         for (key, kind) in &kinds {
             let value = match (row.get(key), kind) {
                 (Some(Some(value)), _) => value.clone(),
-                (_, GqlParameterType::Scalar(_)) => null.clone(),
+                (_, GqlParameterType::Scalar(_) | GqlParameterType::Map) => null.clone(),
                 _ => {
                     return Err(bad(format!(
                         "row {at} key {key} is null or absent; a list parameter cannot be NULL"

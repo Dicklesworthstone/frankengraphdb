@@ -112,6 +112,9 @@ fn admit_head(
             GqlParameterType::List => GqlParameterValue::List(
                 crate::GqlListParameter::new(Vec::new()).expect("bounded empty list"),
             ),
+            GqlParameterType::Map => GqlParameterValue::Map(
+                crate::GqlMapParameter::new(Vec::new()).expect("bounded empty map"),
+            ),
         })
         .collect();
     for (column, (name, value)) in head.outputs.iter().enumerate() {

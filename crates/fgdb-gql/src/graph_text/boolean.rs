@@ -914,7 +914,9 @@ impl BoundBooleanTemplate {
                     GqlParameterValue::Scalar(value) => {
                         Ok(Some(value.predicate(IntegerComparison::Equal)))
                     }
-                    GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) => {
+                    GqlParameterValue::UInt64(_)
+                    | GqlParameterValue::List(_)
+                    | GqlParameterValue::Map(_) => {
                         Err(error(self.at, GraphPatternTextErrorKind::BooleanExpression))
                     }
                 },

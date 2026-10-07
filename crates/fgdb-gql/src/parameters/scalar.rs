@@ -62,7 +62,7 @@ impl GqlParameterType {
             || matches!(
                 (self, actual),
                 (
-                    Self::Scalar(_) | Self::List,
+                    Self::Scalar(_) | Self::List | Self::Map,
                     Self::Scalar(CanonicalScalarKind::Null)
                 )
             )

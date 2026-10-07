@@ -614,7 +614,9 @@ fn parse_row(
             let value = match value {
                 GqlParameterValue::Int64(value) => CanonicalScalar::Int(value),
                 GqlParameterValue::Scalar(value) => value.value().clone(),
-                GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) => {
+                GqlParameterValue::UInt64(_)
+                | GqlParameterValue::List(_)
+                | GqlParameterValue::Map(_) => {
                     return Err("InvalidProperty: value is not a storable canonical scalar".into());
                 }
             };

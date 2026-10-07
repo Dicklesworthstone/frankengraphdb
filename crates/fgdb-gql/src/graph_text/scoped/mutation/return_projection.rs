@@ -61,6 +61,7 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
 fn map_capable(
     value: &ReadValueTemplate,
     schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
+    parameters: &[GqlParameterSpec],
 ) -> bool {
     match value {
         ReadValueTemplate::MapLiteral { .. }
@@ -71,6 +72,9 @@ fn map_capable(
         ReadValueTemplate::Column(at) => schema
             .and_then(|schema| schema.get(*at))
             .is_some_and(|(_, kind)| *kind == GraphSetColumnType::Any),
+        ReadValueTemplate::Parameter { index, .. } => {
+            parameters[*index].parameter_type == GqlParameterType::Map
+        }
         _ => false,
     }
 }
@@ -1016,6 +1020,7 @@ impl<'a> Parser<'a> {
                 && map_capable(
                     &value,
                     (inputs.is_none() && resolve.is_none()).then_some(schema),
+                    &self.syntax.parameters,
                 )
             {
                 self.advance()?;
@@ -1463,6 +1468,7 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
         ReadValueTemplate::Parameter { index, at } => match &values[*index] {
             GqlParameterValue::List(value) => GraphSetValue::Value(value.value().clone()),
+            GqlParameterValue::Map(value) => GraphSetValue::Value(value.value().clone()),
             value => GraphSetValue::Literal(scalar(value.clone(), *at)?),
         },
         ReadValueTemplate::Integer { program, at } => GraphSetValue::Integer(

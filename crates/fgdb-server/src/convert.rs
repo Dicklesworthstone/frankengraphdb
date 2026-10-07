@@ -8,7 +8,9 @@
 
 use fgdb::QueryValue;
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{GqlListParameter, GqlParameterValue, GqlParameters, GqlScalarParameter};
+use fgdb_gql::{
+    GqlListParameter, GqlMapParameter, GqlParameterValue, GqlParameters, GqlScalarParameter,
+};
 use fgdb_protocol::body::{WireTimestamp, WireValue, WireZone};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalTimestamp, ObjectId, TzdbResolver};
 
@@ -109,7 +111,16 @@ pub(crate) fn parameters(
                         .map_err(|_| refuse("list exceeds the parameter bounds"))?,
                 )
             }
-            WireValue::Map(_) => return Err(refuse("a map binds only inside a list")),
+            WireValue::Map(entries) => {
+                let entries = entries
+                    .iter()
+                    .map(|(key, value)| Ok((key.as_str().into(), element(value, tzdb)?)))
+                    .collect::<Result<Vec<_>, &'static str>>()
+                    .map_err(refuse)?;
+                GqlParameterValue::Map(GqlMapParameter::new(entries).map_err(|_| {
+                    refuse("map has duplicate keys or exceeds the parameter bounds")
+                })?)
+            }
             scalar => GqlParameterValue::Scalar(
                 GqlScalarParameter::new(argument_scalar(scalar, tzdb).map_err(refuse)?)
                     .map_err(|_| refuse("scalar exceeds the parameter bounds"))?,
@@ -224,8 +235,6 @@ mod tests {
     fn arguments_without_a_parameter_type_are_refused_by_name() {
         let error = parameters(&[("who".into(), WireValue::Vertex(1))], None).unwrap_err();
         assert_eq!(error.parameter, "who");
-        let error = parameters(&[("m".into(), WireValue::Map(vec![]))], None).unwrap_err();
-        assert_eq!(error.parameter, "m");
         let error = parameters(&[("f".into(), WireValue::Float(f64::NAN))], None).unwrap_err();
         assert_eq!(error.parameter, "f");
         let rows = WireValue::List(vec![WireValue::Map(vec![(
@@ -239,5 +248,57 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn top_level_maps_preserve_nested_values_and_canonical_key_order() {
+        let input = vec![
+            (
+                "z".into(),
+                WireValue::List(vec![WireValue::Bool(true), WireValue::Null]),
+            ),
+            (
+                "a".into(),
+                WireValue::Map(vec![("name".into(), WireValue::Text("Ann".into()))]),
+            ),
+        ];
+        let parameters = parameters(&[("payload".into(), WireValue::Map(input))], None).unwrap();
+        let Some(GqlParameterValue::Map(map)) = parameters.get("payload") else {
+            panic!("a wire map binds as a map parameter");
+        };
+        assert_eq!(
+            graph(map.value()),
+            WireValue::Map(vec![
+                (
+                    "a".into(),
+                    WireValue::Map(vec![("name".into(), WireValue::Text("Ann".into()))])
+                ),
+                (
+                    "z".into(),
+                    WireValue::List(vec![WireValue::Bool(true), WireValue::Null])
+                ),
+            ])
+        );
+        assert_eq!(
+            parameters.canonical_bytes().len(),
+            parameters.canonical_byte_len()
+        );
+    }
+
+    #[test]
+    fn map_argument_refusals_never_coerce_identities_or_expose_nested_values() {
+        for fields in [
+            vec![("private".into(), WireValue::Vertex(9))],
+            vec![("private".into(), WireValue::Float(f64::NAN))],
+            vec![
+                ("private".into(), WireValue::Null),
+                ("private".into(), WireValue::Null),
+            ],
+        ] {
+            let error =
+                parameters(&[("payload".into(), WireValue::Map(fields))], None).unwrap_err();
+            assert_eq!(error.parameter, "payload");
+            assert!(!format!("{error}").contains("private"));
+        }
     }
 }

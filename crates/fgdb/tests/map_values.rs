@@ -65,6 +65,151 @@ fn map(entries: &[(&str, GraphValue)]) -> GraphValue {
     .unwrap()
 }
 
+fn map_parameters(entries: &[(&str, GraphValue)]) -> GqlParameters {
+    GqlParameters::new()
+        .with_map(
+            "payload",
+            entries
+                .iter()
+                .map(|(key, value)| ((*key).into(), value.clone()))
+                .collect(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn top_level_map_parameters_compose_with_graph_rows_unwind_and_grouped_outputs() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let fields = [
+            ("title", text("a quote ' and $syntax are data")),
+            ("nested", map(&[("answer", int(42))])),
+            (
+                "rows",
+                list([map(&[("value", int(7))]), map(&[("value", int(9))])]),
+            ),
+        ];
+        let params = map_parameters(&fields);
+        for (statement, expected) in [
+            ("RETURN $payload AS value", vec![vec![map(&fields)]]),
+            (
+                "RETURN $payload.nested.answer AS value, $payload.missing AS absent",
+                vec![vec![int(42), null()]],
+            ),
+            (
+                "WITH $payload AS m RETURN m.title AS title, keys(m) AS keys",
+                vec![vec![
+                    text("a quote ' and $syntax are data"),
+                    list([text("nested"), text("rows"), text("title")]),
+                ]],
+            ),
+            (
+                "UNWIND $payload.rows AS row RETURN row.value AS value",
+                vec![vec![int(7)], vec![int(9)]],
+            ),
+            (
+                "MATCH (n:Person) RETURN n.name AS name, $payload.nested.answer AS answer ORDER BY name",
+                vec![
+                    vec![text("a"), int(42)],
+                    vec![text("b"), int(42)],
+                    vec![text("c"), int(42)],
+                ],
+            ),
+            (
+                "MATCH (n:Person) WITH count(*) AS n RETURN $payload.nested.answer AS answer",
+                vec![vec![int(42)]],
+            ),
+        ] {
+            assert_eq!(
+                cells(
+                    db.query(cx, statement, &params, symbols, policy())
+                        .expect(statement)
+                ),
+                expected,
+                "{statement}"
+            );
+        }
+        // Map admission grants no scalar property coercion or numeric role.
+        for statement in [
+            "MATCH (n:Person) WHERE n.p = $payload RETURN n",
+            "RETURN $payload + 1 AS n",
+            "RETURN 1 AS n LIMIT $payload",
+        ] {
+            assert!(
+                db.query(cx, statement, &params, symbols, policy()).is_err(),
+                "{statement}"
+            );
+        }
+    });
+}
+
+#[test]
+fn map_parameter_certificate_replays_canonical_order_and_rejects_value_changes() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let args = map_parameters(&[("z", int(5)), ("a", int(2))]);
+        let query = "MATCH (n:Person) RETURN n.name AS name, $payload AS payload ORDER BY name";
+        let (result, certificate) = db
+            .execute_certified(cx, query, &args, symbols, policy())
+            .unwrap();
+        let expected = cells(result);
+        let reordered = map_parameters(&[("a", int(2)), ("z", int(5))]);
+        assert_eq!(args.canonical_bytes(), reordered.canonical_bytes());
+        let mut extra = WriteBatch::new(R);
+        extra.create_vertex(
+            VId(4),
+            vec![PERSON],
+            vec![(NAME, CanonicalScalar::ucs_basic_text("later").unwrap())],
+        );
+        db.write(commit, extra).await.unwrap();
+        assert_eq!(
+            cells(
+                db.replay(cx, &certificate, &reordered, symbols, policy())
+                    .unwrap()
+            ),
+            expected
+        );
+        let changed = map_parameters(&[("a", int(3)), ("z", int(5))]);
+        assert!(matches!(
+            db.replay(cx, &certificate, &changed, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ParameterValuesMismatch)
+        ));
+    });
+}
+
+#[test]
+fn map_parameters_drive_atomic_create_and_return_from_nested_bulk_input() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let arguments = map_parameters(&[
+            ("tag", text("batch")),
+            ("rows", list([map(&[("name", text("a")), ("p", int(1))]), map(&[("name", text("b"))])])),
+        ]);
+        let statement = "UNWIND $payload.rows AS row CREATE (n:Person {name: row.name, p: row.p, first: $payload.tag}) RETURN n.name AS name, n.p AS p, $payload.tag AS tag ORDER BY name";
+        let write_policy = GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000);
+        let result = db.query_write_engine(&txn, &cx, &commit, statement, &arguments, symbols, R, write_policy).await.unwrap();
+        assert_eq!(cells(result), vec![vec![text("a"), int(1), text("batch")], vec![text("b"), null(), text("batch")]]);
+        let before = db.frontier().unwrap();
+        let invalid = map_parameters(&[
+            ("tag", text("refused")),
+            ("rows", list([map(&[("name", text("must not commit"))]), map(&[("name", map(&[("nested", int(1))]))])])),
+        ]);
+        assert!(db.query_write_engine(&txn, &cx, &commit, statement, &invalid, symbols, R,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.is_err());
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(cells(db.query(&cx, "MATCH (n:Person) RETURN n.name AS name ORDER BY name", &GqlParameters::new(), symbols, policy()).unwrap()), vec![vec![text("a")], vec![text("b")]]);
+        // The no-RETURN facade must propagate Map declarations as well.
+        db.query_write_engine(&txn, &cx, &commit, "CREATE (:Person {name:$payload.tag})", &arguments, symbols, R,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.unwrap();
+    });
+}
+
 /// Person vertices 1..=3: p = 10, 20, 30 and name = "a", "b", "c".
 fn graph() -> WriteBatch {
     let mut batch = WriteBatch::new(R);

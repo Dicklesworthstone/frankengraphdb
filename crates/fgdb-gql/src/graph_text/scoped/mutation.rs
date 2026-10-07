@@ -74,9 +74,9 @@ fn scalar(
             at,
             GraphPatternTextErrorKind::Expected("signed or canonical scalar assignment"),
         )),
-        GqlParameterValue::List(_) => Err(error(
+        GqlParameterValue::List(_) | GqlParameterValue::Map(_) => Err(error(
             at,
-            GraphPatternTextErrorKind::Expected("scalar assignment, not a list parameter"),
+            GraphPatternTextErrorKind::Expected("scalar assignment, not a collection parameter"),
         )),
     }
 }

@@ -3008,7 +3008,7 @@ fn json_list_parameters_drive_unwind_creation_and_keep_every_value_type() {
             [{"type":"map","value":{"k":{"type":"map","value":{"n":{"type":"bool","value":false}}}}}]]"#,
     );
     for bad in [
-        r#"xs=json:{"a":1}"#,
+        "xs=json:1",
         "xs=json:[1,",
         "xs=json:[1e999]",
         "xs=json:[99999999999999999999]",
@@ -3017,6 +3017,55 @@ fn json_list_parameters_drive_unwind_creation_and_keep_every_value_type() {
         db.command("query", &["--param", bad, "UNWIND $xs AS x RETURN x"])
             .failure(2, "usage");
     }
+}
+
+#[test]
+fn json_object_parameters_drive_nested_reads_and_create_returning() {
+    let db = TestDb::new("json-map-parameters");
+    db.create();
+    let payload =
+        r#"payload=json:{"rows":[{"name":"Ann","born":1},{"name":"Bob"}],"meta":{"z":2,"a":1}}"#;
+    assert_rows(
+        &db.command("query", &["--param", payload,
+            "RETURN $payload.rows[0].name AS name, $payload.meta AS meta, $payload.missing AS missing"]),
+        r#"[[{"type":"text","value":"Ann"},{"type":"map","value":{"a":{"type":"int","value":"1"},"z":{"type":"int","value":"2"}}},{"type":"null"}]]"#,
+    );
+    assert_rows(
+        &db.command("write", &["--param", payload,
+            "UNWIND $payload.rows AS row CREATE (n:Person {name:row.name,born:row.born}) RETURN n.name AS name, n.born AS born ORDER BY name"]),
+        r#"[[{"type":"text","value":"Ann"},{"type":"int","value":"1"}],[{"type":"text","value":"Bob"},{"type":"null"}]]"#,
+    );
+    for bad in [
+        r#"payload=json:{"a":1,"a":2}"#,
+        r#"payload=json:{"a":{"x":1,"x":2}}"#,
+        r#"payload=json:{"x":1e999}"#,
+        "payload=json:{",
+    ] {
+        db.command("query", &["--param", bad, "RETURN $payload AS value"])
+            .failure(2, "usage");
+    }
+}
+
+#[test]
+fn json_rows_bind_nullable_maps_as_native_create_arguments() {
+    let db = TestDb::new("json-map-rows");
+    db.create();
+    db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"payload":{"name":"Ann","born":1}},{"payload":null},{}]"#,
+            "CREATE (:Person {name:$payload.name,born:$payload.born})",
+        ],
+    )
+    .success();
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (n:Person) RETURN n.name AS name, n.born AS born ORDER BY name NULLS LAST"],
+        ),
+        r#"[[{"type":"text","value":"Ann"},{"type":"int","value":"1"}],[{"type":"null"},{"type":"null"}],[{"type":"null"},{"type":"null"}]]"#,
+    );
 }
 
 /// `write --rows json:[{...},...]` binds the statement's parameters once per
@@ -3080,12 +3129,22 @@ fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
         r#"json:{"team":1}"#,
         r#"json:[{"team":1,"extra":2}]"#,
         r#"json:[{"team":1},{"team":"x"}]"#,
-        r#"json:[{"team":{"a":1}}]"#,
         r#"[{"team":1}]"#,
     ] {
         db.command("write", &["--rows", rows, "MERGE (p:Person {team: $team})"])
             .failure(2, "usage");
     }
+    // Objects now bind as maps. A map in a scalar identity predicate is
+    // rejected by native parameter typing, after valid JSON admission.
+    db.command(
+        "write",
+        &[
+            "--rows",
+            r#"json:[{"team":{"a":1}}]"#,
+            "MERGE (p:Person {team:$team})",
+        ],
+    )
+    .failure(3, "query");
     db.command(
         "write",
         &[
