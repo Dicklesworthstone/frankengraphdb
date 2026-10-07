@@ -6,6 +6,11 @@
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
 pub mod aggregate;
+mod asynchronous;
+pub use asynchronous::{
+    AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanOutput,
+    AsyncEdgeScanPlan, AsyncEdgeScanRecord, AsyncEdgeScanSource,
+};
 mod join;
 pub(crate) use join::Probe;
 mod record;
@@ -93,7 +98,7 @@ impl EdgeScanPlan {
             };
             match op {
                 GlaOperator::Select { slot, .. } if slot.ordinal() < 2 => {}
-                GlaOperator::VertexIdentity { left, right, .. }
+                GlaOperator::VertexIdentity { left, right, equal: _ }
                     if left.ordinal() < 2 && right.ordinal() < 2 => {}
                 GlaOperator::CapturePath {
                     capture,
@@ -373,6 +378,8 @@ pub enum EdgeScanError<E> {
     Source(E),
     Plan(EdgeScanBuildError),
     NonIncreasingIdentity,
+    /// Candidate admission was omitted, repeated, or did not name the result.
+    InvalidCandidateAdmission,
     /// An admitted visible edge has no visible endpoint; never a null binding.
     DanglingEndpoint,
     CounterExhausted,
@@ -386,6 +393,9 @@ impl<E: core::fmt::Display> core::fmt::Display for EdgeScanError<E> {
             Self::Plan(error) => error.fmt(f),
             Self::NonIncreasingIdentity => {
                 f.write_str("edge stream source is not strictly increasing")
+            }
+            Self::InvalidCandidateAdmission => {
+                f.write_str("edge stream candidate does not match its admission")
             }
             Self::DanglingEndpoint => f.write_str("edge stream source has a dangling endpoint"),
             Self::CounterExhausted => f.write_str("edge stream counter exhausted"),
