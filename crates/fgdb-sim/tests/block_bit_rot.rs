@@ -849,10 +849,15 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                 );
                 drop(store);
 
-                // A reopened handle retains decoded rows but no publication
-                // receipts. Its resumed put must detect the dirty prefix even
-                // when the mutation's first dirty sync lied. Later commit syncs
-                // are honest, so the failed publication has a durable suffix.
+                // A reopened handle holds receipts seeded from the root it
+                // opened (fgdb-ibbuq, owner ruling "trust publication"), as
+                // the handle that published the prefix does, so its resumed
+                // put does not re-verify an object that root names. Damage
+                // made after the open stays cache-only and undetected by the
+                // commit, as in the retained case above; the open that reads
+                // the object cold is where it is caught. Here the mutation's
+                // first dirty sync lied, so the crash rolls the block back to
+                // its pristine bytes and the reopen serves the completed load.
                 let case = Case {
                     seed,
                     family,
@@ -884,54 +889,32 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                 bulk_answers(&db, &checkpoint, false);
                 let mut resume = BulkLoadPolicy::new(4, R);
                 resume.resume = Some(checkpoint);
-                let error = db
+                let finished = db
                     .bulk_load(&query, &commit, bulk_rows(), resume)
                     .await
-                    .unwrap_err();
-                match &error.kind {
-                    BulkLoadErrorKind::Write(fgdb::WriteTxnError::Write(
-                        fgdb::WriteError::CommittedNeedsRecovery { source, .. },
-                    )) => match source.as_ref() {
-                        RebuildError::Store(StoreError::DamagedExisting { expected, actual }) => {
-                            assert_eq!(*expected, target.id);
-                            assert_ne!(*actual, target.id);
-                        }
-                        other => panic!(
-                            "expected immutable-put damage naming {:?}, got {other:?}",
-                            target.id
-                        ),
-                    },
-                    other => {
-                        panic!("expected committed derived-publication refusal, got {other:?}")
-                    }
-                }
-                assert_eq!(error.committed.next_row, 4);
-                let pending = error
-                    .pending
-                    .as_ref()
-                    .expect("durable attempted successor checkpoint");
-                assert_eq!(pending.next_row, 5);
-                assert_eq!(pending.frontier, CommitSeq(2));
+                    .unwrap();
+                assert_eq!(finished.next_row, 5);
+                assert_eq!(finished.committed_chunks, 2);
+                assert_eq!(finished.frontier, CommitSeq(2));
+                bulk_answers(&db, &finished, true);
                 assert_eq!(visible_bytes(&vfs, &target.path).await, damaged);
-                assert_eq!(vfs.read(&target.path).await.unwrap(), target.bytes);
                 case.record(
-                    "bulk-resume-retained-reopened-handle",
-                    "typed-put-refusal-committed-needs-recovery",
-                    &error,
+                    "bulk-resume-reopened-handle",
+                    "cache-only/not-detected",
+                    &finished,
                 );
-                assert!(matches!(db.edges(), Err(ReadError::RecoveryRequired(_))));
                 drop(db);
                 vfs.crash().await.unwrap();
                 assert_eq!(visible_bytes(&vfs, &target.path).await, target.bytes);
                 let db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                     .await
                     .unwrap();
-                bulk_answers(&db, pending, true);
+                bulk_answers(&db, &finished, true);
                 assert_eq!(db.frontier().unwrap(), CommitSeq(2));
                 case.record(
-                    "bulk-resume-retained-reopened-after-crash",
-                    "pristine-rollback-plus-durable-suffix-not-healing",
-                    pending,
+                    "bulk-resume-reopened-after-crash",
+                    "pristine-rollback",
+                    &finished,
                 );
                 drop(db);
                 drop(store);

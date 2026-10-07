@@ -1617,10 +1617,15 @@ fn first_commit_batch() -> WriteBatch {
     batch
 }
 
-/// Recreate `from`'s tree at `to` through `vfs` without a single sync: the
-/// copy `cp -r` leaves in the page cache. Not `Vfs::write`, which syncs.
-async fn copy_without_sync(vfs: &FaultVfs, from: &Path, to: &Path) {
+/// Recreate `from`'s tree at `to` through `vfs`, leaving every block-store
+/// object unsynced: the copy a crash catches with the strata objects still in
+/// the page cache. Those are exactly the objects a seeded receipt trusts.
+/// Every other file is synced (`Vfs::write` syncs), because the lab VFS reports
+/// an unsynced file's length from disk and Chronicle's recovery would refuse
+/// the copy before it could commit.
+async fn copy_leaving_strata_unsynced(vfs: &FaultVfs, from: &Path, to: &Path) {
     let create = OpenOptions::new().write(true).create(true).truncate(true);
+    let strata = from.join(fgdb_strata::store::BLOCK_DIR);
     let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
     while let Some((source, target)) = pending.pop() {
         vfs.create_dir(&target).await.expect("copy a directory");
@@ -1630,6 +1635,11 @@ async fn copy_without_sync(vfs: &FaultVfs, from: &Path, to: &Path) {
             let destination = target.join(entry.file_name());
             if kind.is_dir() {
                 pending.push((entry.path(), destination));
+            } else if kind.is_file() && !entry.path().starts_with(&strata) {
+                let bytes = std::fs::read(entry.path()).expect("read a source file");
+                vfs.write(&destination, &bytes)
+                    .await
+                    .expect("copy and sync a file");
             } else if kind.is_file() {
                 let bytes = std::fs::read(entry.path()).expect("read a source file");
                 let mut file = vfs
@@ -1694,8 +1704,10 @@ async fn assert_first_commit_survived(cx: &CommitCx, dir: &Path, seq: CommitSeq)
 /// - an fsync lie on that commit's first new strata inode is caught before
 ///   any root names the object, and a reopen recovers the committed write
 ///   from Chronicle;
-/// - a copy made without a sync does not survive the same sequence. This is
-///   the control: the model can see the copy hazard;
+/// - a copy whose block-store objects never reached disk loses them at a
+///   crash after its first commit: its new root names objects the crash
+///   took, so it no longer opens. This is the control, and it also catches
+///   empty receipts, under which the first commit re-syncs those objects;
 /// - the same copy, adopted before its first open, survives.
 #[test]
 fn a_fresh_processs_first_commit_trusts_publication_and_a_copy_is_adopted_first() {
@@ -1710,9 +1722,9 @@ fn a_fresh_processs_first_commit_trusts_publication_and_a_copy_is_adopted_first(
         write_history(cx, &lied).await;
 
         let raw_vfs = FaultVfs::unix(FaultPlan::faultless());
-        copy_without_sync(&raw_vfs, &source, &raw_copy).await;
+        copy_leaving_strata_unsynced(&raw_vfs, &source, &raw_copy).await;
         let adopted_vfs = FaultVfs::unix(FaultPlan::faultless());
-        copy_without_sync(&adopted_vfs, &source, &adopted_copy).await;
+        copy_leaving_strata_unsynced(&adopted_vfs, &source, &adopted_copy).await;
 
         let vfs = FaultVfs::unix(FaultPlan::faultless());
         assert_eq!(first_commit_then_crash(cx, &vfs, &source).await, next);
@@ -1748,9 +1760,14 @@ fn a_fresh_processs_first_commit_trusts_publication_and_a_copy_is_adopted_first(
 
         let seq = first_commit_then_crash(cx, &raw_vfs, &raw_copy).await;
         assert_eq!(seq, next);
+        let refusal = Database::open(cx, &raw_copy, engine_keys()).await;
         assert!(
-            Database::open(cx, &raw_copy, engine_keys()).await.is_err(),
-            "an unadopted copy loses what it never synced"
+            matches!(
+                refusal,
+                Err(OpenError::Rebuild(RebuildError::Store(_)) | OpenError::Store(_))
+            ),
+            "an unadopted copy loses the strata objects it never synced: {:?}",
+            refusal.as_ref().err()
         );
 
         let adopted = Database::adopt_with_vfs(cx, adopted_vfs.clone(), &adopted_copy)
