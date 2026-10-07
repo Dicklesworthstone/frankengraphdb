@@ -409,7 +409,7 @@ impl Server {
                 cx,
                 &listener,
                 tls::Protocol::Fgp,
-                |server, child, stream| {
+                |server, child, stream, _local| {
                     Box::pin(async move {
                         connection::run(&child, &server, stream).await;
                     })
@@ -439,9 +439,9 @@ impl Server {
                 cx,
                 &listener,
                 tls::Protocol::Bolt,
-                |server, child, stream| {
+                |server, child, stream, local| {
                     Box::pin(async move {
-                        bolt::run(&child, &server, stream).await;
+                        bolt::run(&child, &server, stream, local).await;
                     })
                 },
             )
@@ -474,7 +474,7 @@ impl Server {
                 cx,
                 &listener,
                 tls::Protocol::Http,
-                move |server, child, stream| {
+                move |server, child, stream, _local| {
                     let config = config.clone();
                     let signal = signal.clone();
                     Box::pin(async move {
@@ -523,7 +523,15 @@ impl Server {
         connect: F,
     ) -> Result<Vec<TaskHandle<()>>, ServerError>
     where
-        F: Fn(Arc<Self>, Cx, Box<dyn DuplexIo>) -> ConnectionFuture<()> + Send + Sync + 'static,
+        F: Fn(
+                Arc<Self>,
+                Cx,
+                Box<dyn DuplexIo>,
+                Option<std::net::SocketAddr>,
+            ) -> ConnectionFuture<()>
+            + Send
+            + Sync
+            + 'static,
     {
         let waiter = self.shutdown.waiter();
         let connect = Arc::new(connect);
@@ -547,6 +555,9 @@ impl Server {
                 drop(stream);
                 continue;
             }
+            // The concrete local address this peer reached, read before TLS
+            // boxes the socket (Bolt routing advertises it).
+            let local = stream.local_addr().ok();
             let server = Arc::clone(self);
             let connect = Arc::clone(&connect);
             let handle = cx
@@ -558,7 +569,7 @@ impl Server {
                     else {
                         return;
                     };
-                    connect(server, child, stream).await;
+                    connect(server, child, stream, local).await;
                 })
                 .map_err(|_| ServerError::Spawn)?;
             connections.push(handle);

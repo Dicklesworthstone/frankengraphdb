@@ -67,6 +67,9 @@ struct Closed;
 /// Buffered socket I/O. Reads stop at the drain signal while idle.
 struct Io {
     stream: Box<dyn DuplexIo>,
+    /// The local address the peer reached, read from the socket before TLS
+    /// wrapped it (a boxed duplex stream no longer knows it).
+    local: Option<std::net::SocketAddr>,
     dechunker: Dechunker,
     out: Vec<u8>,
     /// A failed/cancelled partial flush cannot be restarted or followed by a
@@ -284,10 +287,16 @@ struct Transaction<'s> {
 }
 
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
-pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
+pub(crate) async fn run(
+    cx: &Cx,
+    server: &Server,
+    stream: Box<dyn DuplexIo>,
+    local: Option<std::net::SocketAddr>,
+) {
     let waiter = server.shutdown.waiter();
     let mut io = Io {
         stream,
+        local,
         dechunker: Dechunker::new(server.limits.max_frame_len as usize),
         out: Vec::new(),
         failed: false,
@@ -711,7 +720,7 @@ impl<'s> Connection<'s> {
         let address = get(routing, "address")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| io.stream.local_addr().ok().map(|addr| addr.to_string()))
+            .or_else(|| io.local.map(|addr| addr.to_string()))
             .ok_or_else(|| Failure::invalid("no routing address"))?;
         let server = |role: &str| {
             Value::Map(vec![
