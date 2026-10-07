@@ -603,14 +603,18 @@ impl PreparedNativeRead {
         max_input_rows: u64,
         max_work_units: u64,
         resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
-    ) -> impl Future<Output = Result<(NativeAggregateSpool, u64)>> + 'q + use<'q, A, B, C>
+    ) -> crate::SendFuture<'q, Result<(NativeAggregateSpool, u64)>>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = open(self, view, cx, params, policy);
-        async move {
+        // Type-erased like the commit chokepoints (fgdb-a5y6m): a caller's
+        // `Send` proof stops at `dyn Future + Send` instead of descending the
+        // whole partition/reduce/sort chain. Without it, fgdb-cli's spill lab
+        // test overflowed proving its future `Send` under clippy.
+        Box::pin(async move {
             execute(
                 opened?,
                 cx,
@@ -628,7 +632,7 @@ impl PreparedNativeRead {
                 resolver,
             )
             .await
-        }
+        })
     }
 }
 
