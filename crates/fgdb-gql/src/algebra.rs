@@ -27,7 +27,7 @@ pub use pattern::{
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue,
-    GraphValueRow, ValueProjection,
+    GraphValueDecodeError, GraphValueRow, ValueProjection,
 };
 pub(crate) use values::{RowKey, ValueRef};
 
