@@ -485,14 +485,17 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 // One record per damaged object; `reason` exactly when lost.
                 let object = event.get("object").string();
                 assert!(object.len() == 64 && object.bytes().all(|b| b.is_ascii_hexdigit()));
-                assert!(matches!(event.get("kind").string(), "capsule" | "block"));
+                assert!(matches!(
+                    event.get("kind").string(),
+                    "capsule" | "block" | "metadata"
+                ));
                 match event.get("state").string() {
                     "repaired" => {
                         exact_fields(event, &["v", "event", "object", "kind", "state"]);
                         assert_eq!(
                             event.get("kind").string(),
                             "capsule",
-                            "blocks are never repaired"
+                            "only capsules have repairable redundancy"
                         );
                         repaired += 1;
                     }
@@ -568,11 +571,13 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                                 "objects",
                                 "repaired",
                                 "block_objects",
+                                "metadata_objects",
                             ],
                         );
                         event.get("seq").unsigned();
                         event.get("objects").unsigned();
                         event.get("block_objects").unsigned();
+                        event.get("metadata_objects").unsigned();
                         assert_eq!(event.get("repaired").unsigned(), repaired);
                     }
                     "help" => {
@@ -2180,7 +2185,7 @@ fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
     };
     let before = answer(&db);
 
-    // A healthy store: every capsule verified, the edge's block audited.
+    // A healthy store: capsules, graph data and generation metadata are audited.
     let clean = db.command("scrub", &[]);
     clean.success();
     assert_eq!(clean.terminal().get("kind").string(), "scrubbed");
@@ -2190,6 +2195,7 @@ fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
         capsule_files(&db).len() as u64
     );
     assert!(clean.terminal().get("block_objects").unsigned() >= 1);
+    assert!(clean.terminal().get("metadata_objects").unsigned() >= 2);
 
     // One flipped byte: repaired in place, restoring the exact bytes.
     let files = capsule_files(&db);

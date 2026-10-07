@@ -1241,6 +1241,76 @@ impl<V: Vfs> BlockStore<V> {
         Ok(bytes)
     }
 
+    /// Read one immutable publication-metadata object independently of its
+    /// children. The family supplies both the allocation ceiling and the
+    /// identity transcript; no filename or decoded child can choose either.
+    async fn read_metadata_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        kind: StoredObjectKind,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id, limit).await?;
+        let actual = kind.identity(self.k_oid.expose(), self.namespace, &bytes);
+        if actual != id {
+            return Err(StoreError::IdentityMismatch {
+                expected: id,
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Re-read an admitted manifest without following its root references.
+    /// This is an identity check, not a new root admission. Scrub uses its
+    /// retained inventory so a damaged parent cannot conceal damaged children.
+    pub async fn get_manifest_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::manifest::ManifestVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id.0,
+            StoredObjectKind::Manifest,
+            MANIFEST_HEADER_AND_RECORDS_CEILING,
+        )
+        .await
+    }
+
+    /// Re-read an admitted V3 or V4 partition-root frame without loading its
+    /// segments. The exact root identity is checked under the root byte cap.
+    pub async fn get_root_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: PartitionRootVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id.0,
+            StoredObjectKind::Root,
+            crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+        )
+        .await
+    }
+
+    /// Re-read one admitted V4 root segment under its own identity transcript
+    /// and fixed format ceiling, without following its block/patch references.
+    pub async fn get_root_segment_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id,
+            StoredObjectKind::Segment,
+            crate::root_segment::SEGMENT_BYTES as u64,
+        )
+        .await
+    }
+
     /// [`BlockStore::get_bytes`] for a root walk, with its CPU-heavy proof
     /// moved off the async task: once the bytes are read, the identity check
     /// and the block's one decode run on the runtime's blocking pool, so a
@@ -2614,6 +2684,26 @@ impl PublishReceipts {
         Self::default()
     }
 
+    /// Enumerate root segments only when this memo covers the caller's exact
+    /// admitted partition membership. An absent or prefix-only memo refuses;
+    /// neither can silently certify an incomplete scrub inventory. This lends
+    /// identities for re-verification and mints no new durability receipts.
+    pub fn root_segment_ids(
+        &self,
+        partition: u64,
+        blocks: &[crate::root::BlockRef],
+        patches: &[crate::root::PatchRef],
+    ) -> Option<impl Iterator<Item = ObjectId> + '_> {
+        self.root_memo
+            .as_ref()
+            .filter(|memo| {
+                memo.partition == partition
+                    && memo.blocks.as_slice() == blocks
+                    && memo.patches.as_slice() == patches
+            })
+            .map(|memo| memo.segments.object_ids())
+    }
+
     /// Receipts for every object a published root names, built from that
     /// root's full admission (fgdb-ibbuq; owner ruling 2026-10-06, "trust
     /// publication").
@@ -3075,6 +3165,129 @@ mod durability_tests {
                 }) if observed == MAX_STORED_OBJECT_BYTES + 1
             ));
         });
+    }
+
+    #[test]
+    fn metadata_reads_refuse_each_family_ceiling_before_materializing_sparse_bytes() {
+        let dir = scratch_dir("oversized-metadata-inodes");
+        under_lab(0x5c12, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            for (kind, limit) in [
+                (0, super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+                (1, crate::root::MAX_ENCODED_ROOT_BYTES as u64),
+                (2, crate::root_segment::SEGMENT_BYTES as u64),
+            ] {
+                let id = ObjectId([0x60 + kind; 32]);
+                let file = File::create(store.path(id)).expect("private sparse fixture");
+                file.set_len(limit + 1).expect("one byte past format cap");
+                let result = match kind {
+                    0 => {
+                        store
+                            .get_manifest_bytes(&cx, crate::manifest::ManifestVersion(id))
+                            .await
+                    }
+                    1 => {
+                        store
+                            .get_root_bytes(&cx, crate::PartitionRootVersion(id))
+                            .await
+                    }
+                    _ => store.get_root_segment_bytes(&cx, id).await,
+                };
+                assert!(
+                    matches!(result, Err(StoreError::ObjectTooLarge {
+                        limit: found_limit, observed
+                    }) if found_limit == limit && observed == limit + 1),
+                    "metadata family {kind}: bound must precede identity/decode"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn scrub_segment_inventory_requires_the_exact_admitted_membership() {
+        use crate::root::{BlockRef, PartitionRoot, PatchRef, SegmentCache, encode_root_v4};
+        use crate::root_segment::SEGMENT_REFS;
+        use fgdb_types::{BranchId, CommitSeq, GraphId};
+
+        let id = |kind, at: usize| {
+            let mut bytes = [kind; 32];
+            bytes[..8].copy_from_slice(&(at as u64).to_be_bytes());
+            ObjectId(bytes)
+        };
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 7,
+            published_at: CommitSeq(1),
+            blocks: (0..SEGMENT_REFS)
+                .map(|at| BlockRef {
+                    block_id: id(1, at),
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                })
+                .collect(),
+            vertex_patches: (0..SEGMENT_REFS)
+                .map(|at| PatchRef {
+                    patch_id: id(2, at),
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                })
+                .collect(),
+        };
+        let mut segments = SegmentCache::default();
+        let encoded = encode_root_v4(&root, &K_OID, NAMESPACE, &mut segments).unwrap();
+        assert_eq!(
+            encoded.new_segments.len(),
+            2,
+            "both reference families are segmented"
+        );
+        let receipts = super::PublishReceipts {
+            root_memo: Some(super::RootMemo {
+                partition: root.partition,
+                blocks: root.blocks.clone(),
+                patches: root.vertex_patches.clone(),
+                segments,
+                ..super::RootMemo::default()
+            }),
+            ..super::PublishReceipts::default()
+        };
+        assert_eq!(
+            receipts
+                .root_segment_ids(7, &root.blocks, &root.vertex_patches)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            encoded
+                .new_segments
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        );
+        for (partition, blocks, patches) in [
+            (8, root.blocks.as_slice(), root.vertex_patches.as_slice()),
+            (
+                7,
+                &root.blocks[..SEGMENT_REFS - 1],
+                root.vertex_patches.as_slice(),
+            ),
+            (
+                7,
+                root.blocks.as_slice(),
+                &root.vertex_patches[..SEGMENT_REFS - 1],
+            ),
+        ] {
+            assert!(
+                receipts
+                    .root_segment_ids(partition, blocks, patches)
+                    .is_none()
+            );
+        }
+        assert!(
+            super::PublishReceipts::default()
+                .root_segment_ids(7, &root.blocks, &root.vertex_patches)
+                .is_none()
+        );
     }
 
     /// fgdb-a7sz, pinned where the seam lives: a lawful root larger than the

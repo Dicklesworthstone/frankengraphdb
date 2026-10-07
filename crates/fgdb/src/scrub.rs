@@ -1,7 +1,8 @@
-//! Maintenance of published capsules and admitted Strata block objects.
+//! Maintenance of published capsules and the admitted Strata generation.
 
 use asupersync::fs::Vfs;
 use fgdb_chronicle::CommitError;
+use fgdb_strata::vertex::VertexPatchVersion;
 use fgdb_strata::{DeltaBlockVersion, store::StoreError};
 use fgdb_types::{CommitCx, ObjectId};
 use std::collections::BTreeMap;
@@ -10,8 +11,9 @@ use crate::Database;
 use fgdb_chronicle::scrub::LostReason;
 pub use fgdb_chronicle::scrub::{LostCapsule, ScrubCrashPoint};
 
-/// Capsule repair results and a separate audit of published FGSB/FGSP objects.
-/// Blocks have no local redundancy: a lost block is reported, never repaired.
+/// Capsule repair results and separate audits of the current generation's data
+/// (FGSB/FGSP/FGVP) and metadata (manifest, root, root segments). Strata objects
+/// have no local redundancy: a lost object is reported, never repaired.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScrubSummary {
     pub objects: usize,
@@ -21,14 +23,63 @@ pub struct ScrubSummary {
     pub block_objects: usize,
     pub block_clean: Vec<ObjectId>,
     pub block_lost: Vec<LostCapsule>,
+    pub metadata_objects: usize,
+    pub metadata_clean: Vec<ObjectId>,
+    pub metadata_lost: Vec<LostCapsule>,
+}
+
+#[derive(Clone, Copy)]
+enum DataKind {
+    Block,
+    EdgeProperties,
+    VertexPatch,
+}
+
+#[derive(Clone, Copy)]
+enum MetadataKind {
+    Manifest,
+    Root,
+    Segment,
+}
+
+fn record_verification(
+    object_id: ObjectId,
+    result: Result<Vec<u8>, StoreError>,
+    clean: &mut Vec<ObjectId>,
+    lost: &mut Vec<LostCapsule>,
+) -> Result<(), CommitError> {
+    match result {
+        Ok(_) => clean.push(object_id),
+        Err(StoreError::IdentityMismatch { .. }) => lost.push(LostCapsule {
+            object_id,
+            reason: LostReason::IdentityMismatch,
+        }),
+        Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(CommitError::Io(error));
+        }
+        Err(_) => lost.push(LostCapsule {
+            object_id,
+            reason: LostReason::Unusable,
+        }),
+    }
+    Ok(())
+}
+
+fn checkpoint(cx: &CommitCx) -> Result<(), CommitError> {
+    cx.checkpoint().map_err(|error| {
+        CommitError::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
+    })
 }
 
 impl<V: Vfs + Clone> Database<V> {
     /// Verify every capsule named by the published history and restore damaged
     /// redundancy without changing object, ciphertext, or encoding identity.
     /// Lost objects are reported individually and are never overwritten.
-    /// Also re-read every published FGSB and hosted FGSP object. Their identities
-    /// come from the admitted snapshot, so damage to a parent cannot hide a child.
+    /// Also re-read the admitted generation's manifest, partition root, V4
+    /// segments, FGSB blocks, hosted FGSP properties and FGVP vertex patches.
+    /// The complete inventory comes from admission metadata retained before
+    /// this sweep, so damage to a parent cannot hide a child. Unreachable
+    /// staging objects and superseded fallback-slot generations are not swept.
     pub async fn scrub(&mut self, cx: &CommitCx) -> Result<ScrubSummary, CommitError> {
         self.scrub_with_crash(cx, None).await
     }
@@ -53,6 +104,25 @@ impl<V: Vfs + Clone> Database<V> {
             published_frontier: self.snapshot.frontier,
             failed_stage: crate::DerivedPublicationStage::FoldCommittedTemplate,
         });
+        checkpoint(cx)?;
+        let segments = self
+            .receipts
+            .root_segment_ids(
+                crate::PARTITION,
+                &self.snapshot.refs,
+                &self.snapshot.patch_refs,
+            )
+            .ok_or_else(|| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "scrub has no complete admission inventory for the current root",
+                ))
+            })?;
+        let mut metadata = BTreeMap::from([
+            (self.snapshot.manifest.0, MetadataKind::Manifest),
+            (self.snapshot.root.0, MetadataKind::Root),
+        ]);
+        metadata.extend(segments.map(|id| (id, MetadataKind::Segment)));
         let capsules = self
             .coordinator
             .scrub_capsules(
@@ -73,7 +143,7 @@ impl<V: Vfs + Clone> Database<V> {
             .snapshot
             .refs
             .iter()
-            .map(|reference| (reference.block_id, false))
+            .map(|reference| (reference.block_id, DataKind::Block))
             .collect();
         // The retained writer carries the admitted block-to-patch relationship,
         // including when a block can no longer be decoded from storage.
@@ -81,34 +151,58 @@ impl<V: Vfs + Clone> Database<V> {
             if objects.contains_key(&block.block_id)
                 && let Some(patch) = &block.property_patch
             {
-                objects.insert(patch.patch_id, true);
+                objects.insert(patch.patch_id, DataKind::EdgeProperties);
             }
+        }
+        for reference in &self.snapshot.patch_refs {
+            objects.insert(reference.patch_id, DataKind::VertexPatch);
         }
         summary.block_objects = objects.len();
-        for (object_id, property_patch) in objects {
-            let result = if property_patch {
-                self.store
-                    .get_edge_property_patch_bytes(cx, object_id)
-                    .await
-            } else {
-                self.store.get_bytes(cx, DeltaBlockVersion(object_id)).await
-            };
-            match result {
-                Ok(_) => summary.block_clean.push(object_id),
-                Err(StoreError::IdentityMismatch { .. }) => summary.block_lost.push(LostCapsule {
-                    object_id,
-                    reason: LostReason::IdentityMismatch,
-                }),
-                Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(CommitError::Io(error));
+        for (object_id, kind) in objects {
+            checkpoint(cx)?;
+            let result = match kind {
+                DataKind::Block => self.store.get_bytes(cx, DeltaBlockVersion(object_id)).await,
+                DataKind::EdgeProperties => {
+                    self.store
+                        .get_edge_property_patch_bytes(cx, object_id)
+                        .await
                 }
-                Err(_) => summary.block_lost.push(LostCapsule {
-                    object_id,
-                    reason: LostReason::Unusable,
-                }),
-            }
+                DataKind::VertexPatch => {
+                    self.store
+                        .get_patch_bytes(cx, VertexPatchVersion(object_id))
+                        .await
+                }
+            };
+            record_verification(
+                object_id,
+                result,
+                &mut summary.block_clean,
+                &mut summary.block_lost,
+            )?;
         }
-        if summary.lost.is_empty() && summary.block_lost.is_empty() {
+        summary.metadata_objects = metadata.len();
+        for (object_id, kind) in metadata {
+            checkpoint(cx)?;
+            let result = match kind {
+                MetadataKind::Manifest => {
+                    self.store
+                        .get_manifest_bytes(cx, self.snapshot.manifest)
+                        .await
+                }
+                MetadataKind::Root => self.store.get_root_bytes(cx, self.snapshot.root).await,
+                MetadataKind::Segment => self.store.get_root_segment_bytes(cx, object_id).await,
+            };
+            record_verification(
+                object_id,
+                result,
+                &mut summary.metadata_clean,
+                &mut summary.metadata_lost,
+            )?;
+        }
+        if summary.lost.is_empty()
+            && summary.block_lost.is_empty()
+            && summary.metadata_lost.is_empty()
+        {
             self.state = previous_state;
         }
         Ok(summary)

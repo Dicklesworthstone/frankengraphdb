@@ -588,6 +588,14 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                             .await
                             .unwrap();
                     let objects = inventory(&db, &store, &query).await;
+                    let vertex_patches: BTreeSet<_> = store
+                        .resolve_manifest(&query, db.manifest().unwrap())
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .flat_map(|(_, root)| root.vertex_patches)
+                        .map(|reference| reference.patch_id)
+                        .collect();
                     let candidates: Vec<_> = objects
                         .iter()
                         .filter(|object| object.family == family)
@@ -602,7 +610,7 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                     assert_eq!(summary.clean.len(), 2);
                     assert!(summary.repaired.is_empty());
                     assert!(summary.lost.is_empty());
-                    assert_eq!(summary.block_objects, objects.len());
+                    assert_eq!(summary.block_objects, objects.len() + vertex_patches.len());
                     assert_eq!(summary.block_lost.len(), 1);
                     assert_eq!(summary.block_lost[0].object_id, target.id);
                     assert_eq!(summary.block_lost[0].reason, LostReason::IdentityMismatch);
@@ -614,8 +622,12 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                             .iter()
                             .filter(|object| object.id != target.id)
                             .map(|object| object.id)
+                            .chain(vertex_patches)
                             .collect()
                     );
+                    assert_eq!(summary.metadata_objects, 2);
+                    assert_eq!(summary.metadata_clean.len(), 2);
+                    assert!(summary.metadata_lost.is_empty());
                     assert_eq!(visible_bytes(&vfs, &target.path).await, damaged);
                     assert_eq!(
                         vfs.read(&target.path).await.unwrap(),

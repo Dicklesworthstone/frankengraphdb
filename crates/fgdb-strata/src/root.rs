@@ -803,6 +803,15 @@ pub struct SegmentCache {
 }
 
 impl SegmentCache {
+    /// Identities retained by the already-admitted root, independent of any
+    /// later damage to its on-disk frame or either reference list.
+    pub(crate) fn object_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.blocks
+            .iter()
+            .chain(&self.patches)
+            .map(|reference| reference.segment_id)
+    }
+
     /// The cache an encoder that sealed `frame`'s segments would hold. It is
     /// valid for exactly the root assembled from this frame, once each named
     /// segment has been read and proven against its reference: the decoder

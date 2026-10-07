@@ -518,6 +518,295 @@ fn seeded_fault_matrix_repairs_every_commit_and_preserves_all_retained_answers()
     }
 }
 
+mod publication_metadata {
+    use super::*;
+    use fgdb::MemVfs;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_strata::root::RootFrame;
+    use fgdb_strata::root_segment::SEGMENT_REFS;
+    use fgdb_strata::store::BlockStore;
+    use fgdb_types::CanonicalScalar;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        Manifest,
+        Root,
+        Segment,
+        VertexPatch,
+        EdgeBlock,
+        EdgeProperties,
+    }
+    impl Kind {
+        fn metadata(self) -> bool {
+            matches!(self, Self::Manifest | Self::Root | Self::Segment)
+        }
+    }
+    #[derive(Clone)]
+    struct Object {
+        kind: Kind,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    async fn remember(
+        objects: &mut BTreeMap<ObjectId, Object>,
+        vfs: &MemVfs,
+        store: &BlockStore<MemVfs>,
+        id: ObjectId,
+        kind: Kind,
+    ) {
+        let path = store.path(id);
+        let bytes = vfs.read(&path).await.unwrap();
+        objects.insert(id, Object { kind, path, bytes });
+    }
+
+    // The oracle walks the authenticated on-disk format BEFORE any mutation.
+    // It does not use scrub's receipts accessor or its metadata read methods.
+    async fn inventory(
+        db: &Database<MemVfs>,
+        cx: &CommitCx,
+        vfs: &MemVfs,
+        store: &BlockStore<MemVfs>,
+    ) -> BTreeMap<ObjectId, Object> {
+        let manifest = db.manifest().unwrap();
+        let roots = store.resolve_manifest(cx, manifest).await.unwrap();
+        let mut objects = BTreeMap::new();
+        remember(&mut objects, vfs, store, manifest.0, Kind::Manifest).await;
+        for (record, root) in roots {
+            remember(&mut objects, vfs, store, record.root.0, Kind::Root).await;
+            let bytes = vfs.read(&store.path(record.root.0)).await.unwrap();
+            if let RootFrame::V4(frame) = fgdb_strata::root::decode_root_frame(&bytes).unwrap() {
+                for reference in frame.block_segments.iter().chain(&frame.patch_segments) {
+                    remember(&mut objects, vfs, store, reference.segment_id, Kind::Segment).await;
+                }
+            }
+            for reference in root.blocks {
+                let bytes = vfs.read(&store.path(reference.block_id)).await.unwrap();
+                if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1 {
+                    remember(&mut objects, vfs, store, id, Kind::EdgeProperties).await;
+                }
+                remember(&mut objects, vfs, store, reference.block_id, Kind::EdgeBlock).await;
+            }
+            for reference in root.vertex_patches {
+                remember(&mut objects, vfs, store, reference.patch_id, Kind::VertexPatch).await;
+            }
+        }
+        objects
+    }
+
+    fn verified(summary: &ScrubSummary, objects: &BTreeMap<ObjectId, Object>, lost: &[ObjectId]) {
+        assert_eq!(summary.objects, 1);
+        assert_eq!(summary.clean.len(), 1);
+        assert!(summary.repaired.is_empty() && summary.lost.is_empty());
+        for metadata in [false, true] {
+            let expected: BTreeSet<_> = objects
+                .iter()
+                .filter_map(|(id, object)| (object.kind.metadata() == metadata).then_some(*id))
+                .collect();
+            let (count, clean, failures) = if metadata {
+                (
+                    summary.metadata_objects,
+                    &summary.metadata_clean,
+                    &summary.metadata_lost,
+                )
+            } else {
+                (
+                    summary.block_objects,
+                    &summary.block_clean,
+                    &summary.block_lost,
+                )
+            };
+            assert_eq!(count, expected.len());
+            let expected_lost: BTreeSet<_> = expected
+                .iter()
+                .copied()
+                .filter(|id| lost.contains(id))
+                .collect();
+            let expected_clean: BTreeSet<_> = expected.difference(&expected_lost).copied().collect();
+            assert_eq!(clean.len(), expected_clean.len());
+            assert_eq!(id_set(clean), expected_clean);
+            assert_eq!(failures.len(), expected_lost.len());
+            assert_eq!(
+                failures
+                    .iter()
+                    .map(|failure| failure.object_id)
+                    .collect::<BTreeSet<_>>(),
+                expected_lost
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Damage {
+        Flip,
+        Truncate,
+        Missing,
+        Oversized,
+    }
+
+    #[test]
+    fn every_admitted_metadata_family_and_vertex_patch_is_swept_even_with_damaged_parents() {
+        let ((), report) = run_async_under_lab(0x5c14, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(R);
+            let edges = SEGMENT_REFS as u128 + 1;
+            for id in 1..=edges + 1 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+                );
+            }
+            for id in 1..=edges {
+                // A distinct source per family forces a real V4 block segment.
+                batch.add_edge(
+                    EId(id),
+                    VId(id),
+                    VId(edges + 1),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(7))],
+                );
+            }
+            db.write(&cx, batch).await.unwrap();
+            let store = BlockStore::open_with_vfs(&cx, vfs.clone(), &dir, K_OID, NAMESPACE)
+                .await
+                .unwrap();
+            let objects = inventory(&db, &cx, &vfs, &store).await;
+            assert!(objects.values().any(|object| object.kind == Kind::Segment));
+            assert!(
+                objects
+                    .values()
+                    .any(|object| object.kind == Kind::VertexPatch)
+            );
+            // An object-shaped orphan is not made reachable by its filename.
+            let orphan = store.path(ObjectId([0xf3; 32]));
+            vfs.write(&orphan, b"unpublished and malformed")
+                .await
+                .unwrap();
+            verified(&db.scrub(&cx).await.unwrap(), &objects, &[]);
+            let selected: Vec<_> = [Kind::Manifest, Kind::Root, Kind::Segment, Kind::VertexPatch]
+                .into_iter()
+                .map(|kind| {
+                    let (id, object) = objects
+                        .iter()
+                        .find(|(_, object)| object.kind == kind)
+                        .unwrap();
+                    (*id, object.clone())
+                })
+                .collect();
+            for (id, object) in &selected {
+                for damage in [
+                    Damage::Flip,
+                    Damage::Truncate,
+                    Damage::Missing,
+                    Damage::Oversized,
+                ] {
+                    if matches!(damage, Damage::Oversized)
+                        && !matches!(object.kind, Kind::Segment | Kind::VertexPatch)
+                    {
+                        continue; // Large root/manifest caps have sparse-file store tests.
+                    }
+                    let kept = object.path.with_extension("scrub-kept");
+                    let damaged = match damage {
+                        Damage::Flip => {
+                            let mut bytes = object.bytes.clone();
+                            bytes[object.bytes.len() / 2] ^= 1;
+                            bytes
+                        }
+                        Damage::Truncate => object.bytes[..object.bytes.len() / 2].to_vec(),
+                        Damage::Missing => Vec::new(),
+                        Damage::Oversized => vec![
+                            0;
+                            if object.kind == Kind::Segment {
+                                fgdb_strata::root_segment::SEGMENT_BYTES + 1
+                            } else {
+                                fgdb_strata::MAX_BLOCK_ENTRIES as usize * 64 + 1
+                            }
+                        ],
+                    };
+                    if matches!(damage, Damage::Missing) {
+                        vfs.rename(&object.path, &kept).await.unwrap();
+                    } else {
+                        vfs.write(&object.path, &damaged).await.unwrap();
+                    }
+                    let summary = db.scrub(&cx).await.unwrap();
+                    verified(&summary, &objects, &[*id]);
+                    let expected_reason = if matches!(damage, Damage::Missing | Damage::Oversized) {
+                        LostReason::Unusable
+                    } else {
+                        LostReason::IdentityMismatch
+                    };
+                    let loss = summary
+                        .metadata_lost
+                        .iter()
+                        .chain(&summary.block_lost)
+                        .next()
+                        .unwrap();
+                    assert_eq!(loss.reason, expected_reason, "{:?} {damage:?}", object.kind);
+                    assert!(matches!(
+                        db.vertex(VId(1)),
+                        Err(ReadError::RecoveryRequired(_))
+                    ));
+                    assert!(matches!(db.scrub(&cx).await, Err(CommitError::Poisoned)));
+                    drop(db);
+                    if matches!(damage, Damage::Missing) {
+                        assert!(vfs.read(&object.path).await.is_err());
+                        assert_eq!(vfs.read(&kept).await.unwrap(), object.bytes);
+                        vfs.rename(&kept, &object.path).await.unwrap();
+                    } else {
+                        assert_eq!(
+                            vfs.read(&object.path).await.unwrap(),
+                            damaged,
+                            "scrub must preserve loss evidence"
+                        );
+                        vfs.write(&object.path, &object.bytes).await.unwrap();
+                    }
+                    db = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                        .await
+                        .unwrap();
+                    assert_eq!(db.edges().unwrap().len(), edges as usize);
+                    assert_eq!(db.vertices().unwrap().len(), edges as usize + 1);
+                }
+            }
+            // A traversal which rereads a parent to discover its children would
+            // stop at the manifest/root/segment and miss another planted loss.
+            for (_, object) in &selected {
+                let mut damaged = object.bytes.clone();
+                damaged[0] ^= 1;
+                vfs.write(&object.path, &damaged).await.unwrap();
+            }
+            let lost: Vec<_> = selected.iter().map(|(id, _)| *id).collect();
+            verified(&db.scrub(&cx).await.unwrap(), &objects, &lost);
+            assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
+            assert_eq!(
+                vfs.read(&orphan).await.unwrap(),
+                b"unpublished and malformed"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn a_cancelled_sweep_cannot_restore_health_without_verifying_the_inventory() {
+        let ((), report) = run_async_under_lab(0x5c15, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let mut db = Database::open_memory(&cx, engine_keys()).await.unwrap();
+            root.set_cancel_requested(true);
+            assert!(matches!(db.scrub(&cx).await,
+                Err(CommitError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted));
+            assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn every_repair_io_crash_preserves_recoverable_old_or_identical_repaired_container() {
     let points = [
