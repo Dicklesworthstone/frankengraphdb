@@ -25,7 +25,10 @@
 //!   answer the schema names the token may see (the server's bindings,
 //!   scope-filtered), the same answer as HTTP's schema route.
 //! - Results are the ephemeral class of FGP's snapshot stream: buffered per
-//!   statement and dropped on disconnect, DISCARD or RESET.
+//!   statement and dropped on disconnect, DISCARD or RESET. The exact selected
+//!   issuer's expiry/retirement fence is rechecked before every socket write
+//!   and flush, including delayed PULLs and partial writes. This is the existing
+//!   cooperative Warden fence, not durable audit or revocation evidence.
 
 use crate::execute::{ReadSession, Refusal, query_refusal, read_session};
 use crate::shutdown::Waiter;
@@ -45,7 +48,7 @@ use fgdb_gql::GqlParameters;
 use fgdb_gql::algebra::GraphValue;
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
 use fgdb_types::{CommitSeq, PurposeContexts, VId};
-use fgdb_warden::CapabilityToken;
+use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,6 +61,7 @@ const RECORDS_PER_WRITE: usize = 256;
 const HYDRATION_BATCH: usize = 4096;
 
 /// Why a connection ends without another message.
+#[derive(Debug, PartialEq, Eq)]
 struct Closed;
 
 /// Buffered socket I/O. Reads stop at the drain signal while idle.
@@ -65,6 +69,9 @@ struct Io {
     stream: TcpStream,
     dechunker: Dechunker,
     out: Vec<u8>,
+    /// A failed/cancelled partial flush cannot be restarted or followed by a
+    /// different response on the same byte stream.
+    failed: bool,
 }
 
 impl Io {
@@ -116,33 +123,103 @@ impl Io {
         }
     }
 
-    async fn flush(&mut self, cx: &Cx) -> Result<(), Closed> {
-        let mut written = 0;
-        while written < self.out.len() {
-            let count = poll_fn(|task| {
-                if cx.checkpoint().is_err() {
-                    return Poll::Ready(Err(Closed));
-                }
-                match Pin::new(&mut self.stream).poll_write(task, &self.out[written..]) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(0) | Err(_)) => Poll::Ready(Err(Closed)),
-                    Poll::Ready(Ok(count)) => Poll::Ready(Ok(count)),
-                }
-            })
-            .await?;
-            written += count;
-        }
-        self.out.clear();
-        poll_fn(|task| match Pin::new(&mut self.stream).poll_flush(task) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => Poll::Ready(result.map_err(|_| Closed)),
-        })
+    async fn flush(
+        &mut self,
+        cx: &Cx,
+        authority: Option<(&Authority, &CapabilityToken)>,
+    ) -> Result<(), Closed> {
+        flush_output(
+            &mut self.stream,
+            cx,
+            &mut self.out,
+            &mut self.failed,
+            authority,
+            crate::unix_millis,
+        )
         .await
     }
 
     fn respond(&mut self, response: &Response) {
         response.frame(&mut self.out);
     }
+}
+
+/// A flush's terminal state spans retries and future cancellation. Once a
+/// prefix might have escaped, another response must never restart the buffer.
+async fn flush_output<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    cx: &Cx,
+    out: &mut Vec<u8>,
+    failed: &mut bool,
+    authority: Option<(&Authority, &CapabilityToken)>,
+    clock: impl FnMut() -> u64,
+) -> Result<(), Closed> {
+    if *failed {
+        return Err(Closed);
+    }
+    *failed = true;
+    write_output(stream, cx, out, authority, clock).await?;
+    out.clear();
+    *failed = false;
+    Ok(())
+}
+
+/// Write exactly one buffered response batch under current output authority.
+/// The private clock argument makes partial-write/expiry laws deterministic;
+/// production always supplies the existing host clock.
+async fn write_output<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    cx: &Cx,
+    bytes: &[u8],
+    authority: Option<(&Authority, &CapabilityToken)>,
+    mut clock: impl FnMut() -> u64,
+) -> Result<(), Closed> {
+    let authority = match authority {
+        Some((issuer, token)) => {
+            let verified = issuer
+                .verify_at(token, crate::TRUNK, clock())
+                .map_err(|_| Closed)?;
+            Some((issuer, verified))
+        }
+        None => None,
+    };
+    let mut authorize = || {
+        cx.checkpoint().map_err(|_| Closed)?;
+        if let Some((issuer, verified)) = &authority {
+            issuer
+                .recheck_at(verified, crate::TRUNK, clock())
+                .map_err(|_| Closed)?;
+        }
+        Ok::<_, Closed>(())
+    };
+    let mut written = 0;
+    while written < bytes.len() {
+        let count = poll_fn(|task| {
+            if authorize().is_err() {
+                return Poll::Ready(Err(Closed));
+            }
+            let remaining = &bytes[written..];
+            match Pin::new(&mut *stream).poll_write(task, remaining) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(count)) if count > 0 && count <= remaining.len() => {
+                    Poll::Ready(Ok(count))
+                }
+                Poll::Ready(_) => Poll::Ready(Err(Closed)),
+            }
+        })
+        .await?;
+        written += count;
+    }
+    poll_fn(|task| {
+        if authorize().is_err() {
+            return Poll::Ready(Err(Closed));
+        }
+        match Pin::new(&mut *stream).poll_flush(task) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => Poll::Ready(result.map_err(|_| Closed)),
+        }
+    })
+    .await
 }
 
 /// A Bolt-visible refusal: a Neo4j status code and a message.
@@ -187,9 +264,11 @@ impl Failure {
 }
 
 /// A statement's buffered rows awaiting PULL.
-struct Pending {
+struct Pending<'s> {
     rows: VecDeque<Vec<Value>>,
     database: String,
+    /// The exact issuer that authorized RUN, retained across delayed PULLs.
+    db: &'s Served,
     /// The generation read, which names the bookmark; none for an answer
     /// read from the server's bindings rather than the graph.
     seq: Option<CommitSeq>,
@@ -211,6 +290,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
         stream,
         dechunker: Dechunker::new(server.limits.max_frame_len as usize),
         out: Vec::new(),
+        failed: false,
     };
     let Ok(preamble) = io.read_exact(cx, &waiter, 20).await else {
         return;
@@ -221,11 +301,11 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
     let proposals: [u8; 16] = preamble[4..20].try_into().expect("sixteen bytes");
     let Some(version) = negotiate(&proposals) else {
         io.out.extend_from_slice(&[0, 0, 0, 0]);
-        let _ = io.flush(cx).await;
+        let _ = io.flush(cx, None).await;
         return;
     };
     io.out.extend_from_slice(&version.response());
-    if io.flush(cx).await.is_err() {
+    if io.flush(cx, None).await.is_err() {
         return;
     }
     let mut connection = Connection {
@@ -234,6 +314,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
         failed: false,
         pending: None,
         transaction: None,
+        output_database: None,
         id: CONNECTIONS.fetch_add(1, Ordering::Relaxed),
     };
     while let Ok(message) = io.next_message(cx, &waiter).await {
@@ -242,12 +323,12 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: TcpStream) {
             Err(error) => {
                 // An undecodable message leaves the stream state unknown.
                 io.respond(&failure(Failure::invalid(error.to_string())));
-                let _ = io.flush(cx).await;
+                let _ = io.flush(cx, connection.output_authority()).await;
                 return;
             }
         };
         let close = connection.handle(cx, &mut io, request).await;
-        if io.flush(cx).await.is_err() || close {
+        if io.flush(cx, connection.output_authority()).await.is_err() || close {
             return;
         }
     }
@@ -264,14 +345,24 @@ struct Connection<'s> {
     server: &'s Server,
     token: Option<CapabilityToken>,
     failed: bool,
-    pending: Option<Pending>,
+    pending: Option<Pending<'s>>,
     transaction: Option<Transaction<'s>>,
+    /// Exact issuer selected by the request producing the buffered response,
+    /// retained through final metadata after PULL/COMMIT consumes its owner.
+    output_database: Option<&'s Served>,
     id: u64,
 }
 
 impl<'s> Connection<'s> {
+    fn output_authority(&self) -> Option<(&Authority, &CapabilityToken)> {
+        self.output_database
+            .zip(self.token.as_ref())
+            .map(|(database, token)| (&database.authority, token))
+    }
+
     /// Answer one request; true closes the connection.
     async fn handle(&mut self, cx: &Cx, io: &mut Io, request: Request) -> bool {
+        self.output_database = None;
         match request {
             Request::Goodbye => return true,
             Request::Reset => {
@@ -319,6 +410,7 @@ impl<'s> Connection<'s> {
             Request::Begin { extra } => self.begin(cx, &extra).await,
             Request::Commit => match self.transaction.take() {
                 Some(transaction) => {
+                    self.output_database = Some(transaction.db);
                     self.pending = None;
                     Ok(vec![(
                         "bookmark".to_owned(),
@@ -328,7 +420,8 @@ impl<'s> Connection<'s> {
                 None => Err(Failure::invalid("COMMIT outside a transaction")),
             },
             Request::Rollback => match self.transaction.take() {
-                Some(_) => {
+                Some(transaction) => {
+                    self.output_database = Some(transaction.db);
                     self.pending = None;
                     Ok(Vec::new())
                 }
@@ -422,6 +515,7 @@ impl<'s> Connection<'s> {
             ));
         }
         let (name, db) = self.database(extra)?;
+        self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
         let (session, seq) = read_session(cx, db, token)
             .await
@@ -467,6 +561,7 @@ impl<'s> Connection<'s> {
             )
         } else {
             let (name, db) = self.database(extra)?;
+            self.output_database = Some(db);
             let token = self.token.as_ref().expect("authenticated");
             let (session, seq) = read_session(cx, db, token)
                 .await
@@ -474,6 +569,7 @@ impl<'s> Connection<'s> {
             autocommit = Some(session);
             (name, db, seq, None)
         };
+        self.output_database = Some(db);
         let session = match autocommit.as_mut() {
             Some(session) => session,
             None => &mut self.transaction.as_mut().expect("in a transaction").session,
@@ -506,6 +602,7 @@ impl<'s> Connection<'s> {
         self.pending = Some(Pending {
             rows,
             database: name,
+            db,
             seq: Some(seq),
         });
         let mut metadata = vec![
@@ -525,6 +622,9 @@ impl<'s> Connection<'s> {
         let Some(pending) = self.pending.as_mut() else {
             return Err(Failure::invalid("no result to PULL or DISCARD"));
         };
+        let db = pending.db;
+        self.output_database = Some(db);
+        let token = self.token.as_ref().expect("authenticated");
         let count = if n < 0 {
             pending.rows.len()
         } else {
@@ -539,7 +639,9 @@ impl<'s> Connection<'s> {
             }
             io.respond(&Response::Record(row));
             // Stream large results instead of buffering every record.
-            if index % RECORDS_PER_WRITE == RECORDS_PER_WRITE - 1 && io.flush(cx).await.is_err() {
+            if index % RECORDS_PER_WRITE == RECORDS_PER_WRITE - 1
+                && io.flush(cx, Some((&db.authority, token))).await.is_err()
+            {
                 return Err(Failure::invalid("connection closed while streaming"));
             }
         }
@@ -575,6 +677,7 @@ impl<'s> Connection<'s> {
                 (name, db, None)
             }
         };
+        self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
         let schema = crate::execute::schema(db, token).map_err(Failure::from_refusal)?;
         let names = match kind {
@@ -588,6 +691,7 @@ impl<'s> Connection<'s> {
                 .map(|name| vec![Value::String(name)])
                 .collect(),
             database: name,
+            db,
             seq,
         });
         Ok(vec![
@@ -601,8 +705,9 @@ impl<'s> Connection<'s> {
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
     /// is every role. Writes it receives are still refused by the profile.
-    fn route(&self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
-        let (name, _) = self.database(extra)?;
+    fn route(&mut self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
+        let (name, db) = self.database(extra)?;
+        self.output_database = Some(db);
         let address = get(routing, "address")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -987,5 +1092,331 @@ mod tests {
             "MATCH (n) RETURN n.set, n.`delete` // CREATE"
         ));
         assert!(!looks_like_write("MATCH (n:Person) RETURN n.name"));
+    }
+
+    use asupersync::security::key::AuthKey;
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_types::DatabaseSecurityNamespaceId;
+    use fgdb_warden::{Grant, QueryLimits};
+    use std::cell::{Cell, RefCell};
+    use std::future::Future;
+    use std::io;
+    use std::rc::Rc;
+    use std::task::{Context, Waker};
+
+    const START: u64 = 100;
+    const EXPIRES: u64 = 1000;
+
+    fn authority(seed: u64) -> Authority {
+        Authority::new(
+            AuthKey::from_seed(seed),
+            DatabaseSecurityNamespaceId([7; 32]),
+            crate::GRAPH_NAME,
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn token(issuer: &Authority) -> CapabilityToken {
+        issuer
+            .issue_at(
+                &Grant::read_only(
+                    crate::TRUNK,
+                    EXPIRES,
+                    QueryLimits {
+                        max_nodes: 100,
+                        max_work: 1000,
+                        max_rows: 100,
+                    },
+                ),
+                START,
+            )
+            .unwrap()
+    }
+
+    fn framed_output() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        Response::Record(vec![Value::string("protected"), Value::Int(17)]).frame(&mut bytes);
+        Response::Success(vec![("has_more".to_owned(), Value::Bool(false))]).frame(&mut bytes);
+        bytes
+    }
+
+    struct Writer {
+        accepted: Rc<RefCell<Vec<u8>>>,
+        chunks: VecDeque<usize>,
+        flush_pending: bool,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl AsyncWrite for Writer {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let count = self.chunks.pop_front().unwrap_or(usize::MAX);
+            if count == 0 {
+                task.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let count = count.min(bytes.len());
+            self.accepted
+                .borrow_mut()
+                .extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flushes.set(self.flushes.get() + 1);
+            if self.flush_pending {
+                self.flush_pending = false;
+                task.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct Fixture {
+        writer: Writer,
+        accepted: Rc<RefCell<Vec<u8>>>,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl Fixture {
+        fn new(chunks: impl IntoIterator<Item = usize>, flush_pending: bool) -> Self {
+            let accepted = Rc::new(RefCell::new(Vec::new()));
+            let flushes = Rc::new(Cell::new(0));
+            Self {
+                writer: Writer {
+                    accepted: Rc::clone(&accepted),
+                    chunks: chunks.into_iter().collect(),
+                    flush_pending,
+                    flushes: Rc::clone(&flushes),
+                },
+                accepted,
+                flushes,
+            }
+        }
+    }
+
+    fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    fn with_cx(test: impl FnOnce(&Cx)) {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        test(&cx);
+    }
+
+    #[test]
+    fn guarded_bolt_flush_delivers_exact_frames_through_partial_writes() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let mut io = Fixture::new([3, 0, 5, 0], true);
+            let mut out = framed_output();
+            let expected = out.clone();
+            let mut failed = false;
+            let mut flush = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || EXPIRES - 1,
+            ));
+            let mut completed = false;
+            for _ in 0..8 {
+                if let Poll::Ready(result) = poll(flush.as_mut()) {
+                    assert_eq!(result, Ok(()));
+                    completed = true;
+                    break;
+                }
+            }
+            assert!(completed);
+            drop(flush);
+            assert!(!failed);
+            assert!(out.is_empty());
+            assert_eq!(*io.accepted.borrow(), expected);
+            assert_eq!(io.flushes.get(), 2);
+        });
+    }
+
+    #[test]
+    fn delayed_bolt_output_refuses_at_exact_expiry_without_one_byte() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let mut io = Fixture::new([], false);
+            let mut out = framed_output();
+            let expected = out.clone();
+            let mut failed = false;
+            let mut flush = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || EXPIRES,
+            ));
+            assert_eq!(poll(flush.as_mut()), Poll::Ready(Err(Closed)));
+            drop(flush);
+            assert!(failed);
+            assert_eq!(out, expected);
+            assert!(io.accepted.borrow().is_empty());
+            assert_eq!(io.flushes.get(), 0);
+        });
+    }
+
+    #[test]
+    fn expiry_after_a_partial_record_cannot_send_a_suffix_or_later_failure() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let mut io = Fixture::new([7, 0], false);
+            let mut out = framed_output();
+            let mut failed = false;
+            let now = Cell::new(START);
+            let mut flush = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || now.get(),
+            ));
+            assert!(poll(flush.as_mut()).is_pending());
+            let prefix = io.accepted.borrow().clone();
+            assert_eq!(prefix.len(), 7);
+            now.set(EXPIRES);
+            assert_eq!(poll(flush.as_mut()), Poll::Ready(Err(Closed)));
+            drop(flush);
+            assert!(failed);
+            // handle() may construct an error after a failed batch flush. The
+            // terminal lane must refuse that outer flush without restarting
+            // the original partial record, even under a valid clock sample.
+            Response::Failure {
+                code: "Neo.ClientError.Security.Unauthorized".to_owned(),
+                message: "credential not accepted".to_owned(),
+            }
+            .frame(&mut out);
+            let mut retry = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || START,
+            ));
+            assert_eq!(poll(retry.as_mut()), Poll::Ready(Err(Closed)));
+            drop(retry);
+            assert_eq!(*io.accepted.borrow(), prefix);
+            assert_eq!(io.flushes.get(), 0);
+        });
+    }
+
+    #[test]
+    fn bolt_pending_flush_rechecks_both_expiry_and_issuer_retirement() {
+        with_cx(|cx| {
+            for retire in [false, true] {
+                let issuer = authority(41);
+                let credential = token(&issuer);
+                let mut io = Fixture::new([], true);
+                let mut out = framed_output();
+                let expected = out.clone();
+                let mut failed = false;
+                let now = Cell::new(START);
+                let mut flush = Box::pin(flush_output(
+                    &mut io.writer,
+                    cx,
+                    &mut out,
+                    &mut failed,
+                    Some((&issuer, &credential)),
+                    || now.get(),
+                ));
+                assert!(poll(flush.as_mut()).is_pending());
+                assert_eq!(*io.accepted.borrow(), expected);
+                assert_eq!(io.flushes.get(), 1);
+                if retire {
+                    issuer.retire();
+                } else {
+                    now.set(EXPIRES);
+                }
+                assert_eq!(poll(flush.as_mut()), Poll::Ready(Err(Closed)));
+                drop(flush);
+                assert!(failed);
+                assert_eq!(out, expected);
+                assert_eq!(io.flushes.get(), 1, "no flush after invalidation");
+            }
+        });
+    }
+
+    #[test]
+    fn cancelling_a_partial_bolt_flush_permanently_closes_its_buffer() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let mut io = Fixture::new([5, 0], false);
+            let mut out = framed_output();
+            let mut failed = false;
+            let mut flush = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || START,
+            ));
+            assert!(poll(flush.as_mut()).is_pending());
+            let prefix = io.accepted.borrow().clone();
+            assert_eq!(prefix.len(), 5);
+            drop(flush);
+            assert!(failed);
+            let mut retry = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&issuer, &credential)),
+                || START,
+            ));
+            assert_eq!(poll(retry.as_mut()), Poll::Ready(Err(Closed)));
+            drop(retry);
+            assert_eq!(*io.accepted.borrow(), prefix);
+            assert_eq!(io.flushes.get(), 0);
+        });
+    }
+
+    #[test]
+    fn foreign_issuer_cannot_flush_a_saved_result() {
+        with_cx(|cx| {
+            let issuer = authority(41);
+            let credential = token(&issuer);
+            let foreign = authority(42);
+            let mut io = Fixture::new([], false);
+            let mut out = framed_output();
+            let mut failed = false;
+            let mut flush = Box::pin(flush_output(
+                &mut io.writer,
+                cx,
+                &mut out,
+                &mut failed,
+                Some((&foreign, &credential)),
+                || START,
+            ));
+            assert_eq!(poll(flush.as_mut()), Poll::Ready(Err(Closed)));
+            drop(flush);
+            assert!(failed);
+            assert!(io.accepted.borrow().is_empty());
+        });
     }
 }
