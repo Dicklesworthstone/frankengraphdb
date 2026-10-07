@@ -4,8 +4,8 @@
 use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, EdgeRecord, GqlError, OpenError, ReadError,
-    RelationBind, ScrubCrashPoint, ScrubSummary, VertexRow, WriteBatch,
+    CAPSULE_OBJECT_KIND, Database, DatabaseKeys, EdgeRecord, GqlError, ReadError, RelationBind,
+    ScrubCrashPoint, ScrubSummary, VertexRow, WriteBatch,
 };
 use fgdb_chronicle::capsule::{
     CAPSULE_HEADER_BYTES_V1, CapsuleKeys, CapsuleProfile, SealedCapsule, decode_container,
@@ -376,7 +376,8 @@ async fn lost_control(cx: &CommitCx, dir: &Path, missing_file: bool) {
         std::fs::write(&target, &bytes).expect("damage beyond the erasure budget");
         Some(bytes)
     };
-    // Do not reopen before scrub: open already reads every capsule to rebuild the delta index.
+    // Scrub runs on the open handle. A reopen reads no capsule (fgdb-agp1o),
+    // so it would not see the loss; the scrub pass is what finds it.
     let summary = database
         .scrub(cx)
         .await
@@ -412,13 +413,21 @@ async fn lost_control(cx: &CommitCx, dir: &Path, missing_file: bool) {
         );
     }
     drop(database);
+    // A checkpoint open reads no capsule (fgdb-agp1o): it serves the published
+    // generation. Reading the history is where the unrecoverable committed
+    // capsule is refused, with a typed rebuild error.
+    let mut reopened = Database::open(cx, dir, engine_keys())
+        .await
+        .expect("a checkpoint open reads no capsule");
     assert!(
-        matches!(
-            Database::open(cx, dir, engine_keys()).await,
-            Err(OpenError::Rebuild(_))
-        ),
-        "cold open refuses the unrecoverable committed capsule with a typed rebuild error"
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .is_err(),
+        "materializing the history refuses the unrecoverable committed capsule \
+         with a typed rebuild error"
     );
+    drop(reopened);
     if let Some(bytes) = ruined {
         assert_eq!(
             std::fs::read(target).expect("evidence after refusal"),
