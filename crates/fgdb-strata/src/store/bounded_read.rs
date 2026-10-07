@@ -228,6 +228,29 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::PartitionRootVersion,
         maximum: usize,
     ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
+        self.get_root_and_segments_limited(cx, id, maximum, usize::MAX, usize::MAX)
+            .await
+    }
+
+    pub(super) async fn get_root_and_segments_limited(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::PartitionRootVersion,
+        maximum: usize,
+        max_blocks: usize,
+        max_patches: usize,
+    ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
+        let check = |resource, requested, limit| {
+            if requested > limit {
+                Err(StoreError::RootReferenceLimit {
+                    resource,
+                    requested,
+                    limit,
+                })
+            } else {
+                Ok(())
+            }
+        };
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
         let bytes = self
             .read_object_bytes(
@@ -248,10 +271,30 @@ impl<V: Vfs> BlockStore<V> {
         let frame =
             match crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)? {
                 crate::root::RootFrame::V3(root) => {
+                    check("root blocks", root.blocks.len(), max_blocks)?;
+                    check(
+                        "root vertex patches",
+                        root.vertex_patches.len(),
+                        max_patches,
+                    )?;
                     return Ok((root, crate::root::SegmentCache::default()));
                 }
                 crate::root::RootFrame::V4(frame) => frame,
             };
+        // Full segments have a fixed cardinality; refuse their declared total
+        // before loading segments or allocating the flattened reference lists.
+        check(
+            "root blocks",
+            frame.block_segments.len() * crate::root_segment::SEGMENT_REFS
+                + frame.tail_blocks.len(),
+            max_blocks,
+        )?;
+        check(
+            "root vertex patches",
+            frame.patch_segments.len() * crate::root_segment::SEGMENT_REFS
+                + frame.tail_patches.len(),
+            max_patches,
+        )?;
         let segments = crate::root::SegmentCache::of_frame(&frame);
         // A V4 root's segments share the caller's byte ceiling with the root
         // itself, so a two-level root reads no more than a flat one could.

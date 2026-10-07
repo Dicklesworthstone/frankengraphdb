@@ -355,6 +355,37 @@ fn main() -> fgdb::Result<()> {
 }
 ```
 
+**Buffered native reads available today.** `Database::open_buffered_read_view` opens an owned, fixed checkpoint without constructing the resident graph snapshot or a block writer. Its async `vertex`, `edge`, and bounded incoming/outgoing `adjacency_at` methods fault authenticated immutable objects through the Strata extent cache. The corresponding `*_at` methods read historical statements with the same winning-version and retirement metadata as the ordinary resident view. `open_buffered_read_view_with_vfs` provides the same path through an injected filesystem.
+
+The caller supplies a shared `MemoryPool` and `BufferedReadLimits`: root bytes, source bytes inspected during admission, block/vertex-patch counts, per-operation work, and cache frame/extent limits. Metadata, decoding workspace, admission history, cache frames and returned `BufferedValue` rows retain reservations for their lifetimes. A held result remains charged after its view is dropped. Point reads currently scan the admitted descriptors; bounded adjacency returns the complete winning incidence or a resource error, and parallel edges remain distinct.
+
+Within the caller's async runtime, with `commit`, `query`, and `keys` supplied as the ordinary capability contexts and database keys:
+
+```rust
+use fgdb::{BufferLimits, BufferedReadLimits, Database, MemoryPool};
+use fgdb_types::VId;
+
+let memory = MemoryPool::new(16 * 1024 * 1024, 0)?;
+let limits = BufferedReadLimits {
+    max_root_bytes: 64 * 1024,
+    max_source_bytes: 64 * 1024 * 1024,
+    max_blocks: 512,
+    max_vertex_patches: 512,
+    max_work: 1_000_000,
+    buffer: BufferLimits {
+        max_frames: 8,
+        max_ghost_entries: 16,
+        max_extent_bytes: 16 * 1024,
+    },
+};
+let mut view = Database::open_buffered_read_view(
+    &commit, "mydb.fgdbdir", keys, memory.clone(), limits,
+).await?;
+let vertex = view.vertex(&query, VId(1)).await?;
+```
+
+Opening checks the existing slot, manifest coordinates, Chronicle binding and complete object/history admission. A missing or lagging checkpoint returns `BufferedOpenError::RecoveryRequired`; recovery is an explicit ordinary writable open. The buffered view holds no writer lease once returned, so later writes and compaction leave its selected root unchanged. Initial history validation can still exceed the chosen pool and refuse; its conservative reservations favor a hard admission boundary over density. Source-byte refusal can inspect one format-bounded object beyond the requested source limit. Chronicle recovery metadata remains outside the pool. This surface does not yet drive general GQL or supply a cross-process object-retention/GC lease; the database's immutable object directory must remain available.
+
 **4. Python bindings** (ABI3 wheels, with a zero-friction `to_fnx()` / `from_fnx()` bridge and NumPy views over `Embedding` columns). **Target state:** no wheels are published — `pip install frankengraphdb` installs nothing of ours today. When releases exist:
 
 ```bash

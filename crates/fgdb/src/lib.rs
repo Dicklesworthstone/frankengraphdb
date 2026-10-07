@@ -113,6 +113,12 @@
 
 #![forbid(unsafe_code)]
 
+mod buffered_read;
+pub use buffered_read::{
+    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedReadError,
+    BufferedReadLimits, BufferedReadView, BufferedValue, MemoryError, MemoryPool,
+};
+
 mod bulk_load;
 pub use bulk_load::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
@@ -5365,7 +5371,26 @@ async fn select_checkpoint<V: Vfs>(
         Ok(resolved) if resolved.len() == 1 => resolved,
         _ => return Err(disagrees()),
     };
-    let (record, root) = &resolved[0];
+    checkpoint_from_manifest(coordinator.chain(), claimed, &resolved, path).map(Some)
+}
+
+/// The checkpoint's coordinate and Chronicle ancestry have one admission law
+/// for resident and buffered readers. Byte loading belongs to the respective
+/// bounded store operation; no reader can substitute content identity for this
+/// independent marker-chain binding.
+fn checkpoint_from_manifest(
+    chain: &fgdb_chronicle::MarkerChain,
+    claimed: ManifestVersion,
+    resolved: &[(ManifestRecord, fgdb_strata::root::PartitionRoot)],
+    path: &Path,
+) -> Result<SelectedCheckpoint, OpenError> {
+    let disagrees = || OpenError::SlotDisagreesWithStream {
+        path: path.to_path_buf(),
+        slot_manifest: claimed.0,
+    };
+    let [(record, root)] = resolved else {
+        return Err(disagrees());
+    };
     let describes_spine = record.graph == GRAPH
         && record.branch == BRANCH
         && record.partition == PARTITION
@@ -5379,15 +5404,15 @@ async fn select_checkpoint<V: Vfs>(
     // history hashes differently; a lagging root matches at its own seq and
     // heals in bind. WHAT was published stays the equivalence law's question —
     // this binding answers WHO published it.
-    let bound = chain_commitment_at(coordinator.chain(), root.published_at)
+    let bound = chain_commitment_at(chain, root.published_at)
         .is_some_and(|expected| expected == record.published_chain_hash);
     if !describes_spine || !bound {
         return Err(disagrees());
     }
-    Ok(Some(SelectedCheckpoint {
+    Ok(SelectedCheckpoint {
         root_id: record.root,
         published_at: root.published_at,
-    }))
+    })
 }
 
 /// The readable generation of a verified partition that is current with the

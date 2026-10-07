@@ -84,6 +84,11 @@ use std::sync::Arc;
 mod bounded_read;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
+mod buffered_read;
+pub use buffered_read::{
+    BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
+    BufferedValue,
+};
 
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
@@ -418,6 +423,12 @@ pub enum StoreError {
         limit: u64,
         observed: u64,
     },
+    /// A caller's root-reference cap refused metadata before V4 flattening.
+    RootReferenceLimit {
+        resource: &'static str,
+        requested: usize,
+        limit: usize,
+    },
     /// The bytes at the block's path are not the block that path names.
     ///
     /// Damage, or a store that was written by something that did not derive the
@@ -504,6 +515,14 @@ impl core::fmt::Display for StoreError {
                 f,
                 "stored object has at least {observed} bytes, above the {limit}-byte limit"
             ),
+            Self::RootReferenceLimit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "ResourceExhausted: {resource} needs {requested}, limit {limit}"
+            ),
             Self::IdentityMismatch { expected, actual } => write!(
                 f,
                 "the bytes stored for {expected:?} are actually {actual:?}"
@@ -556,6 +575,7 @@ impl core::error::Error for StoreError {
             | Self::ManifestRootLoad { error, .. }
             | Self::BlockPatchLoad { error, .. } => Some(error.as_ref()),
             Self::ObjectTooLarge { .. }
+            | Self::RootReferenceLimit { .. }
             | Self::IdentityMismatch { .. }
             | Self::DamagedExisting { .. }
             | Self::Collision { .. } => None,
