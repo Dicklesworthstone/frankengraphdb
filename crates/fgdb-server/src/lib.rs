@@ -428,16 +428,25 @@ impl Server {
                 let config = config.clone();
                 let signal = signal.clone();
                 Box::pin(async move {
+                    // Both the handler and transport borrow this connection's
+                    // server owner, so verified output authority survives every
+                    // pending write without a self-referential Arc container.
+                    let server = &*server;
+                    let output = Arc::new(http::OutputAuthority::new());
+                    let io = http::GuardedIo::new(stream, child.clone(), Arc::clone(&output));
                     let handler = move |request| {
-                        let server = Arc::clone(&server);
                         let child = child.clone();
-                        let answer: ConnectionFuture<Response> =
-                            Box::pin(async move { http::respond(&child, &server, request).await });
+                        let output = Arc::clone(&output);
+                        let answer: core::pin::Pin<
+                            Box<dyn core::future::Future<Output = Response> + Send + '_>,
+                        > = Box::pin(async move {
+                            http::respond(&child, server, request, &output).await
+                        });
                         answer
                     };
                     let _ = Http1Server::with_config(handler, config)
                         .with_shutdown_signal(signal)
-                        .serve(stream)
+                        .serve(io)
                         .await;
                 })
             })
