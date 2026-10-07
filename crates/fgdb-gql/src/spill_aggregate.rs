@@ -32,7 +32,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection, computed inputs or computed output expressions")
+                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection or computed output expressions")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -111,10 +111,12 @@ impl core::fmt::Debug for SpillAggregateState {
 
 impl SpillAggregateDefinition {
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        if aggregate.input_projection().is_some()
-            || aggregate.output_projection().is_some()
+        if aggregate.output_projection().is_some()
             || aggregate.incremental_output_is_distinct()
             || aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
+            || aggregate
+                .input_projection()
+                .is_some_and(|projection| projection.len() > MAX_PATTERN_VERTICES)
             || aggregate
                 .evaluation_key_columns()
                 .len()
@@ -143,7 +145,10 @@ impl SpillAggregateDefinition {
     }
 
     pub fn input_width(&self) -> usize {
-        self.aggregate.input_pattern().columns().len()
+        self.aggregate.input_projection().map_or_else(
+            || self.aggregate.input_pattern().columns().len(),
+            |projection| projection.len(),
+        )
     }
     pub fn group_key_columns(&self) -> &[usize] {
         self.aggregate.group_key_columns()

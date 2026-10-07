@@ -71,6 +71,106 @@ async fn aggregate_contents(
 }
 
 #[test]
+fn computed_vertex_and_edge_inputs_partition_the_native_projected_schema() {
+    let ((), report) = run_async_under_lab(0x5ba1_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for delta in [
+            CanonicalScalar::Int(1),
+            CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.25)),
+        ] {
+            let params = GqlParameters::new()
+                .with_map(
+                    "weights",
+                    vec![("delta".into(), GraphValue::Scalar(delta.clone()))],
+                )
+                .unwrap();
+            for (case, text) in [
+                "MATCH (n:L) RETURN n.p%3 AS category,COUNT(*) AS rows,SUM(n.p*3+$weights.delta) AS total,AVG(n.p+$weights.delta) AS average GROUP BY n.p%3 ORDER BY category",
+                "MATCH (n:L) RETURN COUNT(*) AS rows GROUP BY n.p%3 HAVING SUM(n.p+$weights.delta)>0 ORDER BY AVG(n.p+$weights.delta) DESC SKIP 1 LIMIT 1",
+                "MATCH (a)-[e:R]->(b) RETURN e.p%3 AS category,SUM(e.q*$weights.delta) AS total,AVG(b.p+$weights.delta) AS average GROUP BY e.p%3 ORDER BY total DESC",
+                "MATCH (a)-[e:R]-(b) RETURN a.p%3 AS category,COUNT(*) AS rows,SUM(b.p+$weights.delta) AS total GROUP BY a.p%3 ORDER BY category",
+            ].into_iter().enumerate() {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+                let ordinary = prepared.stream_aggregate_in_view(&view, &cx, &params, policy()).unwrap();
+                let columns = ordinary.columns().to_vec();
+                let expected = ordinary.collect::<Result<Vec<_>, _>>().unwrap();
+                if case == 0 && delta == CanonicalScalar::Int(1) {
+                    assert_eq!(expected.iter().map(|row| row.values()[0].clone()).collect::<Vec<_>>(), vec![GraphAggregateValue::Count(24), GraphAggregateValue::Count(24), GraphAggregateValue::Count(16)]);
+                    assert_eq!(expected.iter().map(|row| row.values()[1].clone()).collect::<Vec<_>>(), vec![GraphAggregateValue::Integer(240), GraphAggregateValue::Integer(312), GraphAggregateValue::Integer(184)]);
+                }
+                let pool = MemoryPool::new(4_000_000, 0).unwrap();
+                let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+                let (spool, _) = prepared.spool_aggregate_in_view(
+                    &view, &cx, &params,
+                    GqlQueryPolicy::new(10_000, expected.len() as u64, 100_000_000, 1_000_000),
+                    &mut a, &mut b, &mut c, 1, 256, 2, 128, 257, 4096, 1000, 100_000_000, None,
+                ).await.unwrap();
+                assert!(b.stats().published_runs > 0, "{text}");
+                assert_eq!(spool.columns(), columns);
+                assert_eq!(spool.row_count(), expected.len() as u64);
+                assert_eq!(aggregate_contents(&spool, &mut c, &cx).await, expected, "{text}");
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_input_failure_cannot_hide_behind_an_empty_or_full_result_page() {
+    let ((), report) = run_async_under_lab(0x5ba1_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for text in [
+            "MATCH (n:L) RETURN n.p AS category,SUM(10/(n.p-7)) AS total GROUP BY n.p ORDER BY category LIMIT 0",
+            "MATCH (n:L) RETURN n.p AS category,SUM(10/(n.p-7)) AS total GROUP BY n.p ORDER BY category LIMIT 1",
+            "MATCH (a)-[e:R]->(b) RETURN e.p AS category,SUM(10/(e.p-7)) AS total GROUP BY e.p LIMIT 0",
+        ] {
+            let pool = MemoryPool::new(4_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let result = plan(text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    2,
+                    128,
+                    257,
+                    4096,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(NativeAggregateSpoolError::Execute(error))
+                if matches!(*error, GqlQueryError::Source(fgdb_gql::GraphAggregateError::InputExpression { row: 0, error, .. })
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
+                "{text}"
+            );
+            assert_eq!(c.stats().published_runs, 0);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn grace_partitions_match_native_numeric_vertex_edge_and_historical_results() {
     let ((), report) = run_async_under_lab(0x5ba1_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -83,6 +83,13 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
                 return Ok(None);
             };
             let meter = &mut self.input.meter;
+            // The join owns source matching and observation; its complete
+            // binding passes through the same native projection VM as the
+            // resident reducer before any aggregate partition receives it.
+            let row = self
+                .definition
+                .aggregate
+                .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?;
             self.definition.validate_input(&row, &mut |event| {
                 meter.event(value_event(event)).map_err(lift)
             })?;

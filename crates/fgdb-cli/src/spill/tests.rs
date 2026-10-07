@@ -286,6 +286,57 @@ fn external_group_result_clauses_keep_hidden_cells_private_and_select_final_rows
 }
 
 #[test]
+fn external_computed_aggregate_inputs_match_eager_rows_and_retire_failed_scratch() {
+    let ((), report) = run_async_under_lab(0x5b11e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        for text in [
+            "MATCH (n) RETURN n.p%3 AS bucket,SUM(n.p*2) AS total,AVG(n.p+1) AS average GROUP BY n.p%3 ORDER BY total DESC",
+            "MATCH (n) RETURN COUNT(*) AS count GROUP BY n.p%3 HAVING SUM(n.p*2)>0 ORDER BY AVG(n.p+1) DESC SKIP 1 LIMIT 1",
+            "MATCH (a)-[e:R]->(b) RETURN b.p%3 AS bucket,SUM(a.p+b.p) AS total GROUP BY b.p%3 ORDER BY bucket",
+        ] {
+            let mut options = options(&directory, text);
+            options.spill.memory = Some(262_144);
+            let eager = view
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 1, "rows", true, &mut expected));
+            options.budget.rows = Some(rows(&expected).len() as u64);
+            let mut actual = Vec::new();
+            okay(run(&view, &cx, &options, None, true, &mut actual).await);
+            assert_eq!(rows(&actual), rows(&expected), "{text}");
+            empty(&directory);
+        }
+        for text in [
+            "MATCH (n) RETURN SUM(10/(n.p-12)) AS total LIMIT 0",
+            "MATCH (n) RETURN n.p AS bucket,SUM(10/(n.p-12)) AS total GROUP BY n.p ORDER BY bucket LIMIT 1",
+            "MATCH (a)-[e:R]->(b) RETURN SUM(10/(b.p-4)) AS total LIMIT 0",
+        ] {
+            let mut options = options(&directory, text);
+            options.spill.memory = Some(262_144);
+            let mut output = Vec::new();
+            let error = run(&view, &cx, &options, None, true, &mut output)
+                .await
+                .expect_err("all computed occurrences must be checked before delivery");
+            assert_eq!(error.code, 3);
+            assert!(output.is_empty());
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn external_grouping_enforces_full_input_and_final_result_allowances() {
     let ((), report) = run_async_under_lab(0x5b11a, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

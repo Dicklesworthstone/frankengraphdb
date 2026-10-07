@@ -53,7 +53,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::Execute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection, computed inputs or computed output expressions"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection or computed output expressions"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -556,8 +556,10 @@ impl PreparedNativeRead {
     /// bounded grace partitions of input occurrences. This does not run the
     /// resident aggregate cursor or materialize completed groups before spill.
     ///
-    /// The compiler refuses DISTINCT, COLLECT, computed/relational input and
-    /// computed output expressions before source opening. Every partition
+    /// Row-local computed inputs use the ordinary projection VM before
+    /// partitioning; every declared input column runs, including hidden ones.
+    /// The compiler refuses DISTINCT, COLLECT, relational input and computed
+    /// output expressions before source opening. Every partition
     /// preserves original occurrence order within each group. All groups finish
     /// before HAVING, exact typed ordering, visible projection and SKIP/LIMIT.
     /// Hidden keys and clause-only summaries remain private until this stage.
@@ -578,8 +580,9 @@ impl PreparedNativeRead {
     /// max_input_rows bounds matched occurrences, independently of result quota.
     /// The source/reducer share one cumulative GQL meter; max_work_units covers
     /// additional partition, codec, sort and copy work. The decoded snapshot and
-    /// one source-projected row are governed by native source policies, not the
-    /// scratch pool. Artifact-bound scalars use only the supplied resolver.
+    /// one source/computed row are governed by native source and expression
+    /// policies, not the scratch pool. Artifact-bound scalars use only the
+    /// supplied resolver.
     /// The completed handle always belongs to destination, even after sorting.
     #[allow(clippy::too_many_arguments)]
     pub fn spool_aggregate_in_view<'q, A, B, C>(

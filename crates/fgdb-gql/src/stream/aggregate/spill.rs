@@ -98,6 +98,16 @@ impl<S: VertexScanSource, F> VertexSpillAggregateCursor<S, F> {
                 return Ok(None);
             };
             let meter = &mut self.input.meter;
+            // Complete every native computed column before validation and
+            // partitioning. Aggregate positions name this projected schema,
+            // not the graph source columns, and private rows spend no output
+            // allowance. Plain definitions still move their row unchanged.
+            let row = self
+                .definition
+                .aggregate
+                .evaluate_streamed_input(row, &mut |event| {
+                    meter.event(input_event(event)).map_err(lift)
+                })?;
             self.definition
                 .validate_input(&row, &mut |event| meter.event(event).map_err(lift))?;
             Ok(Some(row))
