@@ -87,7 +87,8 @@ pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 mod buffered_read;
 pub use buffered_read::{
     BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
-    BufferedValue,
+    BufferedScanError, BufferedScanEvent, BufferedValue, BufferedVertexCandidate,
+    BufferedVertexScan,
 };
 
 /// Directory holding a database's Strata blocks.

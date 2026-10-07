@@ -5,9 +5,12 @@ use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::edge_props::encode_property_patch;
 use fgdb_strata::root::{BlockRef, PartitionRoot, PatchRef};
-use fgdb_strata::store::{BlockStore, BufferedReadError, BufferedReadLimits, StoreError};
+use fgdb_strata::store::{
+    BlockStore, BufferedReadError, BufferedReadLimits, BufferedScanError, BufferedScanEvent,
+    StoreError,
+};
 use fgdb_strata::tiered::buffer::{BufferError, BufferLimits};
-use fgdb_strata::tiered::memory::MemoryPool;
+use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
 use fgdb_strata::vertex::{VertexRow, encode_patch};
 use fgdb_strata::{
     AdjacencyEntry, PartitionRootVersion, encode_block, encode_block_with_properties,
@@ -76,6 +79,73 @@ fn vertex(created: u64, retired: Option<u64>, value: i64) -> VertexRow {
         labels: vec![LabelId(9)],
         props: vec![(PropertyKeyId(11), CanonicalScalar::Int(value))],
     }
+}
+
+fn scan_vertex(vid: u128, created: u64, retired: Option<u64>, value: i64) -> VertexRow {
+    VertexRow {
+        vid: VId(vid),
+        birth_ordinal: vid as u64,
+        ..vertex(created, retired, value)
+    }
+}
+
+async fn vertex_scan_fixture(
+    contexts: &PurposeContexts,
+    dir: &std::path::Path,
+) -> (BlockStore, PartitionRootVersion) {
+    let commit = contexts.commit();
+    let store = BlockStore::open(&commit, dir, KEY, NS).await.unwrap();
+    let mut patches = Vec::new();
+    for (rows, first, last) in [
+        (
+            vec![
+                scan_vertex(1, 1, None, 10),
+                scan_vertex(3, 2, None, 30),
+                scan_vertex(5, 4, None, 50),
+            ],
+            1,
+            4,
+        ),
+        (
+            vec![
+                scan_vertex(1, 1, Some(3), 10),
+                scan_vertex(1, 3, None, 11),
+                scan_vertex(2, 2, None, 20),
+                scan_vertex(3, 2, Some(4), 30),
+            ],
+            1,
+            4,
+        ),
+        (
+            vec![
+                scan_vertex(1, 3, Some(5), 11),
+                scan_vertex(1, 5, None, 12),
+                scan_vertex(4, 5, None, 40),
+            ],
+            3,
+            5,
+        ),
+    ] {
+        let patch = store
+            .put_patch(&commit, &encode_patch(&rows).unwrap())
+            .await
+            .unwrap();
+        patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(first),
+            last_seq: CommitSeq(last),
+        });
+    }
+    let root = PartitionRoot {
+        graph: GraphId(1),
+        branch: BranchId(2),
+        partition: 0,
+        published_at: CommitSeq(5),
+        blocks: vec![],
+        vertex_patches: patches,
+    };
+    let id = store.put_root(&commit, &root).await.unwrap();
+    (store, id)
 }
 
 async fn fixture(
@@ -250,6 +320,300 @@ fn cold_history_points_and_reverse_adjacency_survive_one_frame_refaults() {
             "answer owns its charge independently of the view"
         );
         drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_scan_merges_history_in_identity_order_and_reports_invisible_candidates() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let expected = [
+            vec![],
+            vec![scan_vertex(1, 1, Some(3), 10)],
+            vec![
+                scan_vertex(1, 1, Some(3), 10),
+                scan_vertex(2, 2, None, 20),
+                scan_vertex(3, 2, Some(4), 30),
+            ],
+            vec![
+                scan_vertex(1, 3, Some(5), 11),
+                scan_vertex(2, 2, None, 20),
+                scan_vertex(3, 2, Some(4), 30),
+            ],
+            vec![
+                scan_vertex(1, 3, Some(5), 11),
+                scan_vertex(2, 2, None, 20),
+                scan_vertex(5, 4, None, 50),
+            ],
+            vec![
+                scan_vertex(1, 5, None, 12),
+                scan_vertex(2, 2, None, 20),
+                scan_vertex(4, 5, None, 40),
+                scan_vertex(5, 4, None, 50),
+            ],
+        ];
+        for (cut, expected) in expected.into_iter().enumerate() {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(cut as u64)).unwrap();
+            assert_eq!(scan.snapshot_seq(), CommitSeq(cut as u64));
+            assert_eq!(scan.work_used(), 0, "construction does not visit history");
+            let mut events = 0usize;
+            let mut admitted = Vec::new();
+            let mut observe = |event| {
+                match event {
+                    BufferedScanEvent::Work => events += 1,
+                    BufferedScanEvent::Identity(vid) => admitted.push(vid),
+                }
+                Ok::<(), core::convert::Infallible>(())
+            };
+            let mut identities = Vec::new();
+            let mut visible = Vec::new();
+            while let Some(candidate) = scan.next_candidate_with(&cx, &mut observe).await.unwrap() {
+                identities.push(candidate.vid);
+                if let Some(row) = candidate.row {
+                    visible.push(row.as_ref().clone());
+                }
+            }
+            assert_eq!(identities, [VId(1), VId(2), VId(3), VId(4), VId(5)]);
+            assert_eq!(admitted, identities, "exactly one admission per identity");
+            assert_eq!(visible, expected, "historical cut {cut}");
+            assert!(events > identities.len());
+            assert_eq!(scan.work_used(), events);
+            assert!(events <= 3 + 10 * (256 + 2));
+            drop(scan);
+            assert_eq!(
+                pool.used(),
+                baseline,
+                "scan misses leave no resident frames"
+            );
+        }
+        assert!(view.stats().bypasses > 0);
+        assert_eq!(view.stats().evictions, 0);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut patches = Vec::new();
+        let count = 32usize;
+        for index in 1..=count {
+            let patch = store
+                .put_patch(
+                    &commit,
+                    &encode_patch(&[scan_vertex(index as u128, 1, None, index as i64)]).unwrap(),
+                )
+                .await
+                .unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            });
+        }
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(1),
+                    blocks: vec![],
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut bounded = limits();
+        // Linear admission suffices for the entire cursor. A point-read loop
+        // over every candidate would revisit 32 patches per output and refuse.
+        bounded.max_work = count * 4;
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), bounded)
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        drop(view.vertex_scan(&cx, CommitSeq(1)).unwrap());
+        assert_eq!(view.stats().misses, 0);
+        assert_eq!(pool.used(), baseline);
+        let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
+        let held = scan.next(&cx).await.unwrap().unwrap();
+        assert_eq!(held.vid, VId(1));
+        for index in 2..=count {
+            let row = scan.next(&cx).await.unwrap().unwrap();
+            assert_eq!(
+                row.as_ref(),
+                &scan_vertex(index as u128, 1, None, index as i64)
+            );
+        }
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        assert_eq!(scan.work_used(), count * 4);
+        drop(scan);
+        assert_eq!(view.stats().misses, count as u64);
+        assert_eq!(view.stats().bypasses, count as u64);
+        drop(view);
+        assert_eq!(pool.used(), held.charged_bytes());
+        drop(held);
+        assert_eq!(pool.used(), 0);
+
+        bounded.max_work -= 1;
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), bounded)
+            .await
+            .unwrap();
+        let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
+        for _ in 1..count {
+            assert!(scan.next(&cx).await.unwrap().is_some());
+        }
+        assert!(matches!(
+            scan.next(&cx).await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered source work",
+                requested: 128,
+                limit: 127,
+            })
+        ));
+        assert!(
+            scan.next(&cx).await.unwrap().is_none(),
+            "a work error fuses the cursor"
+        );
+        drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_scan_control_failure_at_every_source_event_fuses_and_refunds() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let total = {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            while scan.next(&cx).await.unwrap().is_some() {}
+            scan.work_used()
+        };
+        for fail_at in 0..total {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            let mut observed = 0usize;
+            let mut observe = |event| {
+                if event == BufferedScanEvent::Work {
+                    if observed == fail_at {
+                        return Err(fail_at);
+                    }
+                    observed += 1;
+                }
+                Ok(())
+            };
+            loop {
+                match scan.next_candidate_with(&cx, &mut observe).await {
+                    Ok(Some(_)) => {}
+                    Err(BufferedScanError::Control(at)) => {
+                        assert_eq!(at, fail_at);
+                        break;
+                    }
+                    other => panic!("expected control failure at {fail_at}, got {other:?}"),
+                }
+            }
+            assert_eq!(scan.work_used(), fail_at);
+            assert!(
+                scan.next_candidate_with(&cx, &mut observe)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline, "failed source event {fail_at}");
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_scan_heap_admission_and_corrupt_refault_never_expose_a_partial_winner() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let held = pool.reserve(&cx, pool.available() - 100).unwrap();
+        assert!(matches!(
+            view.vertex_scan(&cx, CommitSeq(5)),
+            Err(BufferedReadError::Buffer(BufferError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            )))
+        ));
+        assert_eq!(view.stats().misses, 0);
+        drop(held);
+        assert_eq!(pool.used(), baseline);
+        let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+        let mut observe = |event| match event {
+            BufferedScanEvent::Work => Ok(()),
+            BufferedScanEvent::Identity(vid) => {
+                assert_eq!(vid, VId(1));
+                Err(7u8)
+            }
+        };
+        assert!(matches!(
+            scan.next_candidate_with(&cx, &mut observe).await,
+            Err(BufferedScanError::Control(7))
+        ));
+        assert_eq!(scan.work_used(), 3, "only authenticated heads were visited");
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        drop(scan);
+        assert_eq!(
+            view.stats().misses,
+            0,
+            "identity admission precedes all payload reads"
+        );
+        assert_eq!(pool.used(), baseline);
+        assert!(matches!(
+            view.vertex_scan(&cx, CommitSeq(6)),
+            Err(BufferedReadError::BeyondPublication { .. })
+        ));
+        let path = store.path(view.root().vertex_patches[1].patch_id);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+        let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+        assert!(matches!(
+            scan.next(&cx).await,
+            Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+        ));
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        drop(scan);
+        assert_eq!(
+            pool.used(),
+            baseline,
+            "even the first patch's candidate was released"
+        );
+        drop(view);
         assert_eq!(pool.used(), 0);
     });
 }

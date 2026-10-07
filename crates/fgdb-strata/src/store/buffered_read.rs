@@ -14,13 +14,14 @@ use crate::tiered::buffer::{
     PreparedExtent, extent_checksum,
 };
 use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
-use crate::vertex::VertexRow;
+use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
 use asupersync::io::AsyncReadExt;
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 
 // One stored payload is at most 16 KiB, with at most 256 rows. This allowance
 // covers two encoded objects, their decoded vectors/scalars, temporary scalar
@@ -59,6 +60,8 @@ pub struct BufferedReadLimits {
     pub max_blocks: usize,
     pub max_vertex_patches: usize,
     /// Object visits plus decoded row visits, separately per open/read call.
+    /// A vertex scan also counts head initialization/consumption and shares
+    /// this one cumulative ceiling across every pull of the cursor.
     pub max_work: usize,
     pub buffer: BufferLimits,
 }
@@ -162,6 +165,13 @@ pub struct BufferedValue<T> {
     value: T,
     _charge: MemoryCharge,
 }
+impl<T> BufferedValue<T> {
+    /// The conservative reservation retained by this value. This is database
+    /// accounting, not allocator/RSS telemetry or permission to detach a clone.
+    pub const fn charged_bytes(&self) -> usize {
+        self._charge.bytes()
+    }
+}
 impl<T> AsRef<T> for BufferedValue<T> {
     fn as_ref(&self) -> &T {
         &self.value
@@ -186,6 +196,89 @@ struct BlockDescriptor {
     properties: Option<ExtentKey>,
 }
 
+#[derive(Clone, Copy)]
+struct PatchDescriptor {
+    extent: ExtentKey,
+    first: Option<(VId, CommitSeq)>,
+    rows: usize,
+}
+
+/// One canonical identity encountered by a buffered scan. Invisible identities
+/// still produce a candidate, so a query can account for its complete source
+/// work without inferring that every visited identity was a visible record.
+#[derive(Debug)]
+pub struct BufferedVertexCandidate {
+    pub vid: VId,
+    pub row: Option<BufferedValue<VertexRow>>,
+}
+
+/// One governed source boundary. Identity admission precedes that identity's
+/// history reads; a single mutable callback can share a Send query meter with
+/// the evaluator without shared interior borrows across an await.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferedScanEvent {
+    Work,
+    Identity(VId),
+}
+
+/// Keeps caller control failures distinct from storage/admission failures.
+#[derive(Debug)]
+pub enum BufferedScanError<C> {
+    Read(BufferedReadError),
+    Control(C),
+}
+
+impl<C> From<BufferedReadError> for BufferedScanError<C> {
+    fn from(error: BufferedReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl<C: core::fmt::Display> core::fmt::Display for BufferedScanError<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read(error) => error.fmt(f),
+            Self::Control(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<C: std::error::Error + 'static> std::error::Error for BufferedScanError<C> {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VertexScanHead {
+    vid: VId,
+    created_at: CommitSeq,
+    patch: usize,
+    row: usize,
+}
+
+struct DecodedVertexPatch {
+    patch: usize,
+    rows: VertexPatchRows,
+}
+
+/// A canonical k-way merge over an authenticated immutable patch generation.
+///
+/// The cursor retains one small head per patch and at most one decoded patch;
+/// it never constructs the full vertex directory or retains graph properties.
+/// A changed winning patch may refault, but every patch has at most
+/// `MAX_PATCH_ROWS` rows. For P patches and N stored row versions, the counted
+/// source events are bounded by P + N * (MAX_PATCH_ROWS + 2); heap maintenance
+/// takes O(N log P) comparisons. Scan misses bypass resident cache admission.
+/// Output rows retain their own reservations. A failed or dropped in-flight
+/// pull makes the cursor terminal, so no consumed history prefix can resume.
+pub struct BufferedVertexScan<'source, V: Vfs> {
+    partition: &'source mut BufferedPartition<V>,
+    as_of: CommitSeq,
+    heads: BinaryHeap<Reverse<VertexScanHead>>,
+    head_charge: Option<MemoryCharge>,
+    active: Option<BufferedValue<DecodedVertexPatch>>,
+    initialized: bool,
+    done: bool,
+    work: usize,
+}
+
 /// An owned authenticated source generation. Only cached/active extent handles
 /// pin bytes; this root descriptor never pins every graph payload in RAM.
 pub struct BufferedPartition<V: Vfs> {
@@ -193,7 +286,7 @@ pub struct BufferedPartition<V: Vfs> {
     root_id: PartitionRootVersion,
     root: PartitionRoot,
     blocks: Vec<BlockDescriptor>,
-    patches: Vec<ExtentKey>,
+    patches: Vec<PatchDescriptor>,
     buffer: ExtentBuffer,
     limits: BufferedReadLimits,
     _metadata: MemoryCharge,
@@ -408,7 +501,11 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     }
                     error => StoreError::MalformedRoot(error).into(),
                 })?;
-            patches.push(descriptor(reference.patch_id, &bytes)?);
+            patches.push(PatchDescriptor {
+                extent: descriptor(reference.patch_id, &bytes)?,
+                first: rows.first().map(|row| (row.vid, row.created_at)),
+                rows: rows.len(),
+            });
         }
         drop(walk);
         drop(history_charges);
@@ -441,6 +538,44 @@ impl<V: Vfs> BufferedPartition<V> {
         self.buffer.stats()
     }
 
+    /// Open a lazy canonical vertex cursor at one fixed historical cut. Heap
+    /// admission precedes allocation; source work starts on its first pull.
+    /// The patch heads come from initial authenticated admission, so opening a
+    /// cursor does not fault every payload merely to discover its first key.
+    pub fn vertex_scan(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+    ) -> Result<BufferedVertexScan<'_, V>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        let bytes = self
+            .patches
+            .len()
+            .checked_mul(HISTORY_ENTRY_BYTES)
+            .and_then(|bytes| bytes.checked_add(1024))
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        let head_charge = self.buffer.reserve_scratch(cx, bytes)?;
+        let mut heads = BinaryHeap::new();
+        heads
+            .try_reserve_exact(self.patches.len())
+            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
+        let allocated = heads
+            .capacity()
+            .checked_mul(size_of::<Reverse<VertexScanHead>>())
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        limit("buffered scan heap bytes", allocated, bytes)?;
+        Ok(BufferedVertexScan {
+            partition: self,
+            as_of,
+            heads,
+            head_charge: Some(head_charge),
+            active: None,
+            initialized: false,
+            done: false,
+            work: 0,
+        })
+    }
+
     fn begin(&self, cx: &QueryCx, as_of: CommitSeq) -> Result<(), BufferedReadError> {
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         if as_of.0 > self.root.published_at.0 {
@@ -456,8 +591,9 @@ impl<V: Vfs> BufferedPartition<V> {
         &mut self,
         cx: &QueryCx,
         key: ExtentKey,
+        admission: Admission,
     ) -> Result<BufferHandle, BufferedReadError> {
-        match self.buffer.prepare(cx, key, Admission::Normal)? {
+        match self.buffer.prepare(cx, key, admission)? {
             PreparedExtent::Resident(handle) => Ok(handle),
             PreparedExtent::Load(mut pending) => {
                 let mut file = cx
@@ -491,7 +627,7 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut usize,
     ) -> Result<(Vec<AdjacencyEntry>, Option<BlockProps>), BufferedReadError> {
         let descriptor = self.blocks[at];
-        let bytes = self.pin(cx, descriptor.block).await?;
+        let bytes = self.pin(cx, descriptor.block, Admission::Normal).await?;
         // These exact bytes were keyed-identity, span, digest and partition
         // admitted before the descriptor was issued; refault checks its full
         // extent checksum again before any decoded value can escape.
@@ -501,7 +637,7 @@ impl<V: Vfs> BufferedPartition<V> {
         let properties = match (patch, descriptor.properties) {
             (Some((_, locators)), Some(key)) => {
                 advance(work, 1, self.limits.max_work)?;
-                let bytes = self.pin(cx, key).await?;
+                let bytes = self.pin(cx, key, Admission::Normal).await?;
                 let rows = crate::edge_props::read_property_patch_inner(
                     self.store.k_oid.expose(),
                     self.store.namespace,
@@ -535,8 +671,8 @@ impl<V: Vfs> BufferedPartition<V> {
                 continue;
             }
             let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-            let key = self.patches[at];
-            let bytes = self.pin(cx, key).await?;
+            let key = self.patches[at].extent;
+            let bytes = self.pin(cx, key, Admission::Normal).await?;
             let rows = crate::root::resolve_patch_ref(
                 self.store.k_oid.expose(),
                 self.store.namespace,
@@ -673,6 +809,223 @@ impl<V: Vfs> BufferedPartition<V> {
             value,
             _charge: result_charge,
         })
+    }
+}
+
+impl<V: Vfs> BufferedVertexScan<'_, V> {
+    pub const fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
+
+    /// Cumulative admitted source events, never reset by a successful pull.
+    pub const fn work_used(&self) -> usize {
+        self.work
+    }
+
+    fn finish(&mut self) {
+        self.done = true;
+        self.active = None;
+        // Release the actual capacity before refunding its affine charge.
+        self.heads = BinaryHeap::new();
+        self.head_charge = None;
+    }
+
+    fn observe<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<(), BufferedScanError<C>> {
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let next = self
+            .work
+            .checked_add(1)
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        limit("buffered source work", next, self.partition.limits.max_work)?;
+        observe(BufferedScanEvent::Work).map_err(BufferedScanError::Control)?;
+        self.work = next;
+        Ok(())
+    }
+
+    async fn load_patch<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<(), BufferedScanError<C>> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.patch == at)
+        {
+            return Ok(());
+        }
+        let descriptor = self.partition.patches[at];
+        self.observe(cx, observe)?;
+        // The authenticated descriptor already knows the complete row count.
+        // Admit all decode visits before performing I/O or allocating rows.
+        for _ in 0..descriptor.rows {
+            self.observe(cx, observe)?;
+        }
+        self.active = None;
+        let charge = self
+            .partition
+            .buffer
+            .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
+            .map_err(BufferedReadError::Buffer)?;
+        let bytes = self
+            .partition
+            .pin(cx, descriptor.extent, Admission::ScanBypass)
+            .await?;
+        let rows = crate::root::resolve_patch_ref(
+            self.partition.store.k_oid.expose(),
+            self.partition.store.namespace,
+            at,
+            &self.partition.root.vertex_patches[at],
+            bytes.as_ref(),
+            self.partition.store.decode_resolver(),
+        )
+        .map_err(StoreError::MalformedRoot)
+        .map_err(BufferedReadError::from)?;
+        if rows.len() != descriptor.rows {
+            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
+        }
+        drop(bytes);
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        self.active = Some(BufferedValue {
+            value: DecodedVertexPatch { patch: at, rows },
+            _charge: charge,
+        });
+        Ok(())
+    }
+
+    async fn next_candidate_inner<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
+        if !self.initialized {
+            for at in 0..self.partition.patches.len() {
+                self.observe(cx, observe)?;
+                if let Some((vid, created_at)) = self.partition.patches[at].first {
+                    self.heads.push(Reverse(VertexScanHead {
+                        vid,
+                        created_at,
+                        patch: at,
+                        row: 0,
+                    }));
+                }
+            }
+            self.initialized = true;
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let Some(Reverse(first)) = self.heads.peek().copied() else {
+            return Ok(None);
+        };
+        // Candidate-cardinality admission precedes all of its history loads,
+        // including loads that would prove this identity invisible at the cut.
+        observe(BufferedScanEvent::Identity(first.vid)).map_err(BufferedScanError::Control)?;
+        let mut winning_row: Option<BufferedValue<VertexRow>> = None;
+        while let Some(Reverse(head)) = self.heads.peek().copied() {
+            if head.vid != first.vid {
+                break;
+            }
+            self.observe(cx, observe)?;
+            self.load_patch(cx, head.patch, observe).await?;
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+            let row = active
+                .rows
+                .get(head.row)
+                .ok_or_else(|| BufferedReadError::Buffer(BufferError::InvalidLoad))?;
+            if row.vid != head.vid || row.created_at != head.created_at {
+                return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
+            }
+            if row.created_at.0 <= self.as_of.0 {
+                // Heap order visits creation versions and then publication
+                // positions in ascending order. The final eligible statement
+                // therefore incorporates every later retirement restatement.
+                match winning_row.as_mut() {
+                    Some(winner) => winner.value = row.clone(),
+                    None => {
+                        let charge = self
+                            .partition
+                            .buffer
+                            .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
+                            .map_err(BufferedReadError::Buffer)?;
+                        winning_row = Some(BufferedValue {
+                            value: row.clone(),
+                            _charge: charge,
+                        });
+                    }
+                }
+            }
+            let next = active.rows.get(head.row + 1).map(|row| {
+                Reverse(VertexScanHead {
+                    vid: row.vid,
+                    created_at: row.created_at,
+                    patch: head.patch,
+                    row: head.row + 1,
+                })
+            });
+            self.heads.pop();
+            if let Some(next) = next {
+                self.heads.push(next);
+            }
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let row = winning_row.filter(|row| row.visible_at(self.as_of));
+        Ok(Some(BufferedVertexCandidate {
+            vid: first.vid,
+            row,
+        }))
+    }
+
+    /// Yield the next identity, including an invisible identity with no row.
+    /// The callback runs before each source work event and can share one query
+    /// meter with the evaluator. Neither callback failure nor a failed source
+    /// read returns a partial winning row. Identity runs exactly once before
+    /// any history read or output allocation for the next identity.
+    pub async fn next_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
+        if self.done {
+            self.finish();
+            return Ok(None);
+        }
+        // Leave terminal set while the future can suspend. Dropping that
+        // future must never restart after partially consuming one identity.
+        self.done = true;
+        let result = self.next_candidate_inner(cx, observe).await;
+        if matches!(result, Ok(Some(_))) && !self.heads.is_empty() {
+            self.done = false;
+        } else {
+            self.finish();
+        }
+        result
+    }
+
+    /// Yield visible rows in ascending stable VId order.
+    pub async fn next(
+        &mut self,
+        cx: &QueryCx,
+    ) -> Result<Option<BufferedValue<VertexRow>>, BufferedReadError> {
+        let mut observe = |_| Ok::<(), core::convert::Infallible>(());
+        loop {
+            match self.next_candidate_with(cx, &mut observe).await {
+                Ok(Some(candidate)) => {
+                    if let Some(row) = candidate.row {
+                        return Ok(Some(row));
+                    }
+                }
+                Ok(None) => return Ok(None),
+                Err(BufferedScanError::Read(error)) => return Err(error),
+                Err(BufferedScanError::Control(never)) => match never {},
+            }
+        }
     }
 }
 
