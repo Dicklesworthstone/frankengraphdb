@@ -10,9 +10,11 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::{Client, ClientError};
-use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols, issue_token, issuer};
+use fgdb_server::{
+    DatabaseConfig, Server, ServerLimits, Symbols, attenuate_token, issue_token, issuer,
+};
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
-use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
+use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -913,6 +915,124 @@ fn writes_and_reads_round_trip_with_flow_control_refusals_and_drain() {
             matches!(after, ClientError::Closed | ClientError::Transport(_)),
             "{after:?}"
         );
+    });
+}
+
+/// Run `fgdbd attenuate <flags>` with `stdin`; return (exit code, stdout).
+fn fgdbd_attenuate(flags: &[&str], stdin: &str) -> (Option<i32>, String) {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fgdbd"))
+        .arg("attenuate")
+        .args(flags)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn attenuated_tokens_only_narrow_compose_and_need_no_key() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "attenuate").await;
+        let full = token(&grant(Rights::ReadWrite));
+        let mut writer = Client::connect(cx, addr, full.clone()).await.unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name: 'Ann', age: 30})-[:KNOWS]->(:Person {name: 'Bob', age: 25})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        writer.close(cx).await.unwrap();
+        let count = async |token: Vec<u8>| {
+            let mut client = Client::connect(cx, addr, token).await.unwrap();
+            client.select(cx, "social").await.unwrap();
+            let people = client
+                .execute(
+                    cx,
+                    ExecuteMode::Read,
+                    "MATCH (n) RETURN count(n) AS n",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            let denied = client
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (:Person {name: 'Eve'})",
+                    vec![],
+                )
+                .await
+                .map_err(server_code);
+            client.close(cx).await.unwrap();
+            (people.rows, denied.err())
+        };
+
+        // Through the binary, as an operator delegates: no key file, a hex
+        // token on stdin, a narrower hex token on stdout.
+        let (code, out) = fgdbd_attenuate(&["--rights", "read"], &hex(&full));
+        assert_eq!(code, Some(0));
+        let read_only = fgdb_protocol::json::bytes_from_hex(out.trim()).unwrap();
+        assert_eq!(
+            count(read_only.clone()).await,
+            (
+                vec![vec![WireValue::Count(2)]],
+                Some(ErrorCode::PermissionDenied)
+            )
+        );
+
+        // A caveat can only narrow: asking a read-only token for read-write
+        // leaves it read-only.
+        let asked_wider =
+            attenuate_token(&read_only, &[Restriction::Rights(Rights::ReadWrite)]).unwrap();
+        assert_eq!(
+            count(asked_wider).await.1,
+            Some(ErrorCode::PermissionDenied)
+        );
+
+        // Scopes compose by intersection: Person+Company, then Company alone,
+        // observes no Person vertex at all.
+        let both = attenuate_token(
+            &full,
+            &[Restriction::Labels(Scope::only([LabelId(1), LabelId(2)]))],
+        )
+        .unwrap();
+        assert_eq!(count(both.clone()).await.0, vec![vec![WireValue::Count(2)]]);
+        let (code, out) = fgdbd_attenuate(&["--allow-label", "2"], &hex(&both));
+        assert_eq!(code, Some(0));
+        let company = fgdb_protocol::json::bytes_from_hex(out.trim()).unwrap();
+        assert_eq!(count(company).await.0, vec![vec![WireValue::Count(0)]]);
+
+        // Refusals print nothing: no flag, a malformed token, junk on stdin.
+        assert_eq!(fgdbd_attenuate(&[], &hex(&full)), (Some(2), String::new()));
+        assert_eq!(
+            fgdbd_attenuate(&["--rights", "read"], "abcd"),
+            (Some(2), String::new())
+        );
+        assert_eq!(
+            fgdbd_attenuate(&["--rights", "read"], "not hex"),
+            (Some(2), String::new())
+        );
+        assert!(attenuate_token(b"junk", &[Restriction::MaxRows(1)]).is_err());
+
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
     });
 }
 

@@ -9,7 +9,8 @@ use asupersync::net::TcpListener;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
 use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols};
-use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
+use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -29,6 +30,10 @@ USAGE:
       [--rights read|write|read-write] [--expires-in <seconds>]
       [--allow-label <u32>]... [--allow-relation <u32>]... [--allow-property <u32>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]
+  fgdbd attenuate [--rights read|write|read-write] [--expires-in <seconds>]
+      [--not-before-in <seconds>] [--allow-label <u32>]... [--allow-relation <u32>]...
+      [--allow-property <u32>]... [--deny-property <u32>]...
+      [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]   < token.hex
   fgdbd keygen --database <path> | --issuer <path>
   fgdbd help
 
@@ -70,6 +75,14 @@ relation and property; any --allow-* flag restricts that kind to the listed
 ids. Defaults: --rights read, --expires-in 86400, limits 1000000 nodes,
 100000000 work units, 1000000 rows. Bump --policy-epoch on serve and token to
 revoke every token minted under the old epoch.
+
+attenuate reads one hex token on stdin and prints a narrower one as hex. Each
+flag appends a caveat that every later admission must also satisfy, so it can
+only take authority away: --allow-* intersects a scope, --deny-property hides
+those properties, --rights and the limits can only lower, and --expires-in /
+--not-before-in bound the validity window from now. It needs no key file and
+verifies nothing; the server authenticates the result. At least one flag is
+required. Delegate this way: mint once with token, attenuate per holder.
 
 keygen writes a fresh owner-only (0600) key file: three lines for a database
 (the fgdb CLI's --key-file format) or one line for an issuer. It refuses to
@@ -136,6 +149,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
             runtime.block_on(token(&root, options))
         }
         "keygen" => runtime.block_on(keygen(&root, &args[1..])),
+        "attenuate" => attenuate(AttenuateOptions::parse(&args[1..])?),
         _ => Err(Failure::usage("unknown subcommand; use fgdbd help")),
     }
 }
@@ -557,6 +571,164 @@ async fn token(cx: &Cx, options: TokenOptions) -> Result<(), Failure> {
     };
     let token = fgdb_server::issue_token(&authority, &grant).map_err(Failure::usage)?;
     let hex: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!("{hex}");
+    Ok(())
+}
+
+/// `fgdbd attenuate` flags. Each restriction kind may be given once (the
+/// --allow-*/--deny-* lists accumulate into one caveat per kind).
+#[derive(Default)]
+struct AttenuateOptions {
+    rights: Option<Rights>,
+    expires_in_seconds: Option<u64>,
+    not_before_in_seconds: Option<u64>,
+    labels: Option<Vec<u32>>,
+    relations: Option<Vec<u32>>,
+    properties: Option<Vec<u32>>,
+    deny_properties: Option<Vec<u32>>,
+    max_nodes: Option<u64>,
+    max_work: Option<u64>,
+    max_rows: Option<u64>,
+}
+
+impl AttenuateOptions {
+    fn parse(args: &[String]) -> Result<Self, Failure> {
+        let mut options = Self::default();
+        let mut at = 0;
+        while at < args.len() {
+            let flag = args[at].as_str();
+            match flag {
+                "--rights" if options.rights.is_none() => {
+                    options.rights = Some(match value(args, &mut at, flag)? {
+                        "read" => Rights::Read,
+                        "write" => Rights::Write,
+                        "read-write" => Rights::ReadWrite,
+                        _ => return Err(Failure::usage("--rights is read, write or read-write")),
+                    });
+                }
+                "--expires-in" if options.expires_in_seconds.is_none() => {
+                    let seconds = number(value(args, &mut at, flag)?, flag)?;
+                    if seconds == 0 {
+                        return Err(Failure::usage("--expires-in must be positive"));
+                    }
+                    options.expires_in_seconds = Some(seconds);
+                }
+                "--not-before-in" if options.not_before_in_seconds.is_none() => {
+                    options.not_before_in_seconds =
+                        Some(number(value(args, &mut at, flag)?, flag)?);
+                }
+                "--allow-label" => options
+                    .labels
+                    .get_or_insert_with(Vec::new)
+                    .push(number(value(args, &mut at, flag)?, flag)?),
+                "--allow-relation" => options
+                    .relations
+                    .get_or_insert_with(Vec::new)
+                    .push(number(value(args, &mut at, flag)?, flag)?),
+                "--allow-property" => options
+                    .properties
+                    .get_or_insert_with(Vec::new)
+                    .push(number(value(args, &mut at, flag)?, flag)?),
+                "--deny-property" => options
+                    .deny_properties
+                    .get_or_insert_with(Vec::new)
+                    .push(number(value(args, &mut at, flag)?, flag)?),
+                "--max-nodes" if options.max_nodes.is_none() => {
+                    options.max_nodes = Some(number(value(args, &mut at, flag)?, flag)?);
+                }
+                "--max-work" if options.max_work.is_none() => {
+                    options.max_work = Some(number(value(args, &mut at, flag)?, flag)?);
+                }
+                "--max-rows" if options.max_rows.is_none() => {
+                    options.max_rows = Some(number(value(args, &mut at, flag)?, flag)?);
+                }
+                _ => return Err(Failure::usage(format!("unknown or duplicate flag {flag}"))),
+            }
+            at += 1;
+        }
+        if options.restrictions(0)?.is_empty() {
+            return Err(Failure::usage(
+                "attenuate needs at least one restriction flag",
+            ));
+        }
+        Ok(options)
+    }
+
+    /// The caveats to append, with validity bounds measured from `now_ms`.
+    fn restrictions(&self, now_ms: u64) -> Result<Vec<Restriction>, Failure> {
+        fn ids<T: Ord>(ids: &[u32], wrap: impl Fn(u64) -> T) -> BTreeSet<T> {
+            ids.iter().map(|id| wrap(u64::from(*id))).collect()
+        }
+        let from_now = |seconds: u64, flag: &str| {
+            seconds
+                .checked_mul(1000)
+                .and_then(|ms| now_ms.checked_add(ms))
+                .ok_or_else(|| Failure::usage(format!("{flag} is out of range")))
+        };
+        let mut out = Vec::new();
+        if let Some(rights) = self.rights {
+            out.push(Restriction::Rights(rights));
+        }
+        if let Some(labels) = &self.labels {
+            out.push(Restriction::Labels(Scope::Only(ids(labels, LabelId))));
+        }
+        if let Some(relations) = &self.relations {
+            out.push(Restriction::Relations(Scope::Only(ids(
+                relations, RelationId,
+            ))));
+        }
+        if let Some(properties) = &self.properties {
+            out.push(Restriction::Properties(Scope::Only(ids(
+                properties,
+                PropertyKeyId,
+            ))));
+        }
+        if let Some(denied) = &self.deny_properties {
+            out.push(Restriction::DenyProperties(ids(denied, PropertyKeyId)));
+        }
+        if let Some(limit) = self.max_nodes {
+            out.push(Restriction::MaxNodes(limit));
+        }
+        if let Some(limit) = self.max_work {
+            out.push(Restriction::MaxWork(limit));
+        }
+        if let Some(limit) = self.max_rows {
+            out.push(Restriction::MaxRows(limit));
+        }
+        if let Some(seconds) = self.expires_in_seconds {
+            out.push(Restriction::ExpiresBefore(from_now(
+                seconds,
+                "--expires-in",
+            )?));
+        }
+        if let Some(seconds) = self.not_before_in_seconds {
+            out.push(Restriction::NotBefore(from_now(
+                seconds,
+                "--not-before-in",
+            )?));
+        }
+        Ok(out)
+    }
+}
+
+fn attenuate(options: AttenuateOptions) -> Result<(), Failure> {
+    use std::io::Read as _;
+    // A token is a few KiB of hex; read a bounded prefix and refuse the rest.
+    let mut input = String::new();
+    std::io::stdin()
+        .lock()
+        .take(1 << 20)
+        .read_to_string(&mut input)
+        .map_err(Failure::io)?;
+    let token = fgdb_protocol::json::bytes_from_hex(input.trim())
+        .map_err(|_| Failure::usage("attenuate reads one hex token on stdin"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(Failure::io)?;
+    let now_ms = u64::try_from(now.as_millis()).map_err(Failure::io)?;
+    let narrowed = fgdb_server::attenuate_token(&token, &options.restrictions(now_ms)?)
+        .map_err(|error| Failure::usage(format!("token refused: {error:?}")))?;
+    let hex: String = narrowed.iter().map(|byte| format!("{byte:02x}")).collect();
     println!("{hex}");
     Ok(())
 }

@@ -81,7 +81,7 @@ use fgdb_gql::{GqlQueryPolicy, GraphWriteProgramPolicy};
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::PurposeContexts;
-use fgdb_warden::{Authority, CapabilityToken, Grant};
+use fgdb_warden::{Authority, CapabilityToken, Grant, Restriction};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -203,6 +203,21 @@ pub fn issuer(
 /// Mint one capability token for `grant`, scoped to [`TRUNK`].
 pub fn issue_token(authority: &Authority, grant: &Grant) -> Result<Vec<u8>, fgdb_warden::Error> {
     Ok(authority.issue_at(grant, unix_millis())?.encode())
+}
+
+/// Delegate a narrower token offline (`fgdbd attenuate`): append each
+/// restriction as a caveat. No issuer key is needed and nothing is
+/// authenticated here; a caveat can only narrow, because admission requires
+/// every caveat to hold. A malformed or oversized token is refused.
+pub fn attenuate_token(
+    token: &[u8],
+    restrictions: &[Restriction],
+) -> Result<Vec<u8>, fgdb_warden::Error> {
+    let mut token = CapabilityToken::decode(token)?;
+    for restriction in restrictions {
+        token = token.attenuate(restriction.clone())?;
+    }
+    Ok(token.encode())
 }
 
 #[derive(Debug)]
