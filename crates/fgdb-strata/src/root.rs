@@ -1589,7 +1589,16 @@ impl EdgeHistoryValidator {
                 created_at: entry.created_at,
             };
             let key = (entry.eid, entry.created_at);
-            if let Some(existing) = self.statements.get(&key) {
+            // Most EIds carry one statement, so first ask whether this one has
+            // any: a single narrow search. With none there is no restatement,
+            // predecessor or successor to check, and the entry costs that
+            // search plus the insert instead of four tree searches.
+            let chain_known = self
+                .statements
+                .range((entry.eid, CommitSeq(0))..=(entry.eid, CommitSeq(u64::MAX)))
+                .next()
+                .is_some();
+            if chain_known && let Some(existing) = self.statements.get(&key) {
                 // A restatement of one exact statement: birth fields must
                 // byte-match, and the only lawful change is live-to-retired.
                 if birth(existing) != birth(entry) {
@@ -1608,7 +1617,7 @@ impl EdgeHistoryValidator {
                         found: entry.retired_at,
                     });
                 }
-            } else {
+            } else if chain_known {
                 // A NEW statement must extend its EId's chain contiguously —
                 // begin exactly where the predecessor retired (a gap is a
                 // resurrection, an overlap is aliasing) and carry the SAME
