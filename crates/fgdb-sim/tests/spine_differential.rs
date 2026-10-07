@@ -1047,7 +1047,7 @@ fn agreement_survives_a_reopen() {
 }
 
 /// Independent reconstructions of the derived delta window must agree: the
-/// engine rebuilds `LocalDeltaBatchIndex` from the recovered chain at open,
+/// engine materializes `LocalDeltaBatchIndex` from the recovered chain on demand,
 /// and `fgdb_sim::replay` inserts in the same walk. They share nothing but
 /// bytes on disk. A window the engine invented in memory would diverge.
 #[test]
@@ -1058,9 +1058,13 @@ fn the_reopened_delta_index_equals_the_independent_replay() {
         let _ = write_history(cx, &dir).await;
 
         let (engine_index, engine_seqs, engine_frontier) = {
-            let engine = Database::open(cx, &dir, engine_keys())
+            let mut engine = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("reopens");
+            engine
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("the independent delta comparison requests complete history");
             let engine_index = engine.delta_index().expect("healthy rebuilt index").clone();
             let engine_seqs: Vec<_> = engine
                 .delta_since(CommitSeq::ORIGIN)
@@ -1294,9 +1298,13 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             drop(db);
 
             // ENGINE SIDE: only the directory and keys cross the reopen.
-            let engine = Database::open(cx, &dir, engine_keys())
+            let mut engine = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("authoritative reopen recovers the durable commit");
+            engine
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("the recovery oracle requests the complete committed suffix");
             let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("reads");
             let engine_vertices = engine.vertices().expect("reads");
             let engine_edges = engine.edges().expect("reads");
@@ -2831,6 +2839,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("a mid-history reopen rebuilds and continues");
+                    db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                        .await
+                        .expect("compare the complete independently reconstructed delta index");
                     assert_eq!(
                         db.delta_index().expect("reads"),
                         &incremental_index,
@@ -2856,6 +2867,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("the checkpoint-selected session resumes");
+                    db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                        .await
+                        .expect("retain the whole transcript for the final differential");
                 }
                 if round == 6 {
                     // Consolidate mid-history: every epoch comparison below
@@ -3184,9 +3198,13 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             let retained = db.element_versions().expect("reads").clone();
             let retained_index = db.delta_index().expect("reads").clone();
             drop(db);
-            let reopened = Database::open(cx, &dir, engine_keys())
+            let mut reopened = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("reopens on the compacted generation");
+            reopened
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("compare the full post-compaction transcript");
             assert_eq!(
                 reopened.element_versions().expect("reads"),
                 &retained,

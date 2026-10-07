@@ -317,6 +317,9 @@ fn committed_view_tracks_atomic_writes_cascades_and_recovered_history() {
                 .unwrap()
                 .is_none()
         );
+        db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+            .await
+            .unwrap();
         assert_eq!(Pipeline::replay(db.delta_index().unwrap()), pipeline);
         check(&db, &pipeline);
         // A same-commit new left AND right require the derivative cross term.

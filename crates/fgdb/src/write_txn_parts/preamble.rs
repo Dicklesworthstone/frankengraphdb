@@ -11,13 +11,43 @@ use fgdb_types::{
 };
 
 /// Per-open-handle reservations, never persisted independently of Chronicle.
-/// The durable floor is refreshed from committed delta rows before allocation.
+/// Open seeds the durable floor from all admitted partition identities; later
+/// committed delta rows advance it before allocation.
 /// Aborted work does not rewind reservations within this writer lifetime.
 #[derive(Default)]
 pub(crate) struct IdentityAllocation {
     frontier: CommitSeq,
     vertex: u128,
     edge: u128,
+}
+
+impl IdentityAllocation {
+    pub(crate) fn from_partition(
+        cx: &CommitCx,
+        snapshot: &crate::Snapshot,
+    ) -> Result<Self, crate::RebuildError> {
+        let mut allocation = Self {
+            frontier: snapshot.frontier,
+            ..Self::default()
+        };
+        // Include every retained version, not just currently visible rows:
+        // deletion and compaction must never reissue a once-durable identity.
+        for patch in &snapshot.patches {
+            cx.checkpoint().map_err(crate::RebuildError::Interrupted)?;
+            // VertexPatchRows proves canonical (VId, sequence) order.
+            if let Some(row) = patch.last() {
+                allocation.vertex = allocation.vertex.max(row.vid.0);
+            }
+        }
+        for block in &snapshot.blocks {
+            cx.checkpoint().map_err(crate::RebuildError::Interrupted)?;
+            // One admitted block is bounded by the storage format's row cap.
+            for row in block {
+                allocation.edge = allocation.edge.max(row.eid.0);
+            }
+        }
+        Ok(allocation)
+    }
 }
 
 /// The error of a governed WriteTxn GQL entry point: the statement family's

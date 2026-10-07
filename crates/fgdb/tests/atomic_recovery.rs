@@ -106,7 +106,8 @@ fn marker_boundary_recovers_both_relations_or_neither_including_torn_tail() {
             if tear {
                 fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
             }
-            let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            let mut reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            reopened.ensure_delta_window(&cx, basis).await.unwrap();
             let expected_seq = CommitSeq(basis.0 + u64::from(committed));
             assert_eq!(reopened.frontier().unwrap(), expected_seq, "{name}");
             assert_eq!(

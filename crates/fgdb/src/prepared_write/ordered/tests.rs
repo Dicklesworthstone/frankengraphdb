@@ -431,6 +431,7 @@ fn ordered_programs_recover_all_or_none_at_the_existing_marker_boundary() {
             let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
                 .await
                 .unwrap();
+            reopened.ensure_delta_window(&cx, basis).await.unwrap();
             assert_eq!(
                 reopened.frontier().unwrap(),
                 CommitSeq(basis.0 + u64::from(committed))

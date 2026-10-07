@@ -1,4 +1,4 @@
-//! Allocation follows committed creation history, not just the live graph.
+//! Allocation follows retained partition history, not just the live graph.
 //! Never-committed reservations are not claimed to be durable leases.
 
 use asupersync::lab::run_async_under_lab;
@@ -158,6 +158,85 @@ fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
             );
             let edge = db.edge(EId(9002)).unwrap().unwrap();
             assert_eq!((edge.entry.src, edge.entry.dst), (VId(1002), VId(1003)));
+        }
+    });
+}
+
+#[test]
+fn same_commit_folded_creations_may_reissue_after_reopen_without_reissuing_tombstones() {
+    under_lab(0xcd79, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        for rebuilding in [false, true] {
+            let path = scratch(if rebuilding {
+                "fold-rebuild"
+            } else {
+                "fold-open"
+            });
+            let mut db = Database::create(&commit, &path, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![], vec![]);
+            seed.create_vertex(VId(7), vec![], vec![]);
+            seed.add_edge(EId(9), VId(1), VId(7), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            assert_eq!(
+                db.allocate_identity(&query, VERTEX).unwrap(),
+                ElementId::Vertex(VId(8))
+            );
+            assert_eq!(
+                db.allocate_identity(&query, EDGE).unwrap(),
+                ElementId::Edge(EId(10))
+            );
+            let mut folded = WriteBatch::new(R);
+            folded.create_vertex(VId(8), vec![], vec![]);
+            folded.add_edge(EId(10), VId(1), VId(8), vec![]);
+            folded.delete_edge(EId(10));
+            folded.delete_vertex(VId(8));
+            folded.delete_edge(EId(9));
+            folded.delete_vertex(VId(7));
+            db.write(&commit, folded).await.unwrap();
+            assert_eq!(
+                db.allocate_identity(&query, VERTEX).unwrap(),
+                ElementId::Vertex(VId(9))
+            );
+            assert_eq!(
+                db.allocate_identity(&query, EDGE).unwrap(),
+                ElementId::Edge(EId(11))
+            );
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let mut db = if rebuilding {
+                Database::open_rebuilding(&commit, &path, keys())
+                    .await
+                    .unwrap()
+            } else {
+                Database::open(&commit, &path, keys()).await.unwrap()
+            };
+            // V7 and E9 once reached durable partition rows, so their
+            // tombstones set the floor. Reserved V8 and E10 never did.
+            assert_eq!(
+                db.allocate_identity(&query, VERTEX).unwrap(),
+                ElementId::Vertex(VId(8))
+            );
+            assert_eq!(
+                db.allocate_identity(&query, EDGE).unwrap(),
+                ElementId::Edge(EId(10))
+            );
+            let mut recreated = WriteBatch::new(R);
+            recreated.create_vertex(VId(8), vec![], vec![]);
+            recreated.add_edge(EId(10), VId(1), VId(8), vec![]);
+            db.write(&commit, recreated).await.unwrap();
+            assert!(db.vertex(VId(7)).unwrap().is_none());
+            assert!(db.edge(EId(9)).unwrap().is_none());
+            assert!(db.edge(EId(10)).unwrap().is_some());
+            drop(db);
+            let recovered = Database::open_rebuilding(&commit, &path, keys())
+                .await
+                .unwrap();
+            assert!(recovered.vertex(VId(8)).unwrap().is_some());
+            assert!(recovered.edge(EId(10)).unwrap().is_some());
+            assert!(recovered.vertex(VId(7)).unwrap().is_none());
+            assert!(recovered.edge(EId(9)).unwrap().is_none());
         }
     });
 }

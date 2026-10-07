@@ -139,16 +139,26 @@ pub(super) async fn run<V: Vfs + Clone>(
     } else {
         None
     };
-    let (base, base_marker) = if let Some(saved) = &saved {
+    let base = if let Some(saved) = &saved {
         if saved.source_hash != source_hash || saved.rows_per_chunk != rows_per_chunk {
             return Err(invalid("source or chunk policy changed"));
         }
         if saved.checkpoint.frontier.0 > current.0 || saved.base.0 > saved.checkpoint.frontier.0 {
             return Err(invalid("checkpoint frontier is not in recovered history"));
         }
-        (saved.base, saved.base_marker.clone())
+        saved.base
     } else {
-        (current, marker(db, current)?)
+        current
+    };
+    // Checkpoint open retains graph state without eagerly decoding historical
+    // capsules. Continuation needs the complete suffix plus the base marker's
+    // own batch; make that I/O requirement explicit before replaying key maps.
+    db.ensure_delta_window(&contexts.commit(), CommitSeq(base.0.saturating_sub(1)))
+        .await
+        .map_err(invalid)?;
+    let base_marker = match &saved {
+        Some(saved) => saved.base_marker.clone(),
+        None => marker(db, base)?,
     };
     if marker(db, base)? != base_marker {
         return Err(invalid("base history identity changed"));

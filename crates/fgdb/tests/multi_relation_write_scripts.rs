@@ -488,13 +488,14 @@ fn check_multi_relation_recovery(direct_insert: bool) {
                 fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
             }
             for rebuilding in [false, true] {
-                let reopened = if rebuilding {
+                let mut reopened = if rebuilding {
                     Database::open_rebuilding(&commit, &path, keys(0x63))
                         .await
                         .unwrap()
                 } else {
                     Database::open(&commit, &path, keys(0x63)).await.unwrap()
                 };
+                reopened.ensure_delta_window(&commit, basis).await.unwrap();
                 assert_eq!(
                     reopened.frontier().unwrap(),
                     CommitSeq(basis.0 + u64::from(committed)),

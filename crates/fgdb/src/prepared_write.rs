@@ -4,6 +4,8 @@ mod at_basis;
 mod atomic;
 mod ordered;
 
+pub(super) use at_basis::PreparationAnchor;
+
 use crate::{
     CommitCx, CommitSeq, CrashPoint, Database, ElementId, FirstCommitterWinsValidator, PendingRow,
     PreparedWrite, VId, WriteBatch, WriteError,
@@ -138,6 +140,9 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteError::ForeignPreparedWrite);
         }
         self.ensure_writable()?;
+        self.ensure_delta_window(cx, prepared.basis)
+            .await
+            .map_err(WriteError::from)?;
         let validator =
             FirstCommitterWinsValidator::from_history(prepared.basis, &self.snapshot.delta_index)
                 .map_err(WriteError::PreparedHistory)?

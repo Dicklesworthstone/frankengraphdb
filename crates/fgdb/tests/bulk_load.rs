@@ -518,6 +518,9 @@ fn chunk_one_crash_matrix_recovers_exact_whole_chunks_and_resumes() {
                 let mut db = Database::open(&contexts.commit(), &path, keys())
                     .await
                     .unwrap();
+                db.ensure_delta_window(&contexts.commit(), basis)
+                    .await
+                    .unwrap();
                 let recovered = db.frontier().unwrap();
                 assert_eq!(
                     recovered,

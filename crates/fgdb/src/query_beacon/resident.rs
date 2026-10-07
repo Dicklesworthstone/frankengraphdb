@@ -278,6 +278,8 @@ impl ResidentIndex {
     /// previous index and every pin unchanged. Retired history, a foreign owner,
     /// a future/backwards target, and unsupported deltas fail closed; no hidden
     /// rebuild or truncated tail is substituted. Explicit prepare rebuilds.
+    /// After checkpoint open, a historical source below the loaded delta floor
+    /// requires [`Database::ensure_delta_window`] before this synchronous call.
     ///
     /// This is synchronous, caller-driven resident maintenance, not a durable
     /// subscription or a commit hook. Changed IDs are bounded, and only one

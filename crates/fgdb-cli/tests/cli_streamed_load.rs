@@ -64,6 +64,9 @@ impl Fixture {
         command
     }
     fn inspect<T>(&self, check: impl FnOnce(&Database) -> T) -> T {
+        self.inspect_window(None, check)
+    }
+    fn inspect_window<T>(&self, after: Option<CommitSeq>, check: impl FnOnce(&Database) -> T) -> T {
         let runtime = RuntimeBuilder::new().build().unwrap();
         let root = runtime.request_cx_with_budget(Budget::INFINITE);
         let cx = PurposeContexts::narrow_runtime_root(&root).commit();
@@ -73,9 +76,12 @@ impl Fixture {
                 DatabaseSecurityNamespaceId([0x77; 32]),
                 [0x3c; 32],
             );
-            let db = Database::open(&cx, &self.home.join("db"), keys)
+            let mut db = Database::open(&cx, &self.home.join("db"), keys)
                 .await
                 .unwrap();
+            if let Some(after) = after {
+                db.ensure_delta_window(&cx, after).await.unwrap();
+            }
             check(&db)
         })
     }
@@ -163,7 +169,7 @@ fn marker_to_checkpoint_crash_window_reconciles_using_streamed_source_rows() {
             .contains("\"next_row\":3")
     );
     success(&fixture.load().output().unwrap());
-    fixture.inspect(|db| {
+    fixture.inspect_window(Some(basis), |db| {
         assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 4));
         assert_eq!(db.vertices().unwrap().len(), 6);
         assert_eq!(db.edges().unwrap().len(), 4);

@@ -553,6 +553,9 @@ pub enum DatabaseCreateCrashPoint {
 /// Why rebuilding the tier-D fold from the durable stream failed.
 #[derive(Debug)]
 pub enum RebuildError {
+    /// Cooperative cancellation stopped derived-state reconstruction before
+    /// its complete replacement could be published.
+    Interrupted(Box<asupersync::error::Error>),
     /// A retained handle whose Chronicle/publication relationship is unknown
     /// cannot run maintenance from its cached snapshot.
     HandleNotHealthy(DatabaseState),
@@ -666,6 +669,9 @@ pub enum WriteError {
     /// The complete committed suffix needed to validate a prepared basis is
     /// unavailable. Never interpret a missing prefix as no conflicting writes.
     PreparedHistory(IndexError),
+    /// Loading the authenticated conflict history failed before this write
+    /// entered the durable commit protocol. The current graph remains valid.
+    HistoryRebuild(Box<RebuildError>),
     /// The batch was empty. Refused rather than committed as a no-op: an empty
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
@@ -813,9 +819,10 @@ pub enum ReadError {
         asked: CommitSeq,
         frontier: CommitSeq,
     },
-    /// A delta-window cursor names a sequence the retained index no longer
-    /// holds. The batches between the cursor and `retained_after` were
-    /// retired; answering with the remaining suffix would be a gapped stream.
+    /// A delta-window cursor precedes the currently retained index. This may
+    /// be an unloaded checkpoint prefix or an explicitly retired interval;
+    /// answering with only the remaining suffix would be a gapped stream.
+    /// This error alone does not claim that durable history was deleted.
     DeltaCursorRetired {
         asked: CommitSeq,
         retained_after: CommitSeq,
@@ -856,6 +863,14 @@ from_error!(
     SlotGenerationExhausted
 );
 from_error!(WriteError, Canonical, CanonicalError);
+impl From<RebuildError> for WriteError {
+    fn from(error: RebuildError) -> Self {
+        match error {
+            RebuildError::Index { error, .. } => Self::PreparedHistory(error),
+            error => Self::HistoryRebuild(Box::new(error)),
+        }
+    }
+}
 impl From<CommitError> for WriteError {
     fn from(error: CommitError) -> Self {
         Self::Commit(Box::new(error))
@@ -928,6 +943,7 @@ impl core::fmt::Display for OpenError {
 impl core::fmt::Display for RebuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Interrupted(error) => error.fmt(f),
             Self::HandleNotHealthy(state) => write!(
                 f,
                 "maintenance requires a healthy reopened handle, found {state:?}"
@@ -981,6 +997,12 @@ impl core::fmt::Display for WriteError {
             }
             Self::PreparedHistory(error) => {
                 write!(f, "prepared-write conflict history is unavailable: {error}")
+            }
+            Self::HistoryRebuild(error) => {
+                write!(
+                    f,
+                    "prepared-write conflict history could not be loaded: {error}"
+                )
             }
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::ZonedTimestampRequiresResolver { .. } => {
@@ -1090,7 +1112,7 @@ impl core::fmt::Display for ReadError {
                 frontier,
             } => write!(
                 f,
-                "delta cursor {asked:?} was retired: window is ({retained_after:?}, {frontier:?}]"
+                "delta cursor {asked:?} is not retained: window is ({retained_after:?}, {frontier:?}]"
             ),
             Self::DeltaWindow(error) => write!(f, "delta window: {error}"),
             Self::UnmappedLabel(id) => write!(f, "unmapped vertex label id: {id:?}"),
@@ -1812,6 +1834,10 @@ impl EmbeddedReadView {
     ///
     /// The returned reference points into the same shared [`Snapshot`] as the
     /// graph reads; no batch or index clone occurs when a view is acquired.
+    /// A checkpoint-opened generation may retain only its frontier boundary.
+    /// Inspect its retained floor or use [`Self::delta_since`], which refuses
+    /// older cursors. Materializing the database's window does not mutate an
+    /// already pinned view; acquire a new view after materialization.
     #[must_use]
     pub fn delta_index(&self) -> &LocalDeltaBatchIndex {
         &self.snapshot.delta_index
@@ -2134,9 +2160,17 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// The published generation's version heads and birth-ordinal allocator,
     /// derived with the writer and replaced with it at every publication.
     heads: WriteHeads,
-    /// Per-open-handle, engine-owned identity reservations (never recycled;
-    /// the durable floor is re-derived from the committed stream at open).
+    /// Per-open-handle, engine-owned identity reservations. Reopen seeds the
+    /// durable floor from all admitted partition history, including tombstones.
     identity_allocation: std::sync::Arc<std::sync::Mutex<crate::write_txn::IdentityAllocation>>,
+    /// Prefix omitted by checkpoint open, distinct from a subsequently retired
+    /// window. Only explicit authenticated reconstruction can lower this cut.
+    delta_materialized_after: CommitSeq,
+    /// Exact native preparation state retained before the first mutation of a
+    /// lazy-open writer. Historical staging at or above that cut can replay the
+    /// loaded suffix without reading the omitted origin prefix. Captured only
+    /// when the writer changes, and released after origin materialization.
+    preparation_anchor: Option<prepared_write::PreparationAnchor>,
     /// Truthfulness fence for the retained writer/snapshot pair. D2 moves
     /// this out of `Healthy` before any derived work can fail; only completing
     /// the snapshot swap (or constructing a fresh handle in `open`) moves it
@@ -2630,6 +2664,7 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             select_checkpoint(cx, &coordinator, &store, &probe, &keys, path).await?
         };
+        let checkpoint_selected = selected.is_some();
         let (mut snapshot, writer, heads, receipts) = match selected {
             Some(checkpoint) => {
                 reopen_from_verified_checkpoint(
@@ -2723,13 +2758,21 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         };
-        // The index is derived from the FULL recovered chain, not the
-        // checkpoint suffix the writer just folded. A suffix-only rebuild
-        // would open a window starting at `published_at`, and the next
-        // insert would see a gap (plan:397, FG-INV-18).
-        let delta_index =
-            rebuild_delta_index(cx, &coordinator, &keys, &mut crypto_verification_events).await?;
-        snapshot.delta_index = delta_index;
+        // The authenticated partition already contains the complete graph.
+        // A checkpoint-selected open retains only the exact marker boundary;
+        // historical delta consumers explicitly materialize the missing prefix.
+        // Full recovery retains its previous whole-stream window.
+        let delta_materialized_after = if checkpoint_selected {
+            snapshot.delta_index = empty_delta_window_at(cx, &coordinator, snapshot.frontier)?;
+            snapshot.frontier
+        } else {
+            snapshot.delta_index =
+                rebuild_delta_index(cx, &coordinator, &keys, &mut crypto_verification_events)
+                    .await?;
+            CommitSeq::ORIGIN
+        };
+        let identity_allocation =
+            crate::write_txn::IdentityAllocation::from_partition(cx, &snapshot)?;
         let published_frontier = snapshot.frontier;
         Ok(Self {
             coordinator,
@@ -2747,7 +2790,9 @@ impl<V: Vfs + Clone> Database<V> {
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
-            identity_allocation: std::sync::Arc::default(),
+            identity_allocation: Arc::new(std::sync::Mutex::new(identity_allocation)),
+            delta_materialized_after,
+            preparation_anchor: None,
             handle_owner: Arc::new(()),
             standing_queries: Vec::new(),
         })
@@ -3656,6 +3701,7 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
+        self.retain_preparation_anchor();
         let published_frontier = self.snapshot.frontier;
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
         // poisons its own coordinator immediately before marker append, but a
@@ -4387,6 +4433,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Reads check `Healthy` like every other graph read: a fenced handle
     /// must not present a window that may have been inserted after D2 while
     /// the retained snapshot is still one commit behind.
+    /// Checkpoint open initially retains no batches before its frontier.
+    /// [`Self::ensure_delta_window`] authenticates a requested prefix on demand;
+    /// the returned index always exposes its actual retained floor.
     pub fn delta_index(&self) -> Result<&LocalDeltaBatchIndex, ReadError> {
         self.ensure_readable()?;
         Ok(&self.snapshot.delta_index)
@@ -4408,6 +4457,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// the last sequence it has applied and receives the gap-free suffix, or
     /// a refusal. A cursor past the frontier is [`ReadError::BeyondFrontier`];
     /// a cursor below the retained floor is [`ReadError::DeltaCursorRetired`].
+    /// After checkpoint open, call [`Self::ensure_delta_window`] before asking
+    /// below its initially unloaded floor. This synchronous accessor never
+    /// treats unloaded history as an empty result.
     /// Reads check `Healthy` like every other graph read.
     pub fn delta_since(
         &self,
@@ -4418,6 +4470,86 @@ impl<V: Vfs + Clone> Database<V> {
             .delta_index
             .since(after)
             .map_err(read_error_from_index)
+    }
+
+    /// Authenticate and retain every committed delta strictly after `after`.
+    ///
+    /// Checkpoint-selected open starts with an empty window at the published
+    /// frontier. This operation reads only the capsules missing between the
+    /// requested cut and the current materialization floor, verifies each
+    /// against its recovered marker, and publishes one complete replacement.
+    /// Failure or cancellation preserves the graph and the previous window.
+    /// Existing immutable read views keep their original window; reacquire a
+    /// view after this call when it needs the newly admitted history.
+    ///
+    /// This lowers only the prefix omitted by open. It cannot undo an explicit
+    /// retirement, invent a missing capsule, or weaken first-committer-wins.
+    /// Synchronous historical preparation, change-feed and resident-index
+    /// callers may use this explicit I/O boundary before their existing APIs.
+    /// Prepared-write and transaction completion also call it before validating
+    /// any basis that lies below the loaded floor.
+    pub async fn ensure_delta_window(
+        &mut self,
+        cx: &CommitCx,
+        after: CommitSeq,
+    ) -> Result<(), RebuildError> {
+        if !matches!(self.state, DatabaseState::Healthy { .. }) {
+            return Err(RebuildError::HandleNotHealthy(self.state));
+        }
+        let index_error = |error| RebuildError::Index {
+            commit_seq: after.0,
+            error,
+        };
+        let floor = self.delta_materialized_after;
+        let retained = self.snapshot.delta_index.retained_after_commit_seq();
+        if after.0 >= floor.0 || retained != floor {
+            // This also retains existing future and genuinely retired cursor
+            // refusals. A caller changing retention cannot turn that removal
+            // into implicit rehydration from the commit stream.
+            self.snapshot
+                .delta_index
+                .since(after)
+                .map_err(index_error)?;
+            return Ok(());
+        }
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let mut candidate = empty_delta_window_at(cx, &self.coordinator, after)?;
+        let entries = self.coordinator.chain().entries();
+        let start = entries.partition_point(|entry| entry.marker.commit_seq <= after.0);
+        let end = entries.partition_point(|entry| entry.marker.commit_seq <= floor.0);
+        for entry in &entries[start..end] {
+            let batch = read_delta_batch(
+                cx,
+                &self.coordinator,
+                &self.keys,
+                entry,
+                &mut self.crypto_verification_events,
+            )
+            .await?;
+            candidate.insert(batch).map_err(index_error)?;
+        }
+        if candidate.frontier() != floor {
+            return Err(index_error(IndexError::Gapped {
+                expected: floor,
+                found: candidate.frontier(),
+            }));
+        }
+        for batch in self
+            .snapshot
+            .delta_index
+            .since(floor)
+            .map_err(index_error)?
+        {
+            cx.checkpoint().map_err(RebuildError::Interrupted)?;
+            candidate.insert(batch.clone()).map_err(index_error)?;
+        }
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        Arc::make_mut(&mut self.snapshot).delta_index = candidate;
+        self.delta_materialized_after = after;
+        if after == CommitSeq::ORIGIN {
+            self.preparation_anchor = None;
+        }
+        Ok(())
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
@@ -4460,6 +4592,7 @@ impl<V: Vfs + Clone> Database<V> {
         // unreferenced replacement object when no successor slot can ever
         // select it.
         let next_generation = next_slot_generation(self.slot_generation)?;
+        self.retain_preparation_anchor();
         let compaction = fgdb_strata::compact::compact_with_props(
             &self.snapshot.blocks,
             &self.snapshot.block_props,
@@ -5410,13 +5543,100 @@ async fn rebuild<V: Vfs>(
     ))
 }
 
+/// Retain a marker-authenticated boundary without manufacturing a delta batch.
+fn empty_delta_window_at<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    at: CommitSeq,
+) -> Result<LocalDeltaBatchIndex, RebuildError> {
+    if at == CommitSeq::ORIGIN {
+        return Ok(LocalDeltaBatchIndex::new());
+    }
+    let entries = coordinator.chain().entries();
+    let position = entries.partition_point(|entry| entry.marker.commit_seq < at.0);
+    let entry = entries
+        .get(position)
+        .filter(|entry| entry.marker.commit_seq == at.0)
+        .ok_or(CommitError::ChainDiverged { commit_seq: at.0 })?;
+    let EffectSource::Local {
+        logical_delta_template_digest,
+        ..
+    } = &entry.marker.effect_source;
+    LocalDeltaBatchIndex::empty_at_committed(
+        CommittedMarker::attest(
+            MarkerRef {
+                marker_oid: entry.marker_oid,
+                commit_seq: at,
+            },
+            cx,
+        ),
+        logical_delta_template_digest.0,
+    )
+    .map_err(|error| RebuildError::Index {
+        commit_seq: at.0,
+        error,
+    })
+}
+
+/// The single authenticated capsule-to-delta reconstruction path used by
+/// eager recovery and lazy prefix admission alike.
+async fn read_delta_batch<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    keys: &DatabaseKeys,
+    entry: &fgdb_chronicle::marker::ChainedMarker,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+) -> Result<LogicalDeltaBatch, RebuildError> {
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let commit_seq = CommitSeq(entry.marker.commit_seq);
+    let EffectSource::Local {
+        capsule_ref,
+        logical_delta_template_digest,
+    } = &entry.marker.effect_source;
+    if !coordinator.capsule_exists(cx, *capsule_ref).await {
+        return Err(RebuildError::MissingCapsule {
+            commit_seq: commit_seq.0,
+            capsule_oid: *capsule_ref,
+        });
+    }
+    let bytes = coordinator
+        .read_capsule(cx, *capsule_ref, crypto_verification_events)
+        .await?;
+    let recomputed = template_digest(&bytes);
+    // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
+    if recomputed != *logical_delta_template_digest {
+        return Err(RebuildError::TemplateDigestMismatch {
+            commit_seq: commit_seq.0,
+            declared: *logical_delta_template_digest,
+            recomputed,
+        });
+    }
+    let template = keys
+        .decode_template(&bytes)
+        .map_err(|error| RebuildError::Decode {
+            commit_seq: commit_seq.0,
+            error,
+        })?;
+    Ok(LogicalDeltaBatch::order(
+        &template,
+        logical_delta_template_digest.0,
+        CommittedMarker::attest(
+            MarkerRef {
+                marker_oid: entry.marker_oid,
+                commit_seq,
+            },
+            cx,
+        ),
+    ))
+}
+
 /// Rebuild the derived delta window from the FULL recovered marker chain.
 ///
-/// Checkpoint-selected open folds only the suffix into the writer. The
-/// index must still cover `(0, frontier]`: a suffix-only window would
-/// start at `published_at` and the next [`LocalDeltaBatchIndex::insert`]
-/// would refuse as a gap. The index is never a second source of truth
-/// (FG-INV-18); every open reconstructs it from capsules the markers name.
+/// Used when no admitted checkpoint was selected or the caller explicitly
+/// forces stream recovery. Ordinary checkpoint open instead retains an
+/// authenticated floor and reconstructs older batches on demand. The index
+/// is never a second source of truth (FG-INV-18): every row is derived from
+/// the exact capsule named by its recovered marker.
 async fn rebuild_delta_index<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
@@ -5426,48 +5646,8 @@ async fn rebuild_delta_index<V: Vfs>(
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
-        let EffectSource::Local {
-            capsule_ref,
-            logical_delta_template_digest,
-        } = &entry.marker.effect_source;
-
-        if !coordinator.capsule_exists(cx, *capsule_ref).await {
-            return Err(RebuildError::MissingCapsule {
-                commit_seq: commit_seq.0,
-                capsule_oid: *capsule_ref,
-            });
-        }
-        let bytes = coordinator
-            .read_capsule(cx, *capsule_ref, crypto_verification_events)
-            .await?;
-        let recomputed = template_digest(&bytes);
-        // The annotation must sit on the line immediately above the
-        // comparison: UBS anchors it to the next line.
-        // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
-        if recomputed != *logical_delta_template_digest {
-            return Err(RebuildError::TemplateDigestMismatch {
-                commit_seq: commit_seq.0,
-                declared: *logical_delta_template_digest,
-                recomputed,
-            });
-        }
-        let template = keys
-            .decode_template(&bytes)
-            .map_err(|error| RebuildError::Decode {
-                commit_seq: commit_seq.0,
-                error,
-            })?;
-        let batch = LogicalDeltaBatch::order(
-            &template,
-            logical_delta_template_digest.0,
-            CommittedMarker::attest(
-                MarkerRef {
-                    marker_oid: entry.marker_oid,
-                    commit_seq,
-                },
-                cx,
-            ),
-        );
+        let batch =
+            read_delta_batch(cx, coordinator, keys, entry, crypto_verification_events).await?;
         index.insert(batch).map_err(|error| RebuildError::Index {
             commit_seq: commit_seq.0,
             error,
@@ -5728,6 +5908,695 @@ async fn publish_and_snapshot_inner<V: Vfs>(
         writer,
         receipts,
     ))
+}
+
+#[cfg(test)]
+mod lazy_delta_laws {
+    use super::*;
+    use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Count capsule read opens/whole-file reads through the VFS boundary.
+    /// Refusals are injected only when requested, without altering disk bytes.
+    #[derive(Clone, Debug)]
+    struct CountingVfs {
+        memory: MemVfs,
+        reads: Arc<AtomicUsize>,
+        refuse_at: Arc<AtomicUsize>,
+    }
+
+    impl CountingVfs {
+        fn new() -> Self {
+            Self {
+                memory: MemVfs::new().unwrap(),
+                reads: Arc::new(AtomicUsize::new(0)),
+                refuse_at: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        fn count(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+        fn reset(&self) {
+            self.reads.store(0, Ordering::SeqCst);
+        }
+        fn observe(&self, path: &Path) -> io::Result<()> {
+            if path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "capsules")
+            {
+                let count = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.refuse_at.load(Ordering::SeqCst) == count {
+                    return Err(io::Error::other("injected capsule read refusal"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Vfs for CountingVfs {
+        type File = MemVfsFile;
+
+        async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+            self.memory.open(path, options).await
+        }
+        async fn open_read(&self, path: &Path) -> io::Result<Self::File> {
+            self.observe(path)?;
+            self.memory.open_read(path).await
+        }
+        async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+            self.memory.metadata(path).await
+        }
+        async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+            self.memory.symlink_metadata(path).await
+        }
+        async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
+            self.memory.set_permissions(path, permissions).await
+        }
+        async fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.memory.create_dir(path).await
+        }
+        async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.memory.create_dir_all(path).await
+        }
+        async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_dir(path).await
+        }
+        async fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_file(path).await
+        }
+        async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+            self.memory.read_dir(path).await
+        }
+        async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_dir_all(path).await
+        }
+        async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.memory.rename(from, to).await
+        }
+        async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+            self.memory.copy(from, to).await
+        }
+        async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+            self.memory.hard_link(original, link).await
+        }
+        async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            self.memory.canonicalize(path).await
+        }
+        async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+            self.memory.read_link(path).await
+        }
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.observe(path)?;
+            self.memory.read(path).await
+        }
+        async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            self.observe(path)?;
+            self.memory.read_to_string(path).await
+        }
+        async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.memory.write(path, bytes).await
+        }
+    }
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0xa6; 32],
+            DatabaseSecurityNamespaceId([0xa7; 32]),
+            [0xa8; 32],
+        )
+    }
+
+    fn create(id: u128) -> WriteBatch {
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(id),
+            vec![],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+        );
+        batch
+    }
+
+    #[test]
+    fn checkpoint_open_reads_zero_capsules_and_materializes_only_requested_prefixes() {
+        let ((), report) = run_async_under_lab(0xa671, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for count in [8_u64, 384] {
+                let vfs = CountingVfs::new();
+                let path = vfs.memory.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                for id in 1..=count {
+                    db.write(&cx, create(u128::from(id))).await.unwrap();
+                }
+                let expected = db.delta_index().unwrap().clone();
+                drop(db);
+                vfs.reset();
+                let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(vfs.count(), 0, "checkpoint open must not read any capsule");
+                assert!(db.vertex(VId(u128::from(count))).unwrap().is_some());
+                assert_eq!(
+                    db.allocate_identity(
+                        &contexts.query(),
+                        fgdb_gql::insertion::GraphInsertRequest::Vertex { row: 0, vertex: 0 }
+                    )
+                    .unwrap(),
+                    ElementId::Vertex(VId(u128::from(count) + 1))
+                );
+                assert_eq!(
+                    vfs.count(),
+                    0,
+                    "point reads and identity allocation need no history I/O"
+                );
+                let pinned = db.pinned_read_view().unwrap();
+                let after = CommitSeq(count - 2);
+                assert!(
+                    matches!(db.delta_since(after), Err(ReadError::DeltaCursorRetired { retained_after, .. }) if retained_after == CommitSeq(count))
+                );
+                assert_eq!(db.delta_since(CommitSeq(count)).unwrap().count(), 0);
+                db.ensure_delta_window(&cx, after).await.unwrap();
+                assert_eq!(vfs.count(), 2, "only the two missing capsules are loaded");
+                assert_eq!(
+                    db.delta_since(after).unwrap().collect::<Vec<_>>(),
+                    expected.since(after).unwrap().collect::<Vec<_>>()
+                );
+                assert!(
+                    pinned.delta_since(after).is_err(),
+                    "an issued immutable view keeps its original window"
+                );
+                db.ensure_delta_window(&cx, after).await.unwrap();
+                assert_eq!(
+                    vfs.count(),
+                    2,
+                    "an already materialized cut performs no I/O"
+                );
+                db.write(&cx, create(u128::from(count) + 1)).await.unwrap();
+                vfs.reset();
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .unwrap();
+                assert_eq!(vfs.count(), usize::try_from(count - 2).unwrap());
+                assert_eq!(
+                    db.delta_since(CommitSeq::ORIGIN)
+                        .unwrap()
+                        .take(count as usize)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>()
+                );
+                assert_eq!(db.delta_frontier().unwrap(), CommitSeq(count + 1));
+                assert_eq!(db.delta_index().unwrap().len(), count as usize + 1);
+                db.delta_index().unwrap().verify().unwrap();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn failed_prefix_admission_is_atomic_retryable_and_cannot_rehydrate_retirement() {
+        let ((), report) = run_async_under_lab(0xa672, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            for id in 1..=4 {
+                db.write(&cx, create(id)).await.unwrap();
+            }
+            drop(db);
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let before = Arc::clone(&db.snapshot);
+            vfs.reset();
+            vfs.refuse_at.store(2, Ordering::SeqCst);
+            assert!(
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .is_err()
+            );
+            assert!(Arc::ptr_eq(&db.snapshot, &before));
+            assert_eq!(db.delta_materialized_after, CommitSeq(4));
+            assert_eq!(
+                db.state(),
+                DatabaseState::Healthy {
+                    published_frontier: CommitSeq(4)
+                }
+            );
+            assert!(db.vertex(VId(4)).unwrap().is_some());
+            vfs.refuse_at.store(0, Ordering::SeqCst);
+            vfs.reset();
+            db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
+            assert_eq!(
+                vfs.count(),
+                4,
+                "a failed candidate exposes no partial admitted prefix"
+            );
+            Arc::make_mut(&mut db.snapshot)
+                .delta_index
+                .retire_prefix(CommitSeq(3))
+                .unwrap();
+            vfs.reset();
+            assert!(matches!(
+                db.ensure_delta_window(&cx, CommitSeq(2)).await,
+                Err(RebuildError::Index {
+                    error: IndexError::CursorRetired { .. },
+                    ..
+                })
+            ));
+            assert_eq!(
+                vfs.count(),
+                0,
+                "explicit retirement is not a lazy cache miss"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_and_transaction_completion_reload_the_complete_conflict_interval() {
+        let ((), report) = run_async_under_lab(0xa673, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for mode in 0..4 {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                let basis = db.write(&cx, create(1)).await.unwrap();
+                let mut change = WriteBatch::new(RelationId(1));
+                change.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(20)),
+                );
+                if mode >= 2 {
+                    change.ensure_vertex(VId(1), vec![], vec![]);
+                }
+                let mut transaction = db.begin(&contexts.txn()).unwrap();
+                if mode == 3 {
+                    assert!(transaction.vertex(&db, VId(1)).unwrap().is_some());
+                }
+                let prepared = if mode != 0 {
+                    transaction.write(&mut db, change.clone()).unwrap();
+                    None
+                } else {
+                    Some(db.prepare_write(change.clone()).unwrap())
+                };
+                change.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(30)),
+                );
+                db.write(&cx, change).await.unwrap();
+                // Evict only derived payloads to exercise an old, same-owner
+                // preparation across the same unloaded-prefix shape as open.
+                // The original read basis and ownership token stay untouched.
+                Arc::make_mut(&mut db.snapshot).delta_index =
+                    empty_delta_window_at(&cx, &db.coordinator, CommitSeq(2)).unwrap();
+                db.delta_materialized_after = CommitSeq(2);
+                if let Some(prepared) = prepared {
+                    assert!(matches!(
+                        db.commit_prepared(&cx, prepared).await,
+                        Err(WriteError::FirstCommitterWins { .. })
+                    ));
+                    transaction.abort();
+                } else if mode == 1 {
+                    assert!(matches!(
+                        transaction.finish(&mut db, &cx).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ));
+                } else {
+                    assert!(matches!(
+                        transaction
+                            .commit_idempotent_rebased(&mut db, &cx, 100)
+                            .await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ));
+                }
+                assert_eq!(db.delta_materialized_after, basis);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(30)
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn historical_preparation_after_reopen_requires_explicit_history_and_keeps_conflicts() {
+        let ((), report) = run_async_under_lab(0xa675, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let basis = db.write(&cx, create(1)).await.unwrap();
+            let mut update = WriteBatch::new(RelationId(1));
+            update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(20)));
+            db.write(&cx, update.clone()).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.prepare_write_at(basis, update.clone()),
+                Err(WriteTxnError::Write(WriteError::PreparedHistory(
+                    IndexError::CursorRetired { .. }
+                )))
+            ));
+            assert_eq!(
+                vfs.count(),
+                0,
+                "a synchronous refusal performs no hidden I/O"
+            );
+            db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
+            let prepared = db.prepare_write_at(basis, update).unwrap();
+            assert_eq!(prepared.basis(), basis);
+            assert!(matches!(
+                db.commit_prepared(&cx, prepared).await,
+                Err(WriteError::FirstCommitterWins { .. })
+            ));
+            assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            assert_eq!(
+                vfs.count(),
+                2,
+                "reconstruction reads the exact two committed capsules"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn reopened_transactions_stage_at_their_exact_basis_without_loading_origin_history() {
+        let ((), report) = run_async_under_lab(0xa676, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let update = |id, value| {
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.set_vertex_property(
+                    VId(id),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(value)),
+                );
+                batch
+            };
+            for recover_suffix in [false, true] {
+                let vfs = CountingVfs::new();
+                let path = vfs.memory.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut seed = create(1);
+                seed.create_vertex(
+                    VId(2),
+                    vec![],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+                );
+                seed.create_vertex(VId(7), vec![], vec![]);
+                seed.add_edge(EId(9), VId(1), VId(7), vec![]);
+                db.write(&cx, seed).await.unwrap();
+                let mut retire = WriteBatch::new(RelationId(1));
+                retire.delete_vertex(VId(7));
+                if recover_suffix {
+                    assert!(matches!(
+                        db.write_with_publication_failure(
+                            &cx,
+                            retire,
+                            DerivedPublicationStage::FoldCommittedTemplate,
+                        )
+                        .await,
+                        Err(WriteError::CommittedNeedsRecovery { .. })
+                    ));
+                } else {
+                    db.write(&cx, retire).await.unwrap();
+                }
+                drop(db);
+                let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                assert!(
+                    db.preparation_anchor.is_none(),
+                    "open itself needs no writer clone"
+                );
+                let basis = db.frontier().unwrap();
+                assert_eq!(basis, CommitSeq(2));
+                let expected = db.prepare_write(update(1, 11)).unwrap().template;
+                let mut txn = db.begin(&txcx).unwrap();
+                if !recover_suffix {
+                    db.compact(&cx).await.unwrap();
+                }
+                let mut winner = update(2, 22);
+                winner.create_vertex(VId(99), vec![], vec![]);
+                db.write(&cx, winner).await.unwrap();
+                vfs.reset();
+                assert!(db.preparation_anchor.is_some());
+                assert_eq!(
+                    db.prepare_write_at(basis, update(1, 11)).unwrap().template,
+                    expected
+                );
+                assert!(matches!(
+                    db.prepare_write_at(basis, create(7)),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Vertex(VId(7))
+                    }))
+                ));
+                let mut spent_edge = WriteBatch::new(RelationId(1));
+                spent_edge.add_edge(EId(9), VId(1), VId(2), vec![]);
+                assert!(matches!(
+                    db.prepare_write_at(basis, spent_edge),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Edge(EId(9))
+                    }))
+                ));
+                // The ordinary evaluator still rejects reuse within a single
+                // statement even when normalization would erase its birth.
+                let mut same_statement = create(8);
+                same_statement.delete_vertex(VId(8));
+                same_statement.create_vertex(VId(8), vec![], vec![]);
+                assert!(matches!(
+                    db.prepare_write_at(basis, same_statement),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Vertex(VId(8))
+                    }))
+                ));
+                // A future identity must not leak into the pinned writer's
+                // spent set. It prepares as absent, then ordinary FCW refuses.
+                let future_identity = db.prepare_write_at(basis, create(99)).unwrap();
+                assert!(matches!(
+                    db.commit_prepared(&cx, future_identity).await,
+                    Err(WriteError::FirstCommitterWins { .. })
+                ));
+                txn.write_at_basis(&mut db, update(1, 11)).unwrap();
+                assert_eq!(txn.basis(), basis);
+                assert_eq!(
+                    txn.vertex(&db, VId(2)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(10)
+                );
+                // Returning the old V2 value adds a real dependency. Its
+                // changed winner must conflict even though the V1 write is
+                // disjoint; the original read basis never advances silently.
+                assert!(matches!(
+                    txn.commit(&mut db, &cx).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                ));
+                let mut txn = db.begin(&txcx).unwrap();
+                let current = txn.basis();
+                let mut unrelated = update(2, 33);
+                unrelated.create_vertex(VId(100), vec![], vec![]);
+                db.write(&cx, unrelated).await.unwrap();
+                txn.write_at_basis(&mut db, update(1, 11)).unwrap();
+                assert_eq!(txn.basis(), current);
+                assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(5));
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(33)
+                );
+
+                // The ordinary API retains its explicit refresh contract, and
+                // that path also needs only this handle's post-open suffix.
+                let mut txn = db.begin(&txcx).unwrap();
+                assert!(txn.vertex(&db, VId(1)).unwrap().is_some());
+                let expected = db.prepare_write(update(1, 12)).unwrap().template;
+                let stable = txn.basis();
+                db.write(&cx, update(2, 44)).await.unwrap();
+                assert_eq!(
+                    db.prepare_write_at(stable, update(1, 12)).unwrap().template,
+                    expected
+                );
+                assert!(matches!(
+                    txn.write(&mut db, update(1, 12)),
+                    Err(WriteTxnError::SnapshotAdvanced { .. })
+                ));
+                assert_eq!(txn.refresh_snapshot(&db, &txcx).unwrap(), CommitSeq(6));
+                txn.write(&mut db, update(1, 12)).unwrap();
+                assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(7));
+                assert_eq!(
+                    vfs.count(),
+                    0,
+                    "stable staging, refresh, and completion do not load origin"
+                );
+                assert_eq!(db.delta_materialized_after, basis);
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    vfs.count(),
+                    2,
+                    "only the original missing prefix is admitted"
+                );
+                assert!(db.preparation_anchor.is_none());
+                assert_eq!(
+                    db.prepare_write_at(stable, update(1, 12)).unwrap().template,
+                    expected
+                );
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn reopened_historical_resident_index_refresh_requires_and_uses_its_exact_delta_suffix() {
+        let ((), report) = run_async_under_lab(0xa677, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let query = contexts.query();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![],
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                )],
+            );
+            db.write(&cx, seed).await.unwrap();
+            let mut update = WriteBatch::new(RelationId(1));
+            update.set_vertex_property(
+                VId(1),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::ucs_basic_text("storage").unwrap()),
+            );
+            db.write(&cx, update).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let policy = fgdb_beacon::read::ReadPolicy::default();
+            let search = fgdb_beacon::read::Search::Text {
+                query: "graph",
+                k: 10,
+                mode: fgdb_beacon::TextMatch::Any,
+            };
+            let mut options = query_beacon::Options::text(PropertyKeyId(1));
+            options.as_of = Some(CommitSeq(1));
+            let mut resident = db.prepare_beacon_index(&query, &options).unwrap();
+            let pinned = resident.snapshot();
+            let before = resident.search(&query, search, policy).unwrap();
+            assert_eq!(resident.source_sequence(), CommitSeq(1));
+            assert_eq!(pinned.stats().documents, 1);
+            assert!(matches!(
+                resident.refresh(&query, &db, None, policy),
+                Err(query_beacon::ResidentIndexError::Source(
+                    ReadError::DeltaCursorRetired {
+                        asked: CommitSeq(1),
+                        retained_after: CommitSeq(2),
+                        frontier: CommitSeq(2),
+                    }
+                ))
+            ));
+            assert_eq!(resident.source_sequence(), CommitSeq(1));
+            assert_eq!(resident.search(&query, search, policy).unwrap(), before);
+            assert_eq!(
+                vfs.count(),
+                0,
+                "historical graph projection needs no capsule reads"
+            );
+            db.ensure_delta_window(&cx, CommitSeq(1)).await.unwrap();
+            let refreshed = resident.refresh(&query, &db, None, policy).unwrap();
+            assert_eq!(
+                (
+                    refreshed.from,
+                    refreshed.through,
+                    refreshed.commits,
+                    refreshed.touched_vertices
+                ),
+                (CommitSeq(1), CommitSeq(2), 1, 1)
+            );
+            options.as_of = None;
+            let expected = db.beacon_search(&query, &options, search).unwrap();
+            assert_ne!(before, expected);
+            assert_eq!(resident.search(&query, search, policy).unwrap(), expected);
+            assert_eq!(pinned.search(&query, search, policy).unwrap(), before);
+            assert_eq!(
+                vfs.count(),
+                1,
+                "refresh reads only the one requested capsule"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn standing_reachability_anchors_at_checkpoint_without_reading_a_capsule() {
+        let ((), report) = run_async_under_lab(0xa674, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let query = contexts.query();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = create(1);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.create_vertex(VId(3), vec![], vec![]);
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(&cx, seed).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let policy = fgdb_gql::GqlQueryPolicy::new(10_000, 10_000, 100_000, 100_000);
+            let handle = db
+                .register_standing_reachability(&query, RelationId(1), policy)
+                .unwrap();
+            let rows = db.standing_reachability(&query, &handle).unwrap();
+            assert_eq!(rows.rows().len(), 1);
+            assert_eq!(rows.rows().iter().next().unwrap().0, &(VId(1), VId(2)));
+            assert_eq!(vfs.count(), 0);
+            let mut suffix = WriteBatch::new(RelationId(1));
+            suffix.add_edge(EId(2), VId(2), VId(3), vec![]);
+            db.write(&cx, suffix).await.unwrap();
+            let rows = db.standing_reachability(&query, &handle).unwrap();
+            assert_eq!(rows.rows().len(), 3);
+            assert_eq!(rows.frontier(), CommitSeq(2));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
 
 #[cfg(test)]

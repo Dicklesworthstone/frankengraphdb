@@ -17,6 +17,16 @@ use fgdb_types::CommitSeq;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// An exact native fold at this writer lifetime's lazy-open cut. Keep the
+/// writer, including its spent identities, rather than deriving old state from
+/// newer partition rows. Sealed bytes are retained because the ordinary fold
+/// and per-commit seal remain the reconstruction implementation.
+pub(crate) struct PreparationAnchor {
+    basis: CommitSeq,
+    writer: BlockWriter,
+    heads: WriteHeads,
+}
+
 /// A synchronous, preparation-only borrow. In particular there is deliberately
 /// no DerefMut or accessor exposing the temporarily selected database to writes.
 pub(crate) struct PreparationBasis<'a, V: Vfs> {
@@ -129,6 +139,19 @@ impl<V: Vfs + Clone> PreparationBasis<'_, V> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Read-only opens retain no extra writer clone. The first commit or
+    /// compaction preserves the exact open state before replacing it, allowing
+    /// later stable-basis staging to replay only this handle's loaded suffix.
+    pub(crate) fn retain_preparation_anchor(&mut self) {
+        if self.delta_materialized_after != CommitSeq::ORIGIN && self.preparation_anchor.is_none() {
+            self.preparation_anchor = Some(PreparationAnchor {
+                basis: self.snapshot.frontier,
+                writer: self.writer.clone(),
+                heads: self.heads.clone(),
+            });
+        }
+    }
+
     /// Select a preparation basis without issuing a new read view, changing an
     /// ownership token, or touching the current publication/commit coordinator.
     /// All reconstruction succeeds before any handle state is displaced.
@@ -155,17 +178,38 @@ impl<V: Vfs + Clone> Database<V> {
         let original = if basis == self.snapshot.frontier {
             None
         } else {
-            // The native index guarantees a gap-free retained prefix. A retired
-            // origin is NOT an empty history, even when the target is old.
+            // A lazy-open handle preserves its exact original native state
+            // before the first post-open mutation. No post-basis identity,
+            // property or version head can enter this seed. Older cuts still
+            // require the complete origin prefix and explicitly refuse when it
+            // has not been materialized.
+            let (after, mut writer, mut versions, mut births) = match self
+                .preparation_anchor
+                .as_ref()
+                .filter(|anchor| anchor.basis <= basis)
+            {
+                Some(anchor) => {
+                    checkpoint()?;
+                    (
+                        anchor.basis,
+                        anchor.writer.clone(),
+                        anchor.heads.versions.clone(),
+                        anchor.heads.next_birth_ordinal,
+                    )
+                }
+                None => (
+                    CommitSeq::ORIGIN,
+                    BlockWriter::new(crate::GRAPH, crate::BRANCH, crate::PARTITION),
+                    BTreeMap::new(),
+                    0_u64,
+                ),
+            };
             let history = self
                 .snapshot
                 .delta_index
-                .since(CommitSeq(0))
+                .since(after)
                 .map_err(WriteError::PreparedHistory)?;
-            let mut writer = BlockWriter::new(crate::GRAPH, crate::BRANCH, crate::PARTITION);
-            let mut versions = BTreeMap::new();
             let mut touched = BTreeSet::new();
-            let mut births = 0_u64;
             for batch in history.take_while(|batch| batch.commit_seq().0 <= basis.0) {
                 checkpoint()?;
                 let at = batch.commit_seq();
@@ -242,7 +286,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// Future cuts, unavailable retained history and unhealthy handles refuse.
     ///
     /// An older cut reconstructs native writer/version state from the retained
-    /// delta prefix and copies snapshot metadata. This is an in-memory
+    /// delta prefix or the exact lazy-open anchor plus its suffix, and copies
+    /// snapshot metadata. Cuts before that anchor require explicit history
+    /// materialization with [`Self::ensure_delta_window`] at [`CommitSeq::ORIGIN`]
+    /// so the entire prefix needed to reconstruct the writer is available.
+    /// This is an in-memory
     /// preparation path, not an O(delta) preparation, retention lease or SSI claim.
     pub fn prepare_write_at(
         &mut self,

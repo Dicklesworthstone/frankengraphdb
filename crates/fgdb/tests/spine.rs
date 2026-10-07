@@ -4039,7 +4039,15 @@ fn delta_index_is_maintained_on_write_and_rebuilt_at_open() {
         let before_drop_len = after_second.len();
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert!(matches!(
+            reopened.delta_since(CommitSeq::ORIGIN),
+            Err(fgdb::ReadError::DeltaCursorRetired { .. })
+        ));
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes the complete committed window");
         let rebuilt = reopened.delta_index().expect("rebuilt index");
         assert_eq!(
             (
@@ -4095,7 +4103,11 @@ fn a_post_d2_publication_failure_still_rebuilds_the_delta_index_on_reopen() {
         );
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes history after authoritative recovery");
         let rebuilt = reopened.delta_index().expect("rebuilt after post-D2 fail");
         let frontier = reopened.delta_frontier().expect("reopened frontier");
         assert_eq!(
@@ -4174,7 +4186,11 @@ fn empty_net_ensure_still_occupies_the_delta_window() {
         );
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes empty-net commits as well as mutations");
         let rebuilt = reopened.delta_index().expect("rebuilt");
         let rebuilt_rows: Vec<(CommitSeq, usize)> = reopened
             .delta_since(CommitSeq::ORIGIN)

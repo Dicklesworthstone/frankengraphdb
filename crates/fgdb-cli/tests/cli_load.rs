@@ -743,7 +743,10 @@ fn load_progress_and_exact_typed_values() {
         (53, 5, CommitSeq(fixture.basis + 5))
     );
     runtime_check(async |contexts| {
-        let db = open(&fixture.db, &contexts).await;
+        let mut db = open(&fixture.db, &contexts).await;
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         assert_eq!(logical(&db, &checkpoint), expected(&rows[..53]));
         assert_eq!(db.delta_since(CommitSeq(fixture.basis)).unwrap().count(), 5);
     });
@@ -909,7 +912,11 @@ fn resume_scenario(before_capsule: bool) {
         (48, 14)
     );
     runtime_check(async |contexts| {
-        let recovered = open(&fixture.db, &contexts).await;
+        let mut recovered = open(&fixture.db, &contexts).await;
+        recovered
+            .ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         let committed = if before_capsule { 2 } else { 3 };
         assert_eq!(
             recovered.frontier().unwrap(),
@@ -944,7 +951,11 @@ fn resume_scenario(before_capsule: bool) {
     let cli_actual = [R, S].map(|relation| cli_answers(&fixture, relation));
     let cli_reference = [R, S].map(|relation| cli_answers(&uninterrupted, relation));
     runtime_check(async |contexts| {
-        let actual = open(&fixture.db, &contexts).await;
+        let mut actual = open(&fixture.db, &contexts).await;
+        actual
+            .ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         let reference = open(&uninterrupted.db, &contexts).await;
         assert_eq!(logical(&actual, &completed), expected(&rows));
         assert_eq!(logical(&actual, &completed), logical(&reference, &baseline));

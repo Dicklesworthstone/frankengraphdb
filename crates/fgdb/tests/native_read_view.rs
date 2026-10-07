@@ -679,7 +679,10 @@ fn a_read_only_open_answers_like_a_full_open_and_keeps_no_writer_state() {
             .chain(EXPLAINS)
             .collect();
 
-        let full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+        let mut full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        full.ensure_delta_window(&commit, CommitSeq::ORIGIN)
             .await
             .unwrap();
         let expected: Vec<QueryResult> = texts
@@ -692,7 +695,7 @@ fn a_read_only_open_answers_like_a_full_open_and_keeps_no_writer_state() {
         assert_eq!(
             full_view.delta_since(CommitSeq(0)).unwrap().count(),
             3,
-            "a writable open retains the whole delta window"
+            "explicit materialization retains the whole delta window"
         );
         drop(full);
 
@@ -767,8 +770,8 @@ fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
         drop(db);
 
         // Serving the slot's root would answer [4] at seq 1. The read-only
-        // open must fold the committed suffix instead, which takes a full open;
-        // that open retains the whole delta window, the full open's signature.
+        // open must fold the committed suffix instead, which takes a writable
+        // recovery. The recovered graph does not require retaining old deltas.
         let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
             .await
             .unwrap();
@@ -777,7 +780,13 @@ fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
             view.query(&cx, text, &params, symbols, policy()).unwrap(),
             integers(&[4, 7])
         );
-        assert_eq!(view.delta_since(CommitSeq(0)).unwrap().count(), 2);
+        assert!(matches!(
+            view.delta_since(CommitSeq::ORIGIN),
+            Err(ReadError::DeltaCursorRetired {
+                retained_after: CommitSeq(2),
+                ..
+            })
+        ));
 
         // That open healed the durable root, so the next read-only open is
         // the fast path (no delta history) onto the same generation.

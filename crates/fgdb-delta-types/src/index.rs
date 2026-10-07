@@ -55,6 +55,9 @@ pub const INDEX_FORMAT_V1: u16 = 1;
 /// §5.2 permanent fail-closed condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexError {
+    /// Sequence zero is the empty stream and cannot identify a committed
+    /// boundary, even when the caller holds a commit capability.
+    OriginAnchor,
     /// The persisted frontier is the largest representable sequence, so no
     /// further batch can be assigned without wrapping to the reserved origin.
     CommitSeqExhausted(CommitSeqExhaustion),
@@ -122,6 +125,7 @@ pub enum IndexError {
 impl core::fmt::Display for IndexError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::OriginAnchor => f.write_str("the delta origin is not a committed boundary"),
             Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
             Self::Gapped { expected, found } => write!(
                 f,
@@ -192,7 +196,8 @@ pub struct LocalDeltaBatchIndex {
     frontier: CommitSeq,
     entries: BTreeMap<u64, LogicalDeltaBatch>,
     // Only the exact boundary identity, not its rows or a prefix commitment.
-    // Set exclusively by retiring a present, envelope-checked batch. This is
+    // Set by retiring a present, envelope-checked batch or by the recovered
+    // marker authority when checkpoint open omits its capsule. This is
     // process-local continuity evidence within the caller-authenticated index;
     // it neither authenticates an imported index nor authorizes object GC.
     retired_boundary: Option<(u16, fgdb_types::MarkerRef, [u8; 32])>,
@@ -232,6 +237,30 @@ impl LocalDeltaBatchIndex {
             entries: BTreeMap::new(),
             retired_boundary: None,
         }
+    }
+
+    /// An empty window bound to a caller-authenticated committed marker.
+    ///
+    /// Checkpoint recovery can retain the exact frontier identity without
+    /// reading its capsule. The caller must authenticate BOTH the marker and
+    /// its declared template digest from the same recovered chain. As with
+    /// `LogicalDeltaBatch::order`, the commit capability is an authority
+    /// witness, not a storage observation performed by this crate.
+    ///
+    /// This does not fabricate a batch, attest any old rows, or authorize
+    /// retirement. Older cursors still refuse; a fresh snapshot consumer can
+    /// bind its topology to this exact marker before following successors.
+    pub fn empty_at_committed(
+        marker: crate::CommittedMarker,
+        source_template_digest: [u8; 32],
+    ) -> Result<Self, IndexError> {
+        let marker = marker.marker();
+        if marker.commit_seq == CommitSeq::ORIGIN {
+            return Err(IndexError::OriginAnchor);
+        }
+        let mut index = Self::empty_at(marker.commit_seq);
+        index.retired_boundary = Some((crate::DELTA_FORMAT_V1, marker, source_template_digest));
+        Ok(index)
     }
 
     /// Build a window from parts, INCLUDING incoherent ones.

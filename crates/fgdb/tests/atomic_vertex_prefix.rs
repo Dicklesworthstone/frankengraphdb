@@ -472,7 +472,11 @@ fn new_endpoints_and_all_relations_recover_together_across_marker_boundaries() {
             }
             // Surviving unflushed bytes are one crash outcome, not a guarantee
             // of persistence before D2. A torn trailer must recover neither.
-            let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            let mut reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            reopened
+                .ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
             assert_eq!(
                 reopened.frontier().unwrap(),
                 CommitSeq(u64::from(committed)),

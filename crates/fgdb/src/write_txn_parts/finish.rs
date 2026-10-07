@@ -234,6 +234,14 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
+        attempt
+            .database
+            .ensure_delta_window(cx, attempt.transaction.basis)
+            .await
+            .map_err(|error| match error {
+                crate::RebuildError::Interrupted(error) => WriteTxnError::Interrupted(error),
+                error => WriteTxnError::Write(WriteError::from(error)),
+            })?;
         // A new apply basis must never erase the interval over which earlier
         // point, negative and query observations need validation. Reuse the
         // ordinary witness checker BEFORE either policy can replace the basis.

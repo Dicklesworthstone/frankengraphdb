@@ -339,10 +339,12 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Reserve an identity above every committed creation of its kind.
+    /// Reserve an identity above every durable partition identity of its kind.
     /// Reservations are shared by staged transactions on this opened handle.
-    /// Reopen reconstructs the floor from Chronicle, including deleted IDs;
-    /// never-committed reservations are not durable leases.
+    /// Reopen reconstructs the floor from all retained blocks and patches,
+    /// including deleted IDs. A creation and deletion folded away inside one
+    /// commit never became a durable identity and may be reissued after reopen;
+    /// neither it nor never-committed reservations are durable leases.
     pub fn allocate_identity(
         &mut self,
         cx: &fgdb_types::QueryCx,
@@ -414,7 +416,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// private transaction in one call; no caller allocator is accepted. The
     /// identity reservation shares the explicit-transaction allocator: an
     /// aborted autocommit never reissues or reclaims its issued identities on
-    /// this handle, and reopen rebuilds the floor from the committed stream.
+    /// this handle, and reopen rebuilds the floor from retained partition
+    /// history, including tombstones but excluding same-commit folded rows.
     pub async fn execute_graph_insert_autocommit_engine_governed(
         &mut self,
         txcx: &TxnCx,

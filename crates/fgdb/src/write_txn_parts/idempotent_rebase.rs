@@ -115,6 +115,14 @@ impl WriteTxn {
         let mut attempt = TxnCompletionGuard::new(self, database);
         attempt.database.frontier()?;
         checkpoint()?;
+        attempt
+            .database
+            .ensure_delta_window(cx, attempt.transaction.basis)
+            .await
+            .map_err(|error| match error {
+                crate::RebuildError::Interrupted(source) => WriteTxnError::Interrupted(source),
+                other => WriteTxnError::Write(WriteError::from(other)),
+            })?;
         if let Some((law, _, _)) = attempt.transaction.transaction_conflict_in(
             attempt.database,
             ConflictScope::Reads,

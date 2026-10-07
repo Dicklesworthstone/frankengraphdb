@@ -497,6 +497,9 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
             // The cold path must reconstruct the entire historical chain, not
             // merely the frontier value cached by the writer.
             let mut db = Database::open(cx, &dir, keys()).await.expect("reopens");
+            db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("materializes the historical window for pinned delta comparisons");
             assert_eq!(
                 db.partition_root().expect("healthy reopened root"),
                 root_before_reopen,
@@ -652,9 +655,12 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
 
             // The compacted generation is durable, and all 65 old answers are
             // still reconstructable after a second cold open.
-            let db = Database::open(cx, &dir, keys())
+            let mut db = Database::open(cx, &dir, keys())
                 .await
                 .expect("reopens compacted generation");
+            db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("materializes the compacted generation's delta cut");
             assert_eq!(db.partition_root().expect("healthy root"), compacted_root);
             assert_eq!(
                 db.delta_index().expect("rebuilds delta window"),
