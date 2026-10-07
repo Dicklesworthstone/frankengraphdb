@@ -1,12 +1,13 @@
 //! Structural UNWIND lowering, using the ordinary write-script lexer.
 //!
-//! Three-byte synthetic parameter tokens fit even the shortest `r.x` access.
-//! Padding instead of removing bytes preserves every native diagnostic offset.
+//! Selected values become native scalar parameter holes, never source text.
+//! Long accesses preserve byte positions by padding. Short bare aliases use
+//! a monotone source map for native diagnostics and executed batch locations.
 
 use super::{Lexer, Token, TokenKind, next_script_token, scan};
 use crate::unwind_write::{
     GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS,
-    MAX_UNWIND_SOURCES, UnwindField, UnwindFieldAccess, UnwindSource,
+    MAX_UNWIND_SOURCES, UnwindField, UnwindFieldAccess, UnwindSource, UnwindSourceOffset,
 };
 use crate::{GraphPatternTextErrorKind, GraphWriteScriptError, GraphWriteScriptErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -118,12 +119,19 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
             && !index.checked_sub(1).and_then(|i| tokens.get(i))
                 .is_some_and(|(previous, _)| is_word(previous, "AS"))
         {
-            if is_word(token, "CREATE") || is_word(token, "INSERT") {
+            let next = tokens.get(index + 1);
+            let target = next.is_some_and(|(token, _)| matches!(token.kind, TokenKind::Word(_)));
+            if (is_word(token, "CREATE") || is_word(token, "INSERT"))
+                && is_punct(next, b'(')
+            {
                 return false;
             }
-            if ["MERGE", "SET", "REMOVE", "DELETE", "DETACH"]
-                .iter()
-                .any(|word| is_word(token, word))
+            if is_word(token, "MERGE") && is_punct(next, b'(')
+                || (is_word(token, "SET") || is_word(token, "REMOVE")) && target
+                    && [b'.', b':', b'+'].iter().any(|byte| is_punct(tokens.get(index + 2), *byte))
+                || is_word(token, "DETACH") && next.is_some_and(|(token, _)| is_word(token, "DELETE"))
+                || is_word(token, "DELETE") && target
+                    && (tokens.get(index + 2).is_none() || is_punct(tokens.get(index + 2), b','))
             {
                 return true;
             }
@@ -140,7 +148,8 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
 impl GraphUnwindWriteText {
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
-    /// `UNWIND earlier.static.path AS alias` clauses before the mutation.
+    /// `UNWIND earlier[.static.path] AS alias` clauses before the mutation.
+    /// Mutation operands may use bare scalar aliases or static scalar paths.
     /// Ordinary CREATE forms keep their existing native compiler.
     pub fn parse(text: &str) -> Result<Self, GraphUnwindWriteError> {
         Self::parse_if_supported(text)?.ok_or_else(|| {
@@ -218,7 +227,7 @@ impl GraphUnwindWriteText {
                 return Err(syntax(tokens[start].0.at, "an earlier UNWIND alias"));
             };
             let (path, next, _) = field_path(&tokens, start)?;
-            if path.is_empty() || !tokens.get(next).is_some_and(|(token, _)| is_word(token, "AS")) {
+            if !tokens.get(next).is_some_and(|(token, _)| is_word(token, "AS")) {
                 return Err(syntax(tokens[start].0.at, "a static list path followed by AS"));
             }
             let Some((Token { kind: TokenKind::Word(name), at: alias_at }, _)) = tokens.get(next + 1) else {
@@ -254,6 +263,7 @@ impl GraphUnwindWriteText {
         let mut fields: Vec<UnwindField> = Vec::new();
         let mut field_index = BTreeMap::new();
         let mut lowered = text.as_bytes().to_vec();
+        let mut short = Vec::new();
         blank(&mut lowered[..tokens[0].0.at]);
 
         // Outside a property map a ':' before a word names a label or a
@@ -299,12 +309,6 @@ impl GraphUnwindWriteText {
                 index += 1;
                 continue;
             }
-            if !is_punct(tokens.get(index + 1), b'.') {
-                return Err(syntax(
-                    current.at,
-                    "scalar row.field access without alias rebinding",
-                ));
-            }
             let (path, next, end) = field_path(tokens, index)?;
             let identity = (source, path);
             let field = if let Some(existing) = field_index.get(&identity) {
@@ -329,19 +333,44 @@ impl GraphUnwindWriteText {
             };
             let start = current.at;
             if end - start < 3 {
-                return Err(syntax(start, "a complete row.field expression"));
+                // Tokenization is still in original coordinates. Apply these
+                // growing replacements only after all token ranges are sealed.
+                short.push((start, end, field));
+            } else {
+                blank(&mut lowered[start..end]);
+                lowered[start] = b'$';
+                lowered[start + 1..start + 3].copy_from_slice(fields[field].parameter.as_bytes());
             }
-            blank(&mut lowered[start..end]);
-            lowered[start] = b'$';
-            lowered[start + 1..start + 3].copy_from_slice(fields[field].parameter.as_bytes());
             index = next;
+        }
+        let mut source_offsets = Vec::with_capacity(short.len());
+        if !short.is_empty() {
+            // Each short token adds at most two bytes; scan's native byte/token
+            // limits bound the number. Long tokens, comments and UTF-8 literals
+            // were never resized. No input VALUE is copied into this buffer.
+            let extra: usize = short.iter().map(|(start, end, _)| 3 - (end - start)).sum();
+            let mut expanded = Vec::with_capacity(lowered.len() + extra);
+            let mut copied = 0;
+            for (start, end, field) in short {
+                expanded.extend_from_slice(&lowered[copied..start]);
+                let generated = expanded.len();
+                expanded.push(b'$');
+                expanded.extend_from_slice(fields[field].parameter.as_bytes());
+                source_offsets.push(UnwindSourceOffset {
+                    generated: generated..expanded.len(),
+                    original: start..end,
+                });
+                copied = end;
+            }
+            expanded.extend_from_slice(&lowered[copied..]);
+            lowered = expanded;
         }
         let lowered = String::from_utf8(lowered).expect("whole tokens replaced with ASCII padding");
         Ok(Some(Self {
             original: text.to_owned(),
             lowered,
+            source_offsets: source_offsets.into_boxed_slice(),
             source_parameter: source_name.to_owned(),
-            source_offset: source.0.at,
             sources: sources.into_boxed_slice(),
             external_parameters: external_parameters.into_boxed_slice(),
             fields: fields.into_boxed_slice(),

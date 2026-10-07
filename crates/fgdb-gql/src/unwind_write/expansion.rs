@@ -63,13 +63,6 @@ pub(super) fn expand<'a, C>(
     let mut frame = Vec::with_capacity(definition.sources.len() + 1);
     for (root, value) in roots.iter().enumerate() {
         work(control, 1)?;
-        if !matches!(value, GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)) {
-            return Err(GraphUnwindWriteError::Row {
-                row: root,
-                offset: definition.source_offset,
-                kind: GraphUnwindRowError::ExpectedMap,
-            }.into());
-        }
         frame.push(value);
         state.visit(root, &mut frame, control)?;
         frame.pop();
@@ -137,9 +130,9 @@ impl<'a> Expansion<'a, '_> {
                 }.into());
             }
             self.counts[at] += 1;
-            if !matches!(item, GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)) {
-                return Err(refusal(GraphUnwindRowError::ExpectedMap).into());
-            }
+            // UNWIND binds values, not just documents. Subsequent sources
+            // validate list shape; mutation operands validate scalar shape.
+            // Retain each item by reference, including scalar/null/list items.
             frame.push(item);
             self.visit(root, frame, control)?;
             frame.pop();

@@ -5,8 +5,9 @@
 //! atomic program. It does not execute source text or interpolate row values.
 //! Native UNWIND CREATE/INSERT and CREATE RETURN keep their existing compiler.
 //!
-//! The admitted source is a nonempty list of maps (null rows and missing fields
-//! yield null). Referenced fields must be scalar and have one exact non-null
+//! The admitted source is a nonempty list of native values. A bare alias binds
+//! a scalar; static selectors traverse maps/lists (missing fields yield null).
+//! Selected operands must be scalar and have one exact non-null
 //! kind per column; no numeric coercion is introduced. Static nested map fields
 //! and signed list indexes select scalar leaves without copying their containers.
 //! Chained UNWIND clauses expand nested lists, retaining earlier aliases as
@@ -15,8 +16,10 @@
 
 mod controlled;
 mod expansion;
+mod offsets;
 pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
 pub(crate) use expansion::UnwindSource;
+pub(crate) use offsets::UnwindSourceOffset;
 
 use crate::algebra::GraphValue;
 use crate::{
@@ -188,8 +191,8 @@ pub(crate) struct UnwindField {
 pub struct GraphUnwindWriteText {
     pub(crate) original: String,
     pub(crate) lowered: String,
+    pub(crate) source_offsets: Box<[UnwindSourceOffset]>,
     pub(crate) source_parameter: String,
-    pub(crate) source_offset: usize,
     pub(crate) sources: Box<[UnwindSource]>,
     pub(crate) external_parameters: Box<[String]>,
     pub(crate) fields: Box<[UnwindField]>,
@@ -241,12 +244,17 @@ impl GraphUnwindWriteText {
     /// It applies independently at EVERY UNWIND boundary, so a later empty
     /// list cannot conceal an unbounded intermediate expansion. Missing/null
     /// sources and empty lists produce no child bindings; a list's null item
-    /// does produce a binding. Map items retain their earlier aliases. Scalar
-    /// items and a non-list source refuse in this bounded document profile.
+    /// does produce a binding. Scalar, map and list items retain their earlier
+    /// aliases. An alias used as a mutation operand must resolve to a scalar;
+    /// an alias used as another UNWIND source must resolve to a list or null.
+    /// A list-valued alias can be expanded directly or indexed with a static
+    /// signed index. No collection is coerced to a stored scalar property.
     /// An entirely empty expansion retains the explicit Empty refusal.
     ///
-    /// Original UTF-8 byte offsets survive lowering, including comments and
-    /// strings. Execution uses the ordinary program executor and its existing
+    /// Original UTF-8 diagnostics and batch locations survive lowering, even
+    /// when a one-byte alias needs a longer generated parameter token. Native
+    /// definition size limits still apply to the lowered statement. Execution
+    /// uses the ordinary program executor and its existing
     /// rollback, authorization, cancellation, allocation and commit semantics.
     pub fn bind_with_limit(
         &self,
@@ -295,6 +303,11 @@ fn field_value<'a, C>(
 ) -> Result<Option<&'a GraphValue>, GraphUnwindBindError<C>> {
     let refusal = |kind| GraphUnwindWriteError::Row { row: row_index, offset, kind };
     let mut current = row;
+    if path.is_empty() {
+        // A direct scalar/list alias is a real operand lookup too. Admission
+        // and expansion retain one cumulative control, including bare aliases.
+        control(GraphUnwindBindEvent::Work(1)).map_err(GraphUnwindBindError::Interrupted)?;
+    }
     for access in path {
         // Both the admission pass and expansion pass debit the SAME host
         // allowance before each bounded lookup. No container is materialized.
@@ -336,6 +349,9 @@ fn field_value<'a, C>(
 
 #[cfg(test)]
 mod nested_tests;
+
+#[cfg(test)]
+mod scalar_tests;
 
 #[cfg(test)]
 mod tests {
@@ -456,7 +472,7 @@ mod tests {
         assert!(matches!(
             parsed.bind(&arguments, RelationId(1), &mut catalog),
             Err(GraphUnwindWriteError::Row {
-                kind: GraphUnwindRowError::ExpectedMap,
+                kind: GraphUnwindRowError::ExpectedMapField,
                 ..
             })
         ));
@@ -582,13 +598,16 @@ mod tests {
         for query in [
             "UNWIND $rows AS row MERGE (row:Entity {id:row.id})",
             "UNWIND $rows AS row MATCH (row) SET row.name='x'",
-            "UNWIND $rows AS row MERGE (n:Entity {id:row})",
             "UNWIND $rows AS row MERGE (n:Entity {id:row.id[$index]})",
         ] {
-            assert!(matches!(
-                GraphUnwindWriteText::parse(query),
-                Err(GraphUnwindWriteError::Syntax(_))
-            ));
+            // A lexical definition alone is not executable. Short scalar
+            // aliases now lower to parameter operands; the native compiler
+            // still refuses them in graph binding/identity positions.
+            let result = GraphUnwindWriteText::parse(query).and_then(|parsed| {
+                parsed.bind(&rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
+                    RelationId(1), |_, _| panic!("invalid binding cannot enter catalog"))
+            });
+            assert!(result.is_err(), "{query}");
         }
     }
 

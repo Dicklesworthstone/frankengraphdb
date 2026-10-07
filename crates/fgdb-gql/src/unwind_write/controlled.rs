@@ -140,18 +140,6 @@ impl GraphUnwindWriteText {
         let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];
         for row_index in 0..rows.len() {
             work(&mut control, 1)?;
-            let row = rows.at(row_index, 0);
-            if !matches!(
-                row,
-                GraphValue::Map { .. } | GraphValue::Scalar(CanonicalScalar::Null)
-            ) {
-                return Err(GraphUnwindWriteError::Row {
-                    row: row_index,
-                    offset: self.source_offset,
-                    kind: GraphUnwindRowError::ExpectedMap,
-                }
-                .into());
-            }
             for (field, kind) in self.fields.iter().zip(kinds.iter_mut()) {
                 let row = rows.at(row_index, field.source);
                 if let Some(value) = scalar_field(row, field, row_index, &mut control)? {
@@ -248,9 +236,22 @@ impl GraphUnwindWriteText {
             return Err(GraphUnwindBindError::Interrupted(error));
         }
         work(&mut control, 1)?;
-        let prepared = prepared.map_err(GraphUnwindWriteError::Definition)?;
+        let mut prepared = prepared.map_err(|mut error| {
+            self.restore_script_offsets(&mut error);
+            GraphUnwindWriteError::Definition(error)
+        })?;
         control(GraphUnwindBindEvent::Definition(&prepared))
             .map_err(GraphUnwindBindError::Interrupted)?;
+
+        // The admitted definition callback saw the ordinary native template.
+        // Only private batch provenance changes now: binding reads its typed
+        // program, not script slices. The sole span starts in the unchanged
+        // blanked prefix; its end must refer to the ORIGINAL user statement.
+        // The resulting batch keeps these spans through execution errors.
+        for span in &mut prepared.spans {
+            debug_assert_eq!(self.original_offset(span.start), span.start);
+            span.end = self.original_offset(span.end);
+        }
 
         let mut before_allocation = true;
         prepared
@@ -266,7 +267,10 @@ impl GraphUnwindWriteText {
                 control(GraphUnwindBindEvent::Work(units))
             })
             .map_err(|error| match error {
-                GraphWriteScriptBatchBindError::Binding(error) => {
+                GraphWriteScriptBatchBindError::Binding(mut error) => {
+                    if let GraphWriteScriptBatchError::Arguments { source, .. } = &mut error {
+                        self.restore_script_offsets(source);
+                    }
                     GraphUnwindWriteError::Binding(error).into()
                 }
                 GraphWriteScriptBatchBindError::Interrupted { source, .. } => {

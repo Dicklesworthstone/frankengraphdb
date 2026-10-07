@@ -128,16 +128,21 @@ fn final_and_intermediate_expansion_limits_refuse_before_native_resolution() {
 #[test]
 fn malformed_late_sources_and_incompatible_leaves_cannot_publish_a_prefix() {
     let plan = GraphUnwindWriteText::parse(QUERY).unwrap();
-    for (bad, expected) in [
-        (object(vec![("children", int(42))]), GraphUnwindRowError::ExpectedListField),
-        (root(2, vec![item(4), int(42)], vec![]), GraphUnwindRowError::ExpectedMap),
-    ] {
+    for bad in [object(vec![("children", int(42))])] {
         let args = GqlParameters::new().with_list("rows", vec![root(1,vec![item(3)],vec![]), bad]).unwrap();
         let frozen = args.canonical_bytes();
         assert!(matches!(plan.bind(&args, RelationId(1), |_, _| panic!("catalog before admission")),
-            Err(GraphUnwindWriteError::Expansion { row: 1, clause: 1, kind, .. }) if kind == expected));
+            Err(GraphUnwindWriteError::Expansion { row: 1, clause: 1,
+                kind: GraphUnwindRowError::ExpectedListField, .. })));
         assert_eq!(args.canonical_bytes(), frozen);
     }
+    // A scalar list item is now a valid binding. Selecting its `.id` still
+    // refuses, at the exact flattened operand coordinate, before the catalog.
+    let args = GqlParameters::new().with_list("rows", vec![root(1,vec![item(3)],vec![]),
+        root(2, vec![item(4), int(42)], vec![])]).unwrap();
+    assert!(matches!(plan.bind(&args, RelationId(1), |_, _| panic!("catalog before admission")),
+        Err(GraphUnwindWriteError::Row { row: 2,
+            kind: GraphUnwindRowError::ExpectedMapField, .. })));
     let args = GqlParameters::new().with_list("rows", vec![root(1, vec![item(1),
         object(vec![("id", GraphValue::Scalar(CanonicalScalar::Bool(true)))])], vec![])]).unwrap();
     assert!(matches!(plan.bind(&args, RelationId(1), |_, _| panic!("catalog")),
@@ -165,7 +170,10 @@ fn aliases_and_paths_are_sealed_before_lowering_with_original_byte_coordinates()
     }
     for target in ["p", "c"] {
         let text = format!("UNWIND $rows AS p UNWIND p.children AS c MATCH ({target}) SET {target}.id=1");
-        assert!(GraphUnwindWriteText::parse(&text).is_err());
+        let args = GqlParameters::new().with_list("rows", vec![root(1, vec![item(2)], vec![])]).unwrap();
+        assert!(GraphUnwindWriteText::parse(&text).and_then(|definition|
+            definition.bind(&args, RelationId(1), |_, _| panic!("graph alias cannot enter catalog"))
+        ).is_err());
     }
     let mut text = "UNWIND $rows AS p".to_owned();
     for at in 1..MAX_UNWIND_SOURCES { text.push_str(&format!(" UNWIND p.children AS c{at}")); }
