@@ -303,7 +303,7 @@ fn sort_and_final_window_share_one_work_allowance() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let db = seed(&c.commit(), 12).await;
-        let prepared = plan("MATCH (n:L) RETURN n.p AS p, n AS id ORDER BY p DESC SKIP 1 LIMIT 3");
+        let prepared = plan("MATCH (n:L) RETURN n AS id ORDER BY n.p DESC SKIP 1 LIMIT 3");
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
@@ -369,7 +369,7 @@ fn opening_pins_the_old_values_and_releases_the_generation_after_source_drain() 
         let view = db.read_session().unwrap();
         let weak = Arc::downgrade(&db.snapshot);
         let at = view.frontier();
-        let text = "MATCH (n:L) RETURN n.p AS p, n AS id ORDER BY p DESC LIMIT 4";
+        let text = "MATCH (n:L) RETURN n AS id ORDER BY n.p DESC LIMIT 4";
         let expected = expected(&view, &cx, text);
         let prepared = plan(text);
         let params = GqlParameters::new();
@@ -896,6 +896,227 @@ fn duplicate_frame_equality_checks_every_byte_and_propagates_every_control_cut()
         assert_eq!(seen, cut);
     }
     assert!(equal_frame(&left, &left, &mut |_| Ok(())).unwrap());
+}
+
+#[test]
+fn hidden_sort_keys_match_eager_rows_and_return_only_a_resortable_visible_schema() {
+    let ((), report) = run_async_under_lab(0x50ed_0014, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 36).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        for (text, column) in [
+            (
+                "MATCH (n:L) RETURN n AS id ORDER BY n.p DESC NULLS FIRST, n.q ASC SKIP 3 LIMIT 7",
+                "id",
+            ),
+            (
+                "MATCH (n:L) RETURN n.q AS payload ORDER BY n.p ASC NULLS LAST",
+                "payload",
+            ),
+            (
+                "MATCH (n:L) RETURN n.p AS value ORDER BY n.q DESC, value ASC NULLS FIRST SKIP 2 LIMIT 9",
+                "value",
+            ),
+        ] {
+            let prepared = plan(text);
+            let params = GqlParameters::new();
+            let wanted = expected(&view, &cx, text);
+            assert!(prepared.stream(&db, &cx, &params, policy()).is_err());
+            let mut allowance = policy();
+            allowance.rows = GqlExecutionBudget::new(36, wanted.len() as u64);
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, backing) = file(&cx, &pool).await;
+            let (spool, _) = prepared
+                .spool_ordered(
+                    &db,
+                    &cx,
+                    &params,
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    3,
+                    12,
+                    127,
+                    4096,
+                    36,
+                    100_000_000,
+                )
+                .await
+                .unwrap();
+            assert_eq!(spool.columns(), &[column]);
+            assert_eq!(spool.encoded_columns, 1);
+            assert_eq!(spool.row_count(), wanted.len() as u64);
+            assert_eq!(spool.row_stats().snapshot_records, 36);
+            assert_eq!(spool.max_row_bytes, wanted.iter().map(Vec::len).max().unwrap());
+            assert_eq!(contents(&spool, &mut destination, &cx).await, wanted, "{text}");
+            assert!(backing.0.lock().unwrap().bytes.get_ref().len() > pool.limit());
+            assert_eq!(pool.used(), 0);
+
+            // The public result owns only visible rows, including its framing
+            // metadata. A caller may read and sort it again without hidden keys.
+            let mut typed: Vec<_> = wanted
+                .iter()
+                .map(|bytes| GraphValueRow::decode_canonical(bytes).unwrap())
+                .collect();
+            assert!(typed.iter().all(|row| row.len() == 1));
+            typed.sort();
+            let reordered: Vec<_> = typed
+                .iter()
+                .map(|row| row.canonical_bytes().unwrap())
+                .collect();
+            let (sorted_again, _) = spool
+                .sort_into(
+                    &cx,
+                    &mut destination,
+                    &mut scratch,
+                    &[GraphValueOrder::ascending(0).with_nulls_first(true)],
+                    3,
+                    12,
+                    127,
+                    100_000_000,
+                )
+                .await
+                .unwrap();
+            assert_eq!(sorted_again.columns(), &[column]);
+            assert_eq!(contents(&sorted_again, &mut scratch, &cx).await, reordered);
+            assert_eq!(pool.used(), 0);
+            assert!(prepared.stream(&db, &cx, &params, policy()).is_err());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hidden_payloads_spend_the_full_input_row_limit_even_when_the_visible_page_is_empty() {
+    let ((), report) = run_async_under_lab(0x50ed_0015, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 3).await;
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let visible = GraphValueRow::from_owned_values(vec![
+            fgdb_gql::algebra::GraphValue::Vertex(VId(0)),
+        ]);
+        assert!(visible.canonical_bytes().unwrap().len() < 1024);
+        for limit in [0, 1] {
+            let text = format!("MATCH (n:L) RETURN n AS id ORDER BY n.q LIMIT {limit}");
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, _) = file(&cx, &pool).await;
+            let error = plan(&text)
+                .spool_ordered(
+                    &db,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    3,
+                    127,
+                    1024,
+                    3,
+                    1_000_000,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                NativeSpoolError::RowTooLarge { bytes, limit: 1024 } if bytes > 1024
+            ));
+            assert_eq!(scratch.stats(), SpillStats::default());
+            assert_eq!(destination.stats().published_runs, 0);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn visible_prefix_borrows_exact_frames_and_refuses_a_malformed_discarded_tail() {
+    let ((), report) = run_async_under_lab(0x50ed_0016, |root| async move {
+        use fgdb_gql::algebra::GraphValue;
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let cells = vec![
+            GraphValue::Scalar(CanonicalScalar::bytes(vec![0x5a; 12_295]).unwrap()),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Vertices(vec![VId(3), VId(1)].into()),
+                ]
+                .into(),
+            ),
+        ];
+        let encoded = GraphValueRow::from_owned_values(cells.clone())
+            .canonical_bytes()
+            .unwrap();
+        let header = canonical::ROW.len() + 8;
+        let mut work = Work {
+            cx: &cx,
+            used: 0,
+            limit: u64::MAX,
+        };
+        for visible in 1..=cells.len() {
+            let frames =
+                canonical::visible_prefix(&encoded, cells.len(), visible, &mut work).unwrap();
+            assert_eq!(frames.as_ptr(), encoded[header..].as_ptr());
+            let mut actual = canonical::ROW.to_vec();
+            actual.extend_from_slice(&(visible as u64).to_be_bytes());
+            actual.extend_from_slice(frames);
+            let wanted = GraphValueRow::from_owned_values(cells[..visible].to_vec());
+            assert_eq!(actual, wanted.canonical_bytes().unwrap());
+            assert_eq!(GraphValueRow::decode_canonical(&actual).unwrap(), wanted);
+        }
+        let visible_bytes = canonical::visible_prefix(&encoded, 3, 1, &mut work)
+            .unwrap()
+            .len();
+        let mut bad_domain = encoded.clone();
+        bad_domain[header + visible_bytes + 8] ^= 1;
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        let mut bad_width = encoded.clone();
+        bad_width[canonical::ROW.len()..header].copy_from_slice(&4_u64.to_be_bytes());
+        for invalid in [
+            encoded[..encoded.len() - 1].to_vec(),
+            bad_domain,
+            trailing,
+            bad_width,
+        ] {
+            assert!(matches!(
+                canonical::visible_prefix(&invalid, 3, 1, &mut work),
+                Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+            ));
+        }
+        for visible in [0, 4] {
+            assert!(canonical::visible_prefix(&encoded, 3, visible, &mut work).is_err());
+        }
+        let mut complete = Work {
+            cx: &cx,
+            used: 0,
+            limit: u64::MAX,
+        };
+        canonical::visible_prefix(&encoded, 3, 1, &mut complete).unwrap();
+        for limit in [complete.used - 1, complete.used] {
+            let mut bounded = Work {
+                cx: &cx,
+                used: 0,
+                limit,
+            };
+            let result = canonical::visible_prefix(&encoded, 3, 1, &mut bounded);
+            if limit == complete.used {
+                assert!(result.is_ok());
+                assert_eq!(bounded.used, complete.used);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(NativeSpoolError::SortWorkLimit { .. })
+                ));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[path = "native_edge_order_tests.rs"]

@@ -28,6 +28,8 @@ impl super::VertexScanPlan<GraphValueRow> {
     /// not requested result order. Its ResultRows allowance/counter describes
     /// intermediate input, never the final query page. A host must explicitly
     /// budget that input and apply the returned tail before exposing results.
+    /// Hidden key cells belong to these complete evaluation rows; the consumer
+    /// removes them only after ordering and the query window.
     /// Ordinary compile(), and its ordered/unique-output proof, are unchanged.
     pub fn compile_sort_input(
         plan: &crate::algebra::GlaPlan<GraphValueRow>,
@@ -37,7 +39,7 @@ impl super::VertexScanPlan<GraphValueRow> {
         // DISTINCT is intentionally deferred along with ordering. The row
         // collector emits every source occurrence; only the blocking consumer
         // may deduplicate complete rows before applying the retained window.
-        let mut input = Self::compile_with_projection(plan, |projection, order| {
+        let mut input = Self::compile_with_projection(plan, Some(&tail), |projection, order| {
             let GlaOperator::ProjectValues { columns } = projection else {
                 return false;
             };

@@ -7,7 +7,7 @@
 use super::*;
 use fgdb_gql::algebra::GraphValue;
 
-const ROW: &[u8] = b"fgdb:graph-row:v1\0";
+pub(super) const ROW: &[u8] = b"fgdb:graph-row:v1\0";
 const VALUE: &[u8] = b"fgdb:graph-value:v1\0";
 
 fn invalid() -> NativeSpoolError {
@@ -130,6 +130,31 @@ pub(super) fn validate(bytes: &[u8], columns: usize, work: &mut Work<'_>) -> Res
         return Err(invalid());
     }
     Ok(())
+}
+
+// Return the original framed cells, borrowing the authenticated input row.
+// Validate the COMPLETE evaluation row first, including every hidden cell and
+// its nested frames. A discarded tail must never turn malformed input into a
+// successful visible row. Only the domain/count header changes on output.
+pub(super) fn visible_prefix<'a>(
+    bytes: &'a [u8],
+    columns: usize,
+    visible: usize,
+    work: &mut Work<'_>,
+) -> Result<&'a [u8]> {
+    work.charge(1)?;
+    if visible == 0 || visible > columns {
+        return Err(invalid());
+    }
+    validate(bytes, columns, work)?;
+    let frames = row(bytes, columns)?;
+    let mut remaining = frames;
+    for _ in 0..visible {
+        work.charge(1)?;
+        frame(&mut remaining)?;
+    }
+    let prefix = frames.len() - remaining.len();
+    Ok(&frames[..prefix])
 }
 
 // Bounded chunks admit comparison work before inspecting variable payloads.

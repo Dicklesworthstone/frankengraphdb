@@ -100,17 +100,21 @@ impl PreparedNativeRead {
     /// property-first projections, explicit direction/null placement, implicit
     /// canonical whole-row ordering, predicates and supported EXISTS probes use
     /// the ordinary collectors and pinned sources. No synthetic identity column
-    /// changes DISTINCT, ties or the public schema. DISTINCT compares complete
-    /// canonical rows after sorting and BEFORE pagination; it retains only the
-    /// previous unique frame, not an input-sized seen-set. Equal ORDER BY keys
+    /// changes DISTINCT, ties or the public schema. Compiler-owned hidden
+    /// ORDER BY cells remain in the evaluation row through sorting and paging,
+    /// then the final writer retains the visible prefix without re-encoding its
+    /// values. Hidden cells are never admitted under DISTINCT.
+    /// DISTINCT compares complete canonical rows after sorting and BEFORE
+    /// pagination; it retains only the previous unique frame, not an input-sized
+    /// seen-set. Equal ORDER BY keys
     /// alone never collapse rows. Edge-rooted fixed-hop chains, branches and
     /// identity closures retain the native indexed join traversal, edge/path
     /// values and property predicates. Parallel edges and both undirected
     /// orientations remain distinct input occurrences; only explicit DISTINCT
     /// can collapse equal complete output rows. Traversal state is proportional
     /// to the admitted fixed hop count, not the number of matches.
-    /// Relational/aggregate plans, optional/variable-length joins, hidden sort
-    /// columns and unsupported physical instructions refuse. There is no fallback.
+    /// Relational/aggregate plans, optional/variable-length joins and
+    /// unsupported physical instructions refuse. There is no fallback.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
     /// future borrows ONLY cx and the two scratch files; writer/template/params
@@ -136,6 +140,9 @@ impl PreparedNativeRead {
     /// sort_into documents run_rows/max_runs/page_bytes and minimum headroom.
     /// DISTINCT additionally retains one pool-charged maximum-row frame; its
     /// byte comparisons checkpoint in at most 4 KiB chunks under max_sort_work.
+    /// Hidden-prefix framing and writes spend that same allowance, borrowing the
+    /// already charged input frame and existing output page instead of copying
+    /// another maximum-size row. The complete hidden tail is validated first.
     /// One native row plus its canonical encoding and the decoded source remain
     /// outside the spill pool. This is not a Warden grant, durable result, or a
     /// claim that every GQL operator or the underlying database is out-of-core.
@@ -252,7 +259,10 @@ where
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
-    validate_order(tail.order(), columns.len())?;
+    if columns.len() != tail.visible_width() {
+        return Err(SpillError::InvalidRun.into());
+    }
+    validate_order(tail.order(), tail.evaluation_width())?;
     if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
         return Err(SpillError::InvalidLimits.into());
     }
@@ -268,7 +278,16 @@ where
             limit: 0,
         });
     }
-    let input = drain(cx, columns, cursor, destination, page_bytes, max_row_bytes).await?;
+    let input = drain(
+        cx,
+        columns,
+        tail.evaluation_width(),
+        cursor,
+        destination,
+        page_bytes,
+        max_row_bytes,
+    )
+    .await?;
     let (sorted, used) = input
         .sort_into(
             cx,
@@ -312,6 +331,12 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
+    if sorted.encoded_columns != tail.evaluation_width()
+        || sorted.columns.len() != tail.visible_width()
+        || (tail.distinct() && tail.visible_width() != tail.evaluation_width())
+    {
+        return Err(SpillError::InvalidRun.into());
+    }
     let mut reader = sorted.reader(scratch);
     let mut writer = destination.paged_writer(work.cx, page_bytes)?;
     let mut skip = tail.offset();
@@ -335,8 +360,13 @@ where
             budget
                 .check(GqlBudgetDimension::ResultRows, next)
                 .map_err(|e| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(e))))?;
-            write_row(&mut writer, row.as_ref(), work).await?;
-            largest = largest.max(row.len());
+            let bytes = if tail.visible_width() == tail.evaluation_width() {
+                write_row(&mut writer, row.as_ref(), work).await?;
+                row.len()
+            } else {
+                write_visible_row(&mut writer, row.as_ref(), tail, work).await?
+            };
+            largest = largest.max(bytes);
             selected = next;
         }
         if tail.distinct() {
@@ -356,6 +386,7 @@ where
     let run = writer.finish(work.cx).await?;
     Ok(NativeResultSpool {
         columns: Arc::clone(&sorted.columns),
+        encoded_columns: tail.visible_width(),
         snapshot: sorted.snapshot,
         kind: sorted.kind,
         rows: GqlExecutionStats {
@@ -366,6 +397,38 @@ where
         max_row_bytes: largest,
         run,
     })
+}
+
+// The complete row has already participated in order and window selection.
+// Reframe the original visible cells directly into the charged page writer;
+// no typed decoding, scalar conversion or second row allocation is involved.
+async fn write_visible_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+    writer: &mut PagedSpillWriter<'_, F>,
+    row: &[u8],
+    tail: &ScanSortTail,
+    work: &mut Work<'_>,
+) -> Result<usize> {
+    let frames = canonical::visible_prefix(
+        row,
+        tail.evaluation_width(),
+        tail.visible_width(),
+        work,
+    )?;
+    let header = canonical::ROW.len() + 8;
+    let bytes = header
+        .checked_add(frames.len())
+        .ok_or(SpillError::SizeOverflow)?;
+    let len = u64::try_from(bytes).map_err(|_| SpillError::SizeOverflow)?;
+    let width = u64::try_from(tail.visible_width()).map_err(|_| SpillError::SizeOverflow)?;
+    work.charge(header)?;
+    writer.write(work.cx, &len.to_be_bytes()).await?;
+    writer.write(work.cx, canonical::ROW).await?;
+    writer.write(work.cx, &width.to_be_bytes()).await?;
+    for chunk in frames.chunks(4096) {
+        work.charge(chunk.len())?;
+        writer.write(work.cx, chunk).await?;
+    }
+    Ok(bytes)
 }
 
 // Inputs have authenticated and passed the native structural frame validator.

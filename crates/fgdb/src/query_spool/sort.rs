@@ -247,7 +247,7 @@ impl NativeResultSpool {
             limit: max_work_units,
         };
         work.charge(1)?;
-        validate_order(order, self.columns.len())?;
+        validate_order(order, self.encoded_columns)?;
         if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
             return Err(SpillError::InvalidLimits.into());
         }
@@ -276,10 +276,10 @@ impl NativeResultSpool {
                         .next_row(cx)
                         .await?
                         .ok_or(NativeSpoolError::IncompleteCursor)?;
-                    canonical::validate(row.as_ref(), self.columns.len(), &mut work)?;
+                    canonical::validate(row.as_ref(), self.encoded_columns, &mut work)?;
                     rows.values.push(row);
                 }
-                heap_sort(&mut rows.values, order, self.columns.len(), &mut work)?;
+                heap_sort(&mut rows.values, order, self.encoded_columns, &mut work)?;
                 let rows_written = rows.values.len() as u64;
                 let mut writer = destination.paged_writer(cx, page_bytes)?;
                 for row in &rows.values {
@@ -313,7 +313,7 @@ impl NativeResultSpool {
                     self.max_row_bytes,
                     page_bytes,
                     order,
-                    self.columns.len(),
+                    self.encoded_columns,
                     &mut work,
                 )
                 .await?;
@@ -326,7 +326,7 @@ impl NativeResultSpool {
                     self.max_row_bytes,
                     page_bytes,
                     order,
-                    self.columns.len(),
+                    self.encoded_columns,
                     &mut work,
                 )
                 .await?;
@@ -348,7 +348,7 @@ impl NativeResultSpool {
                 self.max_row_bytes,
                 page_bytes,
                 order,
-                self.columns.len(),
+                self.encoded_columns,
                 &mut work,
             )
             .await?;
@@ -360,6 +360,7 @@ impl NativeResultSpool {
         Ok((
             Self {
                 columns: Arc::clone(&self.columns),
+                encoded_columns: self.encoded_columns,
                 snapshot: self.snapshot,
                 kind: self.kind,
                 rows: self.rows,

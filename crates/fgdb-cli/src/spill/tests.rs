@@ -385,3 +385,142 @@ fn cancellation_after_one_flushed_row_retires_scratch_without_a_success_terminal
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn hidden_sort_keys_rank_spilled_rows_without_entering_the_public_schema() {
+    let ((), report) = run_async_under_lab(0x5b116, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = fixture(&contexts.commit()).await;
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(0), PropertyKeyId(1), None);
+        update.set_vertex_property(
+            VId(1),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(1000)),
+        );
+        db.write(&contexts.commit(), update).await.unwrap();
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        for (text, column, seq) in [
+            (
+                "MATCH (n) RETURN n AS id ORDER BY n.p DESC NULLS LAST, id SKIP 7 LIMIT 13",
+                "id",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN n AS id ORDER BY n.p ASC NULLS FIRST, n.note DESC, id LIMIT 3",
+                "id",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS id ORDER BY n.p DESC, id SKIP 2 LIMIT 4",
+                "id",
+                1,
+            ),
+            (
+                "MATCH (a)-[e:R]->(b) RETURN e AS edge ORDER BY b.p DESC NULLS FIRST, a.p ASC, edge",
+                "edge",
+                2,
+            ),
+            (
+                "MATCH path=(a)-[e:R]->(b) RETURN e AS edge ORDER BY LENGTH(path) DESC, b.p DESC, edge",
+                "edge",
+                2,
+            ),
+            (
+                "MATCH (a)-[e:R]-(b) RETURN b AS target ORDER BY a.p DESC NULLS LAST, b.p ASC NULLS FIRST SKIP 1 LIMIT 5",
+                "target",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN n AS id ORDER BY n.note DESC LIMIT 0",
+                "id",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN n AS id ORDER BY n.p DESC NULLS LAST LIMIT 1",
+                "id",
+                2,
+            ),
+        ] {
+            let mut options = options(&directory, text);
+            if text.ends_with("LIMIT 1") {
+                // Hidden keys belong to the private input allowance. They do
+                // not spend the single-row allowance of the selected page.
+                options.budget.rows = Some(1);
+                options.spill.rows = Some(96);
+            }
+            let eager = view
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, seq, "rows", true, &mut expected));
+            let mut output = Vec::new();
+            okay(run(&view, &cx, &options, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            let rendered = std::str::from_utf8(&output).unwrap();
+            assert_eq!(
+                rendered.lines().next().unwrap(),
+                format!(
+                    r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"columns":[{}]}}"#,
+                    quoted(column)
+                ),
+                "{text}"
+            );
+            assert!(
+                !rendered.contains("padding"),
+                "a hidden text property escaped into the robot output"
+            );
+            empty(&directory);
+
+            let mut human = Vec::new();
+            okay(run(&view, &cx, &options, None, false, &mut human).await);
+            let human = std::str::from_utf8(&human).unwrap();
+            let lines: Vec<_> = human.lines().collect();
+            assert_eq!(lines[0], column, "{text}");
+            assert_eq!(lines.len(), rows(&output).len() + 2, "{text}");
+            assert!(
+                lines[1..lines.len() - 1]
+                    .iter()
+                    .all(|line| !line.contains('\t')),
+                "human rows must contain only the one visible column"
+            );
+            assert!(!human.contains("padding"));
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hidden_distinct_sort_keys_refuse_before_any_delivery_or_scratch_even_at_limit_zero() {
+    let ((), report) = run_async_under_lab(0x5b117, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let cx = contexts.query();
+        let directory = parent();
+        for text in [
+            "MATCH (n) RETURN DISTINCT n.note AS note ORDER BY n.p",
+            "MATCH (n) RETURN DISTINCT n.note AS note ORDER BY n.p LIMIT 0",
+            "MATCH (a)-[e:R]->(b) RETURN DISTINCT a AS source ORDER BY b.p LIMIT 0",
+        ] {
+            let options = options(&directory, text);
+            let mut output = Vec::new();
+            let error = run(&view, &cx, &options, None, true, &mut output)
+                .await
+                .expect_err("DISTINCT cannot deduplicate hidden evaluation cells");
+            assert_eq!(error.code, 3, "{}", error.message);
+            assert!(output.is_empty(), "{text}");
+            empty(&directory);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

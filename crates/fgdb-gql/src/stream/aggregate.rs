@@ -90,6 +90,7 @@ impl VertexAggregatePlan {
         }
         let input = VertexScanPlan::compile_with_projection(
             aggregate.input_pattern().plan(),
+            None,
             |projection, ordering| {
                 let GlaOperator::ProjectValues { columns } = projection else {
                     return false;

@@ -164,7 +164,17 @@ where
             limit: 0,
         });
     }
-    let spool = drain(cx, columns, cursor, source, page_bytes, max_row_bytes).await?;
+    let encoded_columns = columns.len();
+    let spool = drain(
+        cx,
+        columns,
+        encoded_columns,
+        cursor,
+        source,
+        page_bytes,
+        max_row_bytes,
+    )
+    .await?;
     spool
         .sort_into(
             cx,

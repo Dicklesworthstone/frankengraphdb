@@ -101,6 +101,9 @@ impl NativeSpoolError {
 #[derive(Clone)]
 pub struct NativeResultSpool {
     columns: Arc<[String]>,
+    // Private blocking inputs may also contain trailing hidden sort cells.
+    // Only the final window's visible-width handle escapes a native adapter.
+    encoded_columns: usize,
     snapshot: CommitSeq,
     kind: ScanKind,
     rows: GqlExecutionStats,
@@ -205,7 +208,17 @@ impl PreparedNativeRead {
         let opened = self.stream(database, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain(cx, columns, cursor, scratch, page_bytes, max_row_bytes).await
+            let encoded_columns = columns.len();
+            drain(
+                cx,
+                columns,
+                encoded_columns,
+                cursor,
+                scratch,
+                page_bytes,
+                max_row_bytes,
+            )
+            .await
         }
     }
 
@@ -229,7 +242,17 @@ impl PreparedNativeRead {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain(cx, columns, cursor, scratch, page_bytes, max_row_bytes).await
+            let encoded_columns = columns.len();
+            drain(
+                cx,
+                columns,
+                encoded_columns,
+                cursor,
+                scratch,
+                page_bytes,
+                max_row_bytes,
+            )
+            .await
         }
     }
 }
@@ -296,6 +319,7 @@ where
 async fn drain<I, F>(
     cx: &QueryCx,
     columns: Vec<String>,
+    encoded_columns: usize,
     mut cursor: I,
     scratch: &mut SpillFile<F>,
     page_bytes: usize,
@@ -312,6 +336,9 @@ where
     let mut largest = 0;
     while let Some(row) = cursor.pull() {
         let row = row.map_err(|e| NativeSpoolError::Execute(Box::new(e)))?;
+        if row.len() != encoded_columns {
+            return Err(SpillError::InvalidRun.into());
+        }
         cx.with_restriction(|| cx.checkpoint())
             .map_err(SpillError::Interrupted)?;
         let bytes = row.canonical_bytes().map_err(NativeSpoolError::Encode)?;
@@ -335,6 +362,7 @@ where
     let run = writer.finish(cx).await?;
     Ok(NativeResultSpool {
         columns,
+        encoded_columns,
         snapshot,
         kind,
         rows,

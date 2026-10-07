@@ -72,14 +72,16 @@ pub struct VertexScanPlan<Row = VId> {
 }
 impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
-        Self::compile_with_projection(plan, Row::accepts_projection)
+        Self::compile_with_projection(plan, None, Row::accepts_projection)
     }
 
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.
+    // Only a compiler-checked blocking sort tail can retain hidden key cells.
     fn compile_with_projection(
         plan: &GlaPlan<Row>,
+        sort_tail: Option<&crate::scan_stream::ScanSortTail>,
         accepts_projection: impl FnOnce(&GlaOperator, &GlaOperator) -> bool,
     ) -> Result<Self, VertexScanBuildError> {
         let operators = plan.operators();
@@ -139,7 +141,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         // A unique leading identity establishes both whole-row uniqueness and
         // order even when later cells are properties. No global set is needed.
-        if plan.visible_columns.is_some()
+        if (plan.visible_columns.is_some() && sort_tail.is_none())
             || !operators
                 .get(at)
                 .is_some_and(|order| accepts_projection(&operators[projection_at], order))

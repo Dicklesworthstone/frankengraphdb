@@ -63,12 +63,13 @@ impl EdgeScanPlan {
     /// including parallel edges and undirected orientations. ResultRows counts
     /// these intermediate occurrences and must receive an explicit input cap.
     /// The consumer must sort, apply complete-row DISTINCT when requested,
-    /// then SKIP/LIMIT under its final output allowance. Even LIMIT 0 does not
-    /// make the input empty or suppress a later source/data error.
+    /// then SKIP/LIMIT under its final output allowance, and finally remove
+    /// compiler-owned hidden key cells. Even LIMIT 0 does not make the input
+    /// empty or suppress a later source/data error.
     ///
     /// Ordinary ordered streams and aggregate compilation retain their own
-    /// eligibility rules. Optional/variable-length joins, hidden sort columns,
-    /// catalog-name projections and unsupported instructions still refuse.
+    /// eligibility rules. Optional/variable-length joins, catalog-name
+    /// projections and unsupported instructions still refuse.
     pub fn compile_sort_input(
         plan: &GlaPlan<GraphValueRow>,
     ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
@@ -242,7 +243,7 @@ fn compile_output(
         Some(GlaOperator::OrderByValueColumns { .. }) => output == Output::SortInput,
         _ => false,
     };
-    if plan.visible_columns.is_some() || !ordering_supported {
+    if (plan.visible_columns.is_some() && output != Output::SortInput) || !ordering_supported {
         return Err(EdgeScanBuildError { operator: at });
     }
     at += 1;

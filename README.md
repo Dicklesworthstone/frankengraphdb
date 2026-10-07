@@ -218,7 +218,7 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --certify-to result.cert "<gql
 # External ORDER BY/DISTINCT with private query scratch in an existing directory
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property score=1 \
   --spill-dir /tmp --spill-memory-bytes 67108864 --spill-disk-bytes 1073741824 \
-  "MATCH (n) RETURN n.score AS score ORDER BY score DESC LIMIT 100"
+  "MATCH (n) RETURN n AS node ORDER BY n.score DESC LIMIT 100"
 
 # Commit a write, then compare two committed revisions of one query
 fgdb write --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
@@ -285,9 +285,9 @@ d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token")
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
 ```
 
-`query --spill-dir <existing-directory>` uses the native external sorter for vertex and fixed-edge scans, including property-only projections, `DISTINCT`, terminal `SKIP`/`LIMIT`, and historical cuts. Sort keys must be projected; aggregates, optional or variable-length joins, maps, and other unsupported native instructions refuse without an eager retry. It cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`.
+`query --spill-dir <existing-directory>` uses the native external sorter for vertex and fixed-edge scans, including property-only projections, `DISTINCT`, terminal `SKIP`/`LIMIT`, and historical cuts. `ORDER BY` may use unreturned vertex or edge properties and supported path functions: these private cells determine ordering and pagination, then are removed before result rows and column names are published. Multiple sort keys, direction and null placement use the ordinary query semantics. Under `DISTINCT`, sort keys must be projected. Aggregates, optional or variable-length joins, maps, and other unsupported native instructions refuse without an eager retry. It cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`.
 
-The scratch files share one memory allowance (`--spill-memory-bytes`, default 64 MiB), and split one append-only disk allowance (`--spill-disk-bytes`, default 1 GiB) equally. Every intermediate pass and metadata write spends disk quota. `--max-spill-rows` (default 1,000,000) bounds input occurrences independently of final `--max-result-rows`; `--max-sort-work` (default 1,000,000,000) bounds additional sort work independently of the query's source budget. Encoded rows are capped at 1 MiB. The decoded source generation, one native row and scalar/output encoding are outside the scratch pool, so this is external result ordering, not a whole-engine memory bound.
+The scratch files share one memory allowance (`--spill-memory-bytes`, default 64 MiB), and split one append-only disk allowance (`--spill-disk-bytes`, default 1 GiB) equally. Every intermediate pass and metadata write spends disk quota. `--max-spill-rows` (default 1,000,000) bounds input occurrences independently of final `--max-result-rows`; `--max-sort-work` (default 1,000,000,000) bounds additional sort work independently of the query's source budget. Encoded evaluation rows, including hidden sort keys, are capped at 1 MiB. The decoded source generation, one native row and scalar/output encoding are outside the scratch pool, so this is external result ordering, not a whole-engine memory bound.
 
 Sorting finishes before delivery begins. Rows are decoded and flushed individually with the ordinary native cell types and streaming completion contract. Each invocation creates a private scratch directory and exclusive files, then retires its own files before the success result; failures and cancellation also clean them up. Process death can leave that invocation's private directory, which later invocations never reuse or sweep. An error, unsuccessful exit, or missing terminal result means incomplete delivery.
 
