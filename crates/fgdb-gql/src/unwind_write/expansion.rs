@@ -3,11 +3,15 @@
 //! private until the ordinary whole-batch binder accepts the final program.
 
 use super::*;
+use crate::GqlParameterValue;
 
 #[derive(Clone)]
 pub(crate) struct UnwindSource {
     /// An earlier alias: zero is the root, one is the first nested source.
+    /// Used only when `parameter` is None.
     pub(crate) source: usize,
+    /// An independent named list source; alias coordinates still count clauses.
+    pub(crate) parameter: Option<String>,
     pub(crate) path: Box<[UnwindFieldAccess]>,
     pub(crate) offset: usize,
 }
@@ -42,20 +46,57 @@ fn work<C>(
     control(GraphUnwindBindEvent::Work(units)).map_err(GraphUnwindBindError::Interrupted)
 }
 
+#[cfg(test)]
 pub(super) fn expand<'a, C>(
     definition: &GraphUnwindWriteText,
     roots: &'a [GraphValue],
     limit: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<InputRows<'a>, GraphUnwindBindError<C>> {
+    expand_with_parameters(definition, roots, None, limit, control)
+}
+
+pub(super) fn expand_with_parameters<'a, C>(
+    definition: &GraphUnwindWriteText,
+    roots: &'a [GraphValue],
+    arguments: Option<&'a GqlParameters>,
+    limit: usize,
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<InputRows<'a>, GraphUnwindBindError<C>> {
     if definition.sources.is_empty() {
         return Ok(InputRows::Roots(roots));
     }
-    // The lexer seals at most eight sources, all pointing strictly backwards.
-    // Reserve the one active frame and per-stage counters before allocating.
-    work(control, (2 * definition.sources.len() + 2) as u64)?;
+    // At most eight sources: alias dependencies point strictly backwards.
+    // Admit metadata and ALL independent sources before traversing a product,
+    // so an empty earlier source cannot conceal a malformed later parameter.
+    work(control, (3 * definition.sources.len() + 2) as u64)?;
+    let mut parameter_rows = Vec::with_capacity(definition.sources.len());
+    for (clause, source) in definition.sources.iter().enumerate() {
+        let Some(name) = &source.parameter else {
+            parameter_rows.push(None);
+            continue;
+        };
+        work(control, 1)?;
+        let Some(GqlParameterValue::List(values)) = arguments.and_then(|args| args.get(name)) else {
+            return Err(GraphUnwindWriteError::Expansion {
+                row: 0,
+                clause: clause + 1,
+                offset: source.offset,
+                kind: GraphUnwindRowError::ExpectedListField,
+            }.into());
+        };
+        let values = values.values();
+        if values.len() > limit {
+            return Err(GraphUnwindWriteError::TooManyRows {
+                limit,
+                observed: values.len(),
+            }.into());
+        }
+        parameter_rows.push(Some(values));
+    }
     let mut state = Expansion {
         sources: &definition.sources,
+        parameter_rows,
         limit,
         counts: vec![0; definition.sources.len()],
         rows: Vec::new(),
@@ -78,6 +119,7 @@ pub(super) fn expand<'a, C>(
 
 struct Expansion<'a, 'd> {
     sources: &'d [UnwindSource],
+    parameter_rows: Vec<Option<&'a [GraphValue]>>,
     limit: usize,
     counts: Vec<usize>,
     rows: Vec<Box<[&'a GraphValue]>>,
@@ -105,18 +147,24 @@ impl<'a> Expansion<'a, '_> {
             offset,
             kind,
         };
-        let value = field_value(frame[source.source], &source.path, offset, root, control)
-            .map_err(|error| match error {
-                GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
-                    GraphUnwindBindError::Binding(refusal(kind))
-                }
-                error => error,
-            })?;
-        let Some(value) = value.filter(|value| !value.is_null()) else {
-            return Ok(());
-        };
-        let GraphValue::List(items) = value else {
-            return Err(refusal(GraphUnwindRowError::ExpectedListField).into());
+        let items = if let Some(items) = self.parameter_rows[at] {
+            // Copy a borrowed slice, never the source list or its payloads.
+            items
+        } else {
+            let value = field_value(frame[source.source], &source.path, offset, root, control)
+                .map_err(|error| match error {
+                    GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
+                        GraphUnwindBindError::Binding(refusal(kind))
+                    }
+                    error => error,
+                })?;
+            let Some(value) = value.filter(|value| !value.is_null()) else {
+                return Ok(());
+            };
+            let GraphValue::List(items) = value else {
+                return Err(refusal(GraphUnwindRowError::ExpectedListField).into());
+            };
+            items.as_ref()
         };
         for item in items.iter() {
             work(control, 1)?;

@@ -149,6 +149,10 @@ impl GraphUnwindWriteText {
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
     /// `UNWIND earlier[.static.path] AS alias` clauses before the mutation.
+    /// Later clauses may also use independent list parameters. Reusing a
+    /// parameter under a fresh alias forms a product, not a zip. Source-only
+    /// parameters are borrowed for expansion, not replicated into each native
+    /// argument transcript. Every intermediate product retains the row cap.
     /// Mutation operands may use bare scalar aliases or static scalar paths.
     /// Ordinary CREATE forms keep their existing native compiler.
     pub fn parse(text: &str) -> Result<Self, GraphUnwindWriteError> {
@@ -220,13 +224,20 @@ impl GraphUnwindWriteText {
                 return Err(syntax(at, "at most eight UNWIND sources"));
             }
             let start = tail_at + 1;
-            let Some((Token { kind: TokenKind::Word(parent), .. }, _)) = tokens.get(start) else {
-                return Err(syntax(at, "a static list path from an earlier UNWIND alias"));
+            let Some((input, _)) = tokens.get(start) else {
+                return Err(syntax(at, "a list parameter or an earlier UNWIND alias"));
             };
-            let Some(&source) = aliases.get(parent) else {
-                return Err(syntax(tokens[start].0.at, "an earlier UNWIND alias"));
+            let (source, parameter, path, next) = match input.kind {
+                TokenKind::Parameter(name) => (0, Some(name.to_owned()), Vec::new(), start + 1),
+                TokenKind::Word(parent) => {
+                    let Some(&source) = aliases.get(parent) else {
+                        return Err(syntax(input.at, "an earlier UNWIND alias"));
+                    };
+                    let (path, next, _) = field_path(&tokens, start)?;
+                    (source, None, path, next)
+                }
+                _ => return Err(syntax(input.at, "a list parameter or an earlier UNWIND alias")),
             };
-            let (path, next, _) = field_path(&tokens, start)?;
             if !tokens.get(next).is_some_and(|(token, _)| is_word(token, "AS")) {
                 return Err(syntax(tokens[start].0.at, "a static list path followed by AS"));
             }
@@ -238,6 +249,7 @@ impl GraphUnwindWriteText {
             }
             sources.push(UnwindSource {
                 source,
+                parameter,
                 path: path.into_boxed_slice(),
                 offset: tokens[start].0.at,
             });
@@ -259,6 +271,9 @@ impl GraphUnwindWriteText {
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
+        let global_parameter_count = external_parameters.iter().filter(|name| {
+            !sources.iter().any(|source| source.parameter.as_deref() == Some(name.as_str()))
+        }).count();
         let mut cursor = 0;
         let mut fields: Vec<UnwindField> = Vec::new();
         let mut field_index = BTreeMap::new();
@@ -283,10 +298,12 @@ impl GraphUnwindWriteText {
         let mut index = 0;
         while index < tokens.len() {
             let current = &tokens[index].0;
-            if matches!(current.kind, TokenKind::Parameter(name) if name == source_name) {
+            if matches!(current.kind, TokenKind::Parameter(name)
+                if name == source_name || sources.iter().any(|source| source.parameter.as_deref() == Some(name)))
+            {
                 return Err(syntax(
                     current.at,
-                    "the UNWIND source parameter only in its prefix",
+                    "UNWIND source parameters only in their prefixes",
                 ));
             }
             let TokenKind::Word(name) = current.kind else {
@@ -314,7 +331,7 @@ impl GraphUnwindWriteText {
             let field = if let Some(existing) = field_index.get(&identity) {
                 *existing
             } else {
-                if external_parameters.len() + fields.len() + 1
+                if global_parameter_count + fields.len() + 1
                     > crate::parameters::MAX_GQL_PARAMETER_COUNT
                 {
                     return Err(syntax(current.at, "at most 1000 expanded parameters"));

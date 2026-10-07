@@ -164,7 +164,7 @@ fn aliases_and_paths_are_sealed_before_lowering_with_original_byte_coordinates()
         assert_eq!(plan.lowered.as_bytes()[at], byte);
     }
     for prefix in ["UNWIND p.children AS p", "UNWIND later.children AS c",
-        "UNWIND $other AS c", "UNWIND p.children[$i] AS c", "UNWIND p.children AS"] {
+        "UNWIND $other[$i] AS c", "UNWIND p.children[$i] AS c", "UNWIND p.children AS"] {
         let text = format!("UNWIND $rows AS p {prefix} MERGE (n:Entity {{id:p.id}})");
         assert!(GraphUnwindWriteText::parse(&text).is_err(), "{text}");
     }
@@ -213,6 +213,191 @@ fn every_expansion_and_binding_control_can_refuse_and_the_same_input_retries() {
             if spent > limit { Err(()) } else { Ok(()) }
         });
         assert_eq!(bound.is_ok(), limit == units);
+    }
+    assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 4);
+}
+
+#[test]
+fn independent_parameters_form_ordered_borrowed_products_and_native_programs() {
+    use crate::GqlParameterType;
+    use fgdb_types::CanonicalScalarKind;
+
+    let text = "UNWIND /* é */ $left AS x\nUNWIND $right AS y\n\
+        MATCH (n:Entity {id:x}) SET n.parent=y,n.other=$aa";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    assert_eq!(plan.sources[0].parameter.as_deref(), Some("right"));
+    assert!(plan.fields.iter().all(|field| field.parameter != "aa"));
+    let args = GqlParameters::new().with_list("left", vec![int(-4), int(9)]).unwrap()
+        .with_list("right", vec![int(2), int(2), int(7)]).unwrap()
+        .with_int64("aa", 100).unwrap();
+    let frozen = args.canonical_bytes();
+    let Some(GqlParameterValue::List(left)) = args.get("left") else { panic!("left list") };
+    let Some(GqlParameterValue::List(right)) = args.get("right") else { panic!("right list") };
+    let input = expand_with_parameters(&plan, left.values(), Some(&args), 64,
+        &mut |_| Ok::<_, ()>(())).unwrap();
+    let expected = [(-4,2), (-4,2), (-4,7), (9,2), (9,2), (9,7)];
+    assert_eq!(input.len(), expected.len());
+    for (at, (x, y)) in expected.into_iter().enumerate() {
+        assert_eq!(selected(&input, at, &plan.fields[0]), x);
+        assert_eq!(selected(&input, at, &plan.fields[1]), y);
+        assert!(core::ptr::eq(input.at(at, 0), &left.values()[at / 3]));
+        assert!(core::ptr::eq(input.at(at, 1), &right.values()[at % 3]));
+    }
+    let bound = plan.bind(&args, RelationId(1), resolve).unwrap();
+    assert_eq!(bound.argument_sets(), expected.len());
+    assert_eq!(bound.program().statements().len(), expected.len());
+    let reference = PreparedGraphWriteScript::prepare_with_parameter_types(
+        "MATCH (n:Entity {id:$lhs}) SET n.parent=$rhs,n.other=$aa", RelationId(1),
+        &[("lhs", GqlParameterType::Scalar(CanonicalScalarKind::Int)),
+          ("rhs", GqlParameterType::Scalar(CanonicalScalarKind::Int)),
+          ("aa", GqlParameterType::Scalar(CanonicalScalarKind::Int))], resolve,
+    ).unwrap();
+    for (at, (x, y)) in expected.into_iter().enumerate() {
+        let params = GqlParameters::new().with_int64("lhs", x).unwrap()
+            .with_int64("rhs", y).unwrap().with_int64("aa", 100).unwrap();
+        let statement = reference.bind_parameters(&params).unwrap();
+        assert_eq!(&bound.program().statements()[at], &statement.statements()[0]);
+        assert_eq!(bound.location(at).unwrap().span, 0..text.len());
+        assert_eq!(bound.location(at).unwrap().argument_set, at);
+    }
+    assert_eq!(args.canonical_bytes(), frozen);
+}
+
+#[test]
+fn repeated_parameter_sources_are_products_not_zips_or_duplicate_arguments() {
+    let text = "UNWIND $rows AS x UNWIND $rows AS y MERGE (n:Entity {id:x}) SET n.parent=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(3), int(5)]).unwrap();
+    assert!(plan.external_parameters.is_empty());
+    let Some(GqlParameterValue::List(values)) = args.get("rows") else { panic!("list") };
+    let input = expand_with_parameters(&plan, values.values(), Some(&args), 4,
+        &mut |_| Ok::<_, ()>(())).unwrap();
+    let actual: Vec<_> = (0..input.len()).map(|at| plan.fields.iter()
+        .map(|field| selected(&input, at, field)).collect::<Vec<_>>()).collect();
+    assert_eq!(actual, [vec![3,3], vec![3,5], vec![5,3], vec![5,5]]);
+    assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 4);
+}
+
+#[test]
+fn independent_sources_compose_with_correlated_ancestor_and_list_expansion() {
+    let text = "UNWIND $rows AS p UNWIND $groups AS g UNWIND g AS x \
+        UNWIND p.children AS c MATCH (n:Entity {id:c.id}) SET n.parent=x,n.other=p.id";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let roots = vec![root(1, vec![item(4), item(5)], vec![]), root(2, vec![item(6)], vec![])];
+    let args = GqlParameters::new().with_list("rows", roots).unwrap()
+        .with_list("groups", vec![list(vec![int(10), int(11)]), list(vec![]), null(), list(vec![int(12)])]).unwrap();
+    let Some(GqlParameterValue::List(roots)) = args.get("rows") else { panic!("list") };
+    let input = expand_with_parameters(&plan, roots.values(), Some(&args), 64,
+        &mut |_| Ok::<_, ()>(())).unwrap();
+    let mut expected = Vec::new();
+    for (parent, children) in [(1, vec![4,5]), (2, vec![6])] {
+        for value in [10,11,12] {
+            for child in &children { expected.push(vec![*child, value, parent]); }
+        }
+    }
+    let actual: Vec<_> = (0..input.len()).map(|at| plan.fields.iter()
+        .map(|field| selected(&input, at, field)).collect::<Vec<_>>()).collect();
+    assert_eq!(actual, expected);
+    assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 9);
+}
+
+#[test]
+fn independent_null_items_survive_but_empty_lists_produce_no_program() {
+    let text = "UNWIND $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=y,n.other=x";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1), null()]).unwrap()
+        .with_list("other", vec![null(), int(7), int(7)]).unwrap();
+    assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 6);
+    let empty = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_list("other", vec![]).unwrap();
+    assert!(matches!(plan.bind(&empty, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Empty)));
+}
+
+#[test]
+fn independent_source_names_shapes_and_late_bad_columns_precede_the_catalog() {
+    let text = "UNWIND /* é */ $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let missing = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap();
+    assert!(matches!(plan.bind(&missing, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::ArgumentNames)));
+    let wrong = missing.clone().with_int64("other", 4).unwrap();
+    assert!(matches!(plan.bind(&wrong, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Expansion { row: 0, clause: 1, offset,
+            kind: GraphUnwindRowError::ExpectedListField }) if offset == text.find("$other").unwrap()));
+    let mixed = missing.clone().with_list("other", vec![int(1), GraphValue::Scalar(CanonicalScalar::Bool(true))]).unwrap();
+    assert!(matches!(plan.bind(&mixed, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Row { row: 1, kind: GraphUnwindRowError::IncompatibleFieldTypes, .. })));
+    let text = "UNWIND $rows AS x UNWIND $empty AS e UNWIND $bad AS b MATCH (n:Entity) SET n.parent=b";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let wrong = missing.with_list("empty", vec![]).unwrap().with_int64("bad", 42).unwrap();
+    assert!(matches!(plan.bind(&wrong, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Expansion { clause: 2, kind: GraphUnwindRowError::ExpectedListField, .. })));
+}
+
+#[test]
+fn independent_products_admit_each_prefix_not_only_the_final_count() {
+    let text = "UNWIND $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=x,n.other=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1), int(2)]).unwrap()
+        .with_list("other", vec![int(3), int(4), int(5)]).unwrap();
+    assert_eq!(plan.bind_with_limit(&args, RelationId(1), 6, resolve).unwrap().argument_sets(), 6);
+    assert!(matches!(plan.bind_with_limit(&args, RelationId(1), 5, |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::TooManyRows { limit: 5, observed: 6 })));
+    let text = "UNWIND $rows AS x UNWIND $other AS y UNWIND $empty AS z MATCH (n:Entity) SET n.parent=x";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = args.with_list("empty", vec![]).unwrap();
+    assert!(matches!(plan.bind_with_limit(&args, RelationId(1), 5, |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::TooManyRows { limit: 5, observed: 6 })));
+    assert!(matches!(plan.bind_with_limit(&args, RelationId(1), 6, |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Empty)));
+}
+
+#[test]
+fn independent_sources_cannot_be_captured_as_scalar_parameters_or_rebound_aliases() {
+    for text in [
+        "UNWIND $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=$other",
+        "UNWIND $rows AS x UNWIND $rows AS y MATCH (n:Entity) SET n.parent=$rows",
+        "UNWIND $rows AS x UNWIND $other AS x MATCH (n:Entity) SET n.parent=x",
+        "UNWIND $rows AS x UNWIND $other[$i] AS y MATCH (n:Entity) SET n.parent=y",
+    ] {
+        assert!(GraphUnwindWriteText::parse(text).is_err(), "{text}");
+    }
+    assert!(GraphUnwindWriteText::parse_if_supported(
+        "UNWIND $rows AS x UNWIND $other AS y CREATE (n:Entity {id:x,parent:y})"
+    ).unwrap().is_none());
+}
+
+#[test]
+fn independent_products_share_one_cancellable_budget_and_can_retry_unchanged() {
+    let text = "UNWIND $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=x,n.other=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1), int(2)]).unwrap()
+        .with_list("other", vec![int(3), int(4)]).unwrap();
+    let frozen = args.canonical_bytes();
+    let (mut events, mut units) = (0, 0u64);
+    plan.bind_with_limit_controlled(&args, RelationId(1), 4, resolve, |event| {
+        events += 1;
+        if let GraphUnwindBindEvent::Work(work) = event { units += work; }
+        Ok::<_, usize>(())
+    }).unwrap();
+    for stop in 0..events {
+        let mut at = 0;
+        let bound = plan.bind_with_limit_controlled(&args, RelationId(1), 4, resolve, |_| {
+            let current = at;
+            at += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(bound, Err(GraphUnwindBindError::Interrupted(observed)) if observed == stop));
+        assert_eq!(args.canonical_bytes(), frozen);
+    }
+    for allowance in [units, units - 1] {
+        let mut spent = 0;
+        let bound = plan.bind_with_limit_controlled(&args, RelationId(1), 4, resolve, |event| {
+            if let GraphUnwindBindEvent::Work(work) = event { spent += work; }
+            if spent > allowance { Err(()) } else { Ok(()) }
+        });
+        assert_eq!(bound.is_ok(), allowance == units);
     }
     assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 4);
 }
