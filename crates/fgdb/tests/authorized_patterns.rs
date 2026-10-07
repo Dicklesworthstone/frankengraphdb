@@ -1393,6 +1393,12 @@ fn hidden_records_change_neither_results_nor_any_limit_threshold() {
             "MATCH (n:L) RETURN labels(n) AS labels",
             "MATCH (a)-[:R]->(b) RETURN a, b",
             "MATCH (a)-[:R]->(x)-[:R]->(b) RETURN a, b",
+            "MATCH (a)-->(b) RETURN a, b",
+            "MATCH (a)<--(b) RETURN a, b",
+            "MATCH (a)--(b) RETURN a, b",
+            "MATCH (a)-[e]->(b) RETURN a, b, type(e) AS kind",
+            "MATCH (a)-->(x)-[:R]->(b) RETURN a, b",
+            "MATCH (a)-[*1..2]->(b) RETURN a, b",
         ] {
             let p = pattern(text);
             let run = |db: &Database<MemVfs>, token: &CapabilityToken| {

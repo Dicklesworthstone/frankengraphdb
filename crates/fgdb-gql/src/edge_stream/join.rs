@@ -17,7 +17,7 @@ enum Instruction {
 #[derive(Clone, Copy)]
 struct Expansion {
     source: usize,
-    relation: RelationId,
+    relation: crate::algebra::EdgeRelation,
     direction: GlaDirection,
 }
 
@@ -365,7 +365,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let Some(edge) = flatten(source.edge(eid, &mut |event| meter.event(event)))? else {
                 continue;
             };
-            if edge.relation != cursor.plan.relation {
+            if !cursor.plan.relation.matches(edge.relation) {
                 continue;
             }
             let (from, to) = match cursor.plan.direction {
@@ -414,7 +414,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let Some(edge) = flatten(source.edge(eid, &mut |event| meter.event(event)))? else {
                 continue;
             };
-            if edge.relation != expansion.relation {
+            if !expansion.relation.matches(edge.relation) {
                 continue;
             }
             // Incidence indexes contain historical candidates, not necessarily

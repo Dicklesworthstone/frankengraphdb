@@ -169,6 +169,14 @@ fn scoped_edges_and_fixed_joins_aggregate_only_admitted_topology_and_fields() {
             vec![vec![Count(4), Integer(16)]],
         ),
         (
+            "MATCH (a)-[e]->(b)-[f]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
+            vec![vec![Count(4), Integer(16)]],
+        ),
+        (
+            "MATCH (a)-[e]->(b)-[f:R]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
+            vec![vec![Count(4), Integer(16)]],
+        ),
+        (
             "MATCH (a)-[e:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(x) } RETURN COUNT(*) AS n",
             vec![vec![Count(4)]],
         ),
@@ -232,6 +240,9 @@ fn orientation_parallel_edges_and_collection_profiles_keep_native_identity_order
         ("(a)-[e:R]->(b)", 4, 14),
         ("(a)<-[e:R]-(b)", 4, 14),
         ("(a)-[e:R]-(b)", 7, 28),
+        ("(a)-[e]->(b)", 4, 14),
+        ("(a)<-[e]-(b)", 4, 14),
+        ("(a)-[e]-(b)", 7, 28),
     ] {
         let prepared = session
             .prepare(
@@ -569,7 +580,7 @@ fn denied_root_relations_open_no_directory_and_unscoped_access_refuses() {
     let mut control = |_| execution.borrow_mut().checkpoint();
     assert!(
         source
-            .next_edge_for_relation(RelationId(2), &mut control)
+            .next_edge_for_relation(EdgeRelation::One(RelationId(2)), &mut control)
             .unwrap()
             .is_none()
     );
@@ -586,7 +597,7 @@ fn denied_root_relations_open_no_directory_and_unscoped_access_refuses() {
     ));
     issuer.retire();
     assert!(matches!(
-        source.next_edge_for_relation(RelationId(2), &mut control),
+        source.next_edge_for_relation(EdgeRelation::One(RelationId(2)), &mut control),
         Err(EdgeScanSourceError::Control(QueryError::Authorization(
             Denied::AuthorityRetired
         )))

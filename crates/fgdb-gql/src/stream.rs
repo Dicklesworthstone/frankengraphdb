@@ -386,7 +386,7 @@ pub trait VertexScanSource {
     fn next_probe_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        _relation: fgdb_delta_types::RelationId,
+        _relation: crate::algebra::EdgeRelation,
         direction: crate::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,

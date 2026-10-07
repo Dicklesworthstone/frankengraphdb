@@ -12,8 +12,8 @@ pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
 use crate::algebra::{
-    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphWalkSearch,
-    VertexPredicate,
+    EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath,
+    GraphWalkSearch, VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -153,8 +153,8 @@ fn charge(
 }
 
 type Adjacency = BTreeMap<VId, Vec<VId>>;
-type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
-type IdentifiedIndex = BTreeMap<(RelationId, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
+type Index = BTreeMap<(EdgeRelation, GlaDirection), Adjacency>;
+type IdentifiedIndex = BTreeMap<(EdgeRelation, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
 
 // Search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
@@ -294,16 +294,22 @@ fn build_index<E>(
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            let Some(adjacency) = index.get_mut(&(relation, direction)) else {
-                continue;
-            };
-            match direction {
-                GlaDirection::Forward => push_neighbor(adjacency, source, destination, control)?,
-                GlaDirection::Reverse => push_neighbor(adjacency, destination, source, control)?,
-                GlaDirection::Undirected => {
-                    push_neighbor(adjacency, source, destination, control)?;
-                    if source != destination {
-                        push_neighbor(adjacency, destination, source, control)?;
+            for selector in [EdgeRelation::One(relation), EdgeRelation::Any] {
+                let Some(adjacency) = index.get_mut(&(selector, direction)) else {
+                    continue;
+                };
+                match direction {
+                    GlaDirection::Forward => {
+                        push_neighbor(adjacency, source, destination, control)?
+                    }
+                    GlaDirection::Reverse => {
+                        push_neighbor(adjacency, destination, source, control)?
+                    }
+                    GlaDirection::Undirected => {
+                        push_neighbor(adjacency, source, destination, control)?;
+                        if source != destination {
+                            push_neighbor(adjacency, destination, source, control)?;
+                        }
                     }
                 }
             }
@@ -363,28 +369,30 @@ fn build_identified_index<E>(
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            let Some(adjacency) = index.get_mut(&(relation, direction)) else {
-                continue;
-            };
-            let (from, to) = if direction == GlaDirection::Reverse {
-                (destination, source)
-            } else {
-                (source, destination)
-            };
-            control(GlaExecutionEvent::ScratchEntry)?;
-            if !adjacency.contains_key(&from) {
+            for selector in [EdgeRelation::One(relation), EdgeRelation::Any] {
+                let Some(adjacency) = index.get_mut(&(selector, direction)) else {
+                    continue;
+                };
+                let (from, to) = if direction == GlaDirection::Reverse {
+                    (destination, source)
+                } else {
+                    (source, destination)
+                };
                 control(GlaExecutionEvent::ScratchEntry)?;
-            }
-            adjacency.entry(from).or_default().push((edge, to));
-            if direction == GlaDirection::Undirected && source != destination {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                if !adjacency.contains_key(&destination) {
+                if !adjacency.contains_key(&from) {
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                adjacency
-                    .entry(destination)
-                    .or_default()
-                    .push((edge, source));
+                adjacency.entry(from).or_default().push((edge, to));
+                if direction == GlaDirection::Undirected && source != destination {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    if !adjacency.contains_key(&destination) {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    adjacency
+                        .entry(destination)
+                        .or_default()
+                        .push((edge, source));
+                }
             }
         }
     }

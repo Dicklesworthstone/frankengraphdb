@@ -167,7 +167,7 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: fgdb_delta_types::RelationId,
+        relation: crate::algebra::EdgeRelation,
         direction: crate::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,

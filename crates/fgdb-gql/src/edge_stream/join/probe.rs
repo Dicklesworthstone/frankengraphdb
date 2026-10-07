@@ -472,7 +472,7 @@ fn resolve_target<S: EdgeScanSource, C>(
     let Some(edge) = flatten(source.edge(eid, control))? else {
         return Ok(None);
     };
-    if edge.relation != expansion.relation {
+    if !expansion.relation.matches(edge.relation) {
         return Ok(None);
     }
     let to = match expansion.direction {

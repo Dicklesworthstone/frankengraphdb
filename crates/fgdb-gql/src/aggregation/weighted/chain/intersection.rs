@@ -65,7 +65,7 @@ impl<'a> Shape<'a> {
         atoms[0] = Some(Atom {
             left: 0,
             right: 1,
-            relation: *relation,
+            relation: relation.one()?,
             direction: *direction,
         });
         let mut edges = 1;
@@ -95,7 +95,7 @@ impl<'a> Shape<'a> {
                     atoms[edges] = Some(Atom {
                         left: source.ordinal() as usize,
                         right: width,
-                        relation: *relation,
+                        relation: relation.one()?,
                         direction: *direction,
                     });
                     edges += 1;

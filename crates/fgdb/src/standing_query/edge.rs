@@ -13,7 +13,7 @@ mod scoped;
 
 use super::*;
 use fgdb_delta_types::RelationId;
-use fgdb_gql::algebra::GlaDirection;
+use fgdb_gql::algebra::{EdgeRelation, GlaDirection};
 use fgdb_types::EId;
 
 type Endpoints = (VId, VId);
@@ -118,11 +118,11 @@ impl State {
 
 #[derive(PartialEq, Eq)]
 struct OneHopState {
-    relation: RelationId,
+    relation: EdgeRelation,
     direction: GlaDirection,
     scope: Option<scoped::Shape>,
     witnesses: BTreeMap<VId, u64>,
-    edges: BTreeMap<EId, Endpoints>,
+    edges: BTreeMap<EId, (RelationId, Endpoints)>,
     incident: BTreeMap<VId, BTreeSet<EId>>,
 }
 
@@ -136,7 +136,7 @@ impl core::fmt::Debug for OneHopState {
 }
 
 struct OneHopPatch {
-    created: BTreeMap<EId, Endpoints>,
+    created: BTreeMap<EId, (RelationId, Endpoints)>,
     removed: BTreeSet<EId>,
     witnesses: BTreeMap<VId, u64>,
 }
@@ -265,8 +265,8 @@ impl OneHopState {
         }
     }
 
-    fn insert(&mut self, eid: EId, pair: Endpoints) {
-        self.edges.insert(eid, pair);
+    fn insert(&mut self, eid: EId, relation: RelationId, pair: Endpoints) {
+        self.edges.insert(eid, (relation, pair));
         self.incident.entry(pair.0).or_default().insert(eid);
         if pair.0 != pair.1 {
             self.incident.entry(pair.1).or_default().insert(eid);
@@ -282,7 +282,7 @@ impl OneHopState {
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        if row.relation != self.relation {
+        if !self.relation.matches(row.relation) {
             return Ok(());
         }
         if self.edges.contains_key(&row.eid) {
@@ -315,7 +315,7 @@ impl OneHopState {
         } else {
             self.contribute(query, pair, vertices, &BTreeMap::new(), 1, output, meter)?;
         }
-        self.insert(row.eid, pair);
+        self.insert(row.eid, row.relation, pair);
         Ok(())
     }
 
@@ -360,7 +360,7 @@ impl OneHopState {
                     if *relation != entry.relation {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
-                    if *relation != self.relation {
+                    if !self.relation.matches(*relation) {
                         continue;
                     }
                     if self.edges.contains_key(eid) || created.contains_key(eid) {
@@ -369,7 +369,7 @@ impl OneHopState {
                     let pair = (*src, *dst);
                     meter.charge(ZSetEvent::ScratchEntry)?;
                     reserve_edge(pair, meter)?;
-                    created.insert(*eid, pair);
+                    created.insert(*eid, (*relation, pair));
                     touch(&mut affected, *eid, meter)?;
                 }
             }
@@ -383,14 +383,16 @@ impl OneHopState {
                 meter.charge(ZSetEvent::Work)?;
                 match row {
                     DeltaRow::DeleteEdge { eid, .. } => {
-                        let known = created.contains_key(eid) || self.edges.contains_key(eid);
-                        if entry.relation != self.relation {
-                            if known {
+                        let known = created.get(eid).or_else(|| self.edges.get(eid));
+                        if !self.relation.matches(entry.relation) {
+                            if known.is_some() {
                                 return Err(StandingQueryFailure::InvalidDelta);
                             }
                             continue;
                         }
-                        if !known {
+                        // An Any input still retains each edge's concrete
+                        // relation: a delete in a wrong coordinate is invalid.
+                        if known.is_none_or(|(relation, _)| *relation != entry.relation) {
                             return Err(StandingQueryFailure::InvalidDelta);
                         }
                         touch(&mut removed, *eid, meter)?;
@@ -406,7 +408,7 @@ impl OneHopState {
                             let pair = created.get(&eid).or_else(|| self.edges.get(&eid));
                             // A cascade spans relations, including those outside
                             // this fixed query input. Only retained EIds matter.
-                            if let Some(&(src, dst)) = pair {
+                            if let Some(&(_, (src, dst))) = pair {
                                 if src != *vid && dst != *vid {
                                     return Err(StandingQueryFailure::InvalidDelta);
                                 }
@@ -431,7 +433,7 @@ impl OneHopState {
         }
         for eid in affected {
             meter.charge(ZSetEvent::Work)?;
-            if let Some(&pair) = self.edges.get(&eid) {
+            if let Some(&(_, pair)) = self.edges.get(&eid) {
                 if let Some(scope) = self.scope {
                     scope.contribute(
                         query,
@@ -448,7 +450,7 @@ impl OneHopState {
                 }
             }
             if !removed.contains(&eid) {
-                let pair = created
+                let (_, pair) = created
                     .get(&eid)
                     .or_else(|| self.edges.get(&eid))
                     .copied()
@@ -501,7 +503,7 @@ impl OneHopState {
             }
         }
         for &eid in &patch.removed {
-            if let Some((src, dst)) = self.edges.remove(&eid) {
+            if let Some((_, (src, dst))) = self.edges.remove(&eid) {
                 for vid in [src, dst] {
                     if let std::collections::btree_map::Entry::Occupied(mut entry) =
                         self.incident.entry(vid)
@@ -517,9 +519,9 @@ impl OneHopState {
                 }
             }
         }
-        for (eid, pair) in patch.created {
+        for (eid, (relation, pair)) in patch.created {
             if !patch.removed.contains(&eid) {
-                self.insert(eid, pair);
+                self.insert(eid, relation, pair);
             }
         }
     }

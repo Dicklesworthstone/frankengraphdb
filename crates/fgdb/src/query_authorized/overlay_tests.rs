@@ -221,6 +221,7 @@ fn sparse_authorized_admission_preserves_all_charged_callbacks_and_native_thresh
             for text in [
                 "MATCH (a:L) RETURN a, a.p, a.secret",
                 "MATCH (a:L)-[e:R]->(b:L) RETURN a, b, e.p, a.secret",
+                "MATCH (a:L)-[e]->(b:L) RETURN a, b, e.p, a.secret",
             ] {
                 let pattern = pattern(text);
                 let mut visible = None;

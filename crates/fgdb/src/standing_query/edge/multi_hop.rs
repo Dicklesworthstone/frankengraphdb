@@ -22,7 +22,7 @@ use fgdb_gql::algebra::MAX_PATTERN_EDGES;
 struct Atom {
     left: usize,
     right: usize,
-    relation: RelationId,
+    relation: EdgeRelation,
     direction: GlaDirection,
 }
 
@@ -30,11 +30,33 @@ struct Atom {
 pub(super) struct Shape {
     atoms: Vec<Atom>,
     width: usize,
-    relations: BTreeSet<RelationId>,
+    relations: BTreeSet<EdgeRelation>,
     scope: Option<scoped::Shape>,
 }
 
 impl Shape {
+    fn reads_relation(&self, relation: RelationId) -> bool {
+        self.relations
+            .iter()
+            .any(|selector| selector.matches(relation))
+    }
+
+    fn reserve_edge(&self, edge: Edge, meter: &mut Meter<'_>) -> Result<(), StandingQueryFailure> {
+        // One identity and one incident arrangement per requested selector
+        // matching this concrete relation. Typed-only shapes reserve exactly
+        // the former 3/5 entries; a mixed One/Any join admits both indexes.
+        meter.charge(ZSetEvent::ScratchEntry)?;
+        for selector in &self.relations {
+            if selector.matches(edge.relation) {
+                meter.units(
+                    ZSetEvent::ScratchEntry,
+                    if edge.src == edge.dst { 2 } else { 4 },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn of(query: &PreparedGraphAggregate) -> Option<Self> {
         if let Some(scope) = scoped::Shape::multi_hop(query) {
             // The shared scope recognizer validated every operator and the
@@ -178,37 +200,47 @@ fn orientations(edge: Edge, direction: GlaDirection) -> [Option<Endpoints>; 2] {
 #[derive(Default, PartialEq, Eq)]
 struct Arrangement {
     edges: BTreeMap<EId, Edge>,
-    incident: BTreeMap<(RelationId, VId), BTreeSet<EId>>,
+    incident: BTreeMap<(EdgeRelation, VId), BTreeSet<EId>>,
 }
 
 impl Arrangement {
-    fn insert(&mut self, eid: EId, edge: Edge) {
+    fn insert(&mut self, eid: EId, edge: Edge, selectors: &BTreeSet<EdgeRelation>) {
         self.edges.insert(eid, edge);
-        self.incident
-            .entry((edge.relation, edge.src))
-            .or_default()
-            .insert(eid);
-        if edge.src != edge.dst {
+        for &selector in selectors {
+            if !selector.matches(edge.relation) {
+                continue;
+            }
             self.incident
-                .entry((edge.relation, edge.dst))
+                .entry((selector, edge.src))
                 .or_default()
                 .insert(eid);
+            if edge.src != edge.dst {
+                self.incident
+                    .entry((selector, edge.dst))
+                    .or_default()
+                    .insert(eid);
+            }
         }
     }
 
-    fn remove(&mut self, eid: EId) {
+    fn remove(&mut self, eid: EId, selectors: &BTreeSet<EdgeRelation>) {
         if let Some(edge) = self.edges.remove(&eid) {
-            for vid in [edge.src, edge.dst] {
-                if let std::collections::btree_map::Entry::Occupied(mut entry) =
-                    self.incident.entry((edge.relation, vid))
-                {
-                    entry.get_mut().remove(&eid);
-                    if entry.get().is_empty() {
-                        entry.remove();
-                    }
+            for &selector in selectors {
+                if !selector.matches(edge.relation) {
+                    continue;
                 }
-                if edge.src == edge.dst {
-                    break;
+                for vid in [edge.src, edge.dst] {
+                    if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                        self.incident.entry((selector, vid))
+                    {
+                        entry.get_mut().remove(&eid);
+                        if entry.get().is_empty() {
+                            entry.remove();
+                        }
+                    }
+                    if edge.src == edge.dst {
+                        break;
+                    }
                 }
             }
         }
@@ -258,7 +290,7 @@ impl Overlay<'_> {
             .copied()
     }
 
-    fn incident(&self, relation: RelationId, vid: VId) -> impl Iterator<Item = EId> + '_ {
+    fn incident(&self, relation: EdgeRelation, vid: VId) -> impl Iterator<Item = EId> + '_ {
         self.base
             .incident
             .get(&(relation, vid))
@@ -353,7 +385,7 @@ impl Enumeration<'_> {
             return Ok(());
         };
         let atom = self.shape.atoms[anchor];
-        if atom.relation != edge.relation {
+        if !atom.relation.matches(edge.relation) {
             return Ok(());
         }
         for (left, right) in orientations(edge, atom.direction).into_iter().flatten() {
@@ -466,7 +498,7 @@ impl State {
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        if !self.shape.relations.contains(&row.relation) {
+        if !self.shape.reads_relation(row.relation) {
             return Ok(());
         }
         if self.input.edges.contains_key(&row.eid)
@@ -475,15 +507,13 @@ impl State {
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
-        reserve_edge((row.src, row.dst), meter)?;
-        self.input.insert(
-            row.eid,
-            Edge {
-                src: row.src,
-                relation: row.relation,
-                dst: row.dst,
-            },
-        );
+        let edge = Edge {
+            src: row.src,
+            relation: row.relation,
+            dst: row.dst,
+        };
+        self.shape.reserve_edge(edge, meter)?;
+        self.input.insert(row.eid, edge, &self.shape.relations);
         Ok(())
     }
 
@@ -583,23 +613,21 @@ impl State {
                     if *relation != entry.relation {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
-                    if !self.shape.relations.contains(relation) {
+                    if !self.shape.reads_relation(*relation) {
                         continue;
                     }
                     if self.input.edges.contains_key(eid) || created.edges.contains_key(eid) {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
                     // Reserve both the private overlay and later publication.
-                    reserve_edge((*src, *dst), meter)?;
-                    reserve_edge((*src, *dst), meter)?;
-                    created.insert(
-                        *eid,
-                        Edge {
-                            src: *src,
-                            relation: *relation,
-                            dst: *dst,
-                        },
-                    );
+                    let edge = Edge {
+                        src: *src,
+                        relation: *relation,
+                        dst: *dst,
+                    };
+                    self.shape.reserve_edge(edge, meter)?;
+                    self.shape.reserve_edge(edge, meter)?;
+                    created.insert(*eid, edge, &self.shape.relations);
                     touch(&mut affected, *eid, meter)?;
                 }
             }
@@ -620,7 +648,7 @@ impl State {
                             }
                             touch(&mut removed, *eid, meter)?;
                             touch(&mut affected, *eid, meter)?;
-                        } else if self.shape.relations.contains(&entry.relation) {
+                        } else if self.shape.reads_relation(entry.relation) {
                             return Err(StandingQueryFailure::InvalidDelta);
                         }
                     }
@@ -724,11 +752,11 @@ impl State {
 
     pub(super) fn publish(&mut self, patch: Patch) {
         for &eid in &patch.removed {
-            self.input.remove(eid);
+            self.input.remove(eid, &self.shape.relations);
         }
         for (eid, edge) in patch.created.edges {
             if !patch.removed.contains(&eid) {
-                self.input.insert(eid, edge);
+                self.input.insert(eid, edge, &self.shape.relations);
             }
         }
         for (root, count) in patch.witnesses {

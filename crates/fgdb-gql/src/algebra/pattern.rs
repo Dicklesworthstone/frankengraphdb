@@ -6,10 +6,12 @@ mod property_comparison;
 mod value_projection;
 
 use super::{
-    BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphPathFunction,
-    GraphWalkSearch, IntegerComparison, VertexPredicate,
+    BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow,
+    GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
 };
-use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_delta_types::LabelId;
+#[cfg(test)]
+use fgdb_delta_types::RelationId;
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
 
@@ -98,7 +100,7 @@ struct Variable {
 struct Edge {
     source: usize,
     destination: usize,
-    relation: RelationId,
+    relation: EdgeRelation,
     direction: GlaDirection,
     walk: Option<crate::GraphWalkBounds>,
     search: GraphWalkSearch,
@@ -283,7 +285,15 @@ impl GraphPatternBuilder {
             ordinal(bytes, value.len());
             bytes.extend_from_slice(value.as_bytes());
         }
-        let mut bytes = b"fgdb:gql:pattern-template:v1\0".to_vec();
+        let untyped = self
+            .edges
+            .iter()
+            .any(|edge| edge.relation == EdgeRelation::Any);
+        let mut bytes = if untyped {
+            b"fgdb:gql:pattern-template:v2\0".to_vec()
+        } else {
+            b"fgdb:gql:pattern-template:v1\0".to_vec()
+        };
         ordinal(&mut bytes, self.variables.len());
         for variable in &self.variables {
             name(&mut bytes, &variable.name);
@@ -322,7 +332,12 @@ impl GraphPatternBuilder {
         for edge in &self.edges {
             ordinal(&mut bytes, edge.source);
             ordinal(&mut bytes, edge.destination);
-            bytes.extend_from_slice(&edge.relation.0.to_be_bytes());
+            if untyped {
+                bytes.push(u8::from(edge.relation == EdgeRelation::Any));
+            }
+            if let EdgeRelation::One(relation) = edge.relation {
+                bytes.extend_from_slice(&relation.0.to_be_bytes());
+            }
             bytes.push(super::direction_tag(edge.direction));
             bytes.push(u8::from(edge.walk.is_some()));
             if let Some(bounds) = edge.walk {
@@ -676,7 +691,7 @@ impl GraphPatternBuilder {
     pub fn edge(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
     ) -> Result<&mut Self, PatternBuildError> {
@@ -693,7 +708,7 @@ impl GraphPatternBuilder {
         self.edges.push(Edge {
             source,
             destination,
-            relation,
+            relation: relation.into(),
             direction,
             walk: None,
             search: GraphWalkSearch::All,
@@ -714,7 +729,7 @@ impl GraphPatternBuilder {
     pub fn walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -739,7 +754,7 @@ impl GraphPatternBuilder {
     pub fn shortest_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -761,7 +776,7 @@ impl GraphPatternBuilder {
     pub fn any_shortest_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -782,7 +797,7 @@ impl GraphPatternBuilder {
     pub fn acyclic_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -801,7 +816,7 @@ impl GraphPatternBuilder {
     pub fn simple_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -1142,7 +1157,7 @@ mod tests {
         let baseline = original.canonical_template_bytes();
         assert_eq!(baseline, original.clone().canonical_template_bytes());
         let mut changed = original.clone();
-        changed.edges[0].relation = RelationId(2);
+        changed.edges[0].relation = EdgeRelation::One(RelationId(2));
         assert_ne!(baseline, changed.canonical_template_bytes());
         changed = original.clone();
         changed.edges[0].destination = 0;
@@ -1230,7 +1245,7 @@ mod tests {
                 .all(|test| (assignment[test.left] == assignment[test.right]) == test.equal);
             let matches = b.edges.iter().all(|atom| {
                 edges.iter().any(|&(s, r, d)| {
-                    if r != atom.relation {
+                    if matches!(atom.relation, EdgeRelation::One(expected) if r != expected) {
                         return false;
                     }
                     let left = assignment[atom.source];

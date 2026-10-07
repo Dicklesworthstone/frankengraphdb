@@ -29,7 +29,7 @@ impl GraphPatternBuilder {
     pub fn trail_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,

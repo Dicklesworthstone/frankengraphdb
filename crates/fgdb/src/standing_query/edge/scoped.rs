@@ -16,7 +16,7 @@ enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Shape {
     mode: Mode,
-    pub(super) relation: RelationId,
+    pub(super) relation: EdgeRelation,
     pub(super) direction: GlaDirection,
     start: usize,
     end: usize,

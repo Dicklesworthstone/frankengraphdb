@@ -377,7 +377,7 @@ impl Number {
 struct Edge<'a> {
     variable: Option<Name<'a>>,
     source: Name<'a>,
-    relation: Name<'a>,
+    relation: Option<Name<'a>>,
     direction: GlaDirection,
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,

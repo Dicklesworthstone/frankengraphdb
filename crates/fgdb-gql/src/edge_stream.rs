@@ -59,7 +59,7 @@ impl core::error::Error for EdgeScanBuildError {}
 /// short-circuit probes; nested/optional probe bodies remain unavailable.
 #[derive(Clone)]
 pub struct EdgeScanPlan {
-    relation: RelationId,
+    relation: crate::algebra::EdgeRelation,
     direction: GlaDirection,
     instructions: Arc<[GlaOperator]>,
     projection: Arc<GlaOperator>,
@@ -230,7 +230,7 @@ pub trait EdgeScanSource {
     /// endpoint admission. This is not authorization for a raw source.
     fn next_edge_for_relation<C>(
         &mut self,
-        _relation: RelationId,
+        _relation: crate::algebra::EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         self.next_edge(control)
@@ -345,7 +345,7 @@ pub trait EdgeScanSource {
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        _relation: RelationId,
+        _relation: crate::algebra::EdgeRelation,
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -559,7 +559,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             };
             let edge = record.as_row();
             meter.event(GlaExecutionEvent::Work)?;
-            if edge.relation != self.plan.relation {
+            if !self.plan.relation.matches(edge.relation) {
                 continue;
             }
             let (from, to) = match self.plan.direction {

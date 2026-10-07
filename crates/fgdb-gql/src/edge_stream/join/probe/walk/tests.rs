@@ -159,7 +159,7 @@ impl EdgeScanSource for Source {
 fn expansion(direction: GlaDirection) -> Expansion {
     Expansion {
         source: 0,
-        relation: R,
+        relation: R.into(),
         direction,
     }
 }

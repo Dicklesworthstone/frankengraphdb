@@ -135,6 +135,11 @@ fn scoped_fixed_and_independent_probes_match_goldens_and_eager_results_before_pa
         let args = GqlParameters::new();
         for (condition, answer) in [
             ("EXISTS { MATCH (a)-[:R]->(b) }", vec![1, 3]),
+            ("EXISTS { MATCH (a)-->(b) }", vec![1, 3]),
+            ("NOT EXISTS { MATCH (a)-->(b) }", vec![4]),
+            ("EXISTS { MATCH (a)<--(b) }", vec![1, 3]),
+            ("EXISTS { MATCH (a)--(b) }", vec![1, 3]),
+            ("EXISTS { MATCH (a)-->(b)-[:R]->(c) }", vec![1, 3]),
             ("NOT EXISTS { MATCH (a)-[:R]->(b) }", vec![4]),
             ("EXISTS { MATCH (a)<-[:R]-(b) }", vec![1, 3]),
             ("EXISTS { MATCH (a)-[:R]-(b) }", vec![1, 3]),

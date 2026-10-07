@@ -1777,7 +1777,7 @@ fn bound_edges<'a, E, Row>(
             as_of,
             control,
             |entry, block, row, control| {
-                if entry.relation == *relation && !selected.contains_key(&entry.eid) {
+                if relation.matches(entry.relation) && !selected.contains_key(&entry.eid) {
                     control(SourceEvent::SnapshotRecord)?;
                     control(SourceEvent::ScratchEntry)?;
                     selected.insert(
@@ -1898,7 +1898,7 @@ fn indexed_roots<E>(
 /// stated.
 fn root_endpoint_roles<Row>(
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
-) -> Option<(RelationId, bool, bool)> {
+) -> Option<(fgdb_gql::algebra::EdgeRelation, bool, bool)> {
     use fgdb_gql::algebra::{GlaDirection, GlaOperator};
     let Some(GlaOperator::ScanEdges {
         relation,
@@ -1992,7 +1992,7 @@ pub(super) fn admit<'a, E, Row>(
                 }
                 | GlaOperator::VarLengthExpand {
                     relation: required, ..
-                } => *required == relation,
+                } => required.matches(relation),
                 _ => false,
             });
             if !requested {
@@ -2000,7 +2000,7 @@ pub(super) fn admit<'a, E, Row>(
             }
             let wanted = match roles {
                 Some((root, source_read, destination_read)) => {
-                    if relation != root {
+                    if !root.matches(relation) {
                         continue;
                     }
                     [(src, source_read), (dst, destination_read)]
@@ -2111,7 +2111,7 @@ mod tests {
         for operator in [
             GlaOperator::ScanVertices,
             GlaOperator::ScanEdges {
-                relation: RelationId(2),
+                relation: fgdb_gql::algebra::EdgeRelation::One(RelationId(2)),
                 direction: GlaDirection::Forward,
             },
             GlaOperator::Probe {

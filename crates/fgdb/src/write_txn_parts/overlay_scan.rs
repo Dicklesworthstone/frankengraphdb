@@ -285,15 +285,12 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         // Records `entry` as read when the plan reads its relation.
         let observe = |entry: &AdjacencyEntry| {
             let mut reads = self.transaction.read_set.borrow_mut();
-            match relations {
-                None => {}
-                Some(read) if read.contains(&entry.relation) => {
-                    reads.insert(ElementId::Vertex(entry.dst));
-                }
-                Some(_) => return false,
+            if relations.is_some_and(|read| !read.contains(&entry.relation)) {
+                return false;
             }
             reads.insert(ElementId::Edge(entry.eid));
             reads.insert(ElementId::Vertex(entry.src));
+            reads.insert(ElementId::Vertex(entry.dst));
             true
         };
         Some((|| {

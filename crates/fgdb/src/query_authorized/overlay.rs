@@ -57,7 +57,7 @@ impl<V: Vfs + Clone> Database<V> {
                 if pattern.plan().reads_edges() {
                     let relations = pattern.plan().edge_relations();
                     overlay
-                        .visit_edges(Some(&relations), &mut scan, |edge, properties, _| {
+                        .visit_edges(relations.as_ref(), &mut scan, |edge, properties, _| {
                             tables.admit_edge(
                                 ((edge.eid, edge.src, edge.relation, edge.dst), properties),
                                 scope,

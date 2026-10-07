@@ -236,6 +236,33 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
 }
 
 #[test]
+fn all_relation_edge_reads_record_destinations_without_a_vertex_scan() {
+    let ((), report) = run_async_under_lab(0xa708, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seed(&cx, 2).await;
+        let txn = db.begin(&txcx).unwrap();
+        {
+            let owner = OverlayRows::new(&txn, &db, true, &mut || Ok(())).unwrap();
+            owner
+                .visit_edges(None, &mut |_| Ok::<_, ()>(()), |_, _, _| Ok(()))
+                .unwrap()
+                .unwrap();
+        }
+        assert!(txn.scanned_edges.get());
+        assert!(!txn.scanned_vertices.get());
+        let reads = txn.read_set.borrow();
+        assert!(reads.contains(&ElementId::Edge(EId(1))));
+        assert!(reads.contains(&ElementId::Vertex(VId(1))));
+        assert!(reads.contains(&ElementId::Vertex(VId(2))));
+        drop(reads);
+        txn.abort();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn historical_basis_and_staged_tombstones_never_fall_back_to_newer_rows() {
     let ((), report) = run_async_under_lab(0xa703, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

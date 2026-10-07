@@ -86,7 +86,7 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
                 source
                     .next_probe_edge_for_relation(
                         VId(u128::MAX),
-                        RelationId(7),
+                        EdgeRelation::One(RelationId(7)),
                         direction,
                         after,
                         &mut control
@@ -101,7 +101,7 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
     assert!(matches!(
         source.next_probe_edge_for_relation(
             VId(0),
-            RelationId(7),
+            EdgeRelation::One(RelationId(7)),
             fgdb_gql::algebra::GlaDirection::Forward,
             None,
             &mut control

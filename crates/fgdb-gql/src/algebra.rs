@@ -55,6 +55,38 @@ pub enum GlaDirection {
     Undirected,
 }
 
+/// Relationship types admitted by one graph atom. `Any` ranges over the
+/// already-authorized edge source; it never grants access to hidden types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EdgeRelation {
+    One(RelationId),
+    Any,
+}
+
+impl EdgeRelation {
+    #[must_use]
+    pub fn matches(self, relation: RelationId) -> bool {
+        match self {
+            Self::One(expected) => expected == relation,
+            Self::Any => true,
+        }
+    }
+
+    #[must_use]
+    pub const fn one(self) -> Option<RelationId> {
+        match self {
+            Self::One(relation) => Some(relation),
+            Self::Any => None,
+        }
+    }
+}
+
+impl From<RelationId> for EdgeRelation {
+    fn from(relation: RelationId) -> Self {
+        Self::One(relation)
+    }
+}
+
 /// Search semantics of one finite path atom, not a terminal row quantifier.
 /// ALL and repetition-restricted modes retain edge-occurrence multiplicity;
 /// ANY selects one occurrence per endpoint pair. DISTINCT remains a separate
@@ -197,7 +229,7 @@ pub enum GlaOperator {
     Empty,
     ScanVertices,
     ScanEdges {
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
     },
     Select {
@@ -211,7 +243,7 @@ pub enum GlaOperator {
     },
     Expand {
         source: BindingSlot,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
     },
     /// Append an endpoint for each selected path occurrence in the inclusive
@@ -221,7 +253,7 @@ pub enum GlaOperator {
     /// restrictions apply to this atom, not to a surrounding compound path.
     VarLengthExpand {
         source: BindingSlot,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
         bounds: crate::GraphWalkBounds,
         search: GraphWalkSearch,
@@ -426,7 +458,7 @@ impl GlaPlan {
                 EdgeDirection::Incoming | EdgeDirection::Outgoing => GlaDirection::Forward,
             };
             operators.push(GlaOperator::ScanEdges {
-                relation,
+                relation: EdgeRelation::One(relation),
                 direction,
             });
             bind_alias(
@@ -467,7 +499,7 @@ impl GlaPlan {
             if let Some(relation) = plan.hop2_relation {
                 operators.push(GlaOperator::Expand {
                     source: destination,
-                    relation,
+                    relation: EdgeRelation::One(relation),
                     direction,
                 });
                 if let Some(name) = &plan.hop2_dst_var {
@@ -607,19 +639,18 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
-    /// Every relation whose edges this plan can read. Each edge operator
-    /// names exactly one relation, so no edge of another relation can
-    /// change this plan's rows. That is what lets a transaction record a
-    /// per-relation read witness instead of the whole edge table
-    /// (fgdb-whole-edge-read-flag-4qe1z). Empty when the plan reads no edges.
+    /// Every relation whose edges this plan can read, or `None` for an
+    /// untyped atom. A typed plan permits per-relation transaction witnesses;
+    /// an untyped atom needs a whole-edge-table witness, including types first
+    /// inserted after the read. `Some(empty)` means the plan reads no edges.
     #[must_use]
-    pub fn edge_relations(&self) -> std::collections::BTreeSet<RelationId> {
+    pub fn edge_relations(&self) -> Option<std::collections::BTreeSet<RelationId>> {
         self.operators
             .iter()
             .filter_map(|operator| match operator {
                 GlaOperator::ScanEdges { relation, .. }
                 | GlaOperator::Expand { relation, .. }
-                | GlaOperator::VarLengthExpand { relation, .. } => Some(*relation),
+                | GlaOperator::VarLengthExpand { relation, .. } => Some(relation.one()),
                 _ => None,
             })
             .collect()
@@ -780,8 +811,13 @@ impl<Row> GlaPlan<Row> {
                     relation,
                     direction,
                 } => {
-                    bytes.push(2);
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    match relation {
+                        EdgeRelation::One(relation) => {
+                            bytes.push(2);
+                            bytes.extend_from_slice(&relation.0.to_be_bytes());
+                        }
+                        EdgeRelation::Any => bytes.push(32),
+                    }
                     bytes.push(direction_tag(*direction));
                 }
                 GlaOperator::Select { slot, predicates } => {
@@ -828,9 +864,11 @@ impl<Row> GlaPlan<Row> {
                     relation,
                     direction,
                 } => {
-                    bytes.push(5);
+                    bytes.push(if relation.one().is_some() { 5 } else { 33 });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    if let EdgeRelation::One(relation) = relation {
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
                     bytes.push(direction_tag(*direction));
                 }
                 GlaOperator::VarLengthExpand {
@@ -842,16 +880,24 @@ impl<Row> GlaPlan<Row> {
                 } => {
                     // Preserve existing transcripts byte-for-byte. Every
                     // selector has its own tag even when outputs coincide.
-                    bytes.push(match search {
+                    let tag = match search {
                         GraphWalkSearch::All => 22,
                         GraphWalkSearch::AllShortest => 23,
                         GraphWalkSearch::AnyShortest => 24,
                         GraphWalkSearch::Acyclic => 29,
                         GraphWalkSearch::Simple => 30,
                         GraphWalkSearch::Trail => 31,
-                    });
+                    };
+                    if relation.one().is_some() {
+                        bytes.push(tag);
+                    } else {
+                        bytes.push(34);
+                        bytes.push(tag);
+                    }
                     bytes.extend_from_slice(&source.0.to_be_bytes());
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    if let EdgeRelation::One(relation) = relation {
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
                     bytes.push(direction_tag(*direction));
                     bytes.extend_from_slice(&bounds.minimum().to_be_bytes());
                     bytes.extend_from_slice(&bounds.maximum().to_be_bytes());

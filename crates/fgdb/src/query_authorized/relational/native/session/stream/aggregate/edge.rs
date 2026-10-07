@@ -115,19 +115,20 @@ where
 
     fn next_edge_for_relation<C>(
         &mut self,
-        relation: RelationId,
+        relation: EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<QueryError, C>> {
         self.poll()?;
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        if !self
-            .vertices
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(relation)
-        {
+        if relation.one().is_some_and(|relation| {
+            !self
+                .vertices
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
             return Ok(None); // No candidate directory, even for a nonempty raw graph.
         }
         loop {
@@ -146,7 +147,7 @@ where
                 )));
             }
             self.after = Some(eid);
-            if self.visible::<C>(eid, Some(relation))?.is_some() {
+            if self.visible::<C>(eid, relation.one())?.is_some() {
                 control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
                 return Ok(Some(eid));
             }
@@ -275,7 +276,7 @@ where
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: fgdb_gql::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,

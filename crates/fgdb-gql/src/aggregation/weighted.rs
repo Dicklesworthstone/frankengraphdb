@@ -75,7 +75,11 @@ struct EdgeAccess {
 
 fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     let operators = aggregate.input.plan().operators();
-    if !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
+    // A mixed-type atom must retain each concrete relationship's multiplicity.
+    // Until the weighted topology has a selector-aware normalization law, use
+    // the ordinary governed GLA evaluator for those plans.
+    if aggregate.input.plan().edge_relations().is_none()
+        || !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
         || aggregate.aggregates.iter().any(|a| {
             !matches!(
                 a.function,
@@ -223,7 +227,9 @@ where
             } => EdgeAccess {
                 source: 0,
                 destination: 1,
-                relation: *relation,
+                relation: relation
+                    .one()
+                    .expect("weighted eligibility requires typed atoms"),
                 direction: *direction,
             },
             GlaOperator::Expand {
@@ -234,7 +240,9 @@ where
                 let access = EdgeAccess {
                     source: source.ordinal() as usize,
                     destination: next_slot,
-                    relation: *relation,
+                    relation: relation
+                        .one()
+                        .expect("weighted eligibility requires typed atoms"),
                     direction: *direction,
                 };
                 next_slot += 1;

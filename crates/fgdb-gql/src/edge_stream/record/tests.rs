@@ -66,11 +66,11 @@ impl EdgeScanSource for Masked {
     }
     fn next_edge_for_relation<C>(
         &mut self,
-        relation: RelationId,
+        relation: crate::algebra::EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        if self.denied || relation != R {
+        if self.denied || !relation.matches(R) {
             Ok(None)
         } else {
             self.next_edge(control)
@@ -451,7 +451,7 @@ fn default_record_and_relation_routes_preserve_borrowed_data_and_event_order() {
     );
     assert_eq!(
         source
-            .next_edge_for_relation(R, &mut |_| Ok::<_, ()>(()))
+            .next_edge_for_relation(R.into(), &mut |_| Ok::<_, ()>(()))
             .unwrap(),
         Some(EId(0))
     );

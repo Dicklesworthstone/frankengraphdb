@@ -13,7 +13,7 @@ mod mutation;
 mod path;
 
 use super::*;
-use crate::algebra::{GraphMatchClause, GraphWalkSearch};
+use crate::algebra::{EdgeRelation, GraphMatchClause, GraphWalkSearch};
 
 #[derive(Clone, Copy)]
 enum ScopeKind {
@@ -163,9 +163,15 @@ fn resolve_pattern_with_captures<'a>(
         )?;
     }
     for (edge_at, edge) in edges.iter().enumerate() {
-        let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
-        else {
-            unreachable!("symbol domain is checked by the shared resolver")
+        let relation = match edge.relation {
+            Some(name) => {
+                let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, name)?
+                else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                EdgeRelation::One(relation)
+            }
+            None => EdgeRelation::Any,
         };
         let result = match edge.walk {
             Some(bounds) if edge.search == GraphWalkSearch::AllShortest => builder.shortest_walk(
@@ -218,7 +224,7 @@ fn resolve_pattern_with_captures<'a>(
                 edge.destination.text,
             ),
         };
-        built(edge.relation.at, result)?;
+        built(edge.relation.map_or(edge.source.at, |name| name.at), result)?;
         if let Some(variable) = edge.variable {
             built(variable.at, builder.capture_edge(variable.text, edge_at))?;
         }
@@ -614,24 +620,32 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_EDGES,
                     PatternLimitDimension::Edges,
                 )?;
+                let edge_at = self.current.at;
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
-                self.punct(b'[', "[")?;
-                let variable = if self.is_punct(b':') {
-                    None
+                let (variable, relation, walk) = if self.take(b'[')? {
+                    let variable = if matches!(self.current.kind, TokenKind::Word(_)) {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    let relation = if self.take(b':')? {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    let walk = self.pattern_walk_bounds()?;
+                    self.punct(b']', "]")?;
+                    (variable, relation, walk)
                 } else {
-                    Some(self.name()?)
+                    (None, None, None)
                 };
-                self.punct(b':', ":")?;
-                let relation = self.name()?;
                 let bound_at = self.current.at;
-                let walk = self.pattern_walk_bounds()?;
-                self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
                 let outgoing = self.take(b'>')?;
                 if incoming && outgoing {
                     return Err(error(
-                        relation.at,
+                        edge_at,
                         GraphPatternTextErrorKind::Expected("one edge direction"),
                     ));
                 }

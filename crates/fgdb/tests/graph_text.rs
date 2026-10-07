@@ -201,6 +201,166 @@ fn long_text_property_bags_agree_on_all_five_read_surfaces() {
 }
 
 #[test]
+fn untyped_edges_and_mixed_relation_paths_agree_across_snapshot_and_overlay_sources() {
+    let ((), report) = run_async_under_lab(0x7e87_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txn_cx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let at = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let txn = db.begin(&txn_cx).unwrap();
+        let edges = db.edges().unwrap();
+        let vertex = GraphValue::Vertex;
+        let mut cases = Vec::new();
+        for (atom, reverse, both) in [
+            ("(a)-->(b)", false, false),
+            ("(a)<--(b)", true, false),
+            ("(a)--(b)", false, true),
+        ] {
+            let mut expected = Vec::new();
+            for row in &edges {
+                let (src, dst) = (row.entry.src, row.entry.dst);
+                let (a, b) = if reverse { (dst, src) } else { (src, dst) };
+                expected.push(vec![vertex(a), vertex(b)]);
+                if both && src != dst {
+                    expected.push(vec![vertex(dst), vertex(src)]);
+                }
+            }
+            cases.push((format!("MATCH {atom} RETURN a,b"), expected));
+        }
+        let captured = edges
+            .iter()
+            .map(|row| {
+                let edge = row.entry;
+                let name = match edge.relation {
+                    KNOWS => "KNOWS",
+                    WORKS_AT => "WORKS_AT",
+                    SHIPS => "SHIPS",
+                    BACKS => "BACKS",
+                    _ => panic!("fixture relation"),
+                };
+                vec![
+                    GraphValue::Edge(edge.eid),
+                    vertex(edge.src),
+                    vertex(edge.dst),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap()),
+                ]
+            })
+            .collect();
+        cases.push((
+            "MATCH (a)-[e]->(b) RETURN e,a,b,type(e) AS kind".to_owned(),
+            captured,
+        ));
+        cases.push((
+            "MATCH (a:Person)-->(b)-[:WORKS_AT]->(c) RETURN a,c".to_owned(),
+            vec![vec![vertex(VId(1)), vertex(VId(3))]; 2],
+        ));
+        cases.push((
+            "MATCH (a:Person)-[*1..2]->(b) RETURN a,b".to_owned(),
+            vec![
+                vec![vertex(VId(1)), vertex(VId(2))],
+                vec![vertex(VId(1)), vertex(VId(2))],
+                vec![vertex(VId(1)), vertex(VId(3))],
+                vec![vertex(VId(1)), vertex(VId(3))],
+            ],
+        ));
+        for (text, mut expected) in cases {
+            expected.sort();
+            let prepared = PreparedGraphText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .with_duplicates();
+            for run in [
+                db.execute_graph_pattern_governed(&cx, &prepared, policy())
+                    .unwrap(),
+                db.execute_graph_pattern_governed_at(&cx, &prepared, at, policy())
+                    .unwrap(),
+                pinned
+                    .execute_graph_pattern_governed(&cx, &prepared, policy())
+                    .unwrap(),
+                pinned
+                    .execute_graph_pattern_governed_at(&cx, &prepared, at, policy())
+                    .unwrap(),
+                txn.execute_graph_pattern_governed(&db, &cx, &prepared, policy())
+                    .unwrap(),
+            ] {
+                let mut actual = plain(&run.value);
+                actual.sort();
+                assert_eq!(actual, expected, "{text}");
+            }
+        }
+        txn.abort();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn untyped_reads_conflict_with_a_new_relation_even_when_the_edge_table_was_empty() {
+    let ((), report) = run_async_under_lab(0x7e87_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txn_cx = contexts.txn();
+        for initially_empty in [true, false] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut base = WriteBatch::new(KNOWS);
+            base.create_vertex(VId(1), vec![PERSON], vec![]);
+            base.create_vertex(VId(2), vec![], vec![]);
+            base.create_vertex(VId(3), vec![], vec![]);
+            if !initially_empty {
+                base.add_edge(EId(10), VId(1), VId(2), vec![]);
+            }
+            db.write(&commit, base).await.unwrap();
+            let prepared = PreparedGraphText::prepare("MATCH (a:Person)-->(b) RETURN b", symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mut reader = db.begin(&txn_cx).unwrap();
+            let before = reader
+                .execute_graph_pattern_governed(&db, &cx, &prepared, policy())
+                .unwrap();
+            assert_eq!(before.value.len(), usize::from(!initially_empty));
+            let mut disjoint = WriteBatch::new(KNOWS);
+            disjoint.create_vertex(VId(99), vec![], vec![]);
+            reader.write(&mut db, disjoint).unwrap();
+            // Relation 999 was never used or bound when the read occurred.
+            // Neither this edge nor its target appeared in the result.
+            let mut phantom = WriteBatch::new(RelationId(999));
+            phantom.add_edge(EId(99), VId(1), VId(3), vec![]);
+            db.write(&commit, phantom).await.unwrap();
+            let failure = reader.commit(&mut db, &commit).await.unwrap_err();
+            assert!(
+                format!("{failure:?}").contains("FG-LAW-FCW-READ-01"),
+                "{failure:?}"
+            );
+            assert!(db.vertex(VId(99)).unwrap().is_none());
+            let after = db
+                .execute_graph_pattern_governed(&cx, &prepared, policy())
+                .unwrap();
+            assert_eq!(after.value.len(), before.value.len() + 1);
+
+            // This guard distinguishes an edge-domain witness from a lock
+            // that refuses every unrelated concurrent commit.
+            let mut reader = db.begin(&txn_cx).unwrap();
+            reader
+                .execute_graph_pattern_governed(&db, &cx, &prepared, policy())
+                .unwrap();
+            let mut disjoint = WriteBatch::new(KNOWS);
+            disjoint.create_vertex(VId(100), vec![], vec![]);
+            reader.write(&mut db, disjoint).unwrap();
+            let mut unrelated = WriteBatch::new(KNOWS);
+            unrelated.create_vertex(VId(101), vec![], vec![]);
+            db.write(&commit, unrelated).await.unwrap();
+            reader.commit(&mut db, &commit).await.unwrap();
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn text_query_staging_nulls_ensures_and_history_survive_compaction_and_reopen() {
     let ((), report) = run_async_under_lab(0x7e87_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

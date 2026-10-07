@@ -4,7 +4,7 @@
 
 use super::*;
 use fgdb_gql::GlaExecutionEvent;
-use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
+use fgdb_gql::algebra::{EdgeRelation, GlaOperator, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanPlan, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
@@ -448,7 +448,7 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
     fn next_probe_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: fgdb_gql::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -457,13 +457,14 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         // This check precedes both endpoint resolution and incidence access.
         // The outer control is the SAME live permit even for a denied relation.
-        if !self
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(relation)
-        {
+        if relation.one().is_some_and(|relation| {
+            !self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
             return Ok(None);
         }
         let vertex = self
@@ -498,7 +499,14 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             else {
                 continue;
             };
-            if edge.relation != relation {
+            if !relation.matches(edge.relation)
+                || !self
+                    .execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_relation(edge.relation)
+            {
                 continue;
             }
             let far = if edge.source == endpoint {
