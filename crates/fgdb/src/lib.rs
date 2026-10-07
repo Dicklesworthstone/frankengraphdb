@@ -115,8 +115,9 @@
 
 mod buffered_read;
 pub use buffered_read::{
-    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedReadError,
-    BufferedReadLimits, BufferedReadView, BufferedValue, MemoryError, MemoryPool,
+    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedQueryCursor,
+    BufferedQueryError, BufferedQueryRow, BufferedReadError, BufferedReadLimits, BufferedReadView,
+    BufferedValue, MemoryError, MemoryPool,
 };
 
 mod bulk_load;

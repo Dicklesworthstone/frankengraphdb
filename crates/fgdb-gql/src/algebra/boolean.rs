@@ -715,7 +715,14 @@ impl BoundBooleanExpression {
                         )? {
                             Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
                             Value::Scalar(Some(value)) => {
-                                crate::algebra_exec::charge_payload(value, control)?;
+                                // This operand is owned by the scalar VM, so
+                                // every payload quantum must be admitted for
+                                // allocation as well as comparison work before
+                                // cloning text, bytes or a timestamp zone.
+                                crate::algebra_exec::charge_payload(value, &mut |event| {
+                                    control(event)?;
+                                    control(GlaExecutionEvent::ScratchEntry)
+                                })?;
                                 GraphValue::Scalar(value.clone())
                             }
                             Value::Vertex(None) | Value::Scalar(None) => {
@@ -945,6 +952,47 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn scalar_operand_payload_is_allocation_admitted_before_the_vm_copies_it() {
+        let value = CanonicalScalar::ucs_basic_text(&"large".repeat(100)).unwrap();
+        let scalar =
+            crate::GraphIntegerExpression::prepare_scalar(&[crate::GraphIntegerOp::ScalarColumn(
+                0,
+            )])
+            .unwrap();
+        let columns = [Arg::Property {
+            variable: "a",
+            key: PropertyKeyId(1),
+        }];
+        let expression = bound(&[Op::Expression {
+            expression: &scalar,
+            columns: &columns,
+        }]);
+        let read = std::cell::Cell::new(false);
+        let mut after_read = Vec::new();
+        let result = expression.evaluate(
+            &[Some(VId(1))],
+            &mut |_, _| {
+                read.set(true);
+                Ok(Some(&value))
+            },
+            &mut |event| {
+                if read.get() {
+                    after_read.push(event);
+                    if after_read.len() == 2 {
+                        return Err(Failure::Source("allocation refused"));
+                    }
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(Failure::Source("allocation refused")));
+        assert_eq!(
+            after_read,
+            [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry]
+        );
     }
 
     #[test]

@@ -9,6 +9,9 @@ pub use fgdb_strata::tiered::buffer::{BufferLimits, BufferStats};
 pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
 use fgdb_types::QueryCx;
 
+mod query;
+pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
+
 /// Failure to acquire an authenticated, bounded cold read view.
 #[derive(Debug)]
 pub enum BufferedOpenError {
@@ -73,8 +76,10 @@ impl From<MemoryError> for BufferedOpenError {
 /// Chronicle recovery and its marker-chain metadata remain outside that pool,
 /// as in the ordinary opener. Initial admission verifies every named graph
 /// object, and can refuse when its bounded identity/history metadata does not
-/// fit. This is an async point/adjacency surface, not general GQL execution or
-/// an assertion that arbitrarily large databases can already be opened.
+/// fit. The governed query methods execute the native ordered single-vertex
+/// GQL profile through this same cache. Other physical profiles refuse before
+/// reading candidates. This is not an assertion that arbitrarily large
+/// databases can already be opened.
 ///
 /// As with EmbeddedReadView, callers must retain the database's immutable
 /// object directory. This handle does not invent the still-unimplemented

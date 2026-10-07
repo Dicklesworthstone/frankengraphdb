@@ -13,7 +13,7 @@ use fgdb_types::VId;
 /// is exactly the requested whole-row order and makes every row unique.
 /// VId has no allocation; GraphValueRow shares the ordinary GLA property
 /// collector, including nulls, canonical scalar variants and payload charges.
-pub trait VertexScanOutput: GlaOutput + sealed::Projection {}
+pub trait VertexScanOutput: GlaOutput + sealed::Projection + Send {}
 impl VertexScanOutput for VId {}
 impl VertexScanOutput for GraphValueRow {}
 

@@ -673,6 +673,9 @@ fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> 
         GqlQueryError::Source(VertexScanError::NonIncreasingIdentity) => QueryError::Stream(
             GqlQueryError::Source(VertexScanError::NonIncreasingIdentity),
         ),
+        GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission) => QueryError::Stream(
+            GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission),
+        ),
         GqlQueryError::Source(VertexScanError::CounterExhausted) => {
             QueryError::Stream(GqlQueryError::Source(VertexScanError::CounterExhausted))
         }

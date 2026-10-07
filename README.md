@@ -384,7 +384,33 @@ let mut view = Database::open_buffered_read_view(
 let vertex = view.vertex(&query, VId(1)).await?;
 ```
 
-Opening checks the existing slot, manifest coordinates, Chronicle binding and complete object/history admission. A missing or lagging checkpoint returns `BufferedOpenError::RecoveryRequired`; recovery is an explicit ordinary writable open. The buffered view holds no writer lease once returned, so later writes and compaction leave its selected root unchanged. Initial history validation can still exceed the chosen pool and refuse; its conservative reservations favor a hard admission boundary over density. Source-byte refusal can inspect one format-bounded object beyond the requested source limit. Chronicle recovery metadata remains outside the pool. This surface does not yet drive general GQL or supply a cross-process object-retention/GC lease; the database's immutable object directory must remain available.
+**Buffered GQL execution.** The same view now exposes `stream_graph_values_governed` and its historical `_at` counterpart. Prepare and bind with the existing native GQL compiler and your symbol resolver; execution then pulls canonical vertex histories through the extent cache. The supported projection begins with the scanned vertex identity and can include its canonical properties. Labels, local `WHERE` expressions, `DISTINCT`/`ALL`, and `SKIP`/`LIMIT` use the existing evaluator and row semantics. `stream_graph_vertices_governed` provides the identity-only counterpart for native prepared patterns.
+
+For example, with property name `score` bound to the application's catalog ID:
+
+```rust
+use fgdb_delta_types::PropertyKeyId;
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
+
+let prepared = PreparedGraphText::prepare(
+    "MATCH (n) WHERE n.score >= 10 RETURN n, n.score LIMIT 100",
+    |kind, name| match (kind, name) {
+        (GraphSymbolKind::Property, "score") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        _ => None,
+    },
+)?.bind_parameters(&GqlParameters::new())?;
+let policy = GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000);
+let mut cursor = view.stream_graph_values_governed(&query, &prepared, policy)?;
+while let Some(row) = cursor.next().await {
+    println!("{:?}", row?.values());
+}
+```
+
+The scan merges sorted patches with one small head per patch and one decoded patch, while scan misses bypass point-cache admission. It admits each candidate before reading that identity's history and shares one cumulative query budget across storage and evaluation. Evaluator temporaries and returned `BufferedQueryRow` values reserve bytes before allocation; a returned row stays charged after dropping the cursor or view. A failed or dropped in-flight pull permanently stops its cursor. Earlier successful pulls remain delivered after a later error, so complete success requires exhausting the cursor. Joins, edge expansion, probes, aggregation, property-only output, and alternate ordering still refuse in this buffered query profile. These owner-level methods do not apply Warden session masking.
+
+Opening checks the existing slot, manifest coordinates, Chronicle binding and complete object/history admission. A missing or lagging checkpoint returns `BufferedOpenError::RecoveryRequired`; recovery is an explicit ordinary writable open. The buffered view holds no writer lease once returned, so later writes and compaction leave its selected root unchanged. Initial history validation can still exceed the chosen pool and refuse; its conservative reservations favor a hard admission boundary over density. Source-byte refusal can inspect one format-bounded object beyond the requested source limit. Chronicle recovery and caller-owned query preparation/catalog metadata remain outside the pool. The view does not supply a cross-process object-retention/GC lease; the database's immutable object directory must remain available.
 
 **4. Python bindings** (ABI3 wheels, with a zero-friction `to_fnx()` / `from_fnx()` bridge and NumPy views over `Embedding` columns). **Target state:** no wheels are published — `pip install frankengraphdb` installs nothing of ours today. When releases exist:
 

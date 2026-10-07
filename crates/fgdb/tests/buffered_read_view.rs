@@ -8,6 +8,11 @@ use fgdb::{
     DerivedPublicationStage, EmbeddedReadView, MemVfs, MemoryPool, WriteBatch, WriteError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::stream::{VertexScanError, VertexScanState};
+use fgdb_gql::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
@@ -40,6 +45,23 @@ fn limits() -> BufferedReadLimits {
 
 fn pool() -> MemoryPool {
     MemoryPool::new(16 * 1024 * 1024, 0).unwrap()
+}
+
+fn query_policy() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000)
+}
+
+fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+        (GraphSymbolKind::Property, "missing") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+        _ => None,
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
 }
 
 fn vertex_batch(vid: u128, value: i64) -> WriteBatch {
@@ -381,6 +403,267 @@ fn a_lagging_checkpoint_requires_explicit_recovery_before_buffered_open() {
         let vertex = view.vertex(&cx, VId(2)).await.unwrap().unwrap();
         assert_eq!(vertex.props, [(PROPERTY, CanonicalScalar::Int(9))]);
         drop(vertex);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_gql_uses_native_predicates_projection_and_windows_at_every_historical_cut() {
+    let ((), report) = run_async_under_lab(0x6275_6604, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, reference) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let statements = [
+            "MATCH (n:L) WHERE n.p >= 2 RETURN n, n.p",
+            "MATCH (n:L) WHERE n.p > 0 AND (n.p = 2 OR n.p = 11) RETURN DISTINCT n, n.p SKIP 1 LIMIT 2",
+            "MATCH (n) RETURN ALL n, n.missing, n.p, n.p",
+            "MATCH (n) RETURN n, n.p SKIP 2 LIMIT 1",
+        ];
+        for text in statements {
+            let prepared = query(text);
+            for cut in 0..=3 {
+                let as_of = CommitSeq(cut);
+                let expected = reference
+                    .execute_graph_pattern_governed_at(&cx, &prepared, as_of, query_policy())
+                    .unwrap()
+                    .value;
+                let mut cursor = view
+                    .stream_graph_values_governed_at(&cx, &prepared, as_of, query_policy())
+                    .unwrap();
+                assert_eq!(cursor.snapshot_seq(), as_of);
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+                let mut actual = Vec::new();
+                while let Some(row) = cursor.next().await {
+                    actual.push(row.unwrap().as_ref().clone());
+                }
+                assert_eq!(actual, expected, "{text} at {cut}");
+                assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().await.is_none());
+            }
+        }
+
+        // An explicit oracle catches changes shared by both physical paths.
+        let prepared = query("MATCH (n) RETURN n, n.p");
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, query_policy())
+            .unwrap();
+        for (vid, value) in [(1, 11), (2, 2), (4, 4)] {
+            let row = cursor.next().await.unwrap().unwrap();
+            assert_eq!(
+                row.values(),
+                [
+                    GraphValue::Vertex(VId(vid)),
+                    GraphValue::Scalar(CanonicalScalar::Int(value))
+                ]
+            );
+        }
+        assert!(cursor.next().await.is_none());
+        assert_eq!(
+            cursor.row_stats().snapshot_records,
+            4,
+            "retired identity is counted"
+        );
+        drop(cursor);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_gql_refuses_unavailable_profiles_and_future_cuts_before_payload_reads() {
+    let ((), report) = run_async_under_lab(0x6275_6605, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let before = pool.used();
+        for text in [
+            "MATCH (n) RETURN n.p",
+            "MATCH (n) RETURN n, n.p ORDER BY n.p",
+            "MATCH (n)-[:R]->(m) RETURN n, m",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n, n.p",
+        ] {
+            let prepared = query(text);
+            assert!(
+                matches!(
+                    view.stream_graph_values_governed(&cx, &prepared, query_policy()),
+                    Err(GqlQueryError::Source(VertexScanError::Plan(_)))
+                ),
+                "{text}"
+            );
+            assert_eq!(pool.used(), before);
+            assert_eq!(view.buffer_stats().misses, 0);
+        }
+        let empty = query("MATCH (n) RETURN n, n.p LIMIT 0");
+        assert!(matches!(
+            view.stream_graph_values_governed_at(&cx, &empty, CommitSeq(4), query_policy()),
+            Err(GqlQueryError::Source(VertexScanError::Source(
+                BufferedReadError::BeyondPublication { .. }
+            )))
+        ));
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &empty, query_policy())
+            .unwrap();
+        assert!(cursor.next().await.is_none());
+        assert_eq!(cursor.row_stats().snapshot_records, 0);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        drop(cursor);
+        assert_eq!(view.buffer_stats().misses, 0);
+        assert_eq!(pool.used(), before);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_gql_budgets_fuse_and_returned_rows_keep_their_own_memory() {
+    let ((), report) = run_async_under_lab(0x6275_6606, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let prepared = query("MATCH (n) RETURN n, n.p");
+
+        let mut zero = query_policy();
+        zero.rows = fgdb_gql::GqlExecutionBudget::new(0, 100);
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, zero)
+            .unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        assert_eq!(
+            view.buffer_stats().misses,
+            0,
+            "record allowance precedes decoding"
+        );
+
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, query_policy())
+            .unwrap();
+        let occupied = pool.reserve(&cx, pool.available()).unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Source(VertexScanError::Source(
+                BufferedReadError::Memory(_)
+                    | BufferedReadError::Buffer(fgdb_strata::tiered::buffer::BufferError::Memory(
+                        _
+                    ))
+            ))))
+        ));
+        drop(occupied);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+
+        let mut one = query_policy();
+        one.rows = fgdb_gql::GqlExecutionBudget::new(100, 1);
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, one)
+            .unwrap();
+        let retained = cursor.next().await.unwrap().unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        drop(view);
+        assert!(pool.used() > 0, "a delivered row still owns payload memory");
+        assert_eq!(
+            retained.values(),
+            [
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(11))
+            ]
+        );
+        drop(retained);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_gql_reports_arithmetic_failure_after_its_delivered_prefix() {
+    let ((), report) = run_async_under_lab(0x6275_6607, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let prepared = query("MATCH (n) WHERE 10 / (n.p - 2) > 0 RETURN n, n.p");
+        let mut cursor = view
+            .stream_graph_values_governed(&cx, &prepared, query_policy())
+            .unwrap();
+        let prefix = cursor.next().await.unwrap().unwrap();
+        assert_eq!(prefix.values()[0], GraphValue::Vertex(VId(1)));
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Data(_)))
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert!(cursor.next().await.is_none());
+        drop(prefix);
+        drop(cursor);
         drop(view);
         assert_eq!(pool.used(), 0);
     });

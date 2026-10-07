@@ -29,6 +29,11 @@ use std::iter::FusedIterator;
 use std::sync::Arc;
 
 pub mod aggregate;
+mod asynchronous;
+pub use asynchronous::{
+    AsyncVertexCandidate, AsyncVertexScanCursor, AsyncVertexScanEvent, AsyncVertexScanOutput,
+    AsyncVertexScanPlan, AsyncVertexScanRecord, AsyncVertexScanSource,
+};
 mod output;
 mod probe;
 mod record;
@@ -213,6 +218,80 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         Ok(true)
     }
+
+    // The synchronous and asynchronous source drivers enter this SAME row
+    // kernel. Allocation admission belongs to the host and happens only after
+    // filtering, SKIP and output-budget admission, before any projection copy.
+    fn project_record<const EMIT: bool, S, F, C, Guard>(
+        &self,
+        vid: VId,
+        row: VertexScanRow<'_>,
+        source: &S,
+        skip: &mut u64,
+        meter: &mut Meter<F>,
+        controls: (
+            impl FnOnce(&mut Meter<F>) -> ScanResult<Guard, S::Error, C>,
+            impl FnMut(VertexScanEvent) -> Result<(), S::Error>,
+        ),
+    ) -> ScanResult<Option<(Row, Guard)>, S::Error, C>
+    where
+        S: VertexScanSource,
+        F: FnMut() -> Result<(), C>,
+    {
+        let (reserve, mut observe) = controls;
+        let accepted = {
+            let metered = std::cell::RefCell::new(&mut *meter);
+            let observer = std::cell::RefCell::new(&mut observe);
+            self.accepts(
+                vid,
+                row,
+                source,
+                &mut |event| {
+                    row_event(
+                        &mut metered.borrow_mut(),
+                        &mut **observer.borrow_mut(),
+                        event,
+                    )
+                },
+                &mut || metered.borrow_mut().record(),
+            )?
+        };
+        if !accepted {
+            return Ok(None);
+        }
+        meter.event(VertexScanEvent::Work)?;
+        if *skip != 0 {
+            *skip -= 1;
+            return Ok(None);
+        }
+        if EMIT {
+            let _ = meter.next_result_count()?;
+        }
+        let guard = reserve(meter)?;
+        let value = Row::project(vid, row, &self.projection, &mut |event| {
+            row_event(meter, &mut observe, event)
+        })?;
+        if EMIT {
+            meter.emit()?;
+        } else {
+            meter.event(VertexScanEvent::Work)?;
+        }
+        Ok(Some((value, guard)))
+    }
+}
+
+fn row_event<F, E, C>(
+    meter: &mut Meter<F>,
+    observe: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+    event: VertexScanEvent,
+) -> ScanResult<(), E, C>
+where
+    F: FnMut() -> Result<(), C>,
+{
+    meter.event(event)?;
+    // Resource refusal remains a source error, never a Boolean UNKNOWN or an
+    // absent property. The logical allowance is checked before byte admission.
+    observe(event).map_err(|error| GqlQueryError::Source(VertexScanError::Source(error)))
 }
 
 /// Reuse the bound evaluator rather than interpreting a second expression
@@ -461,6 +540,9 @@ pub enum VertexScanError<E> {
     Plan(VertexScanBuildError),
     /// The source repeated or reversed an identity; no bad row is delivered.
     NonIncreasingIdentity,
+    /// Async intake must admit exactly the identity it then returns, before
+    /// resolving its payload. Missing, repeated or mismatched admission fails.
+    InvalidCandidateAdmission,
     CounterExhausted,
     /// Structural probe failure. Actual source errors remain Source(E), so
     /// native I/O classification and interruption handling stay unchanged.
@@ -474,6 +556,9 @@ impl<E: core::fmt::Display> core::fmt::Display for VertexScanError<E> {
             Self::Probe(error) => error.fmt(f),
             Self::NonIncreasingIdentity => {
                 f.write_str("vertex stream source is not strictly increasing")
+            }
+            Self::InvalidCandidateAdmission => {
+                f.write_str("vertex stream source violated candidate admission")
             }
             Self::CounterExhausted => f.write_str("vertex stream counter exhausted"),
         }
@@ -663,41 +748,16 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             let Some(record) = record else {
                 continue;
             };
-            let row = record.as_row();
-            // Probe work and candidate admission share the original meter.
-            // These callback borrows are sequential; none spans a source call.
-            let accepted = {
-                let metered = std::cell::RefCell::new(&mut *meter);
-                self.plan.accepts(
-                    vid,
-                    row,
-                    &*source,
-                    &mut |event| metered.borrow_mut().event(event),
-                    &mut || metered.borrow_mut().record(),
-                )?
-            };
-            if !accepted {
-                continue;
+            if let Some((value, ())) = self.plan.project_record::<EMIT, _, _, _, _>(
+                vid,
+                record.as_row(),
+                &*source,
+                &mut self.skip,
+                meter,
+                (|_| Ok(()), |_| Ok(())),
+            )? {
+                return Ok(Some(value));
             }
-            meter.event(VertexScanEvent::Work)?;
-            if self.skip != 0 {
-                self.skip -= 1;
-                continue;
-            }
-            // Refuse an exhausted output budget before copying any property
-            // payload; count delivery only after the whole row is complete.
-            if EMIT {
-                let _ = meter.next_result_count()?;
-            }
-            let value = Row::project(vid, row, &self.plan.projection, &mut |event| {
-                meter.event(event)
-            })?;
-            if EMIT {
-                meter.emit()?;
-            } else {
-                meter.event(VertexScanEvent::Work)?;
-            }
-            return Ok(Some(value));
         }
     }
 }
