@@ -233,7 +233,8 @@ fn independent_parameters_form_ordered_borrowed_products_and_native_programs() {
     let frozen = args.canonical_bytes();
     let Some(GqlParameterValue::List(left)) = args.get("left") else { panic!("left list") };
     let Some(GqlParameterValue::List(right)) = args.get("right") else { panic!("right list") };
-    let input = expand_with_parameters(&plan, left.values(), Some(&args), 64,
+    let owners = prepare_parameter_sources(&plan, &args, &mut |_| Ok::<_, ()>(())).unwrap();
+    let input = expand_with_parameters(&plan, left.values(), &owners, 64,
         &mut |_| Ok::<_, ()>(())).unwrap();
     let expected = [(-4,2), (-4,2), (-4,7), (9,2), (9,2), (9,7)];
     assert_eq!(input.len(), expected.len());
@@ -270,7 +271,8 @@ fn repeated_parameter_sources_are_products_not_zips_or_duplicate_arguments() {
     let args = GqlParameters::new().with_list("rows", vec![int(3), int(5)]).unwrap();
     assert!(plan.external_parameters.is_empty());
     let Some(GqlParameterValue::List(values)) = args.get("rows") else { panic!("list") };
-    let input = expand_with_parameters(&plan, values.values(), Some(&args), 4,
+    let owners = prepare_parameter_sources(&plan, &args, &mut |_| Ok::<_, ()>(())).unwrap();
+    let input = expand_with_parameters(&plan, values.values(), &owners, 4,
         &mut |_| Ok::<_, ()>(())).unwrap();
     let actual: Vec<_> = (0..input.len()).map(|at| plan.fields.iter()
         .map(|field| selected(&input, at, field)).collect::<Vec<_>>()).collect();
@@ -287,7 +289,8 @@ fn independent_sources_compose_with_correlated_ancestor_and_list_expansion() {
     let args = GqlParameters::new().with_list("rows", roots).unwrap()
         .with_list("groups", vec![list(vec![int(10), int(11)]), list(vec![]), null(), list(vec![int(12)])]).unwrap();
     let Some(GqlParameterValue::List(roots)) = args.get("rows") else { panic!("list") };
-    let input = expand_with_parameters(&plan, roots.values(), Some(&args), 64,
+    let owners = prepare_parameter_sources(&plan, &args, &mut |_| Ok::<_, ()>(())).unwrap();
+    let input = expand_with_parameters(&plan, roots.values(), &owners, 64,
         &mut |_| Ok::<_, ()>(())).unwrap();
     let mut expected = Vec::new();
     for (parent, children) in [(1, vec![4,5]), (2, vec![6])] {
@@ -400,4 +403,130 @@ fn independent_products_share_one_cancellable_budget_and_can_retry_unchanged() {
         assert_eq!(bound.is_ok(), allowance == units);
     }
     assert_eq!(plan.bind(&args, RelationId(1), resolve).unwrap().argument_sets(), 4);
+}
+
+#[test]
+fn independent_source_owners_outlive_the_argument_map_without_copying_payloads() {
+    let plan = GraphUnwindWriteText::parse(
+        "UNWIND $rows AS x UNWIND $other AS y MATCH (n:Entity) SET n.parent=y"
+    ).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_list("other", vec![int(2), int(3)]).unwrap();
+    let Some(GqlParameterValue::List(roots)) = args.get("rows") else { panic!("root list") };
+    let owners = prepare_parameter_sources(&plan, &args, &mut |_| Ok::<_, ()>(())).unwrap();
+    let Some(GqlParameterValue::List(other)) = &owners[0] else { panic!("other list") };
+    let original = other.values().as_ptr();
+    drop(args);
+    let input = expand_with_parameters(&plan, roots.values(), &owners, 64,
+        &mut |_| Ok::<_, ()>(())).unwrap();
+    assert_eq!(input.len(), 2);
+    assert_eq!(input.at(0, 1) as *const GraphValue, original);
+    assert_eq!(selected(&input, 1, &plan.fields[0]), 3);
+}
+
+#[test]
+fn parameter_document_paths_drive_products_without_flattening_the_payload() {
+    let text = "UNWIND $rows AS id UNWIND $payload.groups[-1].ids AS x \
+        UNWIND $payload.weights AS y MATCH (n:Entity {id:id}) SET n.parent=x,n.other=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_map("payload", vec![
+            ("groups".into(), list(vec![object(vec![("ids", list(vec![int(3), int(4)]))])])),
+            ("weights".into(), list(vec![int(10), int(20)])),
+        ]).unwrap();
+    let frozen = args.canonical_bytes();
+    assert_eq!(plan.external_parameters.len(), 1, "same document, two source paths");
+    let Some(GqlParameterValue::List(roots)) = args.get("rows") else { panic!("root list") };
+    let owners = prepare_parameter_sources(&plan, &args, &mut |_| Ok::<_, ()>(())).unwrap();
+    let input = expand_with_parameters(&plan, roots.values(), &owners, 64,
+        &mut |_| Ok::<_, ()>(())).unwrap();
+    let actual: Vec<_> = (0..input.len()).map(|at| plan.fields.iter()
+        .map(|field| selected(&input, at, field)).collect::<Vec<_>>()).collect();
+    assert_eq!(actual, [vec![1,3,10], vec![1,3,20], vec![1,4,10], vec![1,4,20]]);
+    let bound = plan.bind(&args, RelationId(1), resolve).unwrap();
+    assert_eq!(bound.argument_sets(), 4);
+    assert_eq!(bound.location(3).unwrap().span, 0..text.len());
+    assert_eq!(args.canonical_bytes(), frozen);
+}
+
+#[test]
+fn parameter_document_null_missing_and_wrong_shapes_follow_selector_semantics() {
+    for path in ["missing", "empty", "absent", "groups[99]", "groups[-9223372036854775808]"] {
+        let text = format!("UNWIND $rows AS x UNWIND $doc.{path} AS y MATCH (n:Entity) SET n.parent=x");
+        let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+            .with_map("doc", vec![("empty".into(), list(vec![])), ("absent".into(), null()),
+                ("groups".into(), list(vec![list(vec![int(1)])]))]).unwrap();
+        let plan = GraphUnwindWriteText::parse(&text).unwrap();
+        assert!(matches!(plan.bind(&args, RelationId(1), |_, _| panic!("catalog")),
+            Err(GraphUnwindWriteError::Empty)), "{path}");
+    }
+    let text = "UNWIND $rows AS x UNWIND $doc AS y MATCH (n:Entity) SET n.parent=x";
+    let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_scalar("doc", CanonicalScalar::Null).unwrap();
+    assert!(matches!(GraphUnwindWriteText::parse(text).unwrap()
+        .bind(&args, RelationId(1), |_, _| panic!("catalog")), Err(GraphUnwindWriteError::Empty)));
+    for (path, kind) in [("value", GraphUnwindRowError::ExpectedListField),
+        ("value.children", GraphUnwindRowError::ExpectedMapField),
+        ("value[0]", GraphUnwindRowError::ExpectedListField)] {
+        let text = format!("UNWIND $rows AS x UNWIND $doc.{path} AS y MATCH (n:Entity) SET n.parent=x");
+        let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+            .with_map("doc", vec![("value".into(), int(2))]).unwrap();
+        assert!(matches!(GraphUnwindWriteText::parse(&text).unwrap()
+            .bind(&args, RelationId(1), |_, _| panic!("catalog")),
+            Err(GraphUnwindWriteError::Expansion { row: 0, clause: 1, kind: actual, offset })
+                if actual == kind && offset == text.find("$doc").unwrap()), "{path}");
+    }
+}
+
+#[test]
+fn unselected_document_payload_is_not_copied_or_charged_per_product_row() {
+    let text = "UNWIND $rows AS x UNWIND $doc.ids AS y MATCH (n:Entity) SET n.parent=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let mut bills = Vec::new();
+    for bytes in [1, 4096] {
+        let args = GqlParameters::new().with_list("rows", vec![int(1), int(2)]).unwrap()
+            .with_map("doc", vec![("ids".into(), list(vec![int(3), int(4)])),
+                ("unused".into(), GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(bytes)).unwrap()))]).unwrap();
+        let mut bill = 0;
+        let bound = plan.bind_with_limit_controlled(&args, RelationId(1), 4, resolve, |event| {
+            if let GraphUnwindBindEvent::Work(units) = event { bill += units; }
+            Ok::<_, ()>(())
+        }).unwrap();
+        assert_eq!(bound.argument_sets(), 4);
+        bills.push(bill);
+    }
+    assert_eq!(bills[0], bills[1], "caller-owned unselected payloads do not become native arguments");
+}
+
+#[test]
+fn parameter_document_selection_limits_and_cancellation_precede_graph_work() {
+    let text = "UNWIND $rows AS x UNWIND $doc.ids AS y MATCH (n:Entity) SET n.parent=y";
+    let plan = GraphUnwindWriteText::parse(text).unwrap();
+    let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_map("doc", vec![("ids".into(), list(vec![int(3), int(4)]))]).unwrap();
+    assert!(matches!(plan.bind_with_limit(&args, RelationId(1), 1, |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::TooManyRows { limit: 1, observed: 2 })));
+    let frozen = args.canonical_bytes();
+    let mut events = 0;
+    plan.bind_with_limit_controlled(&args, RelationId(1), 2, resolve, |_| {
+        events += 1;
+        Ok::<_, usize>(())
+    }).unwrap();
+    for stop in 0..events {
+        let mut at = 0;
+        let result = plan.bind_with_limit_controlled(&args, RelationId(1), 2, resolve, |_| {
+            let current = at;
+            at += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GraphUnwindBindError::Interrupted(observed)) if observed == stop));
+        assert_eq!(args.canonical_bytes(), frozen);
+    }
+    let text = "UNWIND $rows AS x UNWIND $doc.empty AS e UNWIND $doc.bad AS b \
+        MATCH (n:Entity) SET n.parent=b";
+    let args = GqlParameters::new().with_list("rows", vec![int(1)]).unwrap()
+        .with_map("doc", vec![("empty".into(), list(vec![])), ("bad".into(), int(7))]).unwrap();
+    assert!(matches!(GraphUnwindWriteText::parse(text).unwrap()
+        .bind(&args, RelationId(1), |_, _| panic!("catalog")),
+        Err(GraphUnwindWriteError::Expansion { clause: 2, kind: GraphUnwindRowError::ExpectedListField, .. })));
 }

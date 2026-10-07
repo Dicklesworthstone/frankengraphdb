@@ -53,39 +53,98 @@ pub(super) fn expand<'a, C>(
     limit: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<InputRows<'a>, GraphUnwindBindError<C>> {
-    expand_with_parameters(definition, roots, None, limit, control)
+    expand_with_parameters(definition, roots, &[], limit, control)
+}
+
+// GqlParameters::get returns a shared OWNED handle, not a reference into the
+// map. Keep those handles in the caller's scope for as long as expanded frames
+// borrow their payloads. No source container or canonical transcript is copied.
+pub(super) fn prepare_parameter_sources<C>(
+    definition: &GraphUnwindWriteText,
+    arguments: &GqlParameters,
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<Vec<Option<GqlParameterValue>>, GraphUnwindBindError<C>> {
+    if definition.sources.iter().all(|source| source.parameter.is_none()) {
+        return Ok(Vec::new());
+    }
+    work(control, definition.sources.len() as u64)?;
+    let mut parameters = Vec::with_capacity(definition.sources.len());
+    for source in definition.sources.iter() {
+        let Some(name) = &source.parameter else {
+            parameters.push(None);
+            continue;
+        };
+        work(control, 1)?;
+        let value = arguments.get(name).ok_or(GraphUnwindWriteError::ArgumentNames)?;
+        parameters.push(Some(value));
+    }
+    Ok(parameters)
+}
+
+// The same static selector walker serves row operands, correlated sources and
+// parameter documents. Borrow the original graph value inside its shared owner.
+fn parameter_list<'a, C>(
+    value: &'a GqlParameterValue,
+    source: &UnwindSource,
+    clause: usize,
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<&'a [GraphValue], GraphUnwindBindError<C>> {
+    let refusal = |kind| GraphUnwindWriteError::Expansion {
+        row: 0,
+        clause: clause + 1,
+        offset: source.offset,
+        kind,
+    };
+    work(control, 1)?;
+    let value = match value {
+        GqlParameterValue::List(value) => value.value(),
+        GqlParameterValue::Map(value) => value.value(),
+        GqlParameterValue::Scalar(value) if value.kind() == fgdb_types::CanonicalScalarKind::Null => {
+            return Ok(&[]);
+        }
+        _ => return Err(refusal(match source.path.first() {
+            Some(UnwindFieldAccess::Key(_)) => GraphUnwindRowError::ExpectedMapField,
+            _ => GraphUnwindRowError::ExpectedListField,
+        }).into()),
+    };
+    let value = field_value(value, &source.path, source.offset, 0, control)
+        .map_err(|error| match error {
+            GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
+                GraphUnwindBindError::Binding(refusal(kind))
+            }
+            error => error,
+        })?;
+    match value {
+        None | Some(GraphValue::Scalar(CanonicalScalar::Null)) => Ok(&[]),
+        Some(GraphValue::List(values)) => Ok(values.as_ref()),
+        _ => Err(refusal(GraphUnwindRowError::ExpectedListField).into()),
+    }
 }
 
 pub(super) fn expand_with_parameters<'a, C>(
     definition: &GraphUnwindWriteText,
     roots: &'a [GraphValue],
-    arguments: Option<&'a GqlParameters>,
+    parameters: &'a [Option<GqlParameterValue>],
     limit: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<InputRows<'a>, GraphUnwindBindError<C>> {
     if definition.sources.is_empty() {
         return Ok(InputRows::Roots(roots));
     }
-    // At most eight sources: alias dependencies point strictly backwards.
-    // Admit metadata and ALL independent sources before traversing a product,
-    // so an empty earlier source cannot conceal a malformed later parameter.
+    // Admit every independent selected list before traversing any product,
+    // even behind empty earlier sources. All borrows point into caller-owned
+    // handles, never a temporary returned by GqlParameters::get.
     work(control, (3 * definition.sources.len() + 2) as u64)?;
     let mut parameter_rows = Vec::with_capacity(definition.sources.len());
     for (clause, source) in definition.sources.iter().enumerate() {
-        let Some(name) = &source.parameter else {
+        if source.parameter.is_none() {
             parameter_rows.push(None);
             continue;
+        }
+        let Some(Some(value)) = parameters.get(clause) else {
+            return Err(GraphUnwindWriteError::ArgumentNames.into());
         };
-        work(control, 1)?;
-        let Some(GqlParameterValue::List(values)) = arguments.and_then(|args| args.get(name)) else {
-            return Err(GraphUnwindWriteError::Expansion {
-                row: 0,
-                clause: clause + 1,
-                offset: source.offset,
-                kind: GraphUnwindRowError::ExpectedListField,
-            }.into());
-        };
-        let values = values.values();
+        let values = parameter_list(value, source, clause, control)?;
         if values.len() > limit {
             return Err(GraphUnwindWriteError::TooManyRows {
                 limit,
@@ -148,7 +207,7 @@ impl<'a> Expansion<'a, '_> {
             kind,
         };
         let items = if let Some(items) = self.parameter_rows[at] {
-            // Copy a borrowed slice, never the source list or its payloads.
+            // Copy only the borrowed slice. The owner lives in the binder.
             items
         } else {
             let value = field_value(frame[source.source], &source.path, offset, root, control)

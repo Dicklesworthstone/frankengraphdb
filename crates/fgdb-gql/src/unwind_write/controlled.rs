@@ -135,8 +135,11 @@ impl GraphUnwindWriteText {
 
         // Expand parameter documents, not graph state. Preserve earlier alias
         // bindings by reference; every intermediate cardinality is admitted.
+        let parameter_sources = expansion::prepare_parameter_sources(
+            self, arguments, &mut control,
+        )?;
         let rows = expansion::expand_with_parameters(
-            self, rows, Some(arguments), limit, &mut control,
+            self, rows, &parameter_sources, limit, &mut control,
         )?;
         work(&mut control, self.fields.len() as u64 + 1)?;
         let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];

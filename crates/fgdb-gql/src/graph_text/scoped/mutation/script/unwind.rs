@@ -149,7 +149,9 @@ impl GraphUnwindWriteText {
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
     /// `UNWIND earlier[.static.path] AS alias` clauses before the mutation.
-    /// Later clauses may also use independent list parameters. Reusing a
+    /// Later clauses may also select lists from independent parameters, such
+    /// as `$payload.groups[-1].members`. Missing/null selections expand to no
+    /// rows; selected non-list values refuse before catalog access. Reusing a
     /// parameter under a fresh alias forms a product, not a zip. Source-only
     /// parameters are borrowed for expansion, not replicated into each native
     /// argument transcript. Every intermediate product retains the row cap.
@@ -228,7 +230,10 @@ impl GraphUnwindWriteText {
                 return Err(syntax(at, "a list parameter or an earlier UNWIND alias"));
             };
             let (source, parameter, path, next) = match input.kind {
-                TokenKind::Parameter(name) => (0, Some(name.to_owned()), Vec::new(), start + 1),
+                TokenKind::Parameter(name) => {
+                    let (path, next, _) = field_path(&tokens, start)?;
+                    (0, Some(name.to_owned()), path, next)
+                }
                 TokenKind::Word(parent) => {
                     let Some(&source) = aliases.get(parent) else {
                         return Err(syntax(input.at, "an earlier UNWIND alias"));
