@@ -14,7 +14,17 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 #[derive(Clone)]
 pub(crate) enum MutationIntegerTemplateOp {
     Bound(GraphIntegerOp),
-    Parameter { index: usize, at: usize },
+    Parameter {
+        index: usize,
+        at: usize,
+    },
+    /// A static path within one immutable map argument. The selected scalar
+    /// becomes an ordinary native operand at binding, before graph execution.
+    ParameterField {
+        index: usize,
+        keys: Box<[Box<str>]>,
+        at: usize,
+    },
 }
 
 impl MutationIntegerTemplateOp {
@@ -29,6 +39,15 @@ impl MutationIntegerTemplateOp {
             Self::Parameter { index, .. } => {
                 bytes.push(1);
                 bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+            Self::ParameterField { index, keys, .. } => {
+                bytes.push(2);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+                bytes.extend_from_slice(&(keys.len() as u64).to_be_bytes());
+                for key in keys {
+                    bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(key.as_bytes());
+                }
             }
         }
     }

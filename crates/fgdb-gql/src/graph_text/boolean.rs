@@ -359,6 +359,13 @@ impl<'a> Parser<'a> {
                 // `||` concatenation and `=~` matching need the scalar compiler.
                 TokenKind::Punct(b'|' | b'~') => return Ok(true),
                 TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
+                TokenKind::Parameter(_)
+                    if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
+                {
+                    // Map argument fields are bound operands of the existing
+                    // scalar VM, including simple property comparisons.
+                    return Ok(true);
+                }
                 TokenKind::Punct(b'-') => {
                     // A signed numeric RHS keeps the original typed comparison
                     // (including i64::MIN). Binary subtraction and nonliteral

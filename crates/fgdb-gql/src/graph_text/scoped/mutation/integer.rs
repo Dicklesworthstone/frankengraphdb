@@ -28,6 +28,11 @@ enum ExpressionBoundary {
 }
 enum ParsedOp {
     Atom(Operand, usize),
+    ParameterField {
+        index: usize,
+        keys: Box<[Box<str>]>,
+        at: usize,
+    },
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
@@ -77,6 +82,37 @@ fn emit(
     Ok(())
 }
 
+fn parameter_field(
+    values: &[GqlParameterValue],
+    index: usize,
+    keys: &[Box<str>],
+    at: usize,
+) -> Result<GqlScalarParameter, GraphMutationTextError> {
+    let refused = || failure(at, GraphMutationTextErrorKind::IntegerOperand);
+    let mut value = match values.get(index) {
+        Some(GqlParameterValue::Map(map)) => Some(map.value()),
+        Some(GqlParameterValue::Scalar(value)) if value.kind() == CanonicalScalarKind::Null => None,
+        _ => return Err(refused()),
+    };
+    for key in keys {
+        value = match value {
+            None => None,
+            Some(value) if value.is_null() => None,
+            Some(crate::algebra::GraphValue::Map { keys, values }) => keys
+                .binary_search_by(|candidate| candidate.as_bytes().cmp(key.as_bytes()))
+                .ok()
+                .map(|at| &values[at]),
+            _ => return Err(refused()),
+        };
+    }
+    let value = match value {
+        None => CanonicalScalar::Null,
+        Some(crate::algebra::GraphValue::Scalar(value)) => value.clone(),
+        _ => return Err(refused()),
+    };
+    GqlScalarParameter::new(value).map_err(|_| refused())
+}
+
 pub(in crate::graph_text) fn bind_integer(
     program: &[MutationIntegerTemplateOp],
     values: &[GqlParameterValue],
@@ -92,6 +128,11 @@ pub(in crate::graph_text) fn bind_integer(
                     .ok_or_else(|| failure(*at, GraphMutationTextErrorKind::IntegerOperand))?;
                 GraphIntegerOp::Scalar(
                     scalar(value.clone(), *at)?.predicate(IntegerComparison::Equal),
+                )
+            }
+            MutationIntegerTemplateOp::ParameterField { index, keys, at } => {
+                GraphIntegerOp::Scalar(
+                    parameter_field(values, *index, keys, *at)?.predicate(IntegerComparison::Equal),
                 )
             }
         });
@@ -232,6 +273,9 @@ impl<'a> Parser<'a> {
         for op in parsed {
             program.push(match op {
                 ParsedOp::Bound(op) => MutationIntegerTemplateOp::Bound(op),
+                ParsedOp::ParameterField { index, keys, at } => {
+                    MutationIntegerTemplateOp::ParameterField { index, keys, at }
+                }
                 ParsedOp::Unary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Unary(op)),
                 ParsedOp::Binary(op) => {
                     MutationIntegerTemplateOp::Bound(GraphIntegerOp::Binary(op))
@@ -285,6 +329,12 @@ impl<'a> Parser<'a> {
             .iter()
             .map(|op| match op {
                 MutationIntegerTemplateOp::Bound(op) => Ok(op.clone()),
+                MutationIntegerTemplateOp::ParameterField { .. } => {
+                    // A field's kind is known only after the Map argument is
+                    // bound. NULL checks structure without assuming an integer
+                    // or text domain; bind_integer validates the actual scalar.
+                    Ok(GraphIntegerOp::Literal(None))
+                }
                 MutationIntegerTemplateOp::Parameter { index, at } => {
                     let kind = self.syntax.parameters[*index].parameter_type;
                     let witness = match kind {
@@ -724,6 +774,37 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
+        if let TokenKind::Parameter(name) = self.current.kind
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+        {
+            self.parameter_types
+                .entry(name.to_owned())
+                .or_insert(GqlParameterType::Map);
+            let Number::Parameter(index) = self.number(GqlParameterType::Map)? else {
+                unreachable!("the current native token is a parameter");
+            };
+            let mut keys = Vec::new();
+            while self.take(b'.')? {
+                if keys.len() == MAX_INTEGER_NESTING {
+                    return Err(failure(
+                        at,
+                        GraphMutationTextErrorKind::IntegerNesting {
+                            limit: MAX_INTEGER_NESTING,
+                        },
+                    ));
+                }
+                keys.push(self.name()?.text.into());
+            }
+            return emit(
+                program,
+                ParsedOp::ParameterField {
+                    index,
+                    keys: keys.into_boxed_slice(),
+                    at,
+                },
+                at,
+            );
+        }
         // A list-comprehension element (fgdb-20foe) shadows every row and graph
         // name. Reading a property of one would need storage access inside
         // the element scope, so `x.p` refuses rather than falling through to
@@ -1108,5 +1189,129 @@ mod float_parameter_tests {
             ),
             Ok(CanonicalScalar::Bool(true)),
         );
+    }
+}
+
+#[cfg(test)]
+mod map_parameter_field_tests {
+    use super::*;
+    use crate::algebra::GraphValue;
+
+    fn template(text: &str) -> Vec<MutationIntegerTemplateOp> {
+        let mut parser =
+            Parser::new_with_parameter_types(text, &[("m", GqlParameterType::Map)]).unwrap();
+        let Operand::Integer { program, .. } = parser.row_expression(&[]).unwrap() else {
+            panic!("map fields use a native parameterized scalar program");
+        };
+        assert!(matches!(parser.current.kind, TokenKind::End));
+        program
+    }
+
+    fn arguments(value: GraphValue) -> Vec<GqlParameterValue> {
+        vec![GqlParameterValue::Map(
+            crate::GqlMapParameter::new(vec![("value".into(), value)]).unwrap(),
+        )]
+    }
+
+    fn evaluate(program: &[MutationIntegerTemplateOp], value: GraphValue) -> CanonicalScalar {
+        bind_integer(program, &arguments(value), 0)
+            .unwrap()
+            .evaluate_scalar_with_control(&[], &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+    }
+
+    #[test]
+    fn map_field_binding_retains_actual_numeric_text_and_null_domains() {
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let float = |value| {
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        };
+        let arithmetic = template("$m.value * 2 + 1");
+        assert_eq!(evaluate(&arithmetic, int(4)), CanonicalScalar::Int(9));
+        assert_eq!(
+            evaluate(&arithmetic, float(0.25)),
+            CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.5))
+        );
+        assert_eq!(
+            evaluate(
+                &template("upper($m.value)"),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("aBc").unwrap())
+            ),
+            CanonicalScalar::ucs_basic_text("ABC").unwrap()
+        );
+        assert_eq!(
+            evaluate(
+                &template("$m.value"),
+                GraphValue::Scalar(CanonicalScalar::Bool(true))
+            ),
+            CanonicalScalar::Bool(true)
+        );
+        let missing = template("coalesce($m.value.absent, 7)");
+        assert_eq!(
+            evaluate(&missing, GraphValue::map(Vec::new()).unwrap()),
+            CanonicalScalar::Int(7)
+        );
+        assert_eq!(
+            evaluate(&missing, GraphValue::Scalar(CanonicalScalar::Null)),
+            CanonicalScalar::Int(7)
+        );
+        let null =
+            GqlParameterValue::Scalar(GqlScalarParameter::new(CanonicalScalar::Null).unwrap());
+        assert_eq!(
+            bind_integer(&arithmetic, &[null], 0)
+                .unwrap()
+                .evaluate_scalar_with_control(&[], &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            CanonicalScalar::Null
+        );
+        for value in [
+            GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            GraphValue::map(Vec::new()).unwrap(),
+            GraphValue::List(Vec::new().into()),
+        ] {
+            assert!(bind_integer(&arithmetic, &arguments(value), 0).is_err());
+        }
+        assert!(bind_integer(&missing, &arguments(int(1)), 0).is_err());
+    }
+
+    #[test]
+    fn parameter_field_transcripts_pin_path_order_and_parser_bounds() {
+        let program = template("$m.outer.value + 1");
+        let mut transcript = Vec::new();
+        for op in &program {
+            op.append_template_transcript(&mut transcript);
+        }
+        let mut expected = vec![2];
+        expected.extend_from_slice(&0_u64.to_be_bytes());
+        expected.extend_from_slice(&2_u64.to_be_bytes());
+        for key in ["outer", "value"] {
+            expected.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            expected.extend_from_slice(key.as_bytes());
+        }
+        let mut field = Vec::new();
+        program[0].append_template_transcript(&mut field);
+        assert_eq!(field, expected);
+        let other = template("$m.value.outer + 1");
+        let mut other_bytes = Vec::new();
+        for op in &other {
+            op.append_template_transcript(&mut other_bytes);
+        }
+        assert_ne!(transcript, other_bytes);
+        let mut scalar =
+            Parser::new_with_parameter_types("$m.value + 1", &[("m", GqlParameterType::Int64)])
+                .unwrap();
+        assert!(scalar.row_expression(&[]).is_err());
+        let deep = format!("$m{} + 1", ".field".repeat(MAX_INTEGER_NESTING + 1));
+        let mut parser =
+            Parser::new_with_parameter_types(&deep, &[("m", GqlParameterType::Map)]).unwrap();
+        assert!(matches!(
+            parser.row_expression(&[]),
+            Err(GraphMutationTextError {
+                kind: GraphMutationTextErrorKind::IntegerNesting {
+                    limit: MAX_INTEGER_NESTING
+                },
+                ..
+            })
+        ));
     }
 }

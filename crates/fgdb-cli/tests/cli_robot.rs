@@ -3068,6 +3068,43 @@ fn json_rows_bind_nullable_maps_as_native_create_arguments() {
     );
 }
 
+#[test]
+fn json_map_fields_drive_scalar_predicates_and_write_returning() {
+    let db = TestDb::new("json-map-fields");
+    db.create();
+    db.write(&["CREATE (:Person {name:'Ann',born:30})"]);
+    let patch = r#"patch=json:{"name":"Ann","delta":2,"tag":"ok"}"#;
+    assert_rows(
+        &db.command(
+            "query",
+            &[
+                "--param",
+                patch,
+                "MATCH (n:Person) WHERE n.name=$patch.name RETURN n.born+$patch.delta AS born",
+            ],
+        ),
+        r#"[[{"type":"int","value":"32"}]]"#,
+    );
+    let update = "MATCH (n:Person) WHERE n.name=$patch.name SET n.born=n.born+$patch.delta RETURN n.born AS born, upper($patch.tag) AS tag";
+    assert_rows(
+        &db.command("write", &["--param", patch, update]),
+        r#"[[{"type":"int","value":"32"},{"type":"text","value":"OK"}]]"#,
+    );
+    db.command(
+        "write",
+        &[
+            "--param",
+            r#"patch=json:{"name":"Ann","delta":true,"tag":"ok"}"#,
+            update,
+        ],
+    )
+    .failure(3, "query");
+    assert_rows(
+        &db.command("query", &["MATCH (n:Person) RETURN n.born AS born"]),
+        r#"[[{"type":"int","value":"32"}]]"#,
+    );
+}
+
 /// `write --rows json:[{...},...]` binds the statement's parameters once per
 /// object and commits every row as ONE atomic program: a later row's MERGE
 /// sees an earlier row's node, a sparse integer key binds NULL, a failing

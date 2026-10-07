@@ -706,7 +706,28 @@ impl<'a> Parser<'a> {
                 index,
                 at: self.syntax.parameter_offsets[index],
             },
-            Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
+            Operand::Integer { program, at } => {
+                if let [MutationIntegerTemplateOp::ParameterField { index, keys, at }] =
+                    program.as_slice()
+                {
+                    // A lone field remains a general value in RETURN/CREATE:
+                    // `$payload.meta` may itself be a map or list. Composed
+                    // scalar expressions retain the native scalar program.
+                    let mut value = ReadValueTemplate::Parameter {
+                        index: *index,
+                        at: *at,
+                    };
+                    for key in keys {
+                        value = ReadValueTemplate::MapGet {
+                            map: Box::new(value),
+                            key: key.clone(),
+                        };
+                    }
+                    value
+                } else {
+                    ReadValueTemplate::Integer { program, at }
+                }
+            }
         })
     }
 

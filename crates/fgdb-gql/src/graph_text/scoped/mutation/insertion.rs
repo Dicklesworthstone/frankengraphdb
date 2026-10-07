@@ -519,7 +519,8 @@ fn bind_fields(
                             .iter()
                             .map(|op| match op {
                                 MutationIntegerTemplateOp::Bound(op) => op.clone(),
-                                MutationIntegerTemplateOp::Parameter { .. } => {
+                                MutationIntegerTemplateOp::Parameter { .. }
+                                | MutationIntegerTemplateOp::ParameterField { .. } => {
                                     GraphIntegerOp::Literal(None)
                                 }
                             })

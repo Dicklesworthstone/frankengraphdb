@@ -210,6 +210,129 @@ fn map_parameters_drive_atomic_create_and_return_from_nested_bulk_input() {
     });
 }
 
+#[test]
+fn map_parameter_fields_drive_scalar_graph_predicates_arithmetic_and_aggregates() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let params = map_parameters(&[
+            ("threshold", map(&[("value", int(20))])),
+            ("step", int(5)),
+            ("name", text("a")),
+            ("metadata", map(&[("title", text("kept as a map"))])),
+        ]);
+        for (statement, expected) in [
+            (
+                "MATCH (n:Person) WHERE n.p >= $payload.threshold.value RETURN n.name AS name, n.p + $payload.step AS next ORDER BY name",
+                vec![vec![text("b"), int(25)], vec![text("c"), int(35)]],
+            ),
+            (
+                "MATCH (n:Person) WHERE n.name = $payload.name OR n.p >= $payload.threshold.value AND n.p < 30 RETURN n.name AS name ORDER BY name",
+                vec![vec![text("a")], vec![text("b")]],
+            ),
+            (
+                "MATCH (n:Person) WHERE n.p = $payload.missing RETURN n.name AS name",
+                Vec::new(),
+            ),
+            (
+                "MATCH (n:Person) WHERE $payload.missing IS NULL RETURN n.name AS name ORDER BY name",
+                vec![vec![text("a")], vec![text("b")], vec![text("c")]],
+            ),
+            (
+                "RETURN $payload.metadata AS metadata, upper($payload.metadata.title) AS title",
+                vec![vec![
+                    map(&[("title", text("kept as a map"))]),
+                    text("KEPT AS A MAP"),
+                ]],
+            ),
+        ] {
+            assert_eq!(
+                cells(
+                    db.query(cx, statement, &params, symbols, policy())
+                        .expect(statement)
+                ),
+                expected,
+                "{statement}"
+            );
+        }
+        let aggregate = db.query(cx, "MATCH (n:Person) RETURN sum(n.p + $payload.step) AS a, sum(n.p + $payload.threshold.value) AS b", &params, symbols, policy()).unwrap();
+        let QueryResult::Rows { rows, .. } = aggregate else {
+            panic!("aggregate returns rows");
+        };
+        assert!(
+            matches!(rows.as_slice(), [row] if matches!(row.as_slice(), [QueryValue::Integer(75), QueryValue::Integer(120)])),
+            "{rows:?}"
+        );
+    });
+}
+
+#[test]
+fn map_field_set_and_merge_rhs_use_native_atomic_write_programs() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let params = map_parameters(&[
+            ("selected", text("b")), ("increment", int(5)), ("next_name", text("beta")),
+            ("seed", int(100)), ("tag", text("bound map field")),
+        ]);
+        let writes = || GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000);
+        db.query_write_engine(&txn, &cx, &commit,
+            "MATCH (n:Person) WHERE n.name=$payload.selected SET n.p=n.p+$payload.increment, n.name=upper($payload.next_name), n.first=$payload.absent",
+            &params, symbols, R, writes()).await.unwrap();
+        assert_eq!(cells(db.query(&cx, "MATCH (n:Person) WHERE n.name='BETA' RETURN n.p AS p, n.first AS first", &GqlParameters::new(), symbols, policy()).unwrap()), vec![vec![int(25), null()]]);
+        let merge = "MERGE (n:Person {name:'new'}) ON CREATE SET n.p=$payload.seed ON MATCH SET n.p=n.p+$payload.increment SET n.first=$payload.tag";
+        for _ in 0..2 {
+            db.query_write_engine(&txn, &cx, &commit, merge, &params, symbols, R, writes()).await.unwrap();
+        }
+        assert_eq!(cells(db.query(&cx, "MATCH (n:Person) WHERE n.name='new' RETURN n.p AS p, n.first AS first", &GqlParameters::new(), symbols, policy()).unwrap()), vec![vec![int(105), text("bound map field")]]);
+        let before = db.frontier().unwrap();
+        for bad in [
+            map_parameters(&[("value", map(&[("private", int(3))]))]),
+            map_parameters(&[("value", GraphValue::Scalar(CanonicalScalar::Bool(true)))]),
+        ] {
+            // The first statement must never escape a later binding failure.
+            assert!(db.query_write_engine(&txn, &cx, &commit,
+                "MATCH (n:Person) WHERE n.name='a' SET n.p=999; MATCH (n:Person) WHERE n.name='new' SET n.p=n.p+$payload.value",
+                &bad, symbols, R, writes()).await.is_err());
+            assert_eq!(db.frontier().unwrap(), before);
+        }
+        assert_eq!(cells(db.query(&cx, "MATCH (n:Person) WHERE n.name='a' RETURN n.p AS p", &GqlParameters::new(), symbols, policy()).unwrap()), vec![vec![int(10)]]);
+    });
+}
+
+#[test]
+fn map_scalar_field_certificates_replay_field_values_and_pinned_graph_state() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let params = map_parameters(&[("floor", int(20)), ("delta", int(1))]);
+        let (result, certificate) = db.execute_certified(cx,
+            "MATCH (n:Person) WHERE n.p >= $payload.floor RETURN n.p + $payload.delta AS p ORDER BY p",
+            &params, symbols, policy()).unwrap();
+        assert_eq!(cells(result), vec![vec![int(21)], vec![int(31)]]);
+        let reordered = map_parameters(&[("delta", int(1)), ("floor", int(20))]);
+        let mut change = WriteBatch::new(R);
+        change.create_vertex(VId(4), vec![PERSON], vec![(P, CanonicalScalar::Int(40))]);
+        db.write(commit, change).await.unwrap();
+        assert_eq!(
+            cells(
+                db.replay(cx, &certificate, &reordered, symbols, policy())
+                    .unwrap()
+            ),
+            vec![vec![int(21)], vec![int(31)]]
+        );
+        let wrong = map_parameters(&[("delta", int(2)), ("floor", int(20))]);
+        assert!(matches!(
+            db.replay(cx, &certificate, &wrong, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ParameterValuesMismatch)
+        ));
+    });
+}
+
 /// Person vertices 1..=3: p = 10, 20, 30 and name = "a", "b", "c".
 fn graph() -> WriteBatch {
     let mut batch = WriteBatch::new(R);

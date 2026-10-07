@@ -48,6 +48,18 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
                         MutationIntegerTemplateOp::Parameter { index: a, .. },
                         MutationIntegerTemplateOp::Parameter { index: b, .. },
                     ) => a == b,
+                    (
+                        MutationIntegerTemplateOp::ParameterField {
+                            index: a,
+                            keys: a_keys,
+                            ..
+                        },
+                        MutationIntegerTemplateOp::ParameterField {
+                            index: b,
+                            keys: b_keys,
+                            ..
+                        },
+                    ) => a == b && a_keys == b_keys,
                     _ => false,
                 })
         }

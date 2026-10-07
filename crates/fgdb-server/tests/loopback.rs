@@ -259,6 +259,139 @@ fn http_map_parameters_bind_nested_bulk_input_and_return_typed_maps() {
 }
 
 #[test]
+fn fgp_map_fields_select_and_update_through_native_scalar_expressions() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "map-field-expressions").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann',age:30})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let arguments = |delta| {
+            vec![(
+                "patch".into(),
+                WireValue::Map(vec![
+                    ("delta".into(), delta),
+                    ("name".into(), text("Ann")),
+                    (
+                        "nested".into(),
+                        WireValue::Map(vec![("tag".into(), text("ok"))]),
+                    ),
+                ]),
+            )]
+        };
+        let read = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) WHERE n.name=$patch.name RETURN n.age+$patch.delta AS age",
+                arguments(WireValue::Int(2)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.rows, [[WireValue::Int(32)]]);
+        assert_eq!(read.outcome, Outcome::Rows { seq: 1 });
+        let update = "MATCH (n:Person) WHERE n.name=$patch.name SET n.age=n.age+$patch.delta RETURN n.age AS age, upper($patch.nested.tag) AS tag, $patch.nested AS metadata";
+        let changed = client
+            .execute(cx, ExecuteMode::Write, update, arguments(WireValue::Int(2)))
+            .await
+            .unwrap();
+        assert_eq!(
+            changed.rows,
+            [vec![
+                WireValue::Int(32),
+                text("OK"),
+                WireValue::Map(vec![("tag".into(), text("ok"))])
+            ]]
+        );
+        assert_eq!(
+            changed.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+        let refused = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                update,
+                arguments(WireValue::Bool(true)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::Statement);
+        let after = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.rows, [[WireValue::Int(32)]]);
+        assert_eq!(after.outcome, Outcome::Rows { seq: 2 });
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_map_fields_bind_where_set_and_return_without_parameter_substitution() {
+    run(async |cx| {
+        let server = Arc::new(served(cx, "map-field-http").await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let mut task = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let rw = token(&grant(Rights::ReadWrite));
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            "127.0.0.1",
+            Some(&rw),
+            r#"{"statement":"CREATE (:Person {name:'Ann',age:30})"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http(addr, "POST", "/v1/databases/social/write", "127.0.0.1", Some(&rw),
+            r#"{"statement":"MATCH (n:Person) WHERE n.name=$patch.name SET n.age=n.age+$patch.delta RETURN n.age AS age, upper($patch.tag) AS tag","parameters":{"patch":{"name":"Ann","delta":2,"tag":"ok"}}}"#).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["age","tag"],"rows":[[{"type":"int","value":"32"},{"type":"text","value":"OK"}]],"seq":2,"statements":1,"committed":true}"#
+        );
+        let (status, body) = http(addr, "POST", "/v1/databases/social/query", "127.0.0.1", Some(&rw),
+            r#"{"statement":"MATCH (n:Person) WHERE n.age=$patch.age RETURN n.name AS name","parameters":{"patch":{"age":32}}}"#).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name"],"rows":[[{"type":"text","value":"Ann"}]],"seq":2}"#
+        );
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn writes_and_reads_round_trip_with_flow_control_refusals_and_drain() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "roundtrip").await;
