@@ -736,6 +736,13 @@ impl GraphIntegerExpression {
                             .checked_mul(regex.program_len())
                             .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
                         charge_payload(steps, false, control)?;
+                        // Two thread sets and the epsilon-closure stack are
+                        // bounded by the checked program. Admit their slots
+                        // before the matcher allocates, including empty text.
+                        for _ in 0..regex.program_len() {
+                            control(GlaExecutionEvent::ScratchEntry)
+                                .map_err(GraphIntegerEvaluationError::Control)?;
+                        }
                         Some(regex.is_match(text))
                     } else {
                         None
@@ -1144,6 +1151,10 @@ fn convert<E>(
             }
             CanonicalScalar::Float(value) => {
                 return if to_text {
+                    // Binary64's shortest decimal spelling has a fixed small
+                    // bound. Formatting owns a String before make_text sees it.
+                    control(GlaExecutionEvent::ScratchEntry)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
                     make_text(&float_text(*value), instruction, control)
                 } else {
                     match value.checked_to_i64_truncated() {
@@ -1159,6 +1170,9 @@ fn convert<E>(
         },
     };
     if to_text {
+        // An i128 spelling fits in 40 bytes, but formatting allocates before
+        // make_text's payload reservation. Keep that temporary governed too.
+        control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
         make_text(&number.to_string(), instruction, control)
     } else {
         i64::try_from(number)

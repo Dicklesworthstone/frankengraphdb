@@ -171,6 +171,245 @@ fn computed_input_failure_cannot_hide_behind_an_empty_or_full_result_page() {
 }
 
 #[test]
+fn computed_outputs_keep_exact_cells_hidden_rank_and_native_collection_expressions() {
+    let ((), report) = run_async_under_lab(0x5ba1_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for (case, text) in [
+            "MATCH (n:L) RETURN n.p AS category,COUNT(*)+1 AS rows,SUM(n.p)*2 AS total,AVG(n.p) AS average GROUP BY n.p ORDER BY category",
+            "MATCH (n:L) RETURN SUM(n.q)*2 AS total,AVG(n.p) AS average,toString(COUNT(*)) AS count",
+            "MATCH (n:L) RETURN {category:n.p,rows:COUNT(*),sample:range(0,COUNT(*)-6)} AS value GROUP BY n.p ORDER BY SUM(n.p) DESC SKIP 1 LIMIT 3",
+            "MATCH (n:L) RETURN n.p%3 AS category,SUM(n.p*2)+COUNT(*) AS total GROUP BY n.p%3 HAVING SUM(n.p)>0 ORDER BY AVG(n.p) DESC LIMIT 2",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN CASE WHEN COUNT(*)>0 THEN SUM(n.p)*2 ELSE 0 END AS total GROUP BY n.p ORDER BY SUM(n.p) DESC LIMIT 3",
+            "MATCH (a)-[e:R]->(b) RETURN e.p AS category,SUM(e.q)*2 AS total,upper(toString(COUNT(*))) AS count GROUP BY e.p ORDER BY AVG(e.q) DESC SKIP 1 LIMIT 3",
+            "MATCH (a)-[e:R]-(b) RETURN {category:b.p,rows:COUNT(*)} AS value GROUP BY b.p ORDER BY SUM(e.q) DESC LIMIT 3",
+            "MATCH (n:L) WHERE n.p<0 RETURN COUNT(*)+1 AS count,COALESCE(SUM(n.p),42) AS total",
+        ].into_iter().enumerate() {
+            let prepared = plan(text);
+            let parameters = GqlParameters::new();
+            let ordinary = prepared
+                .stream_aggregate_in_view(&view, &cx, &parameters, policy())
+                .unwrap();
+            let columns = ordinary.columns().to_vec();
+            let slots = ordinary.output_slots().to_vec();
+            let expected = ordinary.collect::<Result<Vec<_>, _>>().unwrap();
+            if case == 0 {
+                assert_eq!(expected.len(), 8);
+                for (category, row) in expected.iter().enumerate() {
+                    assert!(row.keys().is_empty());
+                    assert_eq!(row.values()[0], GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(category as i64))));
+                    assert_eq!(row.values()[1], GraphAggregateValue::Integer(9));
+                    assert_eq!(row.values()[2], GraphAggregateValue::Integer(16 * category as i128));
+                }
+            } else if case == 1 {
+                let total: i128 = (0..64_i128)
+                    .filter(|id| id % 5 != 0)
+                    .map(|id| i128::from(i64::MAX) - id)
+                    .sum();
+                assert_eq!(expected.len(), 1);
+                assert_eq!(expected[0].values()[0], GraphAggregateValue::Integer(total * 2));
+                assert_eq!(expected[0].values()[1], GraphAggregateValue::Average(fgdb_gql::GraphExactAverage::new(7, 2).unwrap()));
+                assert_eq!(expected[0].values()[2], GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::ucs_basic_text("64").unwrap())));
+            }
+            for capacity in [1, 3] {
+                let pool = MemoryPool::new(4_000_000, 0).unwrap();
+                let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+                let (spool, _) = prepared.spool_aggregate_in_view(
+                    &view, &cx, &parameters,
+                    GqlQueryPolicy::new(10_000, expected.len() as u64, 100_000_000, 1_000_000),
+                    &mut a, &mut b, &mut c, capacity, 256, 2, 128, 257, 16_384, 1000, 100_000_000, None,
+                ).await.unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(spool.columns(), columns, "{text}");
+                assert_eq!(spool.output_slots(), slots, "{text}");
+                assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+                assert_eq!(aggregate_contents(&spool, &mut c, &cx).await, expected, "{text}");
+                assert_eq!(pool.used(), 0, "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_output_errors_precede_every_page_and_having_controls_evaluation() {
+    let ((), report) = run_async_under_lab(0x5ba1_000a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for text in [
+            "MATCH (n:L) RETURN n.p AS category,10/(SUM(n.p)-56) AS value GROUP BY n.p ORDER BY n.p LIMIT 0",
+            "MATCH (n:L) RETURN n.p AS category,10/(SUM(n.p)-56) AS value GROUP BY n.p ORDER BY n.p LIMIT 1",
+            "MATCH (n:L) RETURN n.p AS category,10/(SUM(n.p)-56) AS value GROUP BY n.p ORDER BY n.p DESC SKIP 1000 LIMIT 1",
+            "MATCH (a)-[e:R]->(b) RETURN e.p AS category,10/(SUM(e.p)-56) AS value GROUP BY e.p LIMIT 0",
+            "MATCH (n:L) WHERE n.p<0 RETURN 1/COUNT(*) AS value LIMIT 0",
+        ] {
+            let pool = MemoryPool::new(4_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let result = plan(text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    2,
+                    128,
+                    257,
+                    4096,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(NativeAggregateSpoolError::Execute(error))
+                if matches!(*error, GqlQueryError::Source(fgdb_gql::GraphAggregateError::OutputExpression { error, .. })
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
+                "{text}"
+            );
+            assert_eq!(pool.used(), 0, "{text}");
+        }
+        let text = "MATCH (n:L) RETURN 10/(SUM(n.p)-56) AS value GROUP BY n.p HAVING n.p<7 ORDER BY n.p LIMIT 1";
+        let pool = MemoryPool::new(4_000_000, 0).unwrap();
+        let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+        let (spool, _) = plan(text)
+            .spool_aggregate_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut a,
+                &mut b,
+                &mut c,
+                1,
+                256,
+                2,
+                128,
+                257,
+                4096,
+                1000,
+                100_000_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(spool.row_count(), 1);
+        assert_eq!(
+            aggregate_contents(&spool, &mut c, &cx).await[0].values(),
+            &[GraphAggregateValue::Integer(0)]
+        );
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_projection_runs_once_per_qualified_group_and_reserves_expansion_before_delivery() {
+    let ((), report) = run_async_under_lab(0x5ba1_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let mut scratch_entries = None;
+        for limit in [0, 1, 8] {
+            let text = format!(
+                "MATCH (n:L) RETURN {{category:n.p,rows:COUNT(*)+1}} AS value GROUP BY n.p ORDER BY n.p LIMIT {limit}"
+            );
+            let pool = MemoryPool::new(4_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let (spool, _) = plan(&text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    2,
+                    128,
+                    257,
+                    4096,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(spool.row_count(), limit);
+            let entries = spool.evaluator_stats().scratch_entries;
+            if let Some(expected) = scratch_entries {
+                assert_eq!(
+                    entries, expected,
+                    "projection must neither stop early nor rerun selected groups"
+                );
+            } else {
+                scratch_entries = Some(entries);
+            }
+            assert_eq!(pool.used(), 0);
+        }
+        // The input is only 64 small rows and the reduction has one group.
+        // Expansion is proportional to its output, not its source frame size.
+        let text = "MATCH (n:L) RETURN range(0,COUNT(*)*100) AS values LIMIT 0";
+        let pool = MemoryPool::new(131_072, 0).unwrap();
+        let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+        let result = plan(text)
+            .spool_aggregate_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut a,
+                &mut b,
+                &mut c,
+                1,
+                256,
+                2,
+                128,
+                257,
+                1_000_000,
+                1000,
+                100_000_000,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(
+                SpillError::Memory(
+                    fgdb_strata::tiered::memory::MemoryError::ResourceExhausted { .. }
+                )
+            )))
+        ));
+        assert!(
+            c.stats().published_runs > 0,
+            "the complete numeric reduction must precede the output-expansion refusal"
+        );
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn grace_partitions_match_native_numeric_vertex_edge_and_historical_results() {
     let ((), report) = run_async_under_lab(0x5ba1_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

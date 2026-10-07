@@ -240,6 +240,14 @@ fn expression<'g, E, C>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 entries.push(graph_value(value, column)?);
             }
+            for key in keys {
+                for _ in 0..=key
+                    .len()
+                    .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+            }
             let value = GraphValue::Map {
                 keys: keys.clone(),
                 values: entries.into_boxed_slice(),
@@ -355,11 +363,14 @@ fn expression<'g, E, C>(
                 narrow(parts[2])?,
             ) {
                 (false, Some(start), Some(end), Some(step)) => {
-                    let members = crate::set_ops::range_values(start, end, step)
-                        .map_err(|kind| failure(column, kind))?;
-                    for _ in &members {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                    }
+                    let members = crate::set_ops::range_values(start, end, step, control).map_err(
+                        |error| match error {
+                            GraphIntegerEvaluationError::Control(error) => error,
+                            GraphIntegerEvaluationError::Value(error) => {
+                                failure(column, error.kind)
+                            }
+                        },
+                    )?;
                     OutputValue::Owned(GraphAggregateValue::Value(GraphValue::List(
                         members.into_boxed_slice(),
                     )))

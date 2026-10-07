@@ -53,7 +53,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::Execute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection or computed output expressions"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT or collection"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -668,9 +668,9 @@ async fn drain_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
         if row.len() != definition.input_width() {
             return invalid();
         }
-        let (bytes, _codec) = account::encode(&pool, work, &row, max_row_bytes)?;
-        largest = largest.max(bytes.len());
-        work.write(&mut writer, &bytes).await?;
+        let encoded = account::encode(&pool, work, &row, max_row_bytes)?;
+        largest = largest.max(encoded.0.len());
+        work.write(&mut writer, &encoded.0).await?;
         count = attempted;
     }
     if !input.exhausted() || input.row_stats().result_rows != 0 {
@@ -1018,9 +1018,9 @@ where
         }
         completed_rows = 1;
         let envelope = envelope(&row);
-        let (row, _codec) = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
-        largest_output = row.len();
-        work.write(&mut result_writer, &row).await?;
+        let encoded = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
+        largest_output = encoded.0.len();
+        work.write(&mut result_writer, &encoded.0).await?;
     }
     if initial.row_count() != 0 {
         pending.values.push(Partition {
@@ -1074,9 +1074,9 @@ where
                     .checked_add(1)
                     .ok_or(SpillError::SizeOverflow)?;
                 let envelope = envelope(&row);
-                let (row, _codec) = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
-                largest_output = largest_output.max(row.len());
-                work.write(&mut result_writer, &row).await?;
+                let encoded = account::encode(&pool, &mut work, &envelope, max_row_bytes)?;
+                largest_output = largest_output.max(encoded.0.len());
+                work.write(&mut result_writer, &encoded.0).await?;
             }
         } else {
             let required = partitions.checked_add(2).ok_or(SpillError::SizeOverflow)?;

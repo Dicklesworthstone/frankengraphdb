@@ -1041,11 +1041,13 @@ fn evaluate_value_at<E>(
             };
             match (start, end, step) {
                 (Some(start), Some(end), Some(step)) => {
-                    let members = range_values(start, end, step).map_err(failure)?;
-                    for _ in &members {
-                        control(GlaExecutionEvent::ScratchEntry)
-                            .map_err(ProjectionFailure::Control)?;
-                    }
+                    let members =
+                        range_values(start, end, step, control).map_err(|error| match error {
+                            GraphIntegerEvaluationError::Control(error) => {
+                                ProjectionFailure::Control(error)
+                            }
+                            GraphIntegerEvaluationError::Value(error) => failure(error.kind),
+                        })?;
                     GraphValue::List(members.into_boxed_slice())
                 }
                 _ => {
@@ -1237,14 +1239,21 @@ pub(crate) fn slice_bounds(
 /// openCypher range(start, end, step), end inclusive. A zero step is a
 /// typed error, and the member count is checked against the list bound
 /// before anything is allocated (fgdb-20foe).
-pub(crate) fn range_values(
+pub(crate) fn range_values<E>(
     start: i64,
     end: i64,
     step: i64,
-) -> Result<Vec<GraphValue>, crate::GraphIntegerErrorKind> {
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<GraphValue>, GraphIntegerEvaluationError<E>> {
     use crate::GraphIntegerErrorKind as Kind;
+    let failure = |kind| {
+        GraphIntegerEvaluationError::Value(GraphIntegerError {
+            instruction: 0,
+            kind,
+        })
+    };
     if step == 0 {
-        return Err(Kind::InvalidRangeStep);
+        return Err(failure(Kind::InvalidRangeStep));
     }
     let (start, end, step) = (i128::from(start), i128::from(end), i128::from(step));
     let span = end - start;
@@ -1254,15 +1263,15 @@ pub(crate) fn range_values(
         0
     };
     if count > GraphValue::MAX_LIST_NODES as i128 {
-        return Err(Kind::Overflow);
+        return Err(failure(Kind::Overflow));
     }
-    (0..count)
-        .map(|at| {
-            i64::try_from(start + at * step)
-                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
-                .map_err(|_| Kind::Overflow)
-        })
-        .collect()
+    let mut members = Vec::new();
+    for at in 0..count {
+        control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
+        let value = i64::try_from(start + at * step).map_err(|_| failure(Kind::Overflow))?;
+        members.push(GraphValue::Scalar(CanonicalScalar::Int(value)));
+    }
+    Ok(members)
 }
 
 /// A per-element predicate's three-valued result: TRUE, FALSE or UNKNOWN

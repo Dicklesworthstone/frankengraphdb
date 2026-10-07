@@ -310,6 +310,28 @@ impl MemoryCharge {
     pub const fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// Extend this affine reservation before growing its owned workspace.
+    /// Every ancestor is admitted through the same rollback-safe path as a
+    /// fresh reservation. Failure preserves the original charge exactly; no
+    /// allocation or reservation-list growth is needed to track the extension.
+    pub fn grow(
+        &mut self,
+        cx: &impl StorageReadCx,
+        additional_bytes: usize,
+    ) -> Result<(), MemoryError> {
+        cx.with_restriction(|| self.grow_inner(additional_bytes))
+    }
+
+    fn grow_inner(&mut self, additional_bytes: usize) -> Result<(), MemoryError> {
+        let total = self
+            .bytes
+            .checked_add(additional_bytes)
+            .ok_or(MemoryError::SizeOverflow)?;
+        self.pool.acquire(additional_bytes)?;
+        self.bytes = total;
+        Ok(())
+    }
 }
 
 impl Drop for MemoryCharge {
@@ -524,6 +546,45 @@ mod tests {
         drop(charge);
         assert_eq!(left.available(), 10);
         assert_eq!(right.available(), 10);
+    }
+
+    #[test]
+    fn growing_charges_preserve_ancestor_limits_and_refund_once() {
+        let root = MemoryPool::new(100, 10).unwrap();
+        let parent = root.child(80, 10).unwrap();
+        let leaf = parent.child(60, 0).unwrap();
+        let sibling = parent.child(60, 0).unwrap();
+        let sibling_charge = sibling.reserve_inner(20).unwrap();
+        let mut charge = leaf.reserve_inner(10).unwrap();
+        charge.grow_inner(40).unwrap();
+        assert_eq!(charge.bytes(), 50);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (70, 70, 50));
+        assert!(matches!(
+            charge.grow_inner(1),
+            Err(MemoryError::ResourceExhausted { limit: 70, .. })
+        ));
+        assert_eq!(charge.bytes(), 50);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (70, 70, 50));
+        drop(sibling_charge);
+        assert!(matches!(
+            charge.grow_inner(11),
+            Err(MemoryError::ResourceExhausted { limit: 60, .. })
+        ));
+        assert_eq!((root.used(), parent.used(), leaf.used()), (50, 50, 50));
+        charge.grow_inner(10).unwrap();
+        assert_eq!(charge.bytes(), 60);
+        drop(charge);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (0, 0, 0));
+
+        let huge = MemoryPool::new(usize::MAX, 0).unwrap();
+        let mut charge = huge.reserve_inner(1).unwrap();
+        assert_eq!(
+            charge.grow_inner(usize::MAX),
+            Err(MemoryError::SizeOverflow)
+        );
+        assert_eq!((charge.bytes(), huge.used()), (1, 1));
+        drop(charge);
+        assert_eq!(huge.used(), 0);
     }
 
     #[test]

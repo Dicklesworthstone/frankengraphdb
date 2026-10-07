@@ -297,6 +297,10 @@ fn external_computed_aggregate_inputs_match_eager_rows_and_retire_failed_scratch
             "MATCH (n) RETURN n.p%3 AS bucket,SUM(n.p*2) AS total,AVG(n.p+1) AS average GROUP BY n.p%3 ORDER BY total DESC",
             "MATCH (n) RETURN COUNT(*) AS count GROUP BY n.p%3 HAVING SUM(n.p*2)>0 ORDER BY AVG(n.p+1) DESC SKIP 1 LIMIT 1",
             "MATCH (a)-[e:R]->(b) RETURN b.p%3 AS bucket,SUM(a.p+b.p) AS total GROUP BY b.p%3 ORDER BY bucket",
+            "MATCH (n) RETURN count(*)+1 AS count",
+            "MATCH (n) RETURN n.p+1 AS p,count(*) AS count",
+            "MATCH (n) RETURN {bucket:n.p,total:SUM(n.p)*2,sample:range(0,COUNT(*)-6)} AS value GROUP BY n.p ORDER BY n.p DESC SKIP 1 LIMIT 3",
+            "MATCH (a)-[e:R]->(b) RETURN SUM(a.p+b.p)*2 AS total,toString(COUNT(*)) AS count GROUP BY b.p ORDER BY SUM(a.p+b.p) DESC",
         ] {
             let mut options = options(&directory, text);
             options.spill.memory = Some(262_144);
@@ -321,6 +325,10 @@ fn external_computed_aggregate_inputs_match_eager_rows_and_retire_failed_scratch
             "MATCH (n) RETURN SUM(10/(n.p-12)) AS total LIMIT 0",
             "MATCH (n) RETURN n.p AS bucket,SUM(10/(n.p-12)) AS total GROUP BY n.p ORDER BY bucket LIMIT 1",
             "MATCH (a)-[e:R]->(b) RETURN SUM(10/(b.p-4)) AS total LIMIT 0",
+            "MATCH (n) RETURN n.p AS bucket,10/(SUM(n.p)-96) AS total GROUP BY n.p ORDER BY n.p LIMIT 0",
+            "MATCH (n) RETURN n.p AS bucket,10/(SUM(n.p)-96) AS total GROUP BY n.p ORDER BY n.p LIMIT 1",
+            "MATCH (n) WHERE n.p<0 RETURN 1/COUNT(*) AS total LIMIT 0",
+            "MATCH (n) RETURN range(0,COUNT(*)*100) AS values LIMIT 0",
         ] {
             let mut options = options(&directory, text);
             options.spill.memory = Some(262_144);
@@ -380,8 +388,6 @@ fn external_grouping_enforces_full_input_and_final_result_allowances() {
             "MATCH (n) RETURN count(DISTINCT n.p) AS count",
             "MATCH (n) RETURN collect(n.p) AS values",
             "MATCH (n) RETURN DISTINCT count(*) AS count GROUP BY n.p",
-            "MATCH (n) RETURN count(*) + 1 AS count",
-            "MATCH (n) RETURN n.p + 1 AS p, count(*) AS count",
         ] {
             let options = options(&directory, text);
             let mut output = Vec::new();

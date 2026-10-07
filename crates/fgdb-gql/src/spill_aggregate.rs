@@ -32,7 +32,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT, collection or computed output expressions")
+                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT or collection")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -111,8 +111,7 @@ impl core::fmt::Debug for SpillAggregateState {
 
 impl SpillAggregateDefinition {
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        if aggregate.output_projection().is_some()
-            || aggregate.incremental_output_is_distinct()
+        if aggregate.incremental_output_is_distinct()
             || aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
             || aggregate
                 .input_projection()
@@ -171,6 +170,9 @@ impl SpillAggregateDefinition {
     pub fn has_output_stage(&self) -> bool {
         self.aggregate.has_streamed_output_stage()
     }
+    pub fn has_computed_output(&self) -> bool {
+        self.aggregate.output_projection().is_some()
+    }
     pub fn ordering(&self) -> &[GraphAggregateOrder] {
         self.aggregate.ordering()
     }
@@ -180,7 +182,8 @@ impl SpillAggregateDefinition {
 
     /// Conservative number of copies of any input payload in late projection.
     /// Numeric summaries are copied once; key projection may repeat keys.
-    /// Computed output expressions are not admitted by this physical profile.
+    /// Computed outputs instead require their evaluator's per-allocation byte
+    /// admission before the host retains the projected scratch envelope.
     pub fn output_payload_copies(&self) -> usize {
         self.key_columns().len().max(1)
     }
@@ -213,8 +216,10 @@ impl SpillAggregateDefinition {
             .qualifies_streamed_output(row, &mut |event| control(result_event(event)))
     }
 
-    /// Apply the checked visible key projection and aggregate prefix after
-    /// ranking. Full rows with no column transform move without payload copies.
+    /// Apply the checked visible projection to a HAVING-qualified group. A host
+    /// with computed outputs MUST call this for every qualified group before
+    /// ranking or pagination, and retain the projected result without running
+    /// its expressions again. Full rows with no transform move without copies.
     /// This neither evaluates HAVING again nor charges a delivered result row.
     pub fn project_output<E, C>(
         &self,
