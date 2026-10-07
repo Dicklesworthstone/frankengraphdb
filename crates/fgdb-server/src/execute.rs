@@ -366,6 +366,45 @@ pub(crate) struct Subscription {
 /// label, relation and property), for which the unmasked result is exactly
 /// what it may already read. Registrations live as long as the database, so
 /// each served database admits a bounded number over the server's lifetime.
+/// The schema names a capability may see: the operator's label, relation
+/// and property bindings (there is no durable catalog), each filtered by the
+/// token's scope so a hidden name is never disclosed (FG-INV-20). Read
+/// rights are required, as for any statement. Names come back sorted.
+pub(crate) struct Schema {
+    pub(crate) labels: Vec<String>,
+    pub(crate) relations: Vec<String>,
+    pub(crate) properties: Vec<String>,
+}
+
+pub(crate) fn schema(db: &Served, token: &CapabilityToken) -> Result<Schema, Refusal> {
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    capability
+        .begin_read_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let scope = capability.predicates();
+    let visible = |names: &mut dyn Iterator<Item = (&str, u32)>, allows: &dyn Fn(u64) -> bool| {
+        names
+            .filter(|&(_, id)| allows(u64::from(id)))
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>()
+    };
+    Ok(Schema {
+        labels: visible(&mut db.symbols.labels(), &|id| {
+            scope.allows_label(fgdb_delta_types::LabelId(id))
+        }),
+        relations: visible(&mut db.symbols.relations(), &|id| {
+            scope.allows_relation(fgdb_delta_types::RelationId(id))
+        }),
+        properties: visible(&mut db.symbols.properties(), &|id| {
+            scope.allows_property(fgdb_delta_types::PropertyKeyId(id))
+        }),
+    })
+}
+
 /// Per-subscription delta backlog: retained commits, changed rows, and
 /// logical payload units. Eviction drops the oldest whole ticks first.
 const REPLAY_TICKS: usize = 1024;

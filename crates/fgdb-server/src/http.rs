@@ -10,6 +10,7 @@
 //!
 //! ```text
 //! GET  /v1/health                          -> {"v":1,"status":"ok"}
+//! GET  /v1/databases/<name>/schema         (the names the token may see)
 //! POST /v1/databases/<name>/query          (read)
 //! POST /v1/databases/<name>/write          (write)
 //!      Authorization: Bearer <hex capability token>
@@ -168,6 +169,48 @@ fn answer_response(answer: &Answer) -> Response {
     }
 }
 
+/// `GET /v1/databases/<name>/schema`: the label, relation and property
+/// names this token may see.
+fn schema_response(server: &Server, name: &str, request: &Request) -> Response {
+    if request.method != Method::Get {
+        return json_response(
+            405,
+            r#"{"v":1,"error":{"code":"protocol","message":"use GET"}}"#.to_owned(),
+        );
+    }
+    let token = match bearer(request) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let Some(db) = server.databases.get(name).filter(|db| db.admits(&token)) else {
+        return refusal_response(
+            ErrorCode::NotFoundOrUnauthorized,
+            "database not found or not authorized",
+        );
+    };
+    match crate::execute::schema(db, &token) {
+        Ok(schema) => {
+            let list = |names: &[String]| {
+                names
+                    .iter()
+                    .map(|name| quote(name))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            json_response(
+                200,
+                format!(
+                    r#"{{"v":1,"labels":[{}],"relations":[{}],"properties":[{}]}}"#,
+                    list(&schema.labels),
+                    list(&schema.relations),
+                    list(&schema.properties)
+                ),
+            )
+        }
+        Err(Refusal { code, message }) => refusal_response(code, &message),
+    }
+}
+
 /// Answer one HTTP request.
 pub(crate) async fn respond(cx: &Cx, server: &Server, request: Request) -> Response {
     if server.shutdown.is_triggered() {
@@ -193,6 +236,9 @@ pub(crate) async fn respond(cx: &Cx, server: &Server, request: Request) -> Respo
             r#"{"v":1,"error":{"code":"protocol","message":"no such route"}}"#.to_owned(),
         );
     };
+    if verb == "schema" {
+        return schema_response(server, name, &request);
+    }
     let mode = match verb {
         "query" => ExecuteMode::Read,
         "write" => ExecuteMode::Write,

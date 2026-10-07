@@ -21,6 +21,9 @@
 //!   returned vertices. Relationships and paths have no Bolt encoding here
 //!   and refuse with `Neo.ClientError.Statement.FeatureNotSupported`;
 //!   return `type(r)`, `r.prop` or the endpoints instead.
+//! - `CALL db.labels()`, `db.relationshipTypes()` and `db.propertyKeys()`
+//!   answer the schema names the token may see (the server's bindings,
+//!   scope-filtered), the same answer as HTTP's schema route.
 //! - Results are the ephemeral class of FGP's snapshot stream: buffered per
 //!   statement and dropped on disconnect, DISCARD or RESET.
 
@@ -187,7 +190,9 @@ impl Failure {
 struct Pending {
     rows: VecDeque<Vec<Value>>,
     database: String,
-    seq: CommitSeq,
+    /// The generation read, which names the bookmark; none for an answer
+    /// read from the server's bindings rather than the graph.
+    seq: Option<CommitSeq>,
 }
 
 /// An explicit transaction: one read session, one pinned generation.
@@ -443,6 +448,9 @@ impl<'s> Connection<'s> {
                 "RUN while a result is still streaming; PULL or DISCARD it first",
             ));
         }
+        if let Some((column, kind)) = schema_procedure(query) {
+            return self.schema_rows(extra, column, kind);
+        }
         let parameters = statement_parameters(parameters)?;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query_cx = contexts.query();
@@ -498,7 +506,7 @@ impl<'s> Connection<'s> {
         self.pending = Some(Pending {
             rows,
             database: name,
-            seq,
+            seq: Some(seq),
         });
         let mut metadata = vec![
             (
@@ -544,13 +552,51 @@ impl<'s> Connection<'s> {
             ("t_last".to_owned(), Value::Int(0)),
             ("db".to_owned(), Value::string(pending.database.clone())),
         ];
-        if self.transaction.is_none() {
+        if let (None, Some(seq)) = (&self.transaction, pending.seq) {
             metadata.push((
                 "bookmark".to_owned(),
-                Value::string(bookmark(&pending.database, pending.seq)),
+                Value::string(bookmark(&pending.database, seq)),
             ));
         }
         Ok(metadata)
+    }
+
+    /// `CALL db.labels()` and its siblings: the schema names this token may
+    /// see, the same filtered answer as HTTP's schema route.
+    fn schema_rows(&mut self, extra: &Map, column: &str, kind: SchemaKind) -> Result<Map, Failure> {
+        let (name, db, seq) = match self.transaction.as_ref() {
+            Some(transaction) => (
+                transaction.name.clone(),
+                transaction.db,
+                Some(transaction.seq),
+            ),
+            None => {
+                let (name, db) = self.database(extra)?;
+                (name, db, None)
+            }
+        };
+        let token = self.token.as_ref().expect("authenticated");
+        let schema = crate::execute::schema(db, token).map_err(Failure::from_refusal)?;
+        let names = match kind {
+            SchemaKind::Labels => schema.labels,
+            SchemaKind::Relations => schema.relations,
+            SchemaKind::Properties => schema.properties,
+        };
+        self.pending = Some(Pending {
+            rows: names
+                .into_iter()
+                .map(|name| vec![Value::String(name)])
+                .collect(),
+            database: name,
+            seq,
+        });
+        Ok(vec![
+            (
+                "fields".to_owned(),
+                Value::List(vec![Value::string(column)]),
+            ),
+            ("t_first".to_owned(), Value::Int(0)),
+        ])
     }
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
@@ -582,6 +628,43 @@ impl<'s> Connection<'s> {
                 ),
             ]),
         )])
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SchemaKind {
+    Labels,
+    Relations,
+    Properties,
+}
+
+/// The Neo4j schema procedures drivers and tools call, in their plain
+/// forms: `CALL db.labels()`, optionally `YIELD label`, and likewise for
+/// `db.relationshipTypes()` / `relationshipType` and `db.propertyKeys()` /
+/// `propertyKey`. Case-insensitive, whitespace-tolerant, one optional `;`.
+fn schema_procedure(query: &str) -> Option<(&'static str, SchemaKind)> {
+    let words: Vec<String> = query
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let (procedure, rest) = match words.as_slice() {
+        [call, procedure, rest @ ..] if call == "call" => (procedure.as_str(), rest),
+        _ => return None,
+    };
+    let (column, kind) = match procedure {
+        "db.labels()" => ("label", SchemaKind::Labels),
+        "db.relationshiptypes()" => ("relationshipType", SchemaKind::Relations),
+        "db.propertykeys()" => ("propertyKey", SchemaKind::Properties),
+        _ => return None,
+    };
+    match rest {
+        [] => Some((column, kind)),
+        [yield_, output] if yield_ == "yield" && output.eq_ignore_ascii_case(column) => {
+            Some((column, kind))
+        }
+        _ => None,
     }
 }
 
@@ -871,6 +954,26 @@ fn value(cell: WireValue, nodes: &Nodes) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_procedures_match_their_plain_forms_only() {
+        assert!(matches!(
+            schema_procedure("CALL db.labels()"),
+            Some(("label", SchemaKind::Labels))
+        ));
+        assert!(matches!(
+            schema_procedure("  call DB.relationshipTypes()  YIELD relationshipType ;"),
+            Some(("relationshipType", SchemaKind::Relations))
+        ));
+        assert!(matches!(
+            schema_procedure("CALL db.propertyKeys() YIELD propertyKey"),
+            Some(("propertyKey", SchemaKind::Properties))
+        ));
+        assert!(schema_procedure("CALL db.labels() YIELD x").is_none());
+        assert!(schema_procedure("CALL db.labels() YIELD label RETURN label").is_none());
+        assert!(schema_procedure("CALL db.indexes()").is_none());
+        assert!(schema_procedure("MATCH (n) RETURN n").is_none());
+    }
 
     #[test]
     fn write_keywords_are_found_outside_strings_comments_and_property_names() {

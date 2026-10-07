@@ -443,6 +443,49 @@ fn http_adapter_serves_the_same_authorized_statements() {
         let (status, body) = http(addr, "GET", "/v1/health", host, None, "").await;
         assert_eq!((status, body.as_str()), (200, r#"{"v":1,"status":"ok"}"#));
 
+        // Schema discovery answers the bound names a token may see, and no
+        // others: a scoped token learns nothing about hidden names.
+        let (status, body) = http(
+            addr,
+            "GET",
+            "/v1/databases/social/schema",
+            host,
+            Some(&ro),
+            "",
+        )
+        .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (
+                200,
+                r#"{"v":1,"labels":["Company","Person"],"relations":["KNOWS","WORKS_AT"],"properties":["age","name"]}"#
+            )
+        );
+        let scoped = token(&Grant {
+            labels: Scope::only([LabelId(1)]),
+            relations: Scope::only([RelationId(1)]),
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Read)
+        });
+        let (status, body) = http(
+            addr,
+            "GET",
+            "/v1/databases/social/schema",
+            host,
+            Some(&scoped),
+            "",
+        )
+        .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (
+                200,
+                r#"{"v":1,"labels":["Person"],"relations":["KNOWS"],"properties":["name"]}"#
+            )
+        );
+        let (status, _) = http(addr, "GET", "/v1/databases/social/schema", host, None, "").await;
+        assert_eq!(status, 401);
+
         let (status, body) = http(
             addr,
             "POST",
@@ -1069,6 +1112,26 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
         assert_eq!(
             fields[2],
             Value::Map(vec![("name".into(), Value::string("Ann"))])
+        );
+        // Neo4j's schema procedures answer the names this token may see.
+        let keys = scoped
+            .expect(0x10, run_message("CALL db.propertyKeys()", vec![]), SUCCESS)
+            .await;
+        assert_eq!(
+            get(&keys, "fields"),
+            Some(&Value::List(vec![Value::string("propertyKey")]))
+        );
+        assert_eq!(scoped.pull_all().await.0, [[Value::string("name")]]);
+        scoped
+            .expect(
+                0x10,
+                run_message("CALL db.labels() YIELD label", vec![]),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            scoped.pull_all().await.0,
+            [[Value::string("Company")], [Value::string("Person")]]
         );
 
         writer.close(cx).await.unwrap();

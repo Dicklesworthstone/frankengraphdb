@@ -264,7 +264,10 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   strings, so the one-key objects `{"$bytes": "<hex>"}` and
   `{"$vector": [numbers]}` spell bytes, the latter as packed little-endian
   f32 values, the stored form of an embedding); `GET
-  /v1/health`. It is a framing over the exact FGP execution path
+  /v1/health`; `GET /v1/databases/<name>/schema` (bearer token, read rights)
+  answers the label, relation and property names the token's scope may see,
+  so a client or agent can discover the schema without being able to learn a
+  hidden name. It is a framing over the exact FGP execution path
   (`crates/fgdb-server/src/execute.rs`): the same capability check, the same
   fresh authorized session per statement, the same statement and error
   classes. A query answers `{"v":1,"columns":[...],"rows":[[cell...]],"seq":N}`
@@ -293,7 +296,9 @@ The CLI's `fgdb remote` and `fgdb_protocol::client::Client` are its clients.
   across round trips. Vertices are returned as Bolt nodes whose labels and
   properties are read through the same session (capability masking applies);
   relationship and path values refuse with
-  `Neo.ClientError.Statement.FeatureNotSupported`. The FGP error classes map
+  `Neo.ClientError.Statement.FeatureNotSupported`. `CALL db.labels()`,
+  `db.relationshipTypes()` and `db.propertyKeys()` answer the same
+  scope-filtered schema names as HTTP's schema route. The FGP error classes map
   onto Neo4j status codes, and only Busy/Draining use a retryable
   `TransientError`. Bookmarks name the generation read and are not required
   inputs. Results are the same ephemeral class as FGP's.
