@@ -1,13 +1,17 @@
-//! Exact integer averages and DISTINCT numeric aggregation.
+//! Exact integer averages, binary64 sums and DISTINCT numeric aggregation.
 //!
 //! Averages retain a checked i128 sum and u64 nonnull count. Result values are
 //! reduced fractions, never rounded floats or truncated integer quotients.
+//! The first binary64 input moves the state to an exact fixed-point sum of
+//! every input, integers included: SUM and AVG are then the correctly rounded
+//! exact sum and mean, a binary64 independent of input order.
 //! Comparisons split quotient/remainder before cross multiplication: only two
 //! u64-bounded residuals multiply, so even i128::MIN is safe. Borrowed result
 //! cells need no gcd or allocation; normalization happens at final output.
 
 use super::*;
 use core::cmp::Ordering;
+use fgdb_types::{CanonicalF64, ExactBinary64Sum};
 
 /// A canonical exact rational returned by AVG_INT (and the bounded AVG alias).
 /// Denominators are positive; numerator/denominator are reduced, including 0/1.
@@ -112,6 +116,7 @@ pub(super) enum NumericResult {
     Empty,
     Sum(i128),
     Average { sum: i128, count: u64 },
+    Float(CanonicalF64),
 }
 
 pub(super) struct NumericAccumulator {
@@ -119,6 +124,15 @@ pub(super) struct NumericAccumulator {
     count: u64,
     average: bool,
     seen: Option<BTreeSet<i64>>,
+    float: Option<Box<FloatState>>,
+}
+
+/// Entered on the first binary64 input. `exact` then holds every counted
+/// input; DISTINCT floats are members by canonical bits (-0.0 is 0.0, one
+/// NaN), and stay distinct from equal integers, as in COUNT(DISTINCT).
+struct FloatState {
+    exact: ExactBinary64Sum,
+    seen: Option<BTreeSet<u64>>,
 }
 
 impl NumericAccumulator {
@@ -128,12 +142,31 @@ impl NumericAccumulator {
             count: 0,
             average,
             seen: distinct.then(BTreeSet::new),
+            float: None,
+        }
+    }
+
+    /// Continue a plain integer SUM whose first binary64 input just arrived.
+    pub(super) fn continue_sum(sum: i128, present: bool) -> Self {
+        Self {
+            sum,
+            count: u64::from(present),
+            ..Self::new(false, false)
         }
     }
 
     pub(super) fn result(&self) -> NumericResult {
         if self.count == 0 {
             NumericResult::Empty
+        } else if let Some(float) = &self.float {
+            NumericResult::Float(if self.average {
+                float
+                    .exact
+                    .mean(self.count)
+                    .expect("a nonempty average has a positive count")
+            } else {
+                float.exact.sum()
+            })
         } else if self.average {
             NumericResult::Average {
                 sum: self.sum,
@@ -150,11 +183,19 @@ impl NumericAccumulator {
     /// are never admitted as mutable input accumulators again.
     pub(super) fn release_distinct_set(&mut self) {
         self.seen = None;
+        if let Some(float) = &mut self.float {
+            float.seen = None;
+        }
     }
 
     #[cfg(test)]
     pub(super) fn retained_distinct_values(&self) -> usize {
         self.seen.as_ref().map_or(0, BTreeSet::len)
+            + self
+                .float
+                .as_ref()
+                .and_then(|float| float.seen.as_ref())
+                .map_or(0, BTreeSet::len)
     }
 
     /// Called only for a nonnull argument after the shared source read. A
@@ -169,12 +210,18 @@ impl NumericAccumulator {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
-        let ValueRef::Scalar(CanonicalScalar::Int(value)) = value else {
-            return Err(GqlQueryError::Source(if self.average {
-                GraphAggregateError::NonIntegerAverage { aggregate }
-            } else {
-                GraphAggregateError::NonIntegerSum { aggregate }
-            }));
+        let value = match value {
+            ValueRef::Scalar(CanonicalScalar::Int(value)) => value,
+            ValueRef::Scalar(CanonicalScalar::Float(value)) => {
+                return self.update_float(*value, aggregate, control);
+            }
+            _ => {
+                return Err(GqlQueryError::Source(if self.average {
+                    GraphAggregateError::NonIntegerAverage { aggregate }
+                } else {
+                    GraphAggregateError::NonIntegerSum { aggregate }
+                }));
+            }
         };
         if let Some(seen) = &self.seen {
             control(GlaExecutionEvent::Work)?;
@@ -185,15 +232,64 @@ impl NumericAccumulator {
         let overflow =
             || GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate });
         let count = self.count.checked_add(1).ok_or_else(overflow)?;
-        let sum = self
-            .sum
-            .checked_add(i128::from(*value))
-            .ok_or_else(overflow)?;
+        // Once exact, the integer joins the fixed-point sum and cannot overflow.
+        let sum = if self.float.is_some() {
+            self.sum
+        } else {
+            self.sum
+                .checked_add(i128::from(*value))
+                .ok_or_else(overflow)?
+        };
         if let Some(seen) = &mut self.seen {
             control(GlaExecutionEvent::ScratchEntry)?;
             seen.insert(*value);
         }
+        if let Some(float) = &mut self.float {
+            float.exact.add_integer(i128::from(*value));
+        }
         self.sum = sum;
+        self.count = count;
+        Ok(())
+    }
+
+    /// A binary64 input: membership and counting as for integers, then exact
+    /// accumulation. The first one moves the integer sum into the exact state.
+    fn update_float<E, C>(
+        &mut self,
+        value: CanonicalF64,
+        aggregate: usize,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        let distinct = self.seen.is_some();
+        if let Some(seen) = self.float.as_ref().and_then(|float| float.seen.as_ref()) {
+            control(GlaExecutionEvent::Work)?;
+            if seen.contains(&value.to_bits()) {
+                return Ok(());
+            }
+        }
+        let count = self.count.checked_add(1).ok_or_else(|| {
+            GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate })
+        })?;
+        if self.float.is_none() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let mut exact = ExactBinary64Sum::new();
+            exact.add_integer(self.sum);
+            self.float = Some(Box::new(FloatState {
+                exact,
+                seen: distinct.then(BTreeSet::new),
+            }));
+        }
+        let float = self
+            .float
+            .as_mut()
+            .expect("the exact state was just entered");
+        if let Some(seen) = &mut float.seen {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            seen.insert(value.to_bits());
+        }
+        float.exact.add(value);
         self.count = count;
         Ok(())
     }

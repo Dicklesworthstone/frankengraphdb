@@ -1,12 +1,13 @@
 //! Exact numeric aggregates use the existing compiled pattern/result stages.
 //! Small-case expectations enumerate original edge occurrences independently.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, IntegerComparison};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphAggregateColumn,
-    GraphAggregateError, GraphAggregateOrder, GraphExactAverage, GraphHavingExpression,
-    GraphHavingOp, GraphHavingOperand, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
-    PreparedGraphAggregateText,
+    GraphAggregateError, GraphAggregateOrder, GraphAggregateValue, GraphExactAverage,
+    GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphSymbol, GraphSymbolKind,
+    PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
 use std::cmp::Ordering;
@@ -311,9 +312,9 @@ fn empty_null_and_noninteger_domains_are_explicit_even_with_zero_output() {
         )
         .unwrap();
     assert_eq!(missing.value, empty.value);
+    // Binary64 inputs are numeric (see the binary64 test below).
     for scalar in [
         CanonicalScalar::Bool(true),
-        CanonicalScalar::Float(CanonicalF64::new(1.0)),
         CanonicalScalar::ucs_basic_text("7").unwrap(),
     ] {
         let query = prepare("MATCH (n) RETURN AVG(n.p) AS a HAVING TRUE OR a IS NULL LIMIT 0");
@@ -488,4 +489,63 @@ fn exact_numeric_updates_share_all_limits_and_every_interruption_checkpoint() {
             "late source failure"
         )))
     ));
+}
+
+/// A binary64 SUM/AVG is the exact sum or mean of every input (integers
+/// included) rounded once: naive addition gives 0.6000000000000001 + 3 and
+/// loses everything to the 1e100 cancellation, in an order-dependent way.
+#[test]
+fn binary64_sum_and_average_round_the_exact_result_once_in_any_order() {
+    let float = |value: f64| CanonicalScalar::Float(CanonicalF64::new(value));
+    let values = [
+        float(0.1),
+        float(0.2),
+        float(0.3),
+        float(1e100),
+        float(-1e100),
+        CanonicalScalar::Int(3),
+    ];
+    let query = prepare("MATCH (n) RETURN SUM(n.p) AS s, AVG(n.p) AS a, SUM(DISTINCT n.p) AS d");
+    let expected = [float(3.6), float(0.6), float(3.6)]
+        .map(|value| GraphAggregateValue::Value(GraphValue::Scalar(value)));
+    let mut order = values.to_vec();
+    for rotation in 0..values.len() * 2 {
+        order.rotate_left(1);
+        if rotation == values.len() {
+            order.reverse();
+        }
+        let rows = query
+            .execute_governed(
+                order.len() as u64,
+                (1..=order.len() as u128).map(VId),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(Some(&order[vid.0 as usize - 1])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert!(rows[0].values() == expected, "rotation {rotation}");
+    }
+    // Repeated binary64 values count once under DISTINCT, and stay distinct
+    // from an equal integer, as COUNT(DISTINCT) keeps them.
+    let repeated = [float(1.5), float(1.5), CanonicalScalar::Int(1), float(1.0)];
+    let rows = query
+        .execute_governed(
+            4,
+            (1..=4).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, _| Ok(Some(&repeated[vid.0 as usize - 1])),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value;
+    assert!(
+        rows[0].values()
+            == [float(5.0), float(1.25), float(3.5)]
+                .map(|value| GraphAggregateValue::Value(GraphValue::Scalar(value)))
+    );
 }

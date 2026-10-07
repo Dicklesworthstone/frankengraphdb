@@ -278,11 +278,11 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             Self::InputRelation(error) => write!(f, "aggregate input relation: {error}"),
             Self::NonIntegerSum { aggregate } => write!(
                 f,
-                "SUM_INT aggregate {aggregate} requires integer or null input"
+                "SUM aggregate {aggregate} requires integer, float or null input"
             ),
             Self::NonIntegerAverage { aggregate } => write!(
                 f,
-                "AVG_INT aggregate {aggregate} requires integer or null input"
+                "AVG aggregate {aggregate} requires integer, float or null input"
             ),
             Self::ArithmeticOverflow { aggregate } => write!(
                 f,
@@ -1237,10 +1237,25 @@ fn update<'a, E, C>(
                     GraphAggregateError::MultiplicityUnavailable,
                 ));
             }
-            let Some(ValueRef::Scalar(CanonicalScalar::Int(value))) = value else {
-                return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
-                    aggregate,
-                }));
+            let value = match value {
+                Some(ValueRef::Scalar(CanonicalScalar::Int(value))) => value,
+                Some(ValueRef::Scalar(CanonicalScalar::Float(_))) => {
+                    // The first binary64 input moves this SUM to the exact
+                    // numeric state; its integer prefix carries over exactly.
+                    let mut exact = numeric::NumericAccumulator::continue_sum(*sum, *present);
+                    exact.update(
+                        value.expect("a binary64 input is present"),
+                        aggregate,
+                        control,
+                    )?;
+                    *state = Accumulator::Numeric(exact);
+                    return Ok(());
+                }
+                _ => {
+                    return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+                        aggregate,
+                    }));
+                }
             };
             *sum = sum.checked_add(i128::from(*value)).ok_or_else(overflow)?;
             *present = true;

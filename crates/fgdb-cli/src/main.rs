@@ -66,7 +66,7 @@ remote subscribe streams a live changefeed (SUBSCRIBE TO <read>): columns, then
 per batch one change record per row (signed weight; the first batch is the
 baseline) and a progress record with the frontier. It needs a capability with
 unrestricted scope; --max-batches N cancels after N batches with a final result.
-Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
+Parameters: int:42, uint:42, float:1.5e-3, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array> (a list: objects are maps, integers int, other numbers float).
 write --rows json:[{...},...] binds the statement's parameters once per object
@@ -591,6 +591,14 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
     }
     let scalar = if let Some(value) = raw.strip_prefix("text:") {
         CanonicalScalar::ucs_basic_text(value).map_err(Failure::query)?
+    } else if let Some(value) = raw.strip_prefix("float:") {
+        let value: f64 = value
+            .parse()
+            .map_err(|_| Failure::usage("invalid float parameter"))?;
+        if !value.is_finite() {
+            return Err(Failure::usage("a float parameter must be finite"));
+        }
+        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value))
     } else if let Some(value) = raw.strip_prefix("bytes:") {
         let bytes = fgdb_protocol::json::bytes_from_hex(value).map_err(Failure::usage)?;
         CanonicalScalar::bytes(bytes).map_err(Failure::query)?

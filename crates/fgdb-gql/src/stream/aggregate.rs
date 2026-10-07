@@ -651,6 +651,13 @@ pub(crate) enum NumericState {
         sum: i128,
         count: u64,
     },
+    /// A SUM/AVG after its first binary64 input: the exact sum of every
+    /// counted input, rounded once at finalization.
+    Float {
+        exact: Box<fgdb_types::ExactBinary64Sum>,
+        count: u64,
+        average: bool,
+    },
     Extreme {
         value: Option<GraphValue>,
         maximum: bool,
@@ -741,6 +748,24 @@ impl NumericState {
             }
             Self::Sum(None) | Self::Average { .. } => {
                 GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
+            }
+            Self::Float {
+                exact,
+                count,
+                average,
+            } => {
+                // One fixed-point division or scan, as bounded as AVG's gcd.
+                for _ in 0..128 {
+                    control(VertexScanEvent::Work)?;
+                }
+                let value = if average {
+                    exact
+                        .mean(count)
+                        .expect("a binary64 state has counted an input")
+                } else {
+                    exact.sum()
+                };
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(value)))
             }
             Self::Extreme { value, .. } => GraphAggregateValue::Value(
                 value.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
@@ -863,6 +888,14 @@ impl NumericState {
         match self {
             Self::Count(value) => *value = value.checked_add(1).ok_or_else(overflow)?,
             Self::Sum(total) => {
+                if let Input::Scalar(Some(CanonicalScalar::Float(_))) = input {
+                    *self = Self::Float {
+                        exact: Self::exact_prefix(total.unwrap_or(0)),
+                        count: u64::from(total.is_some()),
+                        average: false,
+                    };
+                    return self.update(input, aggregate);
+                }
                 let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
                     return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
                         aggregate,
@@ -876,6 +909,14 @@ impl NumericState {
                 );
             }
             Self::Average { sum, count } => {
+                if let Input::Scalar(Some(CanonicalScalar::Float(_))) = input {
+                    *self = Self::Float {
+                        exact: Self::exact_prefix(*sum),
+                        count: *count,
+                        average: true,
+                    };
+                    return self.update(input, aggregate);
+                }
                 let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
                     return Err(GqlQueryError::Source(
                         GraphAggregateError::NonIntegerAverage { aggregate },
@@ -886,11 +927,41 @@ impl NumericState {
                 *sum = next_sum;
                 *count = next_count;
             }
+            Self::Float {
+                exact,
+                count,
+                average,
+            } => {
+                let next_count = count.checked_add(1).ok_or_else(overflow)?;
+                match input {
+                    Input::Scalar(Some(CanonicalScalar::Int(value))) => {
+                        exact.add_integer(i128::from(*value));
+                    }
+                    Input::Scalar(Some(CanonicalScalar::Float(value))) => exact.add(*value),
+                    _ if *average => {
+                        return Err(GqlQueryError::Source(
+                            GraphAggregateError::NonIntegerAverage { aggregate },
+                        ));
+                    }
+                    _ => {
+                        return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+                            aggregate,
+                        }));
+                    }
+                }
+                *count = next_count;
+            }
             Self::Extreme { .. } | Self::Distinct(_) | Self::Collect(_) => {
                 unreachable!("value support and ownership require governed updates")
             }
         }
         Ok(())
+    }
+
+    fn exact_prefix(sum: i128) -> Box<fgdb_types::ExactBinary64Sum> {
+        let mut exact = Box::new(fgdb_types::ExactBinary64Sum::new());
+        exact.add_integer(sum);
+        exact
     }
 }
 

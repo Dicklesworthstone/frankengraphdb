@@ -54,6 +54,9 @@ impl<'a> OutputValue<'a> {
                     Cell::Average { sum, count } => GraphAggregateValue::Average(
                         GraphExactAverage::new(sum, count).expect("nonnull average"),
                     ),
+                    Cell::Float(value) => GraphAggregateValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Float(value),
+                    )),
                     Cell::Value(value) => GraphAggregateValue::Value(value.copy_owned(control)?),
                 })
             }
@@ -78,6 +81,7 @@ fn load_cell(cell: Cell<'_>) -> Result<ExpressionCell<'_>, GraphIntegerErrorKind
         Cell::Average { sum, count } => {
             ExpressionCell::Average(GraphExactAverage::new(sum, count).expect("nonnull average"))
         }
+        Cell::Float(value) => ExpressionCell::Scalar(Cow::Owned(CanonicalScalar::Float(value))),
         Cell::Value(ValueRef::Scalar(value)) => ExpressionCell::Scalar(Cow::Borrowed(value)),
         Cell::Value(_) => return Err(GraphIntegerErrorKind::NonScalar),
     })

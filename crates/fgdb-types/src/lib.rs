@@ -36,7 +36,7 @@ pub use decimal::{
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
 pub use embedded_txn::{EmbeddedTxnCompletion, EmbeddedTxnState};
-pub use float_arithmetic::FloatArithmeticError;
+pub use float_arithmetic::{ExactBinary64Sum, FloatArithmeticError};
 pub use ids::{
     BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
     IssuerId, KeyEpoch, LogicalCommandSeq, ObjectId, PrincipalId, RevocationIndex,

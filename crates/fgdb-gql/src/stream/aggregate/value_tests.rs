@@ -1,6 +1,6 @@
 //! Source-neutral cells must preserve numeric laws and every native value bit.
 use super::*;
-use fgdb_types::EId;
+use fgdb_types::{CanonicalF64, EId};
 use std::collections::BTreeSet;
 
 fn make(function: GraphAggregateFunction) -> NumericState {
@@ -264,4 +264,52 @@ fn average_finalization_and_complex_extremum_replacement_are_governed() {
         seed.finish_governed(&mut |_| Ok::<_, ()>(())).unwrap(),
         GraphAggregateValue::Value(old)
     );
+}
+
+#[test]
+fn binary64_inputs_move_sum_and_average_cells_to_one_exact_rounding() {
+    use GraphAggregateFunction::*;
+    let float = |value: f64| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)));
+    let int = |value: i64| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    // An integer prefix, then floats; naive addition would lose the 3.
+    let values = [
+        int(3),
+        null.clone(),
+        float(1e100),
+        float(0.1),
+        float(-1e100),
+        float(0.2),
+        float(0.3),
+        float(0.3),
+    ];
+    for (function, expected) in [
+        (SumInt, float(3.9)),
+        (AverageInt, float(0.5571428571428572)),
+        (SumIntDistinct, float(3.6)),
+        (AverageIntDistinct, float(0.6)),
+    ] {
+        let mut reversed = values.to_vec();
+        reversed.reverse();
+        for order in [&values[..], &reversed[..]] {
+            assert!(
+                result(function, order) == GraphAggregateValue::Value(expected.clone()),
+                "{function:?}"
+            );
+        }
+    }
+    let mut state = make(SumInt);
+    state
+        .update_governed::<(), ()>(Input::from_value(&float(1.0)), 2, &mut |_| Ok(()))
+        .unwrap();
+    assert!(matches!(
+        state.update_governed::<(), ()>(
+            Input::from_value(&GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            2,
+            &mut |_| Ok(())
+        ),
+        Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+            aggregate: 2
+        }))
+    ));
 }

@@ -104,7 +104,13 @@ struct Group<'g, 'a> {
 enum Cell<'a> {
     Count(u64),
     Integer(i128),
-    Average { sum: i128, count: u64 },
+    Average {
+        sum: i128,
+        count: u64,
+    },
+    /// A binary64 SUM/AVG, rounded from its exact state when read. It orders
+    /// and copies exactly as the equal float scalar value.
+    Float(fgdb_types::CanonicalF64),
     Value(ValueRef<'a>),
 }
 impl<'a> Cell<'a> {
@@ -125,6 +131,7 @@ impl<'a> Cell<'a> {
                 numeric::NumericResult::Empty => Self::Value(ValueRef::Scalar(&NULL)),
                 numeric::NumericResult::Sum(value) => Self::Integer(value),
                 numeric::NumericResult::Average { sum, count } => Self::Average { sum, count },
+                numeric::NumericResult::Float(value) => Self::Float(value),
             },
         }
     }
@@ -153,6 +160,14 @@ impl<'a> Cell<'a> {
         }
     }
     fn compare(self, other: Self) -> Ordering {
+        if let Self::Float(value) = self {
+            let scalar = CanonicalScalar::Float(value);
+            return Cell::Value(ValueRef::Scalar(&scalar)).compare(other);
+        }
+        if let Self::Float(value) = other {
+            let scalar = CanonicalScalar::Float(value);
+            return self.compare(Cell::Value(ValueRef::Scalar(&scalar)));
+        }
         match (self, other) {
             (Self::Count(left), Self::Count(right)) => left.cmp(&right),
             (Self::Integer(left), Self::Integer(right)) => left.cmp(&right),
@@ -206,6 +221,9 @@ impl<'g, 'a: 'g> Group<'g, 'a> {
                     GraphExactAverage::new(sum, count)
                         .expect("a nonnull average has a positive admitted count"),
                 ),
+                Cell::Float(value) => {
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(value)))
+                }
                 Cell::Value(value) if value.is_null() => {
                     GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
                 }

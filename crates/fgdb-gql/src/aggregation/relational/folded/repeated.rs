@@ -48,6 +48,11 @@ fn capacity(state: &NumericState, input: Input<'_>) -> Option<u128> {
             let count = u128::from(u64::MAX - *count);
             Some(sum_capacity(*sum, *step).map_or(count, |sum| sum.min(count)))
         }
+        // An exact binary64 sum cannot overflow; only its count is bounded.
+        (
+            NumericState::Float { count, .. },
+            Input::Scalar(Some(CanonicalScalar::Int(_) | CanonicalScalar::Float(_))),
+        ) => Some(u128::from(u64::MAX - *count)),
         (NumericState::Distinct(_) | NumericState::Extreme { .. }, _) => None,
         // The first ordinary update rejects wrong numeric types. Collections
         // cannot enter this physical profile. Never grant them an unsafe tail.
@@ -89,6 +94,22 @@ fn advance(state: &mut NumericState, input: Input<'_>, count: u128) {
         ) => {
             *sum = advance_sum(*sum, *step, count);
             *denominator += u64::try_from(count).expect("AVG capacity fits u64");
+        }
+        (
+            NumericState::Float {
+                exact,
+                count: denominator,
+                ..
+            },
+            Input::Scalar(Some(value)),
+        ) => {
+            let times = u64::try_from(count).expect("binary64 capacity fits u64");
+            match value {
+                CanonicalScalar::Int(step) => exact.add_integer_repeated(*step, times),
+                CanonicalScalar::Float(step) => exact.add_repeated(*step, times),
+                _ => unreachable!("binary64 capacity admits only numeric tails"),
+            }
+            *denominator += times;
         }
         (NumericState::Distinct(_) | NumericState::Extreme { .. }, _) => {}
         _ => unreachable!("only validated numeric/support tails are advanced"),
