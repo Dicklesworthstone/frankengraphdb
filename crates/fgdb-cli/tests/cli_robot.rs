@@ -541,6 +541,12 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         assert_eq!(index, 1);
                         event.get("seq").unsigned();
                     }
+                    "adopted" => {
+                        exact_fields(event, &["v", "event", "kind", "files", "directories"]);
+                        assert_eq!(index, 1);
+                        assert!(event.get("files").unsigned() > 0);
+                        assert!(event.get("directories").unsigned() > 0);
+                    }
                     "imported_csv" => {
                         exact_fields(
                             event,
@@ -831,7 +837,53 @@ fn robot_schema_is_frozen_and_help_is_a_complete_robot_invocation() {
     assert_eq!(help.code, 0);
     assert!(help.stderr.contains("--key-file"));
     assert!(help.stderr.contains("64 hex"));
+    assert!(help.stderr.contains("adopt --db <dir>"));
     assert_eq!(help.terminal().get("kind").string(), "help");
+}
+
+#[test]
+fn adopt_reports_exact_keyless_counts_without_advancing_the_frontier() {
+    let db = TestDb::new("adopt");
+    db.create();
+    let seq = db.write(&["CREATE (:Person {name: 'Ada'})"]);
+    let mut files = 0;
+    let mut directories = 0;
+    let mut pending = vec![PathBuf::from(&db.db)];
+    while let Some(directory) = pending.pop() {
+        directories += 1;
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                files += 1;
+            }
+        }
+    }
+    let adopted = robot(&["adopt", "--db", &db.db]);
+    adopted.success();
+    assert_eq!(adopted.terminal().get("kind").string(), "adopted");
+    assert_eq!(adopted.terminal().get("files").unsigned(), files);
+    assert_eq!(
+        adopted.terminal().get("directories").unsigned(),
+        directories
+    );
+    let human = run(false, &["adopt", "--db", &db.db]);
+    human.success();
+    assert_eq!(
+        human.stdout,
+        format!(
+            "adopted {}: {files} file(s), {directories} director(ies) synced\n",
+            db.db
+        )
+    );
+    assert_eq!(
+        db.command("query", &["MATCH (p:Person) RETURN p.name"])
+            .sequence("rows"),
+        seq,
+        "neither adoption publishes a transaction"
+    );
 }
 
 #[test]

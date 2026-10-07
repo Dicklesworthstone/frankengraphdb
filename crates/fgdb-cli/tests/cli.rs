@@ -132,6 +132,124 @@ fn directory_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// Copy a stopped database with ordinary file copies: adoption must establish
+/// durability without relying on a writer handle in the copying process.
+fn copy_directory(source: &Path, target: &Path) {
+    std::fs::create_dir(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_directory(&entry.path(), &destination);
+        } else {
+            assert!(entry.file_type().unwrap().is_file());
+            std::fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+#[test]
+fn adopt_copied_database_preserves_bytes_and_allows_fresh_process_writes() {
+    let fixture = Fixture::new("adopt-copy");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let before_seq = succeeded(
+        &fixture.robot("write", &["CREATE (:Person {id: 1})"]),
+        "written",
+    );
+    let copy = fixture.dir.join("copied database");
+    copy_directory(&fixture.db(), &copy);
+    let original_bytes = directory_bytes(&fixture.db());
+    let copied_bytes = directory_bytes(&copy);
+
+    // There is no key file argument or open writer in the adoption process.
+    let adopted = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "adopt", "--db"])
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(adopted.status.success(), "{adopted:?}");
+    assert!(terminal(&adopted).contains("\"kind\":\"adopted\""));
+    assert_eq!(directory_bytes(&copy), copied_bytes);
+    assert_eq!(directory_bytes(&fixture.db()), original_bytes);
+
+    let write = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "write", "--db"])
+        .arg(&copy)
+        .arg("--key-file")
+        .arg(fixture.dir.join("keys"))
+        .args([
+            "--label",
+            "Person=1",
+            "--property",
+            "id=1",
+            "CREATE (:Person {id: 2})",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(succeeded(&write, "written"), before_seq + 1);
+    let query = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "query", "--db"])
+        .arg(&copy)
+        .arg("--key-file")
+        .arg(fixture.dir.join("keys"))
+        .args([
+            "--label",
+            "Person=1",
+            "--property",
+            "id=1",
+            "MATCH (n:Person) RETURN n.id AS id ORDER BY id",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(succeeded(&query, "rows"), before_seq + 1);
+    assert_eq!(
+        rows(&query),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"}]}"#,
+        ]
+    );
+    assert_eq!(directory_bytes(&fixture.db()), original_bytes);
+}
+
+#[test]
+fn adopt_refuses_non_database_and_invalid_invocations_without_writing() {
+    let fixture = Fixture::new("adopt-refusals");
+    let ordinary = fixture.dir.join("ordinary");
+    std::fs::create_dir(&ordinary).unwrap();
+    std::fs::write(ordinary.join("keep"), b"unrelated data").unwrap();
+    let before = directory_bytes(&ordinary);
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "adopt", "--db"])
+        .arg(&ordinary)
+        .output()
+        .unwrap();
+    refused(&output, 4, "open");
+    assert_eq!(directory_bytes(&ordinary), before);
+
+    succeeded(&fixture.robot("create", &[]), "created");
+    let before = directory_bytes(&fixture.db());
+    let database = fixture.db();
+    let database = database.to_str().unwrap();
+    for arguments in [
+        vec![],
+        vec!["--db"],
+        vec!["--db", database, "--db", database],
+        vec!["--db", database, "--key-file", "not-read"],
+        vec!["--db", database, "CREATE (:Person)"],
+        vec!["--unknown", database],
+        vec!["--db", ""],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .args(["--robot", "adopt"])
+            .args(arguments)
+            .output()
+            .unwrap();
+        refused(&output, 2, "usage");
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+}
+
 /// The keys `Fixture` writes, for the embedded library.
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(

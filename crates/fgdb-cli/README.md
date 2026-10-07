@@ -15,6 +15,7 @@ machine-readable contract that the tests freeze.
 | Command | What it does |
 |---|---|
 | `create` | Create a new database directory (refuses an existing one). |
+| `adopt --db <dir>` | Sync a copied database before its first write. Needs no keys; does not change data or advance the frontier. |
 | `write <gql>` | Run one native write program in one transaction. |
 | `query <gql>` | Native read, including `EXPLAIN`. A write statement is refused (exit 3), never retried as a write. `--stream` flushes one row at a time on the streamable profiles; `--certify-to <file>` saves a replayable result certificate. |
 | `query 'CALL fnx.<procedure>(…) YIELD …'` | A registered Prism analytics procedure over an explicit projection of one committed sequence (see Analytics). |
@@ -28,7 +29,23 @@ machine-readable contract that the tests freeze.
 | `search` | Beacon text, vector or exact-fusion hybrid retrieval over one committed sequence (see Retrieval). |
 | `robot schema`, `help` | Need no database or keys. |
 
-Every database command takes `--db <dir> --key-file <file>`.
+Every database command except `adopt` takes `--db <dir> --key-file <file>`.
+
+### Adopting a copied database
+
+After copying a database directory with a tool that did not sync its files
+(for example, `cp -r` or an archive extractor), run `fgdb adopt --db <copy>`
+once before the first write. Writable opens trust that the published root's
+objects are already durable; adoption establishes that premise for a copy by
+syncing every regular file, then the directories from deepest to shallowest,
+then the database directory's parent. It follows no symlinks and needs no key
+file. Use one process at a time, as for other database operations.
+
+Adoption refuses a non-database directory with exit 4. It does not validate or
+repair object contents; subsequent opens perform their normal authentication.
+Robot mode emits a terminal `result` with `kind: "adopted"` and integer
+`files` and `directories` counts. The directory count covers the database
+directory and its descendants; its parent is synced in addition.
 
 ### Key file
 
