@@ -6678,7 +6678,8 @@ mod lazy_delta_laws {
                 k: 10,
                 mode: fgdb_beacon::TextMatch::Any,
             };
-            let mut options = query_beacon::Options::text(PropertyKeyId(1));
+            let mut options =
+                fgdb_beacon::read::ReadOptions::<PropertyKeyId, LabelId>::text(PropertyKeyId(1));
             options.as_of = Some(CommitSeq(1));
             let mut resident = db.prepare_beacon_index(&query, &options).unwrap();
             let pinned = resident.snapshot();
@@ -6687,13 +6688,11 @@ mod lazy_delta_laws {
             assert_eq!(pinned.stats().documents, 1);
             assert!(matches!(
                 resident.refresh(&query, &db, None, policy),
-                Err(query_beacon::ResidentIndexError::Source(
-                    ReadError::DeltaCursorRetired {
-                        asked: CommitSeq(1),
-                        retained_after: CommitSeq(2),
-                        frontier: CommitSeq(2),
-                    }
-                ))
+                Err(ResidentIndexError::Source(ReadError::DeltaCursorRetired {
+                    asked: CommitSeq(1),
+                    retained_after: CommitSeq(2),
+                    frontier: CommitSeq(2),
+                }))
             ));
             assert_eq!(resident.source_sequence(), CommitSeq(1));
             assert_eq!(resident.search(&query, search, policy).unwrap(), before);

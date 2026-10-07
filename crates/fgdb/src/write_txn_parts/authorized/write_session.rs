@@ -276,8 +276,8 @@ enum Request<'a> {
 impl<V, R, C> AuthorizedWriteSession<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
-    C: FnMut() -> u64,
+    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    C: FnMut() -> u64 + Send,
 {
     /// Prepare once through this session's fixed resolver, under a live permit.
     /// All sample arguments and operation rights are checked, but there is no
@@ -567,25 +567,33 @@ where
             .await
     }
 
+    /// Type-erased like the other commit chokepoints (fgdb-a5y6m): every
+    /// authorized execute method ends here, so a caller's `Send` proof stops at
+    /// `dyn Future + Send` instead of descending the whole authorized write
+    /// chain. Without it, `fgdb`'s own lab tests overflowed proving `Send`.
+    /// Boxing as `Send` is why this impl requires a `Send` resolver and clock.
     #[allow(clippy::result_large_err)]
-    async fn run<T>(
-        &mut self,
-        cx: &QueryCx,
-        request: Request<'_>,
+    fn run<'a, T: Send + 'a>(
+        &'a mut self,
+        cx: &'a QueryCx,
+        request: Request<'a>,
         returning: bool,
-        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T,
-    ) -> Result<(T, EmbeddedTxnCompletion), Fault> {
-        // This move is the fail-closed future/unwind guard. The session has no
-        // open state while the operation is pending. Success restores it in a
-        // non-fallible tail; dropping this future drops its private state.
-        let mut state = self.state.take().ok_or_else(stopped)?;
-        let result = state
-            .run(cx, request, &self.owner, returning, receipt)
-            .await;
-        if result.is_ok() {
-            self.state = Some(state);
-        }
-        result
+        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T + Send + 'a,
+    ) -> crate::SendFuture<'a, Result<(T, EmbeddedTxnCompletion), Fault>> {
+        Box::pin(async move {
+            // This move is the fail-closed future/unwind guard. The session has
+            // no open state while the operation is pending. Success restores it
+            // in a non-fallible tail; dropping this future drops its private
+            // state.
+            let mut state = self.state.take().ok_or_else(stopped)?;
+            let result = state
+                .run(cx, request, &self.owner, returning, receipt)
+                .await;
+            if result.is_ok() {
+                self.state = Some(state);
+            }
+            result
+        })
     }
 }
 
