@@ -38,7 +38,7 @@ impl RowProjectionSpec {
             }
             .into());
         }
-        GraphSetProjection::validate_output_name(&name, column)?;
+        GraphSetProjection::validate_binding_name(&name, column)?;
         if columns.contains(&name) {
             return Err(GraphSetProjectionError::DuplicateName { column }.into());
         }

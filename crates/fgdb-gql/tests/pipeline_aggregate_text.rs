@@ -859,10 +859,8 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
     for text in [
         "MATCH (n) WITH n.p AS x RETURN SUM(SUM(x)) AS total",
         "MATCH (n) WITH n.p AS x RETURN SUM([x]) AS total",
-        "MATCH (n) WITH n.p AS x RETURN x+1,COUNT(*) AS rows",
         "MATCH (n) WITH n.p AS x RETURN x+1 AS key,COUNT(*) AS rows GROUP BY x+2",
         "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows GROUP BY x+1,x+1",
-        "MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)",
         "MATCH (n) WITH n.p AS x WITH x AS y RETURN SUM(x+1) AS total",
         "MATCH (n) WITH n.p AS x RETURN SUM(x+$p) AS total LIMIT $p",
         "MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT *)",
@@ -880,6 +878,33 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
         );
         assert_eq!(calls, 0, "{text}");
     }
+    // Unaliased computed keys and repeated summaries take their source text.
+    for (text, columns) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN x+1,COUNT(*) AS rows",
+            &["x+1", "rows"][..],
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)",
+            &["SUM(x)", "SUM(x+1)"][..],
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x),COUNT(*)",
+            &["sum", "count"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+    }
+    let row = run(
+        &query("MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)"),
+        &[CanonicalScalar::Int(7)],
+        wide(),
+    )
+    .value
+    .remove(0);
+    assert_eq!(row.values()[0].as_integer(), Some(7));
+    assert_eq!(row.values()[1].as_integer(), Some(8));
 }
 
 #[test]

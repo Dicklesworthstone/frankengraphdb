@@ -379,6 +379,8 @@ impl<'a> Parser<'a> {
                 ));
             }
         } else {
+            // Source text of each derived output, as in a read RETURN.
+            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     output.len(),
@@ -388,13 +390,28 @@ impl<'a> Parser<'a> {
                 let at = self.current.at;
                 let value = self
                     .read_resolved_value(&mut |parser| returning.leaf(parser, syntax, source), 0)?;
-                let name = if self.take_word("AS")? {
-                    self.name()?
+                let end = self.current.at;
+                let (mut name, derived) = if self.take_word("AS")? {
+                    (self.name()?, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
-                    returning.bindings[*column].1
+                    (
+                        returning.bindings[*column].1,
+                        Some(self.source_name(at, end)),
+                    )
                 } else {
-                    return Err(expected(at, "AS alias for a computed row value"));
+                    let derived = self.source_name(at, end);
+                    (derived, Some(derived))
                 };
+                if let Some(derived) = derived
+                    && let Some(previous) = output.iter().position(|(old, _)| old.text == name.text)
+                {
+                    if let Some(earlier) = sources[previous] {
+                        output[previous].0 = earlier;
+                        returning.projection[previous].name = earlier.text.to_owned();
+                    }
+                    name = derived;
+                }
+                sources.push(derived);
                 if output.iter().any(|(old, _)| old.text == name.text) {
                     return Err(error(
                         name.at,

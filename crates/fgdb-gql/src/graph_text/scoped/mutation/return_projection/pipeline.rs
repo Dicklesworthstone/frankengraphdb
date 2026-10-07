@@ -343,7 +343,7 @@ impl<'a> Parser<'a> {
         } else {
             GraphSetQuantifier::All
         };
-        let (projection, _) = self.row_projection(&schema)?;
+        let (projection, _) = self.row_projection(&schema, true)?;
         // The terminal RETURN is the last reader of any hidden boundary read.
         self.boundary_reads = None;
         append_stage(
@@ -421,7 +421,7 @@ impl<'a> Parser<'a> {
             } else {
                 GraphSetQuantifier::All
             };
-            let (projection, next_schema) = self.row_projection(&schema)?;
+            let (projection, next_schema) = self.row_projection(&schema, false)?;
             append_stage(
                 &mut stages,
                 ReadStageTemplate::Project {
@@ -436,9 +436,12 @@ impl<'a> Parser<'a> {
         Ok((stages, schema, depth))
     }
 
+    /// A RETURN (`returning`) names an unaliased computed value by its
+    /// source text, as openCypher does; a WITH binding needs its AS name.
     fn row_projection(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
+        returning: bool,
     ) -> Result<(Vec<ReadProjectionTemplate>, RowSchema<'a>), GraphSetTextError> {
         let mut projection = Vec::new();
         let mut next_schema: RowSchema<'a> = Vec::new();
@@ -452,6 +455,9 @@ impl<'a> Parser<'a> {
                 next_schema.push((name, kind));
             }
         } else {
+            // Source text of each derived RETURN name: a repeated derived name
+            // (`a.title, b.title` over carried bindings) falls back to it.
+            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     projection.len(),
@@ -460,14 +466,32 @@ impl<'a> Parser<'a> {
                 )?;
                 let at = self.current.at;
                 let value = self.read_row_value(schema, 0)?;
-                let alias = if self.take_word("AS")? {
-                    self.name()?
+                let end = self.current.at;
+                let (mut alias, source) = if self.take_word("AS")? {
+                    (self.name()?, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
-                    self.boundary_key(schema.len(), *column)
-                        .unwrap_or(schema[*column].0)
+                    let name = self
+                        .boundary_key(schema.len(), *column)
+                        .unwrap_or(schema[*column].0);
+                    (name, returning.then(|| self.source_name(at, end)))
+                } else if returning {
+                    let source = self.source_name(at, end);
+                    (source, Some(source))
                 } else {
                     return Err(expected(at, "AS alias for a computed row value"));
                 };
+                if let Some(source) = source
+                    && let Some(previous) = next_schema
+                        .iter()
+                        .position(|(name, _)| name.text == alias.text)
+                {
+                    if let Some(earlier) = sources[previous] {
+                        next_schema[previous].0 = earlier;
+                        projection[previous].name = earlier.text.to_owned();
+                    }
+                    alias = source;
+                }
+                sources.push(source);
                 if next_schema.iter().any(|(name, _)| name.text == alias.text) {
                     return Err(error(
                         alias.at,

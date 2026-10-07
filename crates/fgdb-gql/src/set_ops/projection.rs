@@ -10,8 +10,7 @@ use super::{
     check_depth,
 };
 use crate::algebra::{
-    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueRow, MAX_PATTERN_NAME_BYTES,
-    MAX_PATTERN_VERTICES,
+    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES,
 };
 use crate::{
     GlaExecutionEvent, GqlScalarParameter, GraphIntegerError, GraphIntegerEvaluationError,
@@ -179,6 +178,13 @@ impl GraphSetProjection {
         validate_name(name, column)
     }
 
+    pub(crate) fn validate_binding_name(
+        name: &str,
+        column: usize,
+    ) -> Result<(), GraphSetProjectionError> {
+        validate_binding_name(name, column)
+    }
+
     #[must_use]
     pub fn new(name: impl Into<String>, value: GraphSetValue) -> Self {
         Self {
@@ -322,10 +328,22 @@ pub(super) fn value_type(
 }
 
 pub(super) fn validate_name(name: &str, column: usize) -> Result<(), GraphSetProjectionError> {
+    if !crate::algebra::valid_column_name(name) {
+        return Err(GraphSetProjectionError::InvalidName { column });
+    }
+    Ok(())
+}
+
+/// A name that introduces a row variable (an UNWIND or YIELD alias, a named
+/// procedure argument) keeps the identifier shape; only a projected output
+/// column may carry any [`validate_name`] text.
+pub(super) fn validate_binding_name(
+    name: &str,
+    column: usize,
+) -> Result<(), GraphSetProjectionError> {
+    validate_name(name, column)?;
     let bytes = name.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > MAX_PATTERN_NAME_BYTES
-        || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+    if !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         || !bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')

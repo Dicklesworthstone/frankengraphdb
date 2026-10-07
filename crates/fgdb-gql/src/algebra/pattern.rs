@@ -219,6 +219,15 @@ impl<Row> PreparedGraphPattern<Row> {
     }
 }
 
+/// A result column name: nonempty, at most [`MAX_PATTERN_NAME_BYTES`], and
+/// free of control characters. Identifiers are not the only spelling: a
+/// delimited identifier (`` `total due` ``) and an openCypher derived name
+/// (`a.title`, `count(b)`) are column names too, and every consumer carries
+/// names as length-delimited or escaped text.
+pub(crate) fn valid_column_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_PATTERN_NAME_BYTES && !name.chars().any(char::is_control)
+}
+
 fn check_next(
     count: usize,
     limit: usize,

@@ -234,6 +234,9 @@ impl PreparedGraphPipelineAggregateText {
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();
         let mut inputs = inputs::Inputs::new(schema.len());
+        // Source text of each derived RETURN name (no AS): a repeated derived
+        // name falls back to it, as `count(a), count(b)` does in openCypher.
+        let mut sources = Vec::new();
         loop {
             parser.capacity(
                 returned.len(),
@@ -241,15 +244,17 @@ impl PreparedGraphPipelineAggregateText {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = parser.current.at;
-            let (name, value) = if parser.starts_pipeline_summary()? {
+            let (mut name, value, source) = if parser.starts_pipeline_summary()? {
                 let (function, column) = parser.pipeline_summary(&schema, &mut inputs)?;
-                let name = if parser.take_word("AS")? {
-                    parser.name()?
+                let end = parser.current.at;
+                let (name, source) = if parser.take_word("AS")? {
+                    (parser.name()?, None)
                 } else {
-                    Name {
+                    let name = Name {
                         text: summary_name(function),
                         at,
-                    }
+                    };
+                    (name, Some(parser.source_name(at, end)))
                 };
                 let index = summaries.len();
                 summaries.push(PipelineSummary {
@@ -257,21 +262,41 @@ impl PreparedGraphPipelineAggregateText {
                     function,
                     column,
                 });
-                (name, ReturnedValue::Summary(index))
+                (name, ReturnedValue::Summary(index), source)
             } else {
                 let column = inputs.read(&mut parser, &schema)?;
-                let name = if parser.take_word("AS")? {
-                    parser.name()?
+                let end = parser.current.at;
+                let (name, source) = if parser.take_word("AS")? {
+                    (parser.name()?, None)
                 } else if inputs.is_computed(column) {
-                    return Err(expected(at, "AS alias for a computed grouping expression"));
+                    let source = parser.source_name(at, end);
+                    (source, Some(source))
                 } else {
                     // A carried `n.p` key is named `p`, never its private name.
-                    parser
+                    let name = parser
                         .boundary_key(schema.len(), column)
-                        .unwrap_or(schema[column].0)
+                        .unwrap_or(schema[column].0);
+                    (name, Some(parser.source_name(at, end)))
                 };
-                (name, ReturnedValue::Key(column))
+                (name, ReturnedValue::Key(column), source)
             };
+            if let Some(source) = source
+                && let Some(previous) = returned
+                    .iter()
+                    .position(|previous| previous.name.text == name.text)
+            {
+                if let Some(earlier) = sources[previous] {
+                    returned[previous].name = earlier;
+                    if let ReturnedValue::Summary(index) = returned[previous].value {
+                        summaries[index].name = earlier.text.to_owned();
+                    }
+                }
+                name = source;
+                if let ReturnedValue::Summary(index) = value {
+                    summaries[index].name = source.text.to_owned();
+                }
+            }
+            sources.push(source);
             if returned
                 .iter()
                 .any(|previous| previous.name.text == name.text)

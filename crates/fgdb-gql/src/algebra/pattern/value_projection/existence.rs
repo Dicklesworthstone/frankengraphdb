@@ -493,14 +493,7 @@ impl GraphPatternBuilder {
         )?;
         let mut variables = Vec::new();
         for (at, column) in columns.iter().enumerate() {
-            let bytes = column.name().as_bytes();
-            if bytes.is_empty()
-                || bytes.len() > MAX_PATTERN_NAME_BYTES
-                || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-                || !bytes
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
+            if !super::super::valid_column_name(column.name()) {
                 return Err(PatternBuildError::InvalidColumnName);
             }
             if columns[..at]

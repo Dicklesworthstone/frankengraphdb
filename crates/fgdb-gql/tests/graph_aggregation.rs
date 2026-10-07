@@ -237,7 +237,7 @@ fn definition_validation_preserves_occurrences_and_group_identity() {
         PreparedGraphAggregate::prepare(
             input.clone(),
             &[],
-            &[GraphAggregate::count_rows("bad name")],
+            &[GraphAggregate::count_rows("bad\tname")],
             0,
             None
         )

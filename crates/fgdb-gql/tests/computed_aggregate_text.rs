@@ -335,7 +335,6 @@ fn malformed_computation_and_grouping_refuse_before_catalog_resolution() {
         "MATCH (n) RETURN SUM(other.p*2) AS x",
         "MATCH (n) RETURN SUM(n.p+$x) AS x LIMIT $x",
         "MATCH (n) RETURN SUM(*) AS x",
-        "MATCH (n) RETURN ABS(n.p),COUNT(*) AS c GROUP BY ABS(n.p)",
         "MATCH (n) RETURN ABS(n.p) AS g,COUNT(*) AS c GROUP BY ABS(n.q)",
         "MATCH (n) RETURN COUNT(*) AS c GROUP BY n.p+1,n.p+1",
         "MATCH (n) RETURN COUNT(*) AS c HAVING SUM(n.p+) > 0",
@@ -352,6 +351,14 @@ fn malformed_computation_and_grouping_refuse_before_catalog_resolution() {
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // An unaliased computed RETURN value is named by its source text, as in
+    // openCypher, and stays the same grouping key as its GROUP BY spelling.
+    let named = PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN ABS(n.p),COUNT(*),COUNT(n.p) GROUP BY ABS(n.p)",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(named.columns(), &["ABS(n.p)", "COUNT(*)", "COUNT(n.p)"]);
     for expression in [
         format!("{}n.p{}", "(".repeat(66), ")".repeat(66)),
         std::iter::repeat_n("n.p", MAX_GRAPH_INTEGER_INSTRUCTIONS)

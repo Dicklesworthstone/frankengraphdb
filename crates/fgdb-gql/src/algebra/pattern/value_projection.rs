@@ -187,10 +187,22 @@ mod tests {
             PatternBuildError::DuplicateProjection
         );
         assert_eq!(
-            b.prepare_values(&[GraphColumn::vertex("bad alias", "a")], 0, None)
+            b.prepare_values(&[GraphColumn::vertex("bad\nalias", "a")], 0, None)
                 .unwrap_err(),
             PatternBuildError::InvalidColumnName
         );
+        assert_eq!(
+            b.prepare_values(&[GraphColumn::vertex("", "a")], 0, None)
+                .unwrap_err(),
+            PatternBuildError::InvalidColumnName
+        );
+        // A delimited identifier or a derived openCypher name is a column name.
+        for name in ["total due", "a.title", "count(b)"] {
+            assert!(
+                b.prepare_values(&[GraphColumn::vertex(name, "a")], 0, None)
+                    .is_ok()
+            );
+        }
         assert_eq!(
             b.prepare_values(&[GraphColumn::vertex("valid", "missing")], 0, None)
                 .unwrap_err(),

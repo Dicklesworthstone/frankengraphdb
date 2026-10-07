@@ -85,9 +85,17 @@ refuse instead of dropping a component or inserting a Cartesian product.
 
 RETURN selects named vertices and canonical vertex properties, with optional
 AS aliases. An unaliased vertex uses its variable name; an unaliased property
-uses the property name. Colliding output names require explicit distinct
-aliases and otherwise refuse. Repeated expressions under different aliases
-are legal. RETURN * selects each declared variable once in first-occurrence
+uses the property name, and an unaliased aggregate its function name. A derived
+name that repeats another derived name falls back to each item's source text,
+as openCypher names columns (`RETURN a.title, b.title` yields `a.title` and
+`b.title`; `count(a), count(b)` yields `count(a)` and `count(b)`), and an
+unaliased computed RETURN value is named by its text (`size(a.title)`). An
+explicit alias is never renamed: two equal explicit aliases, or the same
+item twice, still refuse. WITH bindings keep requiring AS for computed values.
+A column name is any nonempty text of at most 128 bytes without control
+characters, so delimited identifiers (`` AS `total due` ``) are column names;
+names that introduce variables (UNWIND and YIELD aliases) stay identifiers.
+Repeated expressions under different aliases are legal. RETURN * selects each declared variable once in first-occurrence
 order and cannot be mixed with additional columns in this profile.
 
 **Text RETURN defaults to ALL; DISTINCT is explicit.** This is different from

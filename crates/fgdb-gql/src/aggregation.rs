@@ -19,8 +19,7 @@ pub use result::{
 
 use crate::algebra::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow,
-    MAX_PATTERN_NAME_BYTES, MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection,
-    VertexPredicate,
+    MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
 };
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
@@ -539,14 +538,7 @@ impl PreparedGraphAggregate {
             {
                 return Err(GraphAggregateBuildError::UnknownColumn { column });
             }
-            let name = aggregate.name.as_bytes();
-            if name.is_empty()
-                || name.len() > MAX_PATTERN_NAME_BYTES
-                || !(name[0].is_ascii_alphabetic() || name[0] == b'_')
-                || !name
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
+            if !crate::algebra::valid_column_name(aggregate.name) {
                 return Err(GraphAggregateBuildError::InvalidName);
             }
             if !names.insert(aggregate.name) {

@@ -347,7 +347,7 @@ impl PreparedGraphSet {
         }
         let depth = self.depth + 1;
         check_depth(depth).map_err(Error::SetBuild)?;
-        projection::validate_name(&name, column)?;
+        projection::validate_binding_name(&name, column)?;
         if self.columns.contains(&name) {
             return Err(Error::DuplicateName { column });
         }
@@ -421,7 +421,7 @@ impl PreparedGraphSet {
                 return Err(Error::Empty);
             }
             for (column, argument) in names.iter().enumerate() {
-                projection::validate_name(argument, column)?;
+                projection::validate_binding_name(argument, column)?;
                 if names[..column].contains(argument) {
                     return Err(Error::DuplicateName { column });
                 }
@@ -430,7 +430,7 @@ impl PreparedGraphSet {
         let mut columns = Vec::with_capacity(outputs.len());
         let mut output_names = Vec::with_capacity(outputs.len());
         for (column, (output, alias)) in outputs.into_iter().enumerate() {
-            projection::validate_name(&alias, column)?;
+            projection::validate_binding_name(&alias, column)?;
             if columns.contains(&alias) {
                 return Err(Error::DuplicateName { column });
             }

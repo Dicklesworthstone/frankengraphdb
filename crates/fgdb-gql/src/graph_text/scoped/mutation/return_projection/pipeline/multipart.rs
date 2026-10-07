@@ -454,7 +454,7 @@ impl<'a> Parser<'a> {
             if !distinct {
                 self.take_all_quantifier()?;
             }
-            let (projection, schema) = self.row_projection(&next)?;
+            let (projection, schema) = self.row_projection(&next, true)?;
             // The terminal RETURN is the last reader of any hidden boundary read.
             self.boundary_reads = None;
             pipeline.push(ReadStageTemplate::Project {
@@ -548,6 +548,8 @@ impl<'a> Parser<'a> {
                 outputs.push((variable, ReadValueTemplate::Column(width + column)));
             }
         } else {
+            // Source text of each derived output; see graph_projection_head.
+            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     outputs.len(),
@@ -608,18 +610,37 @@ impl<'a> Parser<'a> {
                     let column = parser.mutation_projection(&mut inputs, variable, property)?;
                     Ok(Some(width + column))
                 }, 0)?;
-                let alias = if self.take_word("AS")? {
-                    self.name()?
+                let end = self.current.at;
+                let (mut alias, source) = if self.take_word("AS")? {
+                    (self.name()?, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
-                    if *column < width {
+                    let name = if *column < width {
                         incoming[*column].0
                     } else {
                         let input = inputs[*column - width];
                         input.property.unwrap_or(input.variable)
-                    }
+                    };
+                    (name, Some(self.source_name(at, end)))
+                } else if !with {
+                    let source = self.source_name(at, end);
+                    (source, Some(source))
                 } else {
                     return Err(expected(at, "AS alias for a computed row value"));
                 };
+                if let Some(source) = source
+                    && let Some(previous) =
+                        outputs
+                            .iter()
+                            .position(|(name, _): &(Name<'a>, ReadValueTemplate)| {
+                                name.text == alias.text
+                            })
+                {
+                    if let Some(earlier) = sources[previous] {
+                        outputs[previous].0 = earlier;
+                    }
+                    alias = source;
+                }
+                sources.push(source);
                 if outputs
                     .iter()
                     .any(|(name, _): &(Name<'a>, ReadValueTemplate)| name.text == alias.text)

@@ -549,6 +549,9 @@ impl<'a> Parser<'a> {
                 outputs.push((variable, ReadValueTemplate::Column(at)));
             }
         } else {
+            // Source text of each derived (unaliased) output, so a repeated
+            // derived name falls back to its openCypher name.
+            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     outputs.len(),
@@ -557,18 +560,36 @@ impl<'a> Parser<'a> {
                 )?;
                 let at = self.current.at;
                 let operand = self.read_graph_value(&mut inputs, 0)?;
-                let alias = if self.take_word("AS")? {
-                    self.name()?
+                let end = self.current.at;
+                let (mut alias, source) = if self.take_word("AS")? {
+                    (self.name()?, None)
                 } else if let ReadValueTemplate::Column(index) = &operand {
-                    inputs[*index].property.unwrap_or(inputs[*index].variable)
+                    let source = self.source_name(at, end);
+                    (
+                        inputs[*index].property.unwrap_or(inputs[*index].variable),
+                        Some(source),
+                    )
+                } else if !with {
+                    // openCypher names an unaliased computed RETURN value by
+                    // its text; a WITH binding still needs its AS name.
+                    let source = self.source_name(at, end);
+                    (source, Some(source))
                 } else {
                     return Err(GraphSetTextError {
                         offset: at,
-                        kind: GraphSetTextErrorKind::Expected(
-                            "AS alias for a computed RETURN value",
-                        ),
+                        kind: GraphSetTextErrorKind::Expected("AS alias for a computed WITH value"),
                     });
                 };
+                if let Some(source) = source
+                    && let Some(previous) =
+                        outputs.iter().position(|(name, _)| name.text == alias.text)
+                {
+                    if let Some(earlier) = sources[previous] {
+                        outputs[previous].0 = earlier;
+                    }
+                    alias = source;
+                }
+                sources.push(source);
                 if outputs.iter().any(|(name, _)| name.text == alias.text) {
                     return Err(error(
                         alias.at,

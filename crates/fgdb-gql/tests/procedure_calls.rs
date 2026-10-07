@@ -476,14 +476,25 @@ fn a_property_read_of_a_yielded_output_implies_its_identity_match() {
     seen.borrow_mut().clear();
     run("CALL t.scores() YIELD vertex, score RETURN vertex, score");
     assert_eq!(*seen.borrow(), [Vec::<usize>::new()]);
+    // Their property reads stay row reads: the host is told of no vertex
+    // output, and an unaliased read is named by its text, as openCypher does.
     for text in [
-        "UNWIND [1, 2] AS x RETURN x.p",
         "CALL t.echo(1) YIELD a UNWIND [1] AS x RETURN x.p",
         "CALL t.scores() YIELD vertex AS n, score WITH n, score WITH n RETURN n.p",
     ] {
-        assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_err(),
-            "{text}"
+        seen.borrow_mut().clear();
+        let _ = prepare(text, &GqlParameters::new()).execute_governed_with_procedures(
+            wide(),
+            graph(&values),
+            |call, arguments, _| {
+                seen.borrow_mut().push(call.vertex_outputs().to_vec());
+                host(call, arguments)
+            },
+            || Ok(()),
         );
+        assert!(!seen.borrow().is_empty(), "{text}");
+        assert!(seen.borrow().iter().all(Vec::is_empty), "{text}");
     }
+    let unwound = PreparedGraphSetText::prepare("UNWIND [1, 2] AS x RETURN x.p", symbols).unwrap();
+    assert_eq!(unwound.columns(), ["x.p"]);
 }

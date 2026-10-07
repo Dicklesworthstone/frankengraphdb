@@ -172,7 +172,19 @@ impl PreparedGraphAggregateText {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            let item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
+            let mut item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
+            // A derived name that repeats an earlier name takes its source
+            // text (`count(a)`, `count(b)`); so does an earlier derived one.
+            if let Some(source) = item.source
+                && let Some(previous) = returned
+                    .iter_mut()
+                    .find(|previous: &&mut ReturnItem<'_>| previous.alias.text == item.alias.text)
+            {
+                if let Some(earlier) = previous.source {
+                    previous.alias = earlier;
+                }
+                item.alias = source;
+            }
             if returned
                 .iter()
                 .any(|previous: &ReturnItem<'_>| previous.alias.text == item.alias.text)
@@ -911,6 +923,9 @@ struct ReturnItem<'a> {
     function: Option<GraphAggregateFunction>,
     alias: Name<'a>,
     output: Option<ReadValueTemplate>,
+    /// The item's source text when its name was derived (no AS): its
+    /// openCypher name, used when a derived name would repeat another.
+    source: Option<Name<'a>>,
 }
 /// Shared first-use registry for explicit nonreturned aggregate calls. Its
 /// entries retain source offsets; aliases are assigned only after parsing.
@@ -1134,13 +1149,19 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
-        self.word("AS")?;
-        let alias = self.name()?;
+        let end = self.current.at;
+        let (alias, source) = if self.take_word("AS")? {
+            (self.name()?, None)
+        } else {
+            let source = self.source_name(at, end);
+            (source, Some(source))
+        };
         Ok(ReturnItem {
             expression: None,
             function: None,
             alias,
             output: Some(value),
+            source,
         })
     }
 
@@ -1187,21 +1208,21 @@ impl<'a> Parser<'a> {
                 .then_some(expression.property.unwrap_or(expression.variable));
             (Some(expression), None, default)
         };
-        let alias = if self.take_word("AS")? {
-            self.name()?
+        let end = self.current.at;
+        let (alias, source) = if self.take_word("AS")? {
+            (self.name()?, None)
         } else {
-            default_alias.ok_or_else(|| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected("AS alias for computed grouping output"),
-                )
-            })?
+            // GQL derives a property's or function's name; openCypher names
+            // anything else by its text, which also resolves collisions.
+            let source = self.source_name(at, end);
+            (default_alias.unwrap_or(source), Some(source))
         };
         Ok(ReturnItem {
             expression,
             function,
             alias,
             output: None,
+            source,
         })
     }
 

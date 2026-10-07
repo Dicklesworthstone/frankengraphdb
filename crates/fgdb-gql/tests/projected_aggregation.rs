@@ -317,7 +317,7 @@ fn input_schema_refusals_precede_execution_and_transcripts_bind_computation() {
     for projection in [
         vec![],
         vec![GraphSetProjection::new(
-            "bad name",
+            "bad\nname",
             GraphSetValue::Column(0),
         )],
         vec![GraphSetProjection::new(

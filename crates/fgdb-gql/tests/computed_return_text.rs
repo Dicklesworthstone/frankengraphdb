@@ -253,7 +253,6 @@ fn parameter_contract_and_catalog_cache_span_predicates_outputs_and_all_arms() {
 fn malformed_types_aliases_and_projection_depth_refuse_before_catalog_access() {
     for text in [
         "MATCH (n) RETURN n.p+ AS x",
-        "MATCH (n) RETURN n.p+1",
         "MATCH (n) RETURN TRUE+1 AS x",
         "MATCH (n) RETURN n.p+1 AS x,n.q+1 AS x",
         "MATCH (n) RETURN m.p+1 AS x",
@@ -273,6 +272,9 @@ fn malformed_types_aliases_and_projection_depth_refuse_before_catalog_access() {
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // An unaliased computed RETURN value is named by its source text.
+    let named = PreparedGraphSetText::prepare("MATCH (n) RETURN n.p+1, n.p * 2", symbols).unwrap();
+    assert_eq!(named.columns(), ["n.p+1", "n.p * 2"]);
     let text = format!(
         "{}MATCH (n) RETURN n.p+1 AS x{}",
         "(".repeat(MAX_GRAPH_SET_DEPTH - 2),

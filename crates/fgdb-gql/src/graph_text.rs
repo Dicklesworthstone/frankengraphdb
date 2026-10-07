@@ -231,6 +231,27 @@ struct Name<'a> {
     text: &'a str,
     at: usize,
 }
+
+/// Whether a RETURN column's name is the GQL-derived name of a property
+/// reference: the property name itself, at the property's own position.
+fn derived_property_alias(column: &Column<'_>) -> bool {
+    column.property.is_some_and(|property| {
+        property.at == column.alias.at && property.text == column.alias.text
+    })
+}
+
+/// The full source text of a property reference, from its variable through
+/// its property name (`a.title`): openCypher's name for an unaliased column.
+fn reference_text<'a>(statement: &'a str, variable: Name<'a>, property: Name<'a>) -> Name<'a> {
+    let end = property.at + property.text.len();
+    match statement.get(variable.at..end) {
+        Some(text) if variable.at < property.at => Name {
+            text,
+            at: variable.at,
+        },
+        _ => property,
+    }
+}
 #[derive(Clone, Copy)]
 enum TokenKind<'a> {
     Word(&'a str),
@@ -538,6 +559,12 @@ impl<'a> Parser<'a> {
     fn advance(&mut self) -> Result<(), GraphPatternTextError> {
         self.current = self.lexer.next()?;
         Ok(())
+    }
+    /// The statement text of `[at, end)` without trailing trivia: the
+    /// openCypher name of an unaliased RETURN item (`count(n)`, `a.title`).
+    fn source_name(&self, at: usize, end: usize) -> Name<'a> {
+        let text = self.lexer.text.get(at..end).unwrap_or("").trim_end();
+        Name { text, at }
     }
     fn is_word(&self, word: &str) -> bool {
         matches!(self.current.kind, TokenKind::Word(actual) if actual.eq_ignore_ascii_case(word))
@@ -1116,11 +1143,41 @@ impl<'a> Parser<'a> {
                     };
                     (expression, property, None)
                 };
-                let alias = if self.take_word("AS")? {
+                let mut alias = if self.take_word("AS")? {
                     self.name()?
                 } else {
-                    property.unwrap_or(expression)
+                    let derived = property.unwrap_or(expression);
+                    // openCypher compatibility: an unaliased property reference
+                    // is named by its property (GQL's derived name), unless
+                    // that repeats an earlier derived name; then every such
+                    // column is named by its full text (`a.title`, `b.title`).
+                    match self.syntax.columns.iter().position(|column| {
+                        column.alias.text == derived.text && derived_property_alias(column)
+                    }) {
+                        Some(earlier) if property.is_some() => {
+                            let earlier = &mut self.syntax.columns[earlier];
+                            earlier.alias =
+                                reference_text(self.lexer.text, earlier.variable, earlier.alias);
+                            reference_text(self.lexer.text, expression, derived)
+                        }
+                        _ => derived,
+                    }
                 };
+                if property.is_some()
+                    && derived_property_alias(&Column {
+                        variable,
+                        property,
+                        path,
+                        alias,
+                    })
+                    && self.syntax.columns.iter().any(|column| {
+                        column.alias.text == alias.text && !derived_property_alias(column)
+                    })
+                {
+                    // A derived name that repeats an explicit alias takes its
+                    // full text instead of refusing.
+                    alias = reference_text(self.lexer.text, expression, alias);
+                }
                 if self
                     .syntax
                     .columns
@@ -2337,8 +2394,24 @@ mod tests {
             &["value"]
         );
         assert_eq!(query("MATCH (a)-[:R]->(b) RETURN b.n").columns(), &["n"]);
+        // A derived name that repeats another derived name takes its source
+        // text, as openCypher names it; an explicit alias is never renamed.
         assert_eq!(
-            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n,b.n", symbols)
+            query("MATCH (a)-[:R]->(b) RETURN a.n,b.n").columns(),
+            &["a.n", "b.n"]
+        );
+        assert_eq!(
+            query("MATCH (a)-[:R]->(b) RETURN a.n AS n, b.n").columns(),
+            &["n", "b.n"]
+        );
+        assert_eq!(
+            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n AS x, b.n AS x", symbols)
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)
+        );
+        assert_eq!(
+            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n, a.n", symbols)
                 .unwrap_err()
                 .kind,
             GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)
