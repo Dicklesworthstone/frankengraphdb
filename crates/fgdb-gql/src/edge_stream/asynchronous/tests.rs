@@ -462,3 +462,109 @@ fn asynchronous_compilation_refuses_nested_reads_and_non_streamable_output() {
         assert!(AsyncEdgeScanPlan::compile(prepared.plan()).is_err(), "{text}");
     }
 }
+
+// A synchronous reader of the same immutable fixtures. It is an independent
+// source implementation, not an async cursor polled inside synchronous code.
+struct SyncSource { input: Inputs, at: usize }
+impl EdgeScanSource for SyncSource {
+    type Error = &'static str;
+    fn snapshot_seq(&self) -> CommitSeq { CommitSeq(11) }
+    fn next_edge<C>(&mut self, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>)
+        -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        let eid = self.input.get(self.at).map(|(eid, _)| *eid);
+        self.at += usize::from(eid.is_some());
+        Ok(eid)
+    }
+    fn edge<'a, C>(&'a self, eid: EId, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>)
+        -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        Ok(self.input.iter().find(|(id, _)| *id == eid).and_then(|(_, image)| image.as_ref())
+            .map(|image| EdgeScanRow { source: image.source, target: image.target,
+                relation: image.relation, properties: &image.properties }))
+    }
+    fn vertex<'a, C>(&'a self, vid: VId, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>)
+        -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        Ok(self.input.iter().filter_map(|(_, image)| image.as_ref())
+            .flat_map(|image| image.vertices.iter()).find(|vertex| vertex.id == vid)
+            .map(|vertex| VertexScanRow { labels: &vertex.labels, properties: &vertex.properties }))
+    }
+}
+
+#[test]
+fn positional_endpoint_comparisons_execute_in_both_drivers_and_reject_foreign_slots() {
+    use crate::algebra::{BindingSlot, IntegerComparison};
+    for direction in [GlaDirection::Forward, GlaDirection::Reverse, GlaDirection::Undirected] {
+        let text = query(direction, false, 0, false, 0, 100);
+        let prepared = PreparedGraphText::prepare(&text, symbols).unwrap()
+            .bind_parameters(&GqlParameters::new()).unwrap();
+        let mut ops = prepared.plan().operators().to_vec();
+        let at = ops.iter().position(|op| matches!(op, GlaOperator::ProjectValues { .. })).unwrap();
+        // Exercise this IR directly, regardless of whether a text compiler
+        // elects to represent the same predicate as SelectBoolean today.
+        ops.insert(at, GlaOperator::CompareProperties {
+            left: BindingSlot(0), left_key: P, right: BindingSlot(1), right_key: P,
+            comparison: IntegerComparison::Less,
+        });
+        let logical = GlaPlan::<GraphValueRow>::from_operators(ops.clone());
+        let mut asynchronous = AsyncEdgeScanCursor::new(Source::new(inputs()),
+            AsyncEdgeScanPlan::compile(&logical).unwrap(), policy(), ok);
+        let mut rows = Vec::new();
+        while let Some(row) = run(asynchronous.next()) { rows.push(row.unwrap().values().to_vec()); }
+        let expected = oracle(&inputs(), direction, false, 2, 0, 100);
+        assert_eq!(rows, expected);
+        let synchronous = EdgeScanCursor::new(SyncSource { input: inputs(), at: 0 },
+            EdgeScanPlan::compile(&logical).unwrap(), policy(), ok);
+        let rows: Vec<_> = synchronous.map(|row| row.unwrap().values().to_vec()).collect();
+        assert_eq!(rows, expected);
+        for side in 0..2 {
+            let mut invalid = ops.clone();
+            let GlaOperator::CompareProperties { left, right, .. } = &mut invalid[at] else { unreachable!() };
+            if side == 0 { *left = BindingSlot(2); } else { *right = BindingSlot(2); }
+            let logical = GlaPlan::<GraphValueRow>::from_operators(invalid);
+            assert_eq!(EdgeScanPlan::compile(&logical).unwrap_err().operator, at);
+            assert_eq!(AsyncEdgeScanPlan::compile(&logical).unwrap_err().operator, at);
+        }
+    }
+}
+
+#[test]
+fn endpoint_nulls_and_property_domains_do_not_resolve_through_captured_edge_slots() {
+    use crate::algebra::{BindingSlot, IntegerComparison};
+    let text = query(GlaDirection::Forward, false, 0, false, 0, 100);
+    let prepared = PreparedGraphText::prepare(&text, symbols).unwrap()
+        .bind_parameters(&GqlParameters::new()).unwrap();
+    let mut ops = prepared.plan().operators().to_vec();
+    let at = ops.iter().position(|op| matches!(op, GlaOperator::ProjectValues { .. })).unwrap();
+    ops.insert(at, GlaOperator::CompareProperties {
+        left: BindingSlot(0), left_key: P, right: BindingSlot(1), right_key: P,
+        comparison: IntegerComparison::Less,
+    });
+    let logical = GlaPlan::<GraphValueRow>::from_operators(ops);
+    for missing in [true, false] {
+        let mut input = vec![inputs()[1].clone()];
+        let image = Arc::make_mut(input[0].1.as_mut().unwrap());
+        let source_id = image.source;
+        let vertex = image.vertices.iter_mut().find(|vertex| vertex.id == source_id).unwrap();
+        if missing { vertex.properties.clear(); }
+        else { vertex.properties[0].1 = CanonicalScalar::Null; }
+        // The captured edge value would PASS (< target.p == 1). A vertex
+        // NULL/missing property must never be read from capture ordinal zero.
+        image.properties[0].1 = CanonicalScalar::Int(-10);
+        let counts;
+        {
+            let source = Source::new(input.clone());
+            counts = source.counts.clone();
+            let mut cursor = AsyncEdgeScanCursor::new(source,
+                AsyncEdgeScanPlan::compile(&logical).unwrap(), policy(), ok);
+            assert!(run(cursor.next()).is_none());
+            assert_eq!(cursor.row_stats().snapshot_records, 1);
+            assert_eq!(cursor.row_stats().result_rows, 0);
+        }
+        assert_eq!(counts.reservations.load(Ordering::SeqCst), 0);
+        let mut cursor = EdgeScanCursor::new(SyncSource { input, at: 0 },
+            EdgeScanPlan::compile(&logical).unwrap(), policy(), ok);
+        assert!(cursor.next().is_none());
+    }
+}

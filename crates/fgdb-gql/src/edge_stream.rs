@@ -100,6 +100,8 @@ impl EdgeScanPlan {
                 GlaOperator::Select { slot, .. } if slot.ordinal() < 2 => {}
                 GlaOperator::VertexIdentity { left, right, equal: _ }
                     if left.ordinal() < 2 && right.ordinal() < 2 => {}
+                GlaOperator::CompareProperties { left, right, .. }
+                    if left.ordinal() < 2 && right.ordinal() < 2 => {}
                 GlaOperator::CapturePath {
                     capture,
                     start,
@@ -777,7 +779,7 @@ impl EdgeScanPlan {
                         vec![(row.eid, row.ids[1])].into_boxed_slice(),
                     )));
                 }
-                GlaOperator::SelectBoolean { .. } => {
+                GlaOperator::SelectBoolean { .. } | GlaOperator::CompareProperties { .. } => {
                     let meter = std::cell::RefCell::new(&mut *control);
                     if !compare_element_properties(
                         op,
