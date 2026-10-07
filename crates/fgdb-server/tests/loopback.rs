@@ -476,6 +476,108 @@ fn mutation_returning_is_atomic_and_capability_masked_over_fgp() {
     });
 }
 
+#[test]
+fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "merge-returning").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        let statement = "MERGE (p:Person {name:'Ann'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = p.age + 1 SET p.age = p.age + 10 RETURN p, p.age AS age";
+        let first = owner
+            .execute(cx, ExecuteMode::Write, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(first.rows.len(), 1);
+        let vertex = first.rows[0][0].clone();
+        assert!(matches!(vertex, WireValue::Vertex(_)));
+        assert_eq!(first.rows[0], [vertex.clone(), WireValue::Int(11)]);
+        assert!(matches!(
+            first.outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
+        ));
+        let second = owner
+            .execute(cx, ExecuteMode::Write, statement, vec![])
+            .await
+            .unwrap();
+        assert_eq!(second.rows, [vec![vertex.clone(), WireValue::Int(22)]]);
+        assert!(matches!(
+            second.outcome,
+            Outcome::WriteCommitted { seq: 2, .. }
+        ));
+        let matched = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MERGE (p:Person {name:'Ann'}) RETURN p, p.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched.rows, [vec![vertex, WireValue::Int(22)]]);
+        assert!(matches!(
+            matched.outcome,
+            Outcome::ReadClosed { seq: 2, .. }
+        ));
+        let refused = owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MERGE (p:Person {name:'Lost'}) ON CREATE SET p.age = 99 RETURN 1 / 0",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::Statement);
+
+        let scoped = Grant {
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::ReadWrite)
+        };
+        let mut scoped = Client::connect(cx, addr, token(&scoped)).await.unwrap();
+        scoped.select(cx, "social").await.unwrap();
+        let answer = scoped
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MERGE (p:Person {name:'Ann'}) RETURN p.name AS name, p.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [vec![text("Ann"), WireValue::Null]]);
+        let refused = scoped
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MERGE (p:Person {name:'Ann'}) SET p.age = 99 RETURN p.name",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(refused), ErrorCode::PermissionDenied);
+        scoped.close(cx).await.unwrap();
+        let answer = owner
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (p:Person) RETURN p.name AS name, p.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [vec![text("Ann"), WireValue::Int(22)]]);
+        assert!(matches!(answer.outcome, Outcome::Rows { seq: 2 }));
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
 /// One HTTP/1.1 exchange on a fresh connection: the status and the body.
 async fn http(
     addr: SocketAddr,
@@ -648,6 +750,30 @@ fn http_adapter_serves_the_same_authorized_statements() {
         assert_eq!(
             body,
             r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"31"}]],"seq":2}"#
+        );
+
+        let (status, body) = http(
+            addr, "POST", "/v1/databases/social/write", host, Some(&rw),
+            r#"{"statement":"MERGE (p:Person {name:'Ann'}) ON MATCH SET p.age = p.age + 1 RETURN p.name AS name, p.age AS age"}"#,
+        ).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","age"],"rows":[[{"type":"text","value":"Ann"},{"type":"int","value":"32"}]],"seq":3,"statements":1,"committed":true}"#
+        );
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            host,
+            Some(&rw),
+            r#"{"statement":"MERGE (p:Person {name:'Ann'}) RETURN p.age AS age"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"32"}]],"seq":3,"statements":1,"committed":false}"#
         );
 
         // Typed refusals map onto statuses; none reveals a hidden fact.

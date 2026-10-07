@@ -82,11 +82,6 @@ impl WriteTxn {
         policy: fgdb_gql::GraphVertexUpsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> UpsertQueryResult<A> {
-        use fgdb_gql::algebra::GraphValue;
-        use fgdb_gql::{
-            GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-            GqlQueryError, GraphVertexReturnBinding, GraphVertexUpsertError,
-        };
         let workspace = MutationProgramWorkspace::new(self);
         let (stats, outcome) = workspace.txn.execute_graph_vertex_upsert_governed(
             database,
@@ -96,62 +91,22 @@ impl WriteTxn {
             allocate,
         )?;
         let rows = cx.with_restriction(|| {
-            // Continue the statement's evaluator allowance; never refresh it.
-            let mut evaluator = stats.merge.evaluator;
-            let limits = policy.merge.query.evaluator;
-            let mut row = Vec::with_capacity(query.bindings().len());
-            {
-                let mut control = |event| {
-                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                    let work = u128::from(evaluator.work_units) + 1;
-                    let scratch = u128::from(evaluator.scratch_entries)
-                        + u128::from(event == GlaExecutionEvent::ScratchEntry);
-                    for (observed, limit, dimension) in [
-                        (work, limits.max_work_units, GlaLimitDimension::WorkUnits),
-                        (
-                            scratch,
-                            limits.max_scratch_entries,
-                            GlaLimitDimension::ScratchEntries,
-                        ),
-                    ] {
-                        if observed > u128::from(limit) {
-                            return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                                dimension,
-                                limit,
-                                observed,
-                            }));
-                        }
-                    }
-                    evaluator = GlaExecutionStats {
-                        work_units: work as u64,
-                        scratch_entries: scratch as u64,
-                    };
-                    Ok(())
-                };
-                for binding in query.bindings() {
-                    row.push(match binding {
-                        GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
-                        GraphVertexReturnBinding::Property(key) => {
-                            GraphValue::Scalar(vertex_upsert_property(
-                                &*workspace.txn,
-                                &*database,
-                                outcome.vertex(),
-                                *key,
-                                &mut control,
-                            )?)
-                        }
-                    });
-                }
-            }
-            query
-                .project_governed(
-                    row,
-                    stats.merge.match_selection,
-                    evaluator,
-                    policy.merge.query,
-                    || cx.checkpoint(),
-                )
-                .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))
+            vertex_upsert_returning(
+                query,
+                stats,
+                outcome,
+                policy,
+                || cx.checkpoint(),
+                |key, control| {
+                    vertex_upsert_property(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        key,
+                        control,
+                    )
+                },
+            )
         })?;
         workspace.accept();
         Ok((stats, outcome, rows))
@@ -178,6 +133,78 @@ impl WriteTxn {
 
 type VertexUpsertActionResult<T, E, A, C> =
     Result<T, fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexUpsertError<E, A>, C>>;
+
+// Both native and authorized adapters supply point reads of the same selected
+// vertex. Continue the upsert's evaluator allowance through RETURN, never a new
+// MATCH or a fresh projection budget. Hidden-property masking belongs to the
+// authorized property callback, before its storage read.
+fn vertex_upsert_returning<E, A, C>(
+    query: &fgdb_gql::PreparedGraphVertexUpsertQuery,
+    stats: fgdb_gql::GraphVertexUpsertStats,
+    outcome: fgdb_gql::GraphVertexMergeOutcome,
+    policy: fgdb_gql::GraphVertexUpsertPolicy,
+    mut checkpoint: impl FnMut() -> Result<(), C>,
+    mut property: impl FnMut(
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
+{
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
+        GraphVertexReturnBinding, GraphVertexUpsertError,
+    };
+    let mut evaluator = stats.merge.evaluator;
+    let limits = policy.merge.query.evaluator;
+    let mut row = Vec::with_capacity(query.bindings().len());
+    {
+        let mut control = |event| {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            let work = u128::from(evaluator.work_units) + 1;
+            let scratch = u128::from(evaluator.scratch_entries)
+                + u128::from(event == GlaExecutionEvent::ScratchEntry);
+            for (observed, limit, dimension) in [
+                (work, limits.max_work_units, GlaLimitDimension::WorkUnits),
+                (
+                    scratch,
+                    limits.max_scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                if observed > u128::from(limit) {
+                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension,
+                        limit,
+                        observed,
+                    }));
+                }
+            }
+            evaluator = GlaExecutionStats {
+                work_units: work as u64,
+                scratch_entries: scratch as u64,
+            };
+            Ok(())
+        };
+        for binding in query.bindings() {
+            row.push(match binding {
+                GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
+                GraphVertexReturnBinding::Property(key) => {
+                    GraphValue::Scalar(property(*key, &mut control)?)
+                }
+            });
+        }
+    }
+    query
+        .project_governed(
+            row,
+            stats.merge.match_selection,
+            evaluator,
+            policy.merge.query,
+            checkpoint,
+        )
+        .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))
+}
 
 // Both adapters supply authority-appropriate reads and native staging. This
 // collector owns only scalar evaluation and clause boundaries, never a graph.

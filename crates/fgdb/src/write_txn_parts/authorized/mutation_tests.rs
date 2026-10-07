@@ -24,6 +24,9 @@ const NOW: u64 = 100;
 #[path = "mutation_query_tests.rs"]
 mod projected;
 
+#[path = "upsert_query_tests.rs"]
+mod upsert_projected;
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0x50; 32], NS, [0x52; 32])
 }

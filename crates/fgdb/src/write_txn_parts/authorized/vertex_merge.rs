@@ -2,22 +2,145 @@
 //! Reuse the native reducer, point projection and checked scalar-action collector.
 
 use crate::write_txn::authorized::{
-    Database, Execution, Vfs, WriteBatch, WriteTxn, WriteTxnError, selection, stage,
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteBatch, WriteTxn,
+    WriteTxnError, selection, stage,
 };
-use crate::write_txn::{collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property};
+use crate::write_txn::{
+    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property, vertex_upsert_returning,
+};
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
     GqlQueryError, GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
     GraphVertexMergeStats, GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
-    PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
+    PreparedGraphVertexMerge, PreparedGraphVertexUpsert, PreparedGraphVertexUpsertQuery,
 };
-use fgdb_types::QueryCx;
+use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 type MergeFault = GqlQueryError<GraphVertexMergeError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type UpsertFault =
     GqlQueryError<GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+
+impl<V: Vfs + Clone> Database<V> {
+    /// MERGE, its ON MATCH/ON CREATE and trailing SET clauses, and RETURN
+    /// under one ReadWrite permit and one native transaction completion.
+    ///
+    /// The authorized reducer chooses one visible vertex exactly once. Every
+    /// original write passes before/after image authorization; RETURN then
+    /// reads the chosen vertex from that same private overlay, after all clauses.
+    /// Hidden properties yield NULL before lookup, source admission or witness
+    /// creation. No unmasked read or rematch is used to construct the result.
+    ///
+    /// The native evaluator allowance spans actions and projection. Only final
+    /// projected rows consume the signed result allowance, so LIMIT 0 still
+    /// commits effects. Any expression, quota, authority or cancellation failure
+    /// discards all private effects. Native committed/unknown/recovery outcomes
+    /// remain unchanged; no fallible query or permission check follows completion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_vertex_upsert_query_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphVertexUpsertQuery,
+        policy: GraphVertexUpsertPolicy,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<
+        (
+            GraphVertexUpsertStats,
+            GraphVertexMergeOutcome,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        UpsertFault,
+    > {
+        let source = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+        if authority.namespace() != self.keys.namespace {
+            return Err(source(WriteTxnError::Authorization(Error::WrongAuthority)));
+        }
+        let now = clock();
+        let verified = authority
+            .verify_at(token, branch, now)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        let permit = verified
+            .begin_write_at(branch, now)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+        if !verified.predicates().rights().can_read() {
+            return Err(source(WriteTxnError::Authorization(
+                Error::PermissionDenied,
+            )));
+        }
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| source(WriteTxnError::Write(error)))?,
+                ));
+                let (stats, outcome) = upsert(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.upsert(),
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    false,
+                )?;
+                let result = query_cx.with_restriction(|| {
+                    let controls = RefCell::new(&mut execution);
+                    vertex_upsert_returning(
+                        query,
+                        stats,
+                        outcome,
+                        policy,
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                        |key, control| {
+                            if !verified.predicates().allows_property(key) {
+                                control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
+                                return Ok(fgdb_types::CanonicalScalar::Null);
+                            }
+                            vertex_upsert_property(
+                                workspace.transaction(),
+                                self,
+                                outcome.vertex(),
+                                key,
+                                control,
+                            )
+                        },
+                    )
+                })?;
+                let rows = u64::try_from(result.value.len())
+                    .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(source)?;
+                Ok((stats, outcome, result, completion))
+            })
+            .await
+    }
+}
 
 // Both public program entry points verify ReadWrite rights before opening the
 // private workspace. No internal proposal, match or permit escapes these steps.

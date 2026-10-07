@@ -10,8 +10,10 @@ use fgdb::{
 };
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlQueryError, GraphMutationPolicy, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-    PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    GqlQueryError, GraphMutationPolicy, GraphVertexMergePolicy, GraphVertexUpsertPolicy,
+    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphMutationQuery,
+    PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
+    PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_protocol::body::{ErrorCode, Execute, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
@@ -200,6 +202,7 @@ const MAX_CREATED: u64 = 100_000;
 enum Returning {
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
+    Merge(Box<PreparedGraphVertexUpsertQuery>),
 }
 
 impl Returning {
@@ -238,6 +241,19 @@ impl Returning {
                 .map(|query| Some(Self::Mutation(Box::new(query))))
                 .map_err(|e| refusal(&e));
         }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                |kind, name| db.symbols.resolve(kind, name),
+            )
+            .map_err(|e| refusal(&e))?;
+            return template
+                .bind_parameters(parameters)
+                .map(|query| Some(Self::Merge(Box::new(query))))
+                .map_err(|e| refusal(&e));
+        }
         Ok(None)
     }
 
@@ -245,6 +261,7 @@ impl Returning {
         match self {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
+            Self::Merge(query) => query.columns(),
         }
     }
 }
@@ -295,6 +312,21 @@ async fn write_returning(
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
+            .map_err(returning_refusal),
+        Returning::Merge(prepared) => guard
+            .execute_graph_vertex_upsert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &db.authority,
+                token,
+                TRUNK,
+                prepared,
+                GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(db.query_policy), 1_000),
+                unix_millis,
+            )
+            .await
+            .map(|(_, _, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
     };
     drop(guard);
