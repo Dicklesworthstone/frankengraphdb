@@ -7,8 +7,9 @@
 //!
 //! The admitted source is a nonempty list of maps (null rows and missing fields
 //! yield null). Referenced fields must be scalar and have one exact non-null
-//! kind per column; no numeric coercion is introduced. Nested field access,
-//! alias rebinding, multiple statements and empty batches are not admitted.
+//! kind per column; no numeric coercion is introduced. Static nested map fields
+//! and signed list indexes select scalar leaves without copying their containers.
+//! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
 
 mod controlled;
 pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
@@ -26,9 +27,15 @@ use fgdb_types::CanonicalScalar;
 pub const MAX_UNWIND_BOUND_PARAMETER_BYTES: usize =
     crate::parameters::MAX_GQL_PARAMETER_TRANSCRIPT_BYTES;
 
+/// Definition bound on a row-field path, including its first map key. This is
+/// independent of the caller's existing list/map value-depth admission limit.
+pub const MAX_UNWIND_FIELD_STEPS: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphUnwindRowError {
     ExpectedMap,
+    ExpectedMapField,
+    ExpectedListField,
     ExpectedScalarField,
     IncompatibleFieldTypes,
 }
@@ -135,9 +142,15 @@ impl<
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UnwindFieldAccess {
+    Key(String),
+    Index(i64),
+}
+
 #[derive(Clone)]
 pub(crate) struct UnwindField {
-    pub(crate) key: String,
+    pub(crate) path: Box<[UnwindFieldAccess]>,
     pub(crate) parameter: String,
     pub(crate) offset: usize,
 }
@@ -194,7 +207,10 @@ impl GraphUnwindWriteText {
     /// all precede catalog resolution. Every row binds before a program escapes.
     ///
     /// Null does not fix a column's kind: a later non-null value does. An absent
-    /// map key remains null. A list/map/identity used as a scalar field refuses.
+    /// map key or out-of-range signed list index remains null, including through
+    /// later selectors. Negative indexes count from the end. A non-null value
+    /// of the wrong container kind or a non-scalar final leaf refuses before
+    /// catalog resolution. Containers and unselected siblings are never cloned.
     /// Global parameters retain their exact original types. The cap is clamped
     /// to the ordinary batch executor's 65,536-statement hard ceiling.
     ///
@@ -218,27 +234,62 @@ impl GraphUnwindWriteText {
     }
 }
 
-fn scalar_field<'a>(
+fn scalar_field<'a, C>(
     row: &'a GraphValue,
     field: &UnwindField,
     row_index: usize,
-) -> Result<Option<&'a CanonicalScalar>, GraphUnwindWriteError> {
-    let Some((keys, values)) = row.as_map() else {
-        // Row shape was admitted by the caller; null.field is null.
-        return Ok(None);
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<Option<&'a CanonicalScalar>, GraphUnwindBindError<C>> {
+    let refusal = |kind| GraphUnwindWriteError::Row {
+        row: row_index,
+        offset: field.offset,
+        kind,
     };
-    let Ok(index) = keys.binary_search_by(|key| key.as_ref().cmp(field.key.as_str())) else {
-        return Ok(None);
-    };
-    match &values[index] {
+    let mut current = row;
+    for access in field.path.iter() {
+        // Both the admission pass and expansion pass debit the SAME host
+        // allowance before each bounded lookup. No container is materialized.
+        control(GraphUnwindBindEvent::Work(1)).map_err(GraphUnwindBindError::Interrupted)?;
+        if current.is_null() {
+            return Ok(None);
+        }
+        current = match access {
+            UnwindFieldAccess::Key(name) => {
+                let Some((keys, values)) = current.as_map() else {
+                    return Err(refusal(GraphUnwindRowError::ExpectedMapField).into());
+                };
+                let Ok(index) = keys.binary_search_by(|key| key.as_ref().cmp(name.as_str())) else {
+                    return Ok(None);
+                };
+                &values[index]
+            }
+            UnwindFieldAccess::Index(index) => {
+                let GraphValue::List(values) = current else {
+                    return Err(refusal(GraphUnwindRowError::ExpectedListField).into());
+                };
+                // unsigned_abs handles i64::MIN; checked conversion/subtraction
+                // also works on narrower hosts and never wraps an invalid index.
+                let position = if *index < 0 {
+                    usize::try_from(index.unsigned_abs()).ok()
+                        .and_then(|distance| values.len().checked_sub(distance))
+                } else {
+                    usize::try_from(*index).ok()
+                };
+                let Some(value) = position.and_then(|position| values.get(position)) else {
+                    return Ok(None);
+                };
+                value
+            }
+        };
+    }
+    match current {
         GraphValue::Scalar(value) => Ok(Some(value)),
-        _ => Err(GraphUnwindWriteError::Row {
-            row: row_index,
-            offset: field.offset,
-            kind: GraphUnwindRowError::ExpectedScalarField,
-        }),
+        _ => Err(refusal(GraphUnwindRowError::ExpectedScalarField).into()),
     }
 }
+
+#[cfg(test)]
+mod nested_tests;
 
 #[cfg(test)]
 mod tests {
@@ -451,7 +502,10 @@ mod tests {
         let keys: Vec<&str> = parsed
             .fields
             .iter()
-            .map(|field| field.key.as_str())
+            .map(|field| match &field.path[0] {
+                UnwindFieldAccess::Key(key) => key.as_str(),
+                UnwindFieldAccess::Index(_) => panic!("field starts with a map key"),
+            })
             .collect();
         assert_eq!(keys, ["id", "to"]);
         assert!(!parsed.lowered.contains("row."));
@@ -483,7 +537,7 @@ mod tests {
             "UNWIND $rows AS row MERGE (row:Entity {id:row.id})",
             "UNWIND $rows AS row MATCH (row) SET row.name='x'",
             "UNWIND $rows AS row MERGE (n:Entity {id:row})",
-            "UNWIND $rows AS row MERGE (n:Entity {id:row.id.part})",
+            "UNWIND $rows AS row MERGE (n:Entity {id:row.id[$index]})",
         ] {
             assert!(matches!(
                 GraphUnwindWriteText::parse(query),

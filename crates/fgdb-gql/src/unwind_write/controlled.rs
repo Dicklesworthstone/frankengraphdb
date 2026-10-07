@@ -94,7 +94,8 @@ impl GraphUnwindWriteText {
     /// at record boundaries and final acceptance. No row refreshes an allowance.
     ///
     /// Parsing this object's original text and constructing caller arguments
-    /// are outside this method. A bounded field lookup, scalar construction,
+    /// are outside this method. Nested paths are checked before each selector.
+    /// A bounded field lookup, scalar construction,
     /// native parser operation or host callback is not internally preemptible.
     /// These logical ingress prices are not allocator-byte bounds or a claim
     /// that compilation has become a streaming operation.
@@ -148,8 +149,7 @@ impl GraphUnwindWriteText {
                 .into());
             }
             for (field, kind) in self.fields.iter().zip(kinds.iter_mut()) {
-                work(&mut control, 1)?;
-                if let Some(value) = scalar_field(row, field, row_index)? {
+                if let Some(value) = scalar_field(row, field, row_index, &mut control)? {
                     let actual = CanonicalScalarKind::of(value);
                     if actual == CanonicalScalarKind::Null {
                         continue;
@@ -193,8 +193,7 @@ impl GraphUnwindWriteText {
             work(&mut control, globals.canonical_byte_len() as u64 + 1)?;
             let mut values = globals.clone();
             for field in self.fields.iter() {
-                work(&mut control, 1)?;
-                let value = scalar_field(row, field, row_index)?;
+                let value = scalar_field(row, field, row_index, &mut control)?;
                 reserve_scalar(value, &mut control)?;
                 values = values
                     .with_scalar(

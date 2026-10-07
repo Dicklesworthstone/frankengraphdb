@@ -4,7 +4,10 @@
 //! Padding instead of removing bytes preserves every native diagnostic offset.
 
 use super::{Lexer, Token, TokenKind, next_script_token, scan};
-use crate::unwind_write::{GraphUnwindWriteError, GraphUnwindWriteText, UnwindField};
+use crate::unwind_write::{
+    GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS,
+    UnwindField, UnwindFieldAccess,
+};
 use crate::{GraphPatternTextErrorKind, GraphWriteScriptError, GraphWriteScriptErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,6 +40,54 @@ fn blank(bytes: &mut [u8]) {
             *byte = b' ';
         }
     }
+}
+
+// Consume a complete, static input path using the SAME native tokens. The
+// returned end is an original UTF-8 byte boundary, including all selectors.
+// Dynamic keys/indexes, slices and arithmetic indexes cannot be partly erased.
+fn field_path(
+    tokens: &[(Token<'_>, usize)],
+    start: usize,
+) -> Result<(Vec<UnwindFieldAccess>, usize, usize), GraphUnwindWriteError> {
+    let mut path = Vec::new();
+    let mut next = start + 1;
+    let mut end = tokens[start].1;
+    while is_punct(tokens.get(next), b'.') || is_punct(tokens.get(next), b'[') {
+        let offset = tokens[next].0.at;
+        if path.len() == MAX_UNWIND_FIELD_STEPS {
+            return Err(syntax(offset, "at most 64 row-field selectors"));
+        }
+        if is_punct(tokens.get(next), b'.') {
+            let Some((Token { kind: TokenKind::Word(name), .. }, last)) = tokens.get(next + 1) else {
+                return Err(syntax(offset, "a map field name after '.'"));
+            };
+            path.push(UnwindFieldAccess::Key((*name).to_owned()));
+            end = *last;
+            next += 2;
+        } else {
+            next += 1;
+            let negative = is_punct(tokens.get(next), b'-');
+            if negative || is_punct(tokens.get(next), b'+') {
+                next += 1;
+            }
+            let Some((Token { kind: TokenKind::Digits(digits), .. }, _)) = tokens.get(next) else {
+                return Err(syntax(offset, "a constant signed integer list index"));
+            };
+            let magnitude = digits.parse::<u64>()
+                .map_err(|_| syntax(offset, "a list index in the Int64 range"))?;
+            let signed = if negative { -i128::from(magnitude) } else { i128::from(magnitude) };
+            let index = i64::try_from(signed)
+                .map_err(|_| syntax(offset, "a list index in the Int64 range"))?;
+            next += 1;
+            if !is_punct(tokens.get(next), b']') {
+                return Err(syntax(offset, "']' after a constant list index"));
+            }
+            end = tokens[next].1;
+            next += 1;
+            path.push(UnwindFieldAccess::Index(index));
+        }
+    }
+    Ok((path, next, end))
 }
 
 fn fresh_parameter(reserved: &mut BTreeSet<String>, cursor: &mut usize) -> Option<String> {
@@ -204,16 +255,8 @@ impl GraphUnwindWriteText {
                     "scalar row.field access without alias rebinding",
                 ));
             }
-            let Some((key_token, end)) = tokens.get(index + 2) else {
-                return Err(syntax(current.at, "a row field name"));
-            };
-            let TokenKind::Word(key) = key_token.kind else {
-                return Err(syntax(key_token.at, "a row field name"));
-            };
-            if is_punct(tokens.get(index + 3), b'.') || is_punct(tokens.get(index + 3), b'[') {
-                return Err(syntax(current.at, "a scalar row field, not nested access"));
-            }
-            let field = if let Some(existing) = field_index.get(key) {
+            let (path, next, end) = field_path(&tokens, index)?;
+            let field = if let Some(existing) = field_index.get(&path) {
                 *existing
             } else {
                 if external_parameters.len() + fields.len() + 1
@@ -225,21 +268,21 @@ impl GraphUnwindWriteText {
                     .ok_or_else(|| syntax(current.at, "an available bounded parameter name"))?;
                 let field = fields.len();
                 fields.push(UnwindField {
-                    key: key.to_owned(),
+                    path: path.clone().into_boxed_slice(),
                     parameter,
                     offset: current.at,
                 });
-                field_index.insert(key.to_owned(), field);
+                field_index.insert(path, field);
                 field
             };
             let start = current.at;
-            if *end - start < 3 {
+            if end - start < 3 {
                 return Err(syntax(start, "a complete row.field expression"));
             }
-            blank(&mut lowered[start..*end]);
+            blank(&mut lowered[start..end]);
             lowered[start] = b'$';
             lowered[start + 1..start + 3].copy_from_slice(fields[field].parameter.as_bytes());
-            index += 3;
+            index = next;
         }
         let lowered = String::from_utf8(lowered).expect("whole tokens replaced with ASCII padding");
         Ok(Some(Self {
