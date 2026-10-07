@@ -89,6 +89,13 @@ pub enum WriteTxnError {
     /// diagnostics can contain protected identities or CAS values and do not
     /// escape this boundary. Never used for an admitted commit's outcome.
     AuthorizedMutationRefused,
+    /// An authorized write named a client-chosen identity for a creation or
+    /// ensure intent. Authorized creations take engine-allocated identities
+    /// only (fgdb-hxgm1, owner ruling 2026-10-07): a chosen identity would let
+    /// the outcome reveal whether a record hidden from the capability occupies
+    /// it. Refused before any observation; create through the authorized
+    /// insertion surfaces, which allocate.
+    AuthorizedClientIdentity,
     NoPreparedWrite,
     Finished,
     /// The supplied database is not the opened handle that began this txn.
@@ -159,6 +166,9 @@ impl core::fmt::Display for WriteTxnError {
                 write!(formatter, "write authorization refused: {source}")
             }
             Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
+            Self::AuthorizedClientIdentity => formatter.write_str(
+                "authorized creation takes an engine-allocated identity, not a chosen one",
+            ),
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
             Self::WrongDatabase => {
@@ -231,6 +241,7 @@ impl core::error::Error for WriteTxnError {
             Self::Gql(source) => Some(source),
             Self::Write(source) => Some(source),
             Self::AuthorizedMutationRefused
+            | Self::AuthorizedClientIdentity
             | Self::NoPreparedWrite
             | Self::Finished
             | Self::WrongDatabase

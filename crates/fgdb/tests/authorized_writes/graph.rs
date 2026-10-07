@@ -9,26 +9,37 @@ fn edge_delete_grant() -> Grant {
     }
 }
 
+/// The trusted host seeds three visible vertices and edges 10 (1->2, P=1),
+/// 11 (1->1) and 12 (2->3): authorized batches address existing identities
+/// only (fgdb-hxgm1).
+async fn seed_triangle<V: asupersync::fs::Vfs + Clone>(
+    db: &mut Database<V>,
+    cx: &fgdb_types::CommitCx,
+) {
+    let mut seed = WriteBatch::new(R);
+    for vid in [VId(1), VId(2), VId(3)] {
+        seed.create_vertex(vid, vec![L], vec![]);
+    }
+    seed.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(1))]);
+    seed.add_edge(EId(11), VId(1), VId(1), vec![]);
+    seed.add_edge(EId(12), VId(2), VId(3), vec![]);
+    db.write(cx, seed).await.unwrap();
+}
+
 #[test]
-fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
+fn mixed_graph_batch_updates_and_deletes_edges_then_reopens() {
     under_lab(0xa911, |contexts| async move {
         let cx = contexts.commit();
         let txn = contexts.txn();
         let path = scratch("graph-reopen");
         let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        seed_triangle(&mut db, &cx).await;
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&edge_delete_grant(), NOW).unwrap();
         let baseline = txn.outstanding_obligations();
         let frontier = db.frontier().unwrap();
         let mut batch = WriteBatch::new(R);
-        for vid in [VId(1), VId(2), VId(3)] {
-            batch.create_vertex(vid, vec![L], vec![]);
-        }
-        batch.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(1))]);
-        batch.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![(P, CanonicalScalar::Int(99))]);
         batch.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(7)));
-        batch.add_edge(EId(11), VId(1), VId(1), vec![]);
-        batch.add_edge(EId(12), VId(2), VId(3), vec![]);
         batch.delete_edge(EId(12));
         let seq = db
             .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
@@ -40,7 +51,6 @@ fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
             db.edge_at(EId(10), seq).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(7))]
         );
-        assert!(db.edge_at(EId(99), seq).unwrap().is_none());
         assert!(db.edge_at(EId(12), seq).unwrap().is_none());
         assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(1), VId(2)]);
         drop(db);
@@ -50,7 +60,6 @@ fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
             reopened.edge_at(EId(10), seq).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(7))]
         );
-        assert!(reopened.edge_at(EId(99), seq).unwrap().is_none());
         assert!(reopened.edge_at(EId(12), seq).unwrap().is_none());
         assert_eq!(
             reopened.neighbours(VId(1), R).unwrap(),
@@ -60,25 +69,27 @@ fn mixed_graph_batch_uses_native_ensure_aliases_and_reopens() {
 }
 
 #[test]
-fn vertex_delete_authorizes_and_removes_all_prefix_incidence() {
+fn vertex_delete_authorizes_and_removes_all_incidence() {
     under_lab(0xa912, |contexts| async move {
         let cx = contexts.commit();
         let txn = contexts.txn();
         let mut db = Database::create(&cx, &scratch("prefix-cascade"), keys())
             .await
             .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for vid in [VId(1), VId(2), VId(3)] {
+            seed.create_vertex(vid, vec![L], vec![]);
+        }
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(1))]);
+        seed.add_edge(EId(12), VId(2), VId(2), vec![]);
+        seed.add_edge(EId(13), VId(1), VId(3), vec![]);
+        db.write(&cx, seed).await.unwrap();
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&total_grant(), NOW).unwrap();
         let baseline = txn.outstanding_obligations();
         let batch = || {
             let mut batch = WriteBatch::new(R);
-            for vid in [VId(1), VId(2), VId(3)] {
-                batch.create_vertex(vid, vec![L], vec![]);
-            }
-            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
-            batch.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(1))]);
-            batch.add_edge(EId(12), VId(2), VId(2), vec![]);
-            batch.add_edge(EId(13), VId(1), VId(3), vec![]);
             batch.delete_vertex(VId(2));
             batch
         };
@@ -104,13 +115,17 @@ fn vertex_delete_authorizes_and_removes_all_prefix_incidence() {
         }
         assert!(db.edge_at(EId(13), seq).unwrap().is_some());
         assert_eq!(txn.outstanding_obligations(), baseline);
-        // Native normalization cancels the never-durable vertex creation.
+        // Re-creating the deleted identity is a chosen-identity creation:
+        // refused before observation, nothing published (fgdb-hxgm1).
         let mut recreate = WriteBatch::new(R);
         recreate.create_vertex(VId(2), vec![L], vec![]);
-        db.write_authorized(&txn, &cx, &authority, &token, BRANCH, recreate, || NOW)
-            .await
-            .unwrap();
-        assert!(db.vertex(VId(2)).unwrap().is_some());
+        assert!(matches!(
+            db.write_authorized(&txn, &cx, &authority, &token, BRANCH, recreate, || NOW)
+                .await,
+            Err(WriteTxnError::AuthorizedClientIdentity)
+        ));
+        assert_eq!(db.frontier().unwrap(), seq);
+        assert!(db.vertex(VId(2)).unwrap().is_none());
         assert_eq!(txn.outstanding_obligations(), baseline);
     });
 }
@@ -136,7 +151,8 @@ fn hidden_relation_in_a_cascade_refuses_the_whole_batch() {
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let mut delete = WriteBatch::new(R);
-        delete.create_vertex(VId(4), vec![L], vec![]);
+        // An allowed prefix that the refused cascade must discard with it.
+        delete.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(5)));
         delete.delete_vertex(VId(1));
         assert!(matches!(
             db.write_authorized(&txn, &cx, &authority, &token, BRANCH, delete, || NOW)
@@ -144,7 +160,7 @@ fn hidden_relation_in_a_cascade_refuses_the_whole_batch() {
             Err(WriteTxnError::Authorization(Error::ScopeDenied))
         ));
         assert_eq!(db.frontier().unwrap(), frontier);
-        assert!(db.vertex(VId(4)).unwrap().is_none());
+        assert!(db.vertex(VId(2)).unwrap().unwrap().props.is_empty());
         assert!(db.vertex(VId(1)).unwrap().is_some());
         for eid in [EId(10), EId(20)] {
             assert!(db.edge_at(eid, frontier).unwrap().is_some());
@@ -171,7 +187,7 @@ fn hidden_relation_in_a_cascade_refuses_the_whole_batch() {
 }
 
 #[test]
-fn hidden_endpoint_blocks_edge_create_update_and_cascade() {
+fn hidden_endpoint_blocks_edge_update_and_cascade_and_create_cannot_probe_it() {
     under_lab(0xa914, |contexts| async move {
         let cx = contexts.commit();
         let txn = contexts.txn();
@@ -193,12 +209,23 @@ fn hidden_endpoint_blocks_edge_create_update_and_cascade() {
         update.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(7)));
         let mut delete = WriteBatch::new(R);
         delete.delete_vertex(VId(1));
-        for batch in [create, update, delete] {
-            assert!(matches!(
-                db.write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
-                    .await,
-                Err(WriteTxnError::Authorization(Error::ScopeDenied))
-            ));
+        for (batch, creates) in [(create, true), (update, false), (delete, false)] {
+            let outcome = db
+                .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
+                .await;
+            if creates {
+                // A chosen-identity create refuses before reading either
+                // endpoint, so the hidden one is not probed (fgdb-hxgm1).
+                assert!(matches!(
+                    outcome,
+                    Err(WriteTxnError::AuthorizedClientIdentity)
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                ));
+            }
             assert_eq!(db.frontier().unwrap(), frontier);
             assert_eq!(txn.outstanding_obligations(), baseline);
             assert!(db.vertex(VId(1)).unwrap().is_some());
@@ -212,7 +239,7 @@ fn hidden_endpoint_blocks_edge_create_update_and_cascade() {
 }
 
 #[test]
-fn ignored_ensure_alias_cannot_capture_an_unrelated_hidden_edge() {
+fn an_ensure_refuses_before_it_could_capture_an_unrelated_hidden_edge() {
     under_lab(0xa915, |contexts| async move {
         let cx = contexts.commit();
         let txn = contexts.txn();
@@ -235,19 +262,22 @@ fn ignored_ensure_alias_cannot_capture_an_unrelated_hidden_edge() {
         );
         db.write(&cx, hidden).await.unwrap();
         let authority = issuer(NAMESPACE);
-        // Vertex deletion needs a capability that hides nothing (fgdb-4iiho),
-        // so edge 99 is visible here; it is still unrelated to vertex 1, and
-        // its original record, not the ignored ensure spelling, decides that.
+        // Even a capability that hides nothing cannot stage an ensure: it
+        // names a chosen identity (EId 99, an unrelated edge here), so the
+        // whole batch refuses before any read (fgdb-hxgm1).
         let token = authority.issue_at(&total_grant(), NOW).unwrap();
+        let seq = db.frontier().unwrap();
         let mut batch = WriteBatch::new(R);
         batch.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![(P, CanonicalScalar::Int(55))]);
         batch.delete_vertex(VId(1));
-        let seq = db
-            .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
-            .await
-            .unwrap();
-        assert!(db.vertex(VId(1)).unwrap().is_none());
-        assert!(db.edge_at(EId(10), seq).unwrap().is_none());
+        assert!(matches!(
+            db.write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
+                .await,
+            Err(WriteTxnError::AuthorizedClientIdentity)
+        ));
+        assert_eq!(db.frontier().unwrap(), seq);
+        assert!(db.vertex(VId(1)).unwrap().is_some());
+        assert!(db.edge_at(EId(10), seq).unwrap().is_some());
         let untouched = db.edge_at(EId(99), seq).unwrap().unwrap();
         assert_eq!(untouched.entry.src, VId(3));
         assert_eq!(untouched.entry.dst, VId(4));
@@ -340,45 +370,46 @@ async fn ensure_fixture(
     db
 }
 
-/// FG-INV-20 on the write path (fgdb-4iiho). Ensuring an edge scans the
-/// source vertex's live incidence for an alias. A holder can attenuate MaxWork
-/// without the issuer key, so the smallest MaxWork at which the write commits
-/// must not move with the hidden degree of the source vertex, whether the
-/// write creates the edge or resolves an existing visible alias.
+/// FG-INV-20 on the write path (fgdb-4iiho). Ensuring an edge used to scan
+/// the source vertex's live incidence for an alias, so its MaxWork threshold
+/// could count hidden incident edges. An ensure names a chosen identity and
+/// now refuses before any read (fgdb-hxgm1), so its outcome at every budget
+/// must be the same whatever the hidden degree and whether an alias exists:
+/// below the entry charge, exactly at it, and at the full grant.
 #[test]
-fn ensure_edge_threshold_cannot_count_hidden_incident_edges() {
+fn ensure_edge_outcome_cannot_count_hidden_incident_edges() {
     use fgdb_warden::Restriction;
     under_lab(0xa9a1, |contexts| async move {
         let cx = contexts.commit();
         let txn = contexts.txn();
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        for alias in [false, true] {
-            let mut thresholds = Vec::new();
-            for hidden in [false, true] {
-                let (mut low, mut high) = (0_u64, 100_000_u64);
-                while low < high {
-                    let middle = low + (high - low) / 2;
+        for budget in [Some(0_u64), Some(1), None] {
+            let mut outcomes = Vec::new();
+            for alias in [false, true] {
+                for hidden in [false, true] {
                     let mut db = ensure_fixture(&cx, hidden, alias).await;
+                    let frontier = db.frontier().unwrap();
                     let mut batch = WriteBatch::new(R);
                     batch.ensure_edge_by_triple(EId(50), VId(1), VId(2), vec![]);
-                    let limited = token.attenuate(Restriction::MaxWork(middle)).unwrap();
-                    match db
-                        .write_authorized(&txn, &cx, &authority, &limited, BRANCH, batch, || NOW)
-                        .await
-                    {
-                        Ok(_) => high = middle,
-                        Err(WriteTxnError::Authorization(Error::LimitExceeded(
-                            LimitDimension::Work,
-                        ))) => low = middle + 1,
-                        Err(other) => panic!("alias={alias} hidden={hidden} {middle}: {other:?}"),
-                    }
+                    let attenuated;
+                    let limited = match budget {
+                        Some(work) => {
+                            attenuated = token.attenuate(Restriction::MaxWork(work)).unwrap();
+                            &attenuated
+                        }
+                        None => &token,
+                    };
+                    let outcome = db
+                        .write_authorized(&txn, &cx, &authority, limited, BRANCH, batch, || NOW)
+                        .await;
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    outcomes.push(format!("{outcome:?}"));
                 }
-                thresholds.push(low);
             }
-            assert_eq!(
-                thresholds[0], thresholds[1],
-                "alias={alias}: MaxWork threshold moved with hidden incident edges"
+            assert!(
+                outcomes.iter().all(|outcome| outcome == &outcomes[0]),
+                "budget {budget:?}: the outcome moved with hidden incidence: {outcomes:?}"
             );
         }
     });
@@ -428,7 +459,7 @@ async fn delete_fixture(cx: &fgdb_types::CommitCx, hidden: u8) -> Database<fgdb:
 /// delete_fixture variants). Each operation has ONE outcome across all six,
 /// and when admitted, ONE exact work threshold.
 #[test]
-fn create_and_update_work_thresholds_ignore_hidden_data() {
+fn update_thresholds_and_create_refusals_ignore_hidden_data() {
     use fgdb_warden::Restriction;
     const CEILING: u64 = 100_000;
     /// A named single-write batch over the fixture's visible elements.
@@ -438,7 +469,10 @@ fn create_and_update_work_thresholds_ignore_hidden_data() {
         let txn = contexts.txn();
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        let operations: [Operation; 3] = [
+        // Creation's threshold law now lives with the allocating insertion
+        // surface (insert_tests::matched_creation_work_threshold_ignores_
+        // hidden_data); a chosen-identity create refuses uniformly, below.
+        let operations: [Operation; 2] = [
             ("vertex property update", || {
                 let mut batch = WriteBatch::new(R);
                 batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
@@ -449,12 +483,22 @@ fn create_and_update_work_thresholds_ignore_hidden_data() {
                 batch.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(5)));
                 batch
             }),
-            ("edge create", || {
-                let mut batch = WriteBatch::new(R);
-                batch.add_edge(EId(50), VId(1), VId(2), vec![]);
-                batch
-            }),
         ];
+        let mut creates = Vec::new();
+        for variant in 0..=5_u8 {
+            let mut db = delete_fixture(&cx, variant).await;
+            let mut batch = WriteBatch::new(R);
+            batch.add_edge(EId(50), VId(1), VId(2), vec![]);
+            let outcome = db
+                .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
+                .await;
+            assert!(
+                matches!(outcome, Err(WriteTxnError::AuthorizedClientIdentity)),
+                "variant {variant}: {outcome:?}"
+            );
+            creates.push(format!("{outcome:?}"));
+        }
+        assert!(creates.iter().all(|outcome| outcome == &creates[0]));
         for (name, operation) in operations {
             let mut outcomes = Vec::new();
             for variant in 0..=5_u8 {
@@ -681,8 +725,14 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
                 }
                 // An allowed, native-prepared prefix must not escape when the
                 // later whole-edge delete is refused by this capability gate.
+                // (A property write, except under the empty property scope,
+                // where only a label write is allowed.)
                 let mut batch = WriteBatch::new(R);
-                batch.create_vertex(VId(50), vec![L], vec![]);
+                if *name == "empty" {
+                    batch.set_vertex_label(VId(2), L, true);
+                } else {
+                    batch.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(5)));
+                }
                 batch.delete_edge(EId(10));
                 assert!(matches!(
                     db.write_authorized(&txn, &cx, &authority, token, BRANCH, batch, || NOW)
@@ -690,7 +740,7 @@ fn edge_delete_refusal_depends_on_property_authority_not_hidden_data() {
                     Err(WriteTxnError::Authorization(Error::ScopeDenied))
                 ));
                 assert_eq!(db.frontier().unwrap(), frontier);
-                assert!(db.vertex(VId(50)).unwrap().is_none());
+                assert!(db.vertex(VId(2)).unwrap().unwrap().props.is_empty());
                 assert_eq!(txn.outstanding_obligations(), baseline);
             }
         }

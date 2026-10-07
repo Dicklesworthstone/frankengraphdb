@@ -5,7 +5,7 @@ use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_types::context::PurposeContexts;
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, VId};
 use fgdb_warden::{Authority, Error, Grant, LimitDimension, QueryLimits, Rights, Scope};
 use std::path::PathBuf;
 
@@ -86,13 +86,17 @@ fn write_only_vertex_batch_commits_once_and_reopens() {
         let txn = contexts.txn();
         let path = scratch("vertex-reopen");
         let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        // Authorized batches address existing identities (fgdb-hxgm1); the
+        // trusted host seeds the targets.
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![L], vec![]);
+        db.write(&cx, seed).await.unwrap();
         let frontier = db.frontier().unwrap();
         let baseline = txn.outstanding_obligations();
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let mut batch = WriteBatch::new(R);
-        batch.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
-        batch.create_vertex(VId(2), vec![L], vec![]);
         batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(7)));
         batch.set_vertex_label(VId(2), L, true);
         let seq = db
@@ -134,7 +138,7 @@ fn forbidden_noop_tail_discards_the_entire_allowed_prefix() {
         let authority = issuer(NAMESPACE);
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let mut batch = WriteBatch::new(R);
-        batch.create_vertex(VId(2), vec![L], vec![]);
+        batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
         // A normalized no-op must not erase the attempted forbidden field.
         batch.set_vertex_property(VId(1), SECRET, Some(CanonicalScalar::Int(99)));
         assert!(matches!(
@@ -144,14 +148,14 @@ fn forbidden_noop_tail_discards_the_entire_allowed_prefix() {
         ));
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(txn.outstanding_obligations(), baseline);
-        assert!(db.vertex(VId(2)).unwrap().is_none());
+        // The allowed prefix (P = 5) was discarded with the forbidden tail.
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![(SECRET, CanonicalScalar::Int(99))]
         );
-        // No failed workspace or identity reservation prevents a later write.
+        // No failed workspace prevents a later write.
         let mut retry = WriteBatch::new(R);
-        retry.create_vertex(VId(2), vec![L], vec![]);
+        retry.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
         db.write_authorized(&txn, &cx, &authority, &token, BRANCH, retry, || NOW)
             .await
             .unwrap();
@@ -220,8 +224,18 @@ fn admission_and_shared_budget_refuse_without_publishing_or_leaking_pins() {
         let frontier = db.frontier().unwrap();
         let baseline = txn.outstanding_obligations();
         let authority = issuer(NAMESPACE);
+        // A creation at a chosen identity refuses before any observation, for
+        // a token that could otherwise write there (fgdb-hxgm1).
+        let mut create = WriteBatch::new(R);
+        create.create_vertex(VId(1), vec![L], vec![]);
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        assert!(matches!(
+            db.write_authorized(&txn, &cx, &authority, &token, BRANCH, create, || NOW)
+                .await,
+            Err(WriteTxnError::AuthorizedClientIdentity)
+        ));
         let mut batch = WriteBatch::new(R);
-        batch.create_vertex(VId(1), vec![L], vec![]);
+        batch.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
         let mut read = grant();
         read.rights = Rights::Read;
         let token = authority.issue_at(&read, NOW).unwrap();
@@ -250,5 +264,52 @@ fn admission_and_shared_budget_refuse_without_publishing_or_leaking_pins() {
         assert_eq!(db.frontier().unwrap(), frontier);
         assert!(db.vertex(VId(1)).unwrap().is_none());
         assert_eq!(txn.outstanding_obligations(), baseline);
+    });
+}
+
+/// fgdb-hxgm1 channel 1 (owner ruling 2026-10-07: authorized creates take
+/// engine-allocated identities). Two databases differ only in WHICH identity
+/// a vertex and an edge hidden from the token occupy. A create or ensure at
+/// a client-chosen identity must give the token byte-identical observables in
+/// both: each outcome, and the frontier it can read afterwards.
+#[test]
+fn client_chosen_identities_cannot_probe_hidden_records() {
+    under_lab(0x4801, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let authority = issuer(NAMESPACE);
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut observed = Vec::new();
+        for occupied in [7_u128, 8] {
+            let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![]);
+            seed.create_vertex(VId(2), vec![L], vec![]);
+            seed.create_vertex(VId(occupied), vec![HIDDEN], vec![]);
+            db.write(&cx, seed).await.unwrap();
+            let mut hidden = WriteBatch::new(RelationId(2));
+            hidden.add_edge(EId(occupied), VId(1), VId(2), vec![]);
+            db.write(&cx, hidden).await.unwrap();
+
+            let mut outcomes = Vec::new();
+            for probe in 0..4 {
+                let mut batch = WriteBatch::new(R);
+                match probe {
+                    0 => batch.create_vertex(VId(7), vec![L], vec![]),
+                    1 => batch.ensure_vertex(VId(7), vec![L], vec![]),
+                    2 => batch.add_edge(EId(7), VId(1), VId(2), vec![]),
+                    _ => batch.ensure_edge_by_triple(EId(7), VId(1), VId(2), vec![]),
+                };
+                let outcome = db
+                    .write_authorized(&txn, &cx, &authority, &token, BRANCH, batch, || NOW)
+                    .await;
+                outcomes.push((format!("{outcome:?}"), db.frontier().unwrap()));
+            }
+            observed.push(outcomes);
+        }
+        assert_eq!(
+            observed[0], observed[1],
+            "where a hidden record sits changed what the token observed"
+        );
     });
 }

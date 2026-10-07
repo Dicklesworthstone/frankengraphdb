@@ -60,48 +60,60 @@ where
     );
 }
 
+/// The trusted host seeds vertices 1 (P=1), 2 and 3 and one edge per relation:
+/// 10 (R, 1->2, P=10), 20 (S, 2->3) and 30 (T, 3->1). Authorized batches
+/// address existing identities only (fgdb-hxgm1).
+async fn seed_graph<V: Vfs + Clone>(db: &mut Database<V>, cx: &fgdb_types::CommitCx) {
+    let mut vertices = WriteBatch::new(R);
+    vertices.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+    vertices.create_vertex(VId(2), vec![L], vec![]);
+    vertices.create_vertex(VId(3), vec![L], vec![]);
+    vertices.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(10))]);
+    db.write(cx, vertices).await.unwrap();
+    let mut second = WriteBatch::new(S);
+    second.add_edge(EId(20), VId(2), VId(3), vec![]);
+    db.write(cx, second).await.unwrap();
+    let mut third = WriteBatch::new(T);
+    third.add_edge(EId(30), VId(3), VId(1), vec![]);
+    db.write(cx, third).await.unwrap();
+}
+
+/// Cross-relation batches that depend on each other: S's compare-and-set
+/// needs R's write, and T edits an R edge by identity.
 fn dependent_batches() -> Vec<WriteBatch> {
     let mut first = WriteBatch::new(R);
-    first.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
-    first.create_vertex(VId(2), vec![L], vec![]);
-    first.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(10))]);
+    first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(2)));
     let mut second = WriteBatch::new(S);
-    second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(2)));
-    second.create_vertex(VId(3), vec![L], vec![]);
-    second.add_edge(EId(20), VId(2), VId(3), vec![]);
-    let mut third = WriteBatch::new(T);
-    third.compare_and_set_vertex_property(
+    second.compare_and_set_vertex_property(
         VId(1),
         P,
         Some(CanonicalScalar::Int(2)),
         CanonicalScalar::Int(3),
         WriteMismatchPolicy::AbortWrite,
     );
+    let mut third = WriteBatch::new(T);
     // Identity-addressed mutations must retain the actual R coordinate.
     third.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(11)));
-    third.add_edge(EId(30), VId(3), VId(1), vec![]);
-    let mut last = WriteBatch::new(R);
-    last.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![(P, CanonicalScalar::Int(99))]);
-    vec![first, second, third, last]
+    vec![first, second, third]
 }
 
-fn assert_graph<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq) {
+/// The seeded graph, with `vertex_p` on vertex 1 and `edge_p` on edge 10.
+fn assert_graph<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq, vertex_p: i64, edge_p: i64) {
     assert_eq!(db.frontier().unwrap(), seq);
     assert_eq!(
         db.vertex(VId(1)).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(3))]
+        vec![(P, CanonicalScalar::Int(vertex_p))]
     );
     for vid in [VId(1), VId(2), VId(3)] {
         assert_eq!(db.vertex(vid).unwrap().unwrap().labels, vec![L]);
     }
     assert_eq!(
         db.edge_at(EId(10), seq).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(11))]
+        vec![(P, CanonicalScalar::Int(edge_p))]
     );
     assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(2)]);
     assert_eq!(db.neighbours(VId(2), S).unwrap(), vec![VId(3)]);
     assert_eq!(db.neighbours(VId(3), T).unwrap(), vec![VId(1)]);
-    assert!(db.edge_at(EId(99), seq).unwrap().is_none());
 }
 
 #[test]
@@ -114,6 +126,7 @@ fn dependent_relations_authorize_original_intents_and_reopen_one_commit() {
             std::process::id()
         ));
         let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        seed_graph(&mut db, &cx).await;
         let initial = db.frontier().unwrap();
         let baseline = txn.outstanding_obligations();
         let authority = authority();
@@ -132,10 +145,10 @@ fn dependent_relations_authorize_original_intents_and_reopen_one_commit() {
             .unwrap();
         assert_eq!(seq.0, initial.0 + 1);
         assert_eq!(txn.outstanding_obligations(), baseline);
-        assert_graph(&db, seq);
+        assert_graph(&db, seq, 3, 11);
         drop(db);
         let reopened = Database::open_rebuilding(&cx, &path, keys()).await.unwrap();
-        assert_graph(&reopened, seq);
+        assert_graph(&reopened, seq, 3, 11);
     });
 }
 
@@ -145,6 +158,7 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
         let cx = contexts.commit();
         let txn = contexts.txn();
         let mut db = Database::<MemVfs>::open_memory(&cx, keys()).await.unwrap();
+        seed_graph(&mut db, &cx).await;
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(9), vec![L], vec![(SECRET, CanonicalScalar::Int(99))]);
         db.write(&cx, seed).await.unwrap();
@@ -163,17 +177,13 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
         ));
         assert_eq!(db.frontier().unwrap(), initial);
         assert_eq!(txn.outstanding_obligations(), baseline);
-        for vid in [VId(1), VId(2), VId(3)] {
-            assert!(db.vertex(vid).unwrap().is_none());
-        }
-        for eid in [EId(10), EId(20), EId(30), EId(99)] {
-            assert!(db.edge_at(eid, initial).unwrap().is_none());
-        }
+        // Every prefix effect in every relation was discarded.
+        assert_graph(&db, initial, 1, 10);
         assert_eq!(
             db.vertex(VId(9)).unwrap().unwrap().props,
             vec![(SECRET, CanonicalScalar::Int(99))]
         );
-        // The failed workspace must not reserve identities or fence the handle.
+        // The failed workspace must not fence the handle.
         let seq = db
             .write_ordered_authorized(
                 &txn,
@@ -187,7 +197,7 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
             .await
             .unwrap();
         assert_eq!(seq.0, initial.0 + 1);
-        assert_graph(&db, seq);
+        assert_graph(&db, seq, 3, 11);
         assert_eq!(txn.outstanding_obligations(), baseline);
     });
 }
@@ -209,8 +219,9 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
         let mut scoped = grant();
         scoped.relations = Scope::only([R, S]);
         let token = authority.issue_at(&scoped, NOW).unwrap();
+        // An allowed prefix that the refused tail must discard.
         let mut first = WriteBatch::new(R);
-        first.create_vertex(VId(3), vec![L], vec![]);
+        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
         let mut second = WriteBatch::new(S);
         second.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(2)));
         assert!(matches!(
@@ -227,7 +238,7 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
             Err(WriteTxnError::Authorization(Error::ScopeDenied))
         ));
         assert_eq!(db.frontier().unwrap(), initial);
-        assert!(db.vertex(VId(3)).unwrap().is_none());
+        assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());
         assert_eq!(
             db.edge_at(EId(10), initial).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(1))]
@@ -239,68 +250,60 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
 #[test]
 fn node_allowance_is_shared_across_relation_boundaries() {
     under_lab(0xb304, |contexts| async move {
-        let cx = contexts.commit();
-        let txn = contexts.txn();
-        let mut db = Database::<MemVfs>::open_memory(&cx, keys()).await.unwrap();
-        let initial = db.frontier().unwrap();
-        let baseline = txn.outstanding_obligations();
-        let authority = authority();
-        let mut scoped = grant();
-        // One creation pays initial admission and its actual after-image.
-        // Each batch alone fits two nodes; together they need four.
-        scoped.limits.max_nodes = 2;
-        let token = authority.issue_at(&scoped, NOW).unwrap();
+        // Each update pays node admissions for its original images. Measure
+        // each batch alone and both together: one allowance spans the
+        // relation boundary, so together they need more than either alone.
+        let nodes = LimitDimension::Nodes;
         let mut first = WriteBatch::new(R);
-        first.create_vertex(VId(1), vec![L], vec![]);
+        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
         let mut second = WriteBatch::new(S);
-        second.create_vertex(VId(2), vec![L], vec![]);
-        let batches = vec![first, second];
+        second.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(6)));
+        let first_only = minimum(&contexts, &[first.clone()], nodes, false).await;
+        let second_only = minimum(&contexts, &[second.clone()], nodes, false).await;
+        let both = minimum(&contexts, &[first.clone(), second.clone()], nodes, false).await;
+        assert!(first_only > 0 && second_only > 0, "updates must pay nodes");
+        assert!(
+            both > first_only.max(second_only),
+            "{both} vs {first_only}/{second_only}"
+        );
         assert!(matches!(
-            db.write_ordered_authorized(
-                &txn,
-                &cx,
-                &authority,
-                &token,
-                "main",
-                batches.clone(),
-                || NOW,
+            budget_attempt(
+                &contexts,
+                vec![first, second],
+                nodes,
+                first_only.max(second_only),
+                false
             )
             .await,
             Err(WriteTxnError::Authorization(Error::LimitExceeded(
                 LimitDimension::Nodes
             )))
         ));
-        assert_eq!(db.frontier().unwrap(), initial);
-        assert!(db.vertex(VId(1)).unwrap().is_none());
-        assert!(db.vertex(VId(2)).unwrap().is_none());
-        assert_eq!(txn.outstanding_obligations(), baseline);
-        scoped.limits.max_nodes = 4;
-        let token = authority.issue_at(&scoped, NOW).unwrap();
-        let seq = db
-            .write_ordered_authorized(&txn, &cx, &authority, &token, "main", batches, || NOW)
-            .await
-            .unwrap();
-        assert_eq!(seq.0, initial.0 + 1);
-        assert!(db.vertex(VId(1)).unwrap().is_some());
-        assert!(db.vertex(VId(2)).unwrap().is_some());
-        assert_eq!(txn.outstanding_obligations(), baseline);
     });
 }
 
+/// One attempt on a freshly seeded graph with `limit` on `dimension` (work or
+/// nodes); a refusal must leave the seeded graph exactly as it was.
 async fn budget_attempt(
     contexts: &PurposeContexts,
     batches: Vec<WriteBatch>,
-    work: u64,
+    dimension: LimitDimension,
+    limit: u64,
     single: bool,
 ) -> Result<CommitSeq, WriteTxnError> {
     let cx = contexts.commit();
     let txn = contexts.txn();
     let baseline = txn.outstanding_obligations();
     let mut db = Database::<MemVfs>::open_memory(&cx, keys()).await.unwrap();
+    seed_graph(&mut db, &cx).await;
     let initial = db.frontier().unwrap();
     let authority = authority();
     let mut scoped = grant();
-    scoped.limits.max_work = work;
+    if matches!(dimension, LimitDimension::Nodes) {
+        scoped.limits.max_nodes = limit;
+    } else {
+        scoped.limits.max_work = limit;
+    }
     let token = authority.issue_at(&scoped, NOW).unwrap();
     let result = if single {
         assert_eq!(batches.len(), 1);
@@ -320,23 +323,35 @@ async fn budget_attempt(
     };
     assert_eq!(txn.outstanding_obligations(), baseline);
     if result.is_err() {
-        assert_eq!(db.frontier().unwrap(), initial);
-        assert!(db.vertex(VId(1)).unwrap().is_none());
-        assert!(db.vertex(VId(2)).unwrap().is_none());
+        assert_graph(&db, initial, 1, 10);
     }
     result
 }
 
-async fn minimum_work(contexts: &PurposeContexts, batches: &[WriteBatch], single: bool) -> u64 {
-    let (mut low, mut high) = (0, 4096);
-    budget_attempt(contexts, batches.to_vec(), high, single)
+/// The smallest `dimension` limit at which `batches` commit (the grant's own
+/// allowance, 4096 work or 100 nodes, must suffice).
+async fn minimum(
+    contexts: &PurposeContexts,
+    batches: &[WriteBatch],
+    dimension: LimitDimension,
+    single: bool,
+) -> u64 {
+    let ceiling = if matches!(dimension, LimitDimension::Nodes) {
+        100
+    } else {
+        4096
+    };
+    let (mut low, mut high) = (0, ceiling);
+    budget_attempt(contexts, batches.to_vec(), dimension, high, single)
         .await
         .unwrap();
     while high - low > 1 {
         let middle = low + (high - low) / 2;
-        match budget_attempt(contexts, batches.to_vec(), middle, single).await {
+        match budget_attempt(contexts, batches.to_vec(), dimension, middle, single).await {
             Ok(_) => high = middle,
-            Err(WriteTxnError::Authorization(Error::LimitExceeded(LimitDimension::Work))) => {
+            Err(WriteTxnError::Authorization(Error::LimitExceeded(found)))
+                if found == dimension =>
+            {
                 low = middle;
             }
             other => panic!("unexpected budget outcome: {other:?}"),
@@ -348,22 +363,23 @@ async fn minimum_work(contexts: &PurposeContexts, batches: &[WriteBatch], single
 #[test]
 fn splitting_batches_cannot_refresh_work_or_change_single_batch_charges() {
     under_lab(0xb305, |contexts| async move {
+        let work = LimitDimension::Work;
         let mut first = WriteBatch::new(R);
-        first.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(5)));
         let mut second = WriteBatch::new(R);
-        second.create_vertex(VId(2), vec![L], vec![]);
+        second.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(6)));
         let split = vec![first.clone(), second.clone()];
         let mut grouped = first.clone();
-        grouped.create_vertex(VId(2), vec![L], vec![]);
+        grouped.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(6)));
         let grouped = vec![grouped];
-        let single = minimum_work(&contexts, &grouped, true).await;
-        assert_eq!(minimum_work(&contexts, &grouped, false).await, single);
-        assert_eq!(minimum_work(&contexts, &split, false).await, single);
-        let first_only = minimum_work(&contexts, &[first], false).await;
-        let second_only = minimum_work(&contexts, &[second], false).await;
+        let single = minimum(&contexts, &grouped, work, true).await;
+        assert_eq!(minimum(&contexts, &grouped, work, false).await, single);
+        assert_eq!(minimum(&contexts, &split, work, false).await, single);
+        let first_only = minimum(&contexts, &[first], work, false).await;
+        let second_only = minimum(&contexts, &[second], work, false).await;
         assert!(single > first_only.max(second_only));
         assert!(matches!(
-            budget_attempt(&contexts, split, first_only.max(second_only), false).await,
+            budget_attempt(&contexts, split, work, first_only.max(second_only), false).await,
             Err(WriteTxnError::Authorization(Error::LimitExceeded(
                 LimitDimension::Work
             )))
@@ -393,6 +409,21 @@ fn empty_groups_and_read_only_tokens_never_create_a_workspace_or_publish() {
             assert_eq!(txn.outstanding_obligations(), baseline);
             assert!(db.vertex(VId(1)).unwrap().is_none());
         }
+        // A creation in ANY batch refuses the whole write before a workspace
+        // exists or an earlier batch is staged (fgdb-hxgm1). The earlier
+        // batches name vertices that do not even exist here.
+        let mut create = WriteBatch::new(S);
+        create.create_vertex(VId(1), vec![L], vec![]);
+        let mut batches = dependent_batches();
+        batches.push(create);
+        assert!(matches!(
+            db.write_ordered_authorized(&txn, &cx, &authority, &token, "main", batches, || NOW)
+                .await,
+            Err(WriteTxnError::AuthorizedClientIdentity)
+        ));
+        assert_eq!(db.frontier().unwrap(), initial);
+        assert_eq!(txn.outstanding_obligations(), baseline);
+        assert!(db.vertex(VId(1)).unwrap().is_none());
         let mut read = grant();
         read.rights = Rights::Read;
         let token = authority.issue_at(&read, NOW).unwrap();

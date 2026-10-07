@@ -438,7 +438,8 @@ fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
                     code = warden_code(*warden);
                     break;
                 }
-                fgdb::WriteTxnError::AuthorizedMutationRefused => {
+                fgdb::WriteTxnError::AuthorizedMutationRefused
+                | fgdb::WriteTxnError::AuthorizedClientIdentity => {
                     code = ErrorCode::PermissionDenied;
                     break;
                 }

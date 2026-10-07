@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphInsertBinding, GraphSetProjection, GraphSetQuantifier,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 
 const R: RelationId = RelationId(1);
@@ -583,6 +583,111 @@ fn read_write_grant() -> Grant {
     }
 }
 
+/// Visible vertices 1 and 2 joined by an R edge, plus one kind of data around
+/// vertex 1 the grant cannot see. Variant 0 adds nothing; 1 a hidden-relation
+/// edge; 2 an R edge to a hidden vertex; 3 a hidden property on vertex 1; 4 a
+/// hidden label on vertex 1; 5 a hidden property on the R edge.
+async fn creation_fixture(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, keys()).await.unwrap();
+    let mut seed = WriteBatch::new(R);
+    let labels = if hidden == 4 {
+        vec![L, HIDDEN]
+    } else {
+        vec![L]
+    };
+    let secret = |variant| {
+        if hidden == variant {
+            vec![(SECRET, CanonicalScalar::Int(9))]
+        } else {
+            vec![]
+        }
+    };
+    seed.create_vertex(VId(1), labels, secret(3));
+    seed.create_vertex(VId(2), vec![L], vec![]);
+    seed.add_edge(EId(10), VId(1), VId(2), secret(5));
+    if hidden == 2 {
+        seed.create_vertex(VId(3), vec![HIDDEN], vec![]);
+        seed.add_edge(EId(11), VId(1), VId(3), vec![]);
+    }
+    db.write(cx, seed).await.unwrap();
+    if hidden == 1 {
+        let mut other = WriteBatch::new(H);
+        other.add_edge(EId(20), VId(2), VId(1), vec![]);
+        db.write(cx, other).await.unwrap();
+    }
+    db
+}
+
+/// FG-INV-20 for creation (fgdb-4iiho item c). It moved here from the
+/// authorized WriteBatch laws with fgdb-hxgm1: authorized creation now happens
+/// only on these allocating surfaces. Creating an edge between two VISIBLE
+/// vertices has one outcome and one exact MaxWork threshold, whatever the
+/// capability cannot see around them (the six creation_fixture variants).
+#[test]
+fn matched_creation_work_threshold_ignores_hidden_data() {
+    const CEILING: u64 = 100_000;
+    lab(0xa943, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+        let insertion = insert("MATCH (a:Visible)-[:R]->(b:Visible) INSERT (a)-[:S]->(b)");
+        let mut thresholds = Vec::new();
+        for variant in 0..=5_u8 {
+            let (mut low, mut high) = (0_u64, CEILING);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let limited = token.attenuate(Restriction::MaxWork(middle)).unwrap();
+                let mut db = creation_fixture(&commit, variant).await;
+                match db
+                    .execute_graph_insert_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &limited,
+                        "main",
+                        &insertion,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                {
+                    Ok((stats, _)) => {
+                        assert_eq!(
+                            (stats.created_vertices, stats.created_edges),
+                            (0, 1),
+                            "variant {variant}"
+                        );
+                        high = middle;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(error),
+                            Error::LimitExceeded(LimitDimension::Work),
+                            "variant {variant} at {middle}"
+                        );
+                        low = middle + 1;
+                    }
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+            assert!(
+                low < CEILING,
+                "variant {variant}: no threshold below the ceiling"
+            );
+            thresholds.push(low);
+        }
+        assert!(
+            thresholds
+                .iter()
+                .all(|threshold| *threshold == thresholds[0]),
+            "the creation threshold moved with hidden data: {thresholds:?}"
+        );
+    });
+}
+
 // Same visible graph and bag multiplicity, with optional hidden rows, fields,
 // relations and incidence. ID/frontier metadata is not a noninterference claim.
 async fn matched_fixture(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
@@ -849,6 +954,58 @@ fn hidden_data_changes_neither_match_insert_work_nor_node_refusal_thresholds() {
     });
 }
 
+/// The native staging write_ordered_authorized ran before fgdb-hxgm1: the
+/// same permit, workspace, per-intent authorization and completion, without
+/// the chosen-identity refusal that path now applies first (which charges
+/// nothing). It is only the independent allowance witness below; no client
+/// surface reaches it.
+async fn native_ordered_witness(
+    db: &mut Database<MemVfs>,
+    txn_cx: &TxnCx,
+    commit_cx: &CommitCx,
+    authority: &Authority,
+    token: &CapabilityToken,
+    batches: Vec<WriteBatch>,
+) -> Result<CommitSeq, WriteTxnError> {
+    let verified = authority
+        .verify_at(token, "main", NOW)
+        .map_err(WriteTxnError::Authorization)?;
+    let permit = verified
+        .begin_write_at("main", NOW)
+        .map_err(WriteTxnError::Authorization)?;
+    commit_cx
+        .with_restriction_async(async {
+            let mut execution = Execution {
+                cx: commit_cx,
+                permit,
+                clock: || NOW,
+            };
+            execution.checkpoint()?;
+            let mut workspace = Workspace(Some(db.begin(txn_cx)?));
+            for batch in batches {
+                for row in batch.rows {
+                    execution.checkpoint()?;
+                    stage(
+                        workspace.transaction(),
+                        db,
+                        batch.relation,
+                        row,
+                        &mut execution,
+                    )?;
+                }
+            }
+            match workspace
+                .transaction()
+                .complete_controlled(db, commit_cx, None, true, || execution.checkpoint())
+                .await?
+            {
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
+                other => panic!("witness completion: {other:?}"),
+            }
+        })
+        .await
+}
+
 #[test]
 fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
     lab(0xa945, |contexts| async move {
@@ -903,17 +1060,10 @@ fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
                         outgoing.add_edge(EId(101 + 2 * occurrence), vertex, VId(2), vec![]);
                         batches.extend([create, incoming, outgoing]);
                     }
-                    match db
-                        .write_ordered_authorized(
-                            &txn,
-                            &commit,
-                            &authority,
-                            &limited,
-                            "main",
-                            batches,
-                            || NOW,
-                        )
-                        .await
+                    match native_ordered_witness(
+                        &mut db, &txn, &commit, &authority, &limited, batches,
+                    )
+                    .await
                     {
                         Ok(_) => true,
                         Err(WriteTxnError::Authorization(error)) => {

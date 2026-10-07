@@ -115,7 +115,8 @@ enum Mutation {
 
 fn request(mutation: Mutation) -> WriteBatch {
     let mut batch = WriteBatch::new(R);
-    batch.create_vertex(VId(50), vec![L], vec![]);
+    // The valid prefix every refusal must discard: an allowed update.
+    batch.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(5)));
     match mutation {
         Mutation::VertexSet => {
             batch.set_vertex_property(VId(9), P, Some(CanonicalScalar::Int(7)));
@@ -207,7 +208,7 @@ async fn reaches_denial(
         "{mutation:?} {meter:?}={limit}"
     );
     assert_eq!(txn.outstanding_obligations(), baseline);
-    assert!(db.vertex(VId(50)).unwrap().is_none());
+    assert!(db.vertex(VId(2)).unwrap().unwrap().props.is_empty());
     assert!(db.edge_at(EId(50), frontier).unwrap().is_none());
     match (result, meter) {
         (Err(WriteTxnError::Authorization(Error::ScopeDenied)), _) => true,
@@ -221,6 +222,44 @@ async fn reaches_denial(
         ) => false,
         (other, _) => panic!("{mutation:?} {meter:?}={limit}: {other:?}"),
     }
+}
+
+/// The whole observable outcome of one creation attempt at `limit`. A
+/// creation names a chosen identity and refuses before any target is read
+/// (fgdb-hxgm1), so there is no threshold to search, only outcomes to compare.
+async fn create_outcome(
+    db: &mut Database<MemVfs>,
+    contexts: &PurposeContexts,
+    authority: &Authority,
+    token: &CapabilityToken,
+    mutation: Mutation,
+    meter: Meter,
+    limit: u64,
+) -> String {
+    let cx = contexts.commit();
+    let txn = contexts.txn();
+    let frontier = db.frontier().unwrap();
+    let baseline = txn.outstanding_obligations();
+    let restriction = match meter {
+        Meter::Work => Restriction::MaxWork(limit),
+        Meter::Nodes => Restriction::MaxNodes(limit),
+    };
+    let limited = token.attenuate(restriction).unwrap();
+    let result = db
+        .write_authorized(
+            &txn,
+            &cx,
+            authority,
+            &limited,
+            "main",
+            request(mutation),
+            || NOW,
+        )
+        .await;
+    assert_eq!(db.frontier().unwrap(), frontier);
+    assert_eq!(txn.outstanding_obligations(), baseline);
+    assert!(db.edge_at(EId(50), frontier).unwrap().is_none());
+    format!("{result:?}")
 }
 
 async fn threshold(
@@ -260,9 +299,6 @@ fn hidden_vertices_and_endpoints_share_absent_target_refusal_thresholds() {
             Mutation::VertexSet,
             Mutation::VertexCas,
             Mutation::VertexLabel,
-            Mutation::CreateTo,
-            Mutation::EnsureTo,
-            Mutation::CreateFrom,
         ] {
             for meter in [Meter::Work, Meter::Nodes] {
                 assert_eq!(
@@ -270,6 +306,37 @@ fn hidden_vertices_and_endpoints_share_absent_target_refusal_thresholds() {
                     threshold(&mut hidden, &contexts, &authority, &token, mutation, meter).await,
                     "hidden vertex: {mutation:?}, {meter:?}"
                 );
+            }
+        }
+        // Creations toward or from the hidden vertex: one outcome at every
+        // limit, hidden or absent.
+        for mutation in [Mutation::CreateTo, Mutation::EnsureTo, Mutation::CreateFrom] {
+            for meter in [Meter::Work, Meter::Nodes] {
+                for limit in [0, 1, 4096] {
+                    assert_eq!(
+                        create_outcome(
+                            &mut absent,
+                            &contexts,
+                            &authority,
+                            &token,
+                            mutation,
+                            meter,
+                            limit
+                        )
+                        .await,
+                        create_outcome(
+                            &mut hidden,
+                            &contexts,
+                            &authority,
+                            &token,
+                            mutation,
+                            meter,
+                            limit
+                        )
+                        .await,
+                        "hidden vertex: {mutation:?}, {meter:?}={limit}"
+                    );
+                }
             }
         }
         assert_eq!(
@@ -360,7 +427,8 @@ fn admitted_updates_keep_original_hidden_fields_and_refuse_after_image_scope_esc
             ]
         );
         let mut escape = WriteBatch::new(R);
-        escape.create_vertex(VId(50), vec![L], vec![]);
+        // A valid prefix the refused escape must discard with it.
+        escape.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(8)));
         escape.set_vertex_label(VId(1), L, false);
         assert!(matches!(
             db.write_authorized(&txn, &cx, &authority, &token, "main", escape, || NOW)
@@ -368,7 +436,6 @@ fn admitted_updates_keep_original_hidden_fields_and_refuse_after_image_scope_esc
             Err(WriteTxnError::Authorization(Error::ScopeDenied))
         ));
         assert_eq!(db.frontier().unwrap(), frontier);
-        assert!(db.vertex(VId(50)).unwrap().is_none());
         let after = db.vertex(VId(1)).unwrap().unwrap();
         assert_eq!(after.labels, before.labels);
         assert_eq!(after.props, before.props);
