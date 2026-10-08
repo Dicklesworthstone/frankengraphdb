@@ -52,7 +52,7 @@ struct Cell<'a> {
 impl<'a> Cell<'a> {
     fn next(bytes: &mut &'a [u8]) -> Result<Self> {
         let (tag, body) = frame(bytes)?.split_first().ok_or_else(invalid)?;
-        if *tag > 6 {
+        if *tag > 7 {
             return Err(invalid());
         }
         Ok(Self { tag: *tag, body })
@@ -113,10 +113,54 @@ impl<'a> Cell<'a> {
                     return Err(invalid());
                 }
             }
+            7 => {
+                let len = count(&mut body)?;
+                if len > *nodes {
+                    return Err(invalid());
+                }
+                let mut previous = None;
+                for _ in 0..len {
+                    let key = frame(&mut body)?;
+                    validate_key(key, work)?;
+                    if let Some(before) = previous
+                        && lex(before, key, work)? != Ordering::Less
+                    {
+                        return Err(invalid());
+                    }
+                    previous = Some(key);
+                    Self::next(&mut body)?.validate(depth + 1, nodes, work)?;
+                }
+                if !body.is_empty() {
+                    return Err(invalid());
+                }
+            }
             _ => return Err(invalid()),
         }
         Ok(())
     }
+}
+
+// Validate UTF-8 without cloning keys or scanning an unbounded string between
+// checkpoints. A code point split by a chunk is re-read with the next chunk;
+// at most three bytes are revisited, and an incomplete final code point refuses.
+fn validate_key(key: &[u8], work: &mut Work<'_>) -> Result<()> {
+    let mut remaining = key;
+    while !remaining.is_empty() {
+        let len = remaining.len().min(1024);
+        work.charge(len)?;
+        match core::str::from_utf8(&remaining[..len]) {
+            Ok(_) => remaining = &remaining[len..],
+            Err(error)
+                if error.error_len().is_none()
+                    && len < remaining.len()
+                    && error.valid_up_to() != 0 =>
+            {
+                remaining = &remaining[error.valid_up_to()..];
+            }
+            Err(_) => return Err(invalid()),
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate(bytes: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
@@ -214,6 +258,44 @@ fn compare_cells(a: Cell<'_>, b: Cell<'_>, depth: usize, work: &mut Work<'_>) ->
                 }
             }
             Ok(a_len.cmp(&b_len))
+        }
+        7 => {
+            let a_len = count(&mut left)?;
+            let b_len = count(&mut right)?;
+            let (a_entries, b_entries) = (left, right);
+            // GraphValue::Map derives its order from the complete keys slice,
+            // then the complete values slice. Its wire cells are interleaved;
+            // comparing key/value pairs would change the native result order.
+            for _ in 0..a_len.min(b_len) {
+                work.charge(1)?;
+                let cmp = lex(frame(&mut left)?, frame(&mut right)?, work)?;
+                if cmp != Ordering::Equal {
+                    return Ok(cmp);
+                }
+                Cell::next(&mut left)?;
+                Cell::next(&mut right)?;
+            }
+            if a_len != b_len {
+                return Ok(a_len.cmp(&b_len));
+            }
+            // Equal key vectors permit a second borrowed pass over the values.
+            // Framed child skipping is O(1); no decoded map or index is built.
+            (left, right) = (a_entries, b_entries);
+            for _ in 0..a_len {
+                work.charge(1)?;
+                frame(&mut left)?;
+                frame(&mut right)?;
+                let cmp = compare_cells(
+                    Cell::next(&mut left)?,
+                    Cell::next(&mut right)?,
+                    depth + 1,
+                    work,
+                )?;
+                if cmp != Ordering::Equal {
+                    return Ok(cmp);
+                }
+            }
+            Ok(Ordering::Equal)
         }
         _ => Err(invalid()),
     }
