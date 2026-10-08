@@ -239,11 +239,11 @@ fn public_return_cancellation_and_bad_tail_never_publish_a_successful_prefix() {
             let error = db.query_write(&txcx, &cancelled, &commit, text,
                 &GqlParameters::new(), symbols, R, policy(10, 10, 10), no_allocate,
             ).await.unwrap_err();
-            assert!(match (index, error) {
-                (0, QueryWriteError::Mutation(GqlQueryError::Interrupted(_))) => true,
-                (1, QueryWriteError::VertexUpsert(GqlQueryError::Interrupted(_))) => true,
-                _ => false,
-            });
+            assert!(matches!(
+                (index, error),
+                (0, QueryWriteError::Mutation(GqlQueryError::Interrupted(_)))
+                    | (1, QueryWriteError::VertexUpsert(GqlQueryError::Interrupted(_)))
+            ));
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
