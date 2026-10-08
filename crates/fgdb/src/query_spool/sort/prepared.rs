@@ -5,6 +5,7 @@ use super::*;
 
 #[path = "native_order.rs"]
 mod native_order;
+pub use native_order::PreparedBufferedOrder;
 
 impl PreparedNativeRead {
     /// Evaluate a native pull query and externally order its selected result.
@@ -139,10 +140,10 @@ async fn drain_sorted<VS, VF, ES, EF, A, B>(
     max_work_units: u64,
 ) -> Result<(NativeResultSpool, u64)>
 where
-    VS: VertexScanSource<Error = ReadError>,
-    ES: EdgeScanSource<Error = ReadError>,
-    VF: FnMut() -> core::result::Result<(), Cancel>,
-    EF: FnMut() -> core::result::Result<(), Cancel>,
+    VS: VertexScanSource<Error = ReadError> + Send,
+    ES: EdgeScanSource<Error = ReadError> + Send,
+    VF: FnMut() -> core::result::Result<(), Cancel> + Send,
+    EF: FnMut() -> core::result::Result<(), Cancel> + Send,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
@@ -173,6 +174,7 @@ where
         source,
         page_bytes,
         max_row_bytes,
+        None,
     )
     .await?;
     spool

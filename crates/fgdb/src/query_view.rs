@@ -25,6 +25,7 @@ mod spool;
 pub use spool::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
     NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
+    PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 
 impl EmbeddedReadView {

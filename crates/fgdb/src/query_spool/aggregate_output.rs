@@ -636,7 +636,7 @@ mod tests {
         stop: usize,
     }
     impl GroupInput for Control {
-        fn next_input(&mut self) -> core::result::Result<Option<GraphValueRow>, ExecutionError> {
+        fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>> {
             panic!("completed-group comparison must not reopen the graph")
         }
         fn charge(&mut self, _: VertexScanEvent) -> core::result::Result<(), ExecutionError> {

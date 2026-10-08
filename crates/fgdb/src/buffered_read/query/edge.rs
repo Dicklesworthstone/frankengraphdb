@@ -13,9 +13,12 @@ use fgdb_gql::edge_stream::{
     AsyncEdgeScanRecord, AsyncEdgeScanSource, EdgeScanError, EdgeScanRow, EdgeScanSourceError,
     VertexScanRow,
 };
+use fgdb_gql::spill_aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
-use fgdb_strata::tiered::edge_scan::{BufferedEdgeEndpoints, BufferedEdgeScan, BufferedEdgeScanEvent};
+use fgdb_strata::tiered::edge_scan::{
+    BufferedEdgeEndpoints, BufferedEdgeScan, BufferedEdgeScanEvent,
+};
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
@@ -246,6 +249,61 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let plan = AsyncEdgeScanPlan::compile(pattern.plan())
             .map_err(|error| GqlQueryError::Source(EdgeScanError::Plan(error)))?;
+        self.open_edge_input(cx, plan, as_of, policy)
+    }
+
+    /// The same authenticated source and guarded native cursor, with local
+    /// projection admitted for an external operator instead of direct output.
+    pub(crate) fn open_edge_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeScanPlan,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncEdgeScanCursor<
+            impl AsyncEdgeScanSource<Error = BufferedReadError, OutputGuard = MemoryCharge>
+            + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
+    }
+
+    pub(crate) fn open_edge_aggregate_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeSpillAggregatePlan,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncEdgeSpillAggregateCursor<
+            impl AsyncEdgeScanSource<Error = BufferedReadError, OutputGuard = MemoryCharge>
+            + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        Ok(AsyncEdgeSpillAggregateCursor::new(
+            source, plan, policy, checkpoint,
+        ))
+    }
+
+    fn edge_input_source<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        as_of: CommitSeq,
+    ) -> Result<(Source<'view, 'q, V>, Checkpoint<'q>), EdgeQueryError> {
+        if as_of > self.frontier() {
+            return Err(source_error(BufferedReadError::BeyondPublication {
+                requested: as_of,
+                publication: self.frontier(),
+            }));
+        }
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let pool = self.memory_pool().clone();
         let metadata = pool
             .reserve(cx, 1024)
@@ -260,8 +318,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         // reservation there until cursor drop, never refund it on a row pull.
         let checkpoint: Checkpoint<'q> = Box::new(move || {
             let _retained = &metadata;
-            cx.checkpoint()
+            cx.with_restriction(|| cx.checkpoint())
         });
-        Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
+        Ok((source, checkpoint))
     }
 }

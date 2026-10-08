@@ -17,11 +17,14 @@ use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
 
 #[path = "aggregate_account.rs"]
 mod account;
+#[path = "aggregate_buffered.rs"]
+mod buffered;
 #[cfg(test)]
 #[path = "aggregate_codec_tests.rs"]
 mod codec_tests;
 #[path = "aggregate_output.rs"]
 mod output;
+pub use buffered::PreparedBufferedAggregate;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
 
@@ -32,6 +35,14 @@ pub enum NativeAggregateSpoolError {
     Prepare(Box<QueryError>),
     Execute(
         Box<fgdb_gql::GqlQueryError<fgdb_gql::GraphAggregateError<ScanError<ReadError>>, Cancel>>,
+    ),
+    BufferedExecute(
+        Box<
+            fgdb_gql::GqlQueryError<
+                fgdb_gql::GraphAggregateError<ScanError<crate::BufferedReadError>>,
+                Cancel,
+            >,
+        >,
     ),
     Spool(NativeSpoolError),
     Decode(GraphValueDecodeError),
@@ -51,6 +62,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
         match self {
             Self::Prepare(error) => error.fmt(f),
             Self::Execute(error) => error.fmt(f),
+            Self::BufferedExecute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
             Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT arguments or collection"),
@@ -65,6 +77,7 @@ impl core::error::Error for NativeAggregateSpoolError {
         match self {
             Self::Prepare(error) => Some(error.as_ref()),
             Self::Execute(error) => Some(error.as_ref()),
+            Self::BufferedExecute(error) => Some(error.as_ref()),
             Self::Spool(error) => Some(error),
             Self::Decode(error) => Some(error),
             _ => None,
@@ -336,7 +349,7 @@ type ExecutionError =
 // The source cursor remains the sole cumulative GQL meter during partition
 // reduction. Exhaustion releases its source pin but leaves the meter alive.
 trait GroupInput: Send {
-    fn next_input(&mut self) -> core::result::Result<Option<GraphValueRow>, ExecutionError>;
+    fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>>;
     fn charge(&mut self, event: VertexScanEvent) -> core::result::Result<(), ExecutionError>;
     fn finish_result(&mut self) -> core::result::Result<(), ExecutionError>;
     fn exhausted(&self) -> bool;
@@ -352,11 +365,15 @@ macro_rules! input_adapter {
             S: $source<Error = ReadError> + Send,
             F: FnMut() -> core::result::Result<(), Cancel> + Send,
         {
-            fn next_input(
-                &mut self,
-            ) -> core::result::Result<Option<GraphValueRow>, ExecutionError> {
-                $cursor::next_input(self).map_err(|error| {
-                    error.map_source(|error| error.map_source(ScanError::$variant))
+            fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>> {
+                Box::pin(async move {
+                    $cursor::next_input(self)
+                        .map(|row| row.map(SpoolRow::resident))
+                        .map_err(|error| {
+                            execute_error(
+                                error.map_source(|error| error.map_source(ScanError::$variant)),
+                            )
+                        })
                 })
             }
             fn charge(
@@ -475,13 +492,14 @@ struct Opened<'q> {
     slots: Vec<GraphAggregateTextSlot>,
 }
 
-fn open<'q>(
-    prepared: &PreparedNativeRead,
-    view: &EmbeddedReadView,
-    cx: &'q QueryCx,
-    params: &GqlParameters,
-    policy: GqlQueryPolicy,
-) -> Result<Opened<'q>> {
+struct BoundAggregate {
+    definition: fgdb_gql::PreparedGraphAggregate,
+    columns: Vec<String>,
+    slots: Vec<GraphAggregateTextSlot>,
+    as_of: Option<CommitSeq>,
+}
+
+fn bind(prepared: &PreparedNativeRead, params: &GqlParameters) -> Result<BoundAggregate> {
     let (definition, columns, slots, as_of) = match prepared {
         PreparedNativeRead::Aggregate(prepared) => (
             prepared.bind_parameters(params).map_err(|error| {
@@ -489,7 +507,7 @@ fn open<'q>(
             })?,
             prepared.columns(),
             prepared.output_slots(),
-            view.frontier(),
+            None,
         ),
         PreparedNativeRead::TemporalAggregate(prepared) => {
             let query = prepared.bind_parameters(params).map_err(|error| {
@@ -499,7 +517,7 @@ fn open<'q>(
                 query.aggregate().clone(),
                 prepared.columns(),
                 prepared.output_slots(),
-                query.as_of(),
+                Some(query.as_of()),
             )
         }
         PreparedNativeRead::PipelineAggregate(prepared) => (
@@ -508,16 +526,38 @@ fn open<'q>(
             })?,
             prepared.columns(),
             prepared.output_slots(),
-            view.frontier(),
+            None,
         ),
         _ => return Err(NativeAggregateSpoolError::Unsupported),
     };
+    Ok(BoundAggregate {
+        definition,
+        columns: columns.to_vec(),
+        slots: slots.to_vec(),
+        as_of,
+    })
+}
+
+fn open<'q>(
+    prepared: &PreparedNativeRead,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    params: &GqlParameters,
+    policy: GqlQueryPolicy,
+) -> Result<Opened<'q>> {
+    let BoundAggregate {
+        definition,
+        columns,
+        slots,
+        as_of,
+    } = bind(prepared, params)?;
+    let as_of = as_of.unwrap_or_else(|| view.frontier());
     let plan = SpillAggregatePlan::compile(&definition)
         .map_err(|_| NativeAggregateSpoolError::Unsupported)?;
     let definition = plan.definition().clone();
     if !crate::query::aggregate_stream::valid_layout(
-        columns,
-        slots,
+        &columns,
+        &slots,
         definition.key_columns(),
         definition.aggregate_columns(),
     ) {
@@ -546,8 +586,8 @@ fn open<'q>(
     Ok(Opened {
         input,
         definition,
-        columns: columns.to_vec(),
-        slots: slots.to_vec(),
+        columns,
+        slots,
     })
 }
 
@@ -558,8 +598,9 @@ impl PreparedNativeRead {
     ///
     /// Row-local computed inputs use the ordinary projection VM before
     /// partitioning; every declared input column runs, including hidden ones.
-    /// The compiler refuses DISTINCT, COLLECT, relational input and computed
-    /// output expressions before source opening. Every partition
+    /// The compiler refuses DISTINCT aggregate arguments, COLLECT and relational
+    /// input before source opening. Native completed-group expressions and
+    /// RETURN DISTINCT run once before final ranking and pagination. Every partition
     /// preserves original occurrence order within each group. All groups finish
     /// before HAVING, exact typed ordering, visible projection and SKIP/LIMIT.
     /// Hidden keys and clause-only summaries remain private until this stage.
@@ -640,13 +681,6 @@ impl PreparedNativeRead {
 fn execute_error(error: ExecutionError) -> NativeAggregateSpoolError {
     NativeAggregateSpoolError::Execute(Box::new(error))
 }
-fn row_limit(bytes: usize, limit: usize) -> Result<()> {
-    if bytes > limit {
-        return Err(NativeSpoolError::RowTooLarge { bytes, limit }.into());
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn drain_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     input: &mut dyn GroupInput,
@@ -661,7 +695,7 @@ async fn drain_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     let mut writer = file.paged_writer(work.cx, page_bytes)?;
     let mut count = 0_u64;
     let mut largest = 0;
-    while let Some(row) = input.next_input().map_err(execute_error)? {
+    while let Some(row) = input.next_input().await? {
         work.charge(1)?;
         let attempted = count.checked_add(1).ok_or(SpillError::SizeOverflow)?;
         if attempted > max_input_rows {
@@ -670,13 +704,15 @@ async fn drain_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
                 limit: max_input_rows,
             });
         }
-        if row.len() != definition.input_width() {
+        if row.row.len() != definition.input_width() {
             return invalid();
         }
-        let encoded = account::encode(&pool, work, &row, max_row_bytes)?;
+        let encoded = account::encode(&pool, work, &row.row, max_row_bytes)?;
         largest = largest.max(encoded.0.len());
         work.write(&mut writer, &encoded.0).await?;
         count = attempted;
+        drop(encoded);
+        drop(row);
     }
     if !input.exhausted() || input.row_stats().result_rows != 0 {
         return Err(NativeSpoolError::IncompleteCursor.into());

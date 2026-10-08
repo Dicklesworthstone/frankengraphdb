@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 mod canonical;
 #[path = "sort/prepared.rs"]
 mod prepared;
+pub use prepared::PreparedBufferedOrder;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
@@ -301,8 +302,45 @@ impl NativeResultSpool {
             max_runs,
             page_bytes,
             max_work_units,
+            0,
         ))
         .await
+    }
+
+    // Buffered native intake has already spent encoding work. Continue that
+    // SAME allowance, preserving the original limit in every reported refusal.
+    // Ordinary sort_into/sort_with begin at zero and keep their public contract.
+    #[allow(clippy::too_many_arguments)]
+    fn sort_continuing<'a, A, B>(
+        &'a self,
+        cx: &'a QueryCx,
+        source: &'a mut SpillFile<A>,
+        destination: &'a mut SpillFile<B>,
+        order: &'a [GraphValueOrder],
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_work_units: u64,
+        prior_work: u64,
+    ) -> crate::SendFuture<'a, Result<(Self, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+    {
+        Box::pin(async move {
+            cx.with_restriction_async(self.sort_inner(
+                cx,
+                source,
+                destination,
+                &mut CanonicalOrder(order),
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_work_units,
+                prior_work,
+            ))
+            .await
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -316,6 +354,7 @@ impl NativeResultSpool {
         max_runs: usize,
         page_bytes: usize,
         max_work_units: u64,
+        prior_work: u64,
     ) -> core::result::Result<(Self, u64), O::Error>
     where
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -324,7 +363,7 @@ impl NativeResultSpool {
     {
         let mut work = Work {
             cx,
-            used: 0,
+            used: prior_work,
             limit: max_work_units,
         };
         work.charge(1)?;

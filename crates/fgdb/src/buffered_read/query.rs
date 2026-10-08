@@ -10,6 +10,7 @@ use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueRow, PreparedGraphPattern,
 };
+use fgdb_gql::spill_aggregate::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
 use fgdb_gql::stream::{
     AsyncVertexCandidate, AsyncVertexScanCursor, AsyncVertexScanEvent, AsyncVertexScanPlan,
     AsyncVertexScanRecord, AsyncVertexScanSource, VertexScanError, VertexScanEvent,
@@ -34,12 +35,18 @@ pub type BufferedQueryError = GqlQueryError<VertexScanError<BufferedReadError>, 
 pub struct BufferedQueryRow<Row = GraphValueRow> {
     row: Row,
     // Declaration order releases the data before refunding its reservation.
-    _charge: MemoryCharge,
+    charge: MemoryCharge,
 }
 
 impl<Row> AsRef<Row> for BufferedQueryRow<Row> {
     fn as_ref(&self) -> &Row {
         &self.row
+    }
+}
+
+impl<Row> BufferedQueryRow<Row> {
+    pub(crate) fn into_parts(self) -> (Row, MemoryCharge) {
+        (self.row, self.charge)
     }
 }
 
@@ -107,10 +114,7 @@ impl<V: Vfs + Clone, Row: VertexScanOutput> BufferedQueryCursor<'_, '_, V, Row> 
             .map(|result| {
                 result.map(|output| {
                     let (row, charge) = output.into_parts();
-                    BufferedQueryRow {
-                        row,
-                        _charge: charge,
-                    }
+                    BufferedQueryRow { row, charge }
                 })
             })
     }
@@ -260,6 +264,64 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let plan = AsyncVertexScanPlan::compile(pattern.plan())
             .map_err(|error| GqlQueryError::Source(VertexScanError::Plan(error)))?;
+        self.open_vertex_input(cx, plan, as_of, policy)
+    }
+
+    /// Open an already admitted local physical input. Its terminal clauses
+    /// may belong to an external operator; the native cursor still owns all
+    /// source predicates, projection and cumulative evaluation accounting.
+    pub(crate) fn open_vertex_input<'view, 'q, Row: VertexScanOutput>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncVertexScanPlan<Row>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<BufferedQueryCursor<'view, 'q, V, Row>, BufferedQueryError> {
+        let (source, metadata) = self.vertex_input_source(cx, as_of)?;
+        let checkpoint: Checkpoint<'q> = Box::new(move || cx.with_restriction(|| cx.checkpoint()));
+        Ok(BufferedQueryCursor {
+            inner: AsyncVertexScanCursor::new(source, plan, policy, checkpoint),
+            cx,
+            _metadata: metadata,
+        })
+    }
+
+    pub(crate) fn open_vertex_aggregate_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncVertexSpillAggregatePlan,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncVertexSpillAggregateCursor<
+            impl AsyncVertexScanSource<Error = BufferedReadError, OutputGuard = MemoryCharge>
+            + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        BufferedQueryError,
+    > {
+        let (source, metadata) = self.vertex_input_source(cx, as_of)?;
+        let checkpoint: Checkpoint<'q> = Box::new(move || {
+            let _retained = &metadata;
+            cx.with_restriction(|| cx.checkpoint())
+        });
+        Ok(AsyncVertexSpillAggregateCursor::new(
+            source, plan, policy, checkpoint,
+        ))
+    }
+
+    fn vertex_input_source<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        as_of: CommitSeq,
+    ) -> Result<(BufferedVertexQuerySource<'view, 'q, V>, MemoryCharge), BufferedQueryError> {
+        if as_of > self.frontier() {
+            return Err(source_error(BufferedReadError::BeyondPublication {
+                requested: as_of,
+                publication: self.frontier(),
+            }));
+        }
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         let pool = self.memory_pool().clone();
         let metadata = pool
             .reserve(cx, 1024)
@@ -273,12 +335,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             cx,
             pool,
         };
-        let checkpoint: Checkpoint<'q> = Box::new(move || cx.checkpoint());
-        Ok(BufferedQueryCursor {
-            inner: AsyncVertexScanCursor::new(source, plan, policy, checkpoint),
-            cx,
-            _metadata: metadata,
-        })
+        Ok((source, metadata))
     }
 
     /// Execute an already bound native GQL plan through the extent cache.

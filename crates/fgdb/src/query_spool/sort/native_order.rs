@@ -8,6 +8,10 @@ use fgdb_gql::scan_stream::ScanSortTail;
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
 use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 
+#[path = "buffered_order.rs"]
+mod buffered;
+pub use buffered::PreparedBufferedOrder;
+
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {
         // These are PRIVATE input occurrences. The original output allowance
@@ -278,6 +282,11 @@ where
             limit: 0,
         });
     }
+    let mut work = Work {
+        cx,
+        used: 0,
+        limit: max_sort_work,
+    };
     let input = drain(
         cx,
         columns,
@@ -286,10 +295,11 @@ where
         destination,
         page_bytes,
         max_row_bytes,
+        Some(&mut work),
     )
     .await?;
     let (sorted, used) = input
-        .sort_into(
+        .sort_continuing(
             cx,
             destination,
             scratch,
@@ -298,13 +308,10 @@ where
             max_runs,
             page_bytes,
             max_sort_work,
+            work.used,
         )
         .await?;
-    let mut work = Work {
-        cx,
-        used,
-        limit: max_sort_work,
-    };
+    work.used = used;
     let result = window(
         &sorted,
         scratch,

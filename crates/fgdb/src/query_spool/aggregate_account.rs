@@ -131,72 +131,7 @@ pub(super) fn decoded(bytes: &[u8], cx: &QueryCx) -> Result<usize> {
     add(mul(resident, 2)?, 256)
 }
 
-fn body_shape(
-    value: &GraphValue,
-    depth: usize,
-    remaining: &mut usize,
-    cx: &QueryCx,
-) -> Result<(usize, usize)> {
-    cx.with_restriction(|| cx.checkpoint())
-        .map_err(SpillError::Interrupted)?;
-    if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
-        return invalid();
-    }
-    *remaining -= 1;
-    let mut nodes = 1;
-    let body = match value {
-        GraphValue::Scalar(value) => add(
-            9,
-            value
-                .canonical_encoded_len()
-                .map_err(NativeSpoolError::Encode)?,
-        )?,
-        GraphValue::Vertex(_) | GraphValue::Edge(_) => 17,
-        GraphValue::Path(path) => add(25, mul(path.steps().len(), 32)?)?,
-        GraphValue::Vertices(values) => add(9, mul(values.len(), 16)?)?,
-        GraphValue::Edges(values) => add(9, mul(values.len(), 16)?)?,
-        GraphValue::List(values) => {
-            let mut bytes = 9;
-            if values.len() > *remaining {
-                return invalid();
-            }
-            for value in values {
-                let (body, children) = body_shape(value, depth + 1, remaining, cx)?;
-                bytes = add(bytes, add(8, body)?)?;
-                nodes = add(nodes, children)?;
-            }
-            bytes
-        }
-        GraphValue::Map { keys, values } => {
-            if keys.len() != values.len() || values.len() > *remaining {
-                return invalid();
-            }
-            let mut bytes = 9;
-            for (key, value) in keys.iter().zip(values) {
-                let (body, children) = body_shape(value, depth + 1, remaining, cx)?;
-                bytes = add(bytes, add(add(16, key.len())?, body)?)?;
-                nodes = add(nodes, children)?;
-            }
-            bytes
-        }
-    };
-    Ok((body, nodes))
-}
-
-pub(super) fn encoded_shape(row: &GraphValueRow, cx: &QueryCx) -> Result<(usize, usize)> {
-    if row.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES {
-        return invalid();
-    }
-    let mut bytes = ROW.len() + 8;
-    let mut nodes = 0;
-    for value in row.values() {
-        let mut remaining = GraphValue::MAX_LIST_NODES;
-        let (body, count) = body_shape(value, 0, &mut remaining, cx)?;
-        bytes = add(bytes, add(16 + VALUE.len(), body)?)?;
-        nodes = add(nodes, count)?;
-    }
-    Ok((bytes, nodes))
-}
+pub(super) use super::super::codec::encoded_shape;
 
 /// The existing encoder can temporarily own row, cell and scalar byte vectors
 /// together. Admit their geometric growth and iterative traversal stack before
@@ -207,14 +142,5 @@ pub(super) fn encode(
     row: &GraphValueRow,
     limit: usize,
 ) -> Result<(Vec<u8>, MemoryCharge)> {
-    let (len, nodes) = encoded_shape(row, work.cx)?;
-    row_limit(len, limit)?;
-    work.charge(add(len, nodes)?)?;
-    let budget = add(mul(len, 8)?, mul(nodes, 128)?)?;
-    let charge = pool.reserve(work.cx, budget).map_err(SpillError::Memory)?;
-    let bytes = row.canonical_bytes().map_err(NativeSpoolError::Encode)?;
-    if bytes.len() != len {
-        return invalid();
-    }
-    Ok((bytes, charge))
+    super::super::codec::encode(pool, work, row, limit).map_err(Into::into)
 }

@@ -166,8 +166,9 @@ pub use query::{
     HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor, NativeAggregateSpool,
     NativeAggregateSpoolCursor, NativeAggregateSpoolError, NativeAggregateSpoolRow,
     NativeExplainCertificate, NativeResultCertificate, NativeResultSpool, NativeSpoolCursor,
-    NativeSpoolError, PinnedIndex, PreparedNativeRead, ProcedureError, QueryError, QueryResult,
-    QueryValue, QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
+    NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
+    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
+    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession, WriteTxn,
