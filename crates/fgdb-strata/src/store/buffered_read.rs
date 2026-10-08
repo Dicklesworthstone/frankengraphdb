@@ -1,11 +1,14 @@
 //! An admitted immutable partition whose payloads fault through ExtentBuffer.
 //!
 //! Opening proves the ordinary root history laws, retaining only descriptors
-//! afterwards. Admission's existing history validators are charged before they
-//! grow; a large history can therefore refuse even when its eventual descriptor
-//! set would fit. This is not an unbounded external history validator. No durable
+//! afterwards. Vertex admission retains charged lifecycle metadata and birth
+//! locators; restatements refault their authenticated birth patch for exact
+//! payload comparison. Resident admission therefore depends on version count,
+//! not the sum of vertex property bytes. A metadata-heavy history may still
+//! refuse; this is not an unbounded external history validator. No durable
 //! format changes or permission to reclaim objects follow from this reader.
 
+mod admission;
 mod scan_access;
 
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
@@ -55,7 +58,8 @@ pub struct BufferedReadLimits {
     /// Combined root frame and root-segment encoded byte ceiling. Also bounds
     /// the manifest used by the native single-partition selector.
     pub max_root_bytes: usize,
-    /// Encoded payload bytes inspected during initial admission. As with
+    /// Encoded payload bytes inspected during initial admission, including
+    /// birth-patch refaults needed to validate vertex restatements. As with
     /// RootReadLimits, at most one format-bounded object has been read when this
     /// source limit refuses; the resident reservation always precedes the read.
     pub max_source_bytes: usize,
@@ -402,6 +406,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         // Declaration order keeps the charges alive until the validators drop.
         let mut history_charges = Vec::new();
         let mut walk = RootWalk::default();
+        let mut vertex_history = admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
         let mut work = 0;
         let mut source_bytes = 0usize;
         let mut observe = |event| {
@@ -496,30 +501,9 @@ impl<V: Vfs + Clone> BlockStore<V> {
             let (rows, bytes) = self
                 .resolve_root_patch_observed(cx, at, reference, &mut observe)
                 .await?;
-            // Vertex history retains canonical property payloads, so it is NOT
-            // charged as merely one fixed-size row header per version.
-            let history_bytes = bytes
-                .len()
-                .checked_mul(32)
-                .and_then(|bytes| {
-                    rows.len()
-                        .checked_add(1)
-                        .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
-                        .and_then(|headers| bytes.checked_add(headers))
-                })
-                .ok_or(BufferedReadError::SizeOverflow)?;
-            history_charges.push(pool.reserve(cx, history_bytes)?);
-            walk.vertex_history
-                .observe_patch(at, &rows)
-                .map_err(|error| match error {
-                    crate::root::RootError::VertexIdentityMismatch { vid, conflict } => {
-                        // Drop property-bearing diagnostics while the
-                        // workspace/history charges are still alive.
-                        drop(conflict);
-                        BufferedReadError::VertexHistoryConflict { vid }
-                    }
-                    error => StoreError::MalformedRoot(error).into(),
-                })?;
+            vertex_history
+                .observe_patch(cx, at, &rows, &mut observe)
+                .await?;
             patches.push(PatchDescriptor {
                 extent: descriptor(reference.patch_id, &bytes)?,
                 first: rows.first().map(|row| (row.vid, row.created_at)),
@@ -527,6 +511,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 rows: rows.len(),
             });
         }
+        drop(vertex_history);
         drop(walk);
         drop(history_charges);
         cx.buffered_checkpoint()

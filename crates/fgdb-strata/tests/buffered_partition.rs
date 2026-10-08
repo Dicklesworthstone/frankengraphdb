@@ -881,3 +881,354 @@ fn a_keyed_root_cannot_bypass_cross_object_identity_history() {
         }
     });
 }
+
+#[test]
+fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
+    const COUNT: usize = 240;
+    const PAYLOAD: usize = 14_000;
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut patches = Vec::new();
+        let mut source_bytes = 0usize;
+        for index in 1..=COUNT {
+            let mut payload = vec![0x5a; PAYLOAD];
+            payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            let row = VertexRow {
+                props: vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())],
+                ..scan_vertex(index as u128, 1, None, 0)
+            };
+            let bytes = encode_patch(&[row]).unwrap();
+            source_bytes += bytes.len();
+            let patch = store.put_patch(&commit, &bytes).await.unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            });
+        }
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(1),
+                    blocks: vec![],
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        let cap = 3 * 1024 * 1024;
+        assert!(
+            source_bytes > cap,
+            "distinct durable payloads exceed the cap"
+        );
+        let pool = MemoryPool::new(cap, 0).unwrap();
+        let mut bounded = limits();
+        bounded.max_root_bytes = 16 * 1024;
+        bounded.max_source_bytes = source_bytes;
+        bounded.max_vertex_patches = COUNT;
+        bounded.max_work = COUNT * 4;
+        let mut view = store
+            .open_buffered_root(&query, id, pool.clone(), bounded)
+            .await
+            .unwrap();
+        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        for index in [1, COUNT, 1] {
+            let found = view
+                .vertex_at(&query, VId(index as u128), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut payload = vec![0x5a; PAYLOAD];
+            payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            assert_eq!(
+                found.props,
+                vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())]
+            );
+            assert!(pool.used() <= cap);
+        }
+        assert!(view.stats().evictions > 0);
+        let mut scan = view.vertex_scan(&query, CommitSeq(1)).unwrap();
+        for index in 1..=COUNT {
+            let found = scan.next(&query).await.unwrap().unwrap();
+            assert_eq!(found.vid, VId(index as u128));
+            let mut payload = vec![0x5a; PAYLOAD];
+            payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            assert_eq!(
+                found.props,
+                vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())]
+            );
+        }
+        assert!(scan.next(&query).await.unwrap().is_none());
+        drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refault() {
+    const COUNT: usize = 240;
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let mut patches = Vec::new();
+        let mut source_bytes = 0usize;
+        let mut birth_bytes = 0usize;
+        for index in 0..COUNT {
+            let birth = VertexRow {
+                props: vec![(
+                    PropertyKeyId(11),
+                    CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap(),
+                )],
+                ..vertex(1, None, 0)
+            };
+            // Every patch has a distinct keyed identity, even though its
+            // large first statement is an exact restatement of the birth.
+            let bytes =
+                encode_patch(&[birth, scan_vertex(index as u128 + 2, 1, None, index as i64)])
+                    .unwrap();
+            source_bytes += bytes.len();
+            if index == 0 {
+                birth_bytes = bytes.len();
+            }
+            let patch = store.put_patch(&commit, &bytes).await.unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            });
+        }
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(1),
+                    blocks: vec![],
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        let cap = 3 * 1024 * 1024;
+        assert!(source_bytes > cap);
+        let pool = MemoryPool::new(cap, 0).unwrap();
+        let mut bounded = limits();
+        bounded.max_root_bytes = 16 * 1024;
+        bounded.max_vertex_patches = COUNT;
+        bounded.max_source_bytes = source_bytes + (COUNT - 1) * birth_bytes;
+        // Each incoming patch and each refault has one object plus two rows.
+        bounded.max_work = 3 * COUNT + 3 * (COUNT - 1);
+        let mut view = store
+            .open_buffered_root(&query, id, pool.clone(), bounded)
+            .await
+            .unwrap();
+        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        let found = view
+            .vertex_at(&query, VId(1), CommitSeq(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found.props,
+            vec![(
+                PropertyKeyId(11),
+                CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap()
+            )]
+        );
+        drop(found);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+
+        let mut too_little = bounded;
+        too_little.max_work -= 1;
+        assert!(matches!(
+            store.open_buffered_root(&query, id, pool.clone(), too_little).await,
+            Err(BufferedReadError::Limit { resource: "buffered source work", requested, limit })
+                if requested == bounded.max_work && limit == bounded.max_work - 1
+        ));
+        assert_eq!(pool.used(), 0);
+        too_little = bounded;
+        too_little.max_source_bytes -= 1;
+        assert!(matches!(
+            store.open_buffered_root(&query, id, pool.clone(), too_little).await,
+            Err(BufferedReadError::Limit { resource: "buffered source bytes", requested, limit })
+                if requested == bounded.max_source_bytes && limit == bounded.max_source_bytes - 1
+        ));
+        assert_eq!(pool.used(), 0);
+        let starved = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root(&query, id, starved.clone(), bounded)
+                .await,
+            Err(BufferedReadError::Memory(
+                MemoryError::ResourceExhausted { .. }
+            ))
+        ));
+        assert_eq!(starved.used(), 0);
+    });
+}
+
+#[test]
+fn compact_vertex_admission_matches_the_canonical_publication_history_validator() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        // None is an accepted history; false is an identity conflict; true is
+        // a retirement conflict. Each case has its own explicit expected law.
+        let cases = [
+            (
+                "retire then replace",
+                vec![
+                    vertex(1, None, 10),
+                    vertex(1, Some(2), 10),
+                    vertex(2, None, 20),
+                ],
+                None,
+            ),
+            (
+                "repeat retired version",
+                vec![vertex(1, Some(2), 10), vertex(1, Some(2), 10)],
+                None,
+            ),
+            (
+                "prepend contiguous history",
+                vec![vertex(3, None, 30), vertex(1, Some(3), 10)],
+                None,
+            ),
+            (
+                "changed property",
+                vec![vertex(1, None, 10), vertex(1, None, 99)],
+                Some(false),
+            ),
+            (
+                "changed labels",
+                vec![
+                    vertex(1, None, 10),
+                    VertexRow {
+                        labels: vec![LabelId(10)],
+                        ..vertex(1, None, 10)
+                    },
+                ],
+                Some(false),
+            ),
+            (
+                "changed birth ordinal",
+                vec![
+                    vertex(1, None, 10),
+                    VertexRow {
+                        birth_ordinal: 8,
+                        ..vertex(1, None, 10)
+                    },
+                ],
+                Some(false),
+            ),
+            (
+                "retirement removed",
+                vec![vertex(1, Some(2), 10), vertex(1, None, 10)],
+                Some(true),
+            ),
+            (
+                "retirement moved",
+                vec![vertex(1, Some(2), 10), vertex(1, Some(3), 10)],
+                Some(true),
+            ),
+            (
+                "successor gap",
+                vec![vertex(1, Some(2), 10), vertex(3, None, 30)],
+                Some(false),
+            ),
+            (
+                "successor overlap",
+                vec![vertex(1, Some(3), 10), vertex(2, None, 20)],
+                Some(false),
+            ),
+            (
+                "changed successor birth",
+                vec![
+                    vertex(1, Some(2), 10),
+                    VertexRow {
+                        birth_ordinal: 8,
+                        ..vertex(2, None, 20)
+                    },
+                ],
+                Some(false),
+            ),
+            (
+                "late retirement is not a valid prefix",
+                vec![
+                    vertex(1, None, 10),
+                    vertex(2, None, 20),
+                    vertex(1, Some(2), 10),
+                ],
+                Some(false),
+            ),
+            (
+                "prepended gap",
+                vec![vertex(3, None, 30), vertex(1, Some(2), 10)],
+                Some(false),
+            ),
+        ];
+        for (name, history, expected) in cases {
+            let mut patches = Vec::new();
+            for (index, row) in history.into_iter().enumerate() {
+                let first_seq = row.created_at;
+                // Keep root publication ranges monotone even when testing a
+                // malicious retirement removal or a prepended old version.
+                let bytes =
+                    encode_patch(&[row, scan_vertex(index as u128 + 100, 10, None, 0)]).unwrap();
+                let patch = store.put_patch(&commit, &bytes).await.unwrap();
+                patches.push(PatchRef {
+                    patch_id: patch.0,
+                    first_seq,
+                    last_seq: CommitSeq(10),
+                });
+            }
+            let root = PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                partition: 0,
+                published_at: CommitSeq(10),
+                blocks: vec![],
+                vertex_patches: patches,
+            };
+            let bytes = fgdb_strata::root::encode_root(&root).unwrap();
+            let id = fgdb_strata::root::root_id(&KEY, NS, &bytes);
+            std::fs::write(store.path(id), bytes).unwrap();
+            let id = PartitionRootVersion(id);
+            let ordinary = store.admit_root(&query, id).await;
+            assert_eq!(ordinary.is_ok(), expected.is_none(), "ordinary: {name}");
+            let pool = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+            let compact = store
+                .open_buffered_root(&query, id, pool.clone(), limits())
+                .await;
+            match expected {
+                None => assert!(compact.is_ok(), "compact: {name}"),
+                Some(false) => assert!(
+                    matches!(
+                        &compact,
+                        Err(BufferedReadError::VertexHistoryConflict { vid: VId(1) })
+                    ),
+                    "compact: {name}"
+                ),
+                Some(true) => assert!(
+                    matches!(&compact, Err(BufferedReadError::Store(error))
+                    if matches!(**error, StoreError::MalformedRoot(fgdb_strata::root::RootError::VertexRetirementMismatch { vid: VId(1), .. }))),
+                    "compact: {name}"
+                ),
+            }
+            drop(compact);
+            assert_eq!(pool.used(), 0, "{name}");
+        }
+    });
+}
