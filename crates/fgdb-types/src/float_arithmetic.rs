@@ -205,6 +205,64 @@ fn round_integral(
 }
 
 impl CanonicalF64 {
+    /// Compare this binary64 value with an exact signed rational. No operand
+    /// is rounded or converted to the other's representation. The positive
+    /// denominator may span all of u64; the numerator may span all of i128.
+    /// Canonical NaN retains its STRICT_PORTABLE position above positive
+    /// infinity. This does not change canonical scalar equality or hashing.
+    ///
+    /// The comparison uses a fixed number of integer operations and no
+    /// allocation: a 53-bit significand times a 64-bit denominator fits in
+    /// u128, and unequal bit lengths settle every otherwise oversized shift.
+    #[must_use]
+    pub fn compare_rational(
+        self,
+        numerator: i128,
+        denominator: core::num::NonZeroU64,
+    ) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+
+        let number = match Number::read(self) {
+            Ok(number) => number,
+            Err(_) => {
+                return if self.to_bits() & SIGN != 0 {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+        };
+        if number.significand == 0 {
+            return 0_i128.cmp(&numerator);
+        }
+        if numerator == 0 || number.negative != numerator.is_negative() {
+            return if number.negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        let scaled = u128::from(number.significand) * u128::from(denominator.get());
+        let integer = numerator.unsigned_abs();
+        let scaled_bits = (128 - scaled.leading_zeros()) as i32;
+        let integer_bits = (128 - integer.leading_zeros()) as i32;
+        let magnitude = (scaled_bits + number.exponent)
+            .cmp(&integer_bits)
+            .then_with(|| {
+                // Equal bit lengths prove the shifted operand fits in u128.
+                if number.exponent >= 0 {
+                    (scaled << number.exponent as u32).cmp(&integer)
+                } else {
+                    scaled.cmp(&(integer << number.exponent.unsigned_abs()))
+                }
+            });
+        if number.negative {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
+    }
+
     /// Convert a signed integer using round-to-nearest, ties-to-even. Integers
     /// outside binary64's exact precision are rounded, never truncated through
     /// a host cast. This explicit conversion does not change scalar equality.
@@ -635,6 +693,70 @@ mod tests {
             (i64::MIN, 0xc3e0_0000_0000_0000),
         ] {
             assert_eq!(CanonicalF64::from_i64_rounded(integer).to_bits(), encoded);
+        }
+    }
+
+    #[test]
+    fn rational_comparison_keeps_extreme_widths_subnormals_and_canonical_specials_exact() {
+        use core::cmp::Ordering::{Equal, Greater, Less};
+        use core::num::NonZeroU64;
+
+        for (floating, numerator, denominator, expected) in [
+            (0.0, 0, 1, Equal),
+            (-0.0, 0, u64::MAX, Equal),
+            (0.0, 1, u64::MAX, Less),
+            (0.0, -1, u64::MAX, Greater),
+            (0.5, 1, 2, Equal),
+            (-0.5, -1, 2, Equal),
+            (0.1, 1, 10, Greater),
+            (-0.1, -1, 10, Less),
+            (1.0 / 3.0, 1, 3, Less),
+            (-1.0 / 3.0, -1, 3, Greater),
+            (9_007_199_254_740_992.0, (1_i128 << 53) + 1, 1, Less),
+            (-9_007_199_254_740_992.0, -(1_i128 << 53) - 1, 1, Greater),
+            (f64::from_bits(0x47e0_0000_0000_0000), i128::MAX, 1, Greater),
+            (f64::from_bits(0xc7e0_0000_0000_0000), i128::MIN, 1, Equal),
+            (f64::from_bits(0x47df_ffff_ffff_ffff), i128::MAX, 1, Less),
+            (f64::from_bits(0xc7df_ffff_ffff_ffff), i128::MIN, 1, Greater),
+            (9_223_372_036_854_775_808.0, i128::MAX, u64::MAX, Less),
+            (-9_223_372_036_854_775_808.0, i128::MIN, u64::MAX, Greater),
+            (f64::from_bits(1), 0, 1, Greater),
+            (f64::from_bits(1), 1, u64::MAX, Less),
+            (-f64::from_bits(1), -1, u64::MAX, Greater),
+            (f64::MAX, i128::MAX, 1, Greater),
+            (-f64::MAX, i128::MIN, 1, Less),
+            (f64::INFINITY, i128::MAX, 1, Greater),
+            (f64::NEG_INFINITY, i128::MIN, 1, Less),
+            (f64::NAN, i128::MAX, 1, Greater),
+        ] {
+            assert_eq!(
+                f(floating).compare_rational(numerator, NonZeroU64::new(denominator).unwrap()),
+                expected,
+                "{floating:?} versus {numerator}/{denominator}"
+            );
+        }
+    }
+
+    #[test]
+    fn rational_comparison_matches_independent_bounded_cross_products() {
+        // Each floating input is an exactly represented eighth. Integer cross
+        // products are therefore an independent oracle, with no rounding and
+        // no decomposition/bit-length algorithm shared with the implementation.
+        for eighths in -64_i128..=64 {
+            let floating = f(eighths as f64 / 8.0);
+            for numerator in -33_i128..=33 {
+                for denominator in 1_u64..=17 {
+                    let expected = (eighths * i128::from(denominator)).cmp(&(numerator * 8));
+                    assert_eq!(
+                        floating.compare_rational(
+                            numerator,
+                            core::num::NonZeroU64::new(denominator).unwrap(),
+                        ),
+                        expected,
+                        "{eighths}/8 versus {numerator}/{denominator}"
+                    );
+                }
+            }
         }
     }
 

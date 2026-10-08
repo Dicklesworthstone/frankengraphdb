@@ -153,6 +153,40 @@ impl<'a> Cell<'a> {
         }
     }
 
+    fn float(self) -> Option<fgdb_types::CanonicalF64> {
+        match self {
+            Self::Float(value) => Some(value),
+            Self::Value(ValueRef::Scalar(CanonicalScalar::Float(value))) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Predicate comparison shares exact numeric semantics with scalar WHERE.
+    /// Canonical ordering and DISTINCT identity keep their separate contracts.
+    fn numeric_comparison(self, other: Self) -> Option<Ordering> {
+        match (self.numeric(), other.numeric(), self.float(), other.float()) {
+            (Some(left), Some(right), _, _) => Some(numeric::compare_ratios(left, right)),
+            (Some((numerator, denominator)), _, _, Some(right)) => Some(
+                right
+                    .compare_rational(
+                        numerator,
+                        core::num::NonZeroU64::new(denominator)
+                            .expect("aggregate fractions have positive denominators"),
+                    )
+                    .reverse(),
+            ),
+            (_, Some((numerator, denominator)), Some(left), _) => Some(
+                left.compare_rational(
+                    numerator,
+                    core::num::NonZeroU64::new(denominator)
+                        .expect("aggregate fractions have positive denominators"),
+                ),
+            ),
+            (_, _, Some(left), Some(right)) => Some(left.cmp(&right)),
+            _ => None,
+        }
+    }
+
     fn payload_units(self) -> usize {
         match self {
             Self::Value(value) => value.payload_units(),
@@ -440,10 +474,9 @@ impl PreparedGraphAggregate {
                 GraphAggregateTest::IsNotNull => !cell.is_null(),
                 GraphAggregateTest::Integer { .. } if cell.is_null() => false,
                 GraphAggregateTest::Integer { comparison, value } => {
-                    let actual = cell.numeric().ok_or(GqlQueryError::Source(
-                        GraphAggregateError::NonIntegerHaving { predicate },
-                    ))?;
-                    let order = numeric::compare_ratios(actual, (value, 1));
+                    let order = cell.numeric_comparison(Cell::Integer(value)).ok_or(
+                        GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate }),
+                    )?;
                     match comparison {
                         IntegerComparison::Equal => order == Ordering::Equal,
                         IntegerComparison::NotEqual => order != Ordering::Equal,

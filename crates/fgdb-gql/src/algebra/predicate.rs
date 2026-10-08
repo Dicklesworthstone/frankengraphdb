@@ -200,31 +200,9 @@ impl IntegerComparison {
 /// Compare without rounding the integer to binary64. In particular, 2^53+1
 /// must not compare equal to 2^53, and i64::MAX is less than the float 2^63.
 fn compare_integer_float(integer: i64, floating: f64) -> Ordering {
-    const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
-    if floating.is_nan() || floating >= I64_LIMIT {
-        return Ordering::Less;
-    }
-    if floating < -I64_LIMIT {
-        return Ordering::Greater;
-    }
-    // The range checks exclude infinities and both saturating-cast boundaries.
-    let truncated = floating as i64;
-    match integer.cmp(&truncated) {
-        Ordering::Equal => {
-            // Only here is converting the integer back to f64 exact: it came
-            // from this in-range float's integral part. Above 2^53 the float
-            // has no fractional bits; below it every integral part fits.
-            let integral = truncated as f64;
-            if integral < floating {
-                Ordering::Less
-            } else if integral > floating {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        order => order,
-    }
+    fgdb_types::CanonicalF64::new(floating)
+        .compare_rational(i128::from(integer), core::num::NonZeroU64::MIN)
+        .reverse()
 }
 
 impl VertexPredicate {

@@ -1087,8 +1087,8 @@ impl<'a> Parser<'a> {
                 aggregate = true;
             }
             match token.kind {
-                TokenKind::Punct(b'(' | b'[') => depth += 1,
-                TokenKind::Punct(b')' | b']') => {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 && direct {
                         direct_closed = true;

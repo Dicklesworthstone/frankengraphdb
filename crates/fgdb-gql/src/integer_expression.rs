@@ -361,6 +361,16 @@ impl ExpressionCell<'_> {
         }
     }
 
+    fn float(&self) -> Option<fgdb_types::CanonicalF64> {
+        match self {
+            Self::Scalar(value) => match value.as_ref() {
+                CanonicalScalar::Float(value) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn boolean(&self) -> Result<Option<bool>, GraphIntegerErrorKind> {
         match self {
             Self::Scalar(value) => scalar_boolean(value),
@@ -1294,25 +1304,50 @@ fn compare_cells<E>(
             kind: GraphIntegerErrorKind::IncompatibleOperands,
         })
     };
-    let order = match (left, right) {
-        (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
-        (ExpressionCell::Average(left), right) => left.compare_integer(
-            right
-                .integer()
-                .map_err(incompatible)?
-                .expect("nonnull integer operand"),
-        ),
-        (left, ExpressionCell::Average(right)) => right
-            .compare_integer(
-                left.integer()
+    let compare_float = |floating: fgdb_types::CanonicalF64, exact: &ExpressionCell<'_>| {
+        let (numerator, denominator) = match exact {
+            ExpressionCell::Average(average) => (average.numerator(), average.denominator()),
+            _ => (
+                exact
+                    .integer()
                     .map_err(incompatible)?
                     .expect("nonnull integer operand"),
-            )
-            .reverse(),
-        (left, right) => left
-            .integer()
-            .map_err(incompatible)?
-            .cmp(&right.integer().map_err(incompatible)?),
+                1,
+            ),
+        };
+        Ok::<_, GraphIntegerEvaluationError<E>>(
+            floating.compare_rational(
+                numerator,
+                core::num::NonZeroU64::new(denominator)
+                    .expect("aggregate fractions have positive denominators"),
+            ),
+        )
+    };
+    let order = if let Some(floating) = left.float() {
+        compare_float(floating, right)?
+    } else if let Some(floating) = right.float() {
+        compare_float(floating, left)?.reverse()
+    } else {
+        match (left, right) {
+            (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
+            (ExpressionCell::Average(left), right) => left.compare_integer(
+                right
+                    .integer()
+                    .map_err(incompatible)?
+                    .expect("nonnull integer operand"),
+            ),
+            (left, ExpressionCell::Average(right)) => right
+                .compare_integer(
+                    left.integer()
+                        .map_err(incompatible)?
+                        .expect("nonnull integer operand"),
+                )
+                .reverse(),
+            (left, right) => left
+                .integer()
+                .map_err(incompatible)?
+                .cmp(&right.integer().map_err(incompatible)?),
+        }
     };
     Ok(Some(match comparison {
         IntegerComparison::Equal => order == Ordering::Equal,

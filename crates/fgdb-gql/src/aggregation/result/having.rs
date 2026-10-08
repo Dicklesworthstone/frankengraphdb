@@ -3,7 +3,8 @@
 //! This is a scalar result-stage program, not a second graph executor. Every
 //! leaf is evaluated in order; neither Boolean decisions nor pagination hide
 //! invalid numeric operands. Counts, integer sums and exact-average fractions
-//! share overflow-free rational comparisons without float conversion. Other
+//! share overflow-free rational comparisons, including binary64 operands,
+//! without rounding either side. Other
 //! scalars compare only within their canonical kind. Null and incompatible
 //! nonnumeric kinds are UNKNOWN.
 
@@ -376,16 +377,20 @@ fn compare<E, C>(
     if left.is_null() || right.is_null() {
         return Ok(None);
     }
-    let order = match (left.numeric(), right.numeric()) {
-        (Some(a), Some(b)) => numeric::compare_ratios(a, b),
-        (Some(_), None) | (None, Some(_)) => {
+    let order = match left.numeric_comparison(right) {
+        Some(order) => order,
+        None if left.numeric().is_some()
+            || right.numeric().is_some()
+            || left.float().is_some()
+            || right.float().is_some() =>
+        {
             // Preserve the existing numeric HAVING domain refusal, even under
             // OR TRUE / AND FALSE. Never make adding parentheses hide it.
             return Err(GqlQueryError::Source(
                 GraphAggregateError::NonIntegerHaving { predicate },
             ));
         }
-        (None, None) => match (left, right) {
+        None => match (left, right) {
             (Cell::Value(ValueRef::Scalar(a)), Cell::Value(ValueRef::Scalar(b)))
                 if core::mem::discriminant(a) == core::mem::discriminant(b) =>
             {

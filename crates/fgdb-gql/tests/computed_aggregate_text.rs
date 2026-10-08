@@ -66,6 +66,117 @@ fn properties() -> Props {
 }
 
 #[test]
+fn aggregates_inside_nested_maps_lists_and_scalar_outputs_share_the_native_group_engine() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let map = |entries: Vec<(&str, GraphValue)>| {
+        let (keys, values): (Vec<Box<str>>, Vec<_>) = entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .unzip();
+        GraphValue::Map {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        }
+    };
+    let plan = prepare(
+        "MATCH (n) RETURN {bucket:n.p,nested:{list:[COUNT(*),SUM(n.q)*2],sample:range(0,COUNT(*)-1)}} AS result GROUP BY n.p ORDER BY n.p",
+    );
+    let rows = run(&plan, &[VId(1), VId(2), VId(3), VId(4)], &[], &properties())
+        .unwrap()
+        .value;
+    let expected: Vec<_> = [(-2, 1, -4), (2, 2, 10), (5, 1, 2)]
+        .into_iter()
+        .map(|(bucket, count, sum)| {
+            GraphAggregateValue::Value(map(vec![
+                ("bucket", integer(bucket)),
+                (
+                    "nested",
+                    map(vec![
+                        (
+                            "list",
+                            GraphValue::List(vec![integer(count), integer(sum)].into_boxed_slice()),
+                        ),
+                        (
+                            "sample",
+                            GraphValue::List(
+                                (0..count)
+                                    .map(integer)
+                                    .collect::<Vec<_>>()
+                                    .into_boxed_slice(),
+                            ),
+                        ),
+                    ]),
+                ),
+            ]))
+        })
+        .collect();
+    assert_eq!(rows.len(), expected.len());
+    for (row, expected) in rows.iter().zip(expected) {
+        assert!(row.keys().is_empty());
+        assert_eq!(row.values(), &[expected]);
+    }
+    // An aggregate after a map's comma must select aggregate lowering even
+    // when keywords, comments and quoted commas occur before the call.
+    let template = PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN {`AS`:'x,y',`GROUP`:{label:'COUNT(*)',total:/*x*/ SUM(n.q)}} AS result",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.columns(), &["result"]);
+    let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(
+        run(&bound, &[VId(2)], &[], &properties())
+            .unwrap()
+            .value
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn floating_aggregate_having_and_case_compare_exact_counts_sums_and_averages() {
+    use fgdb_gql::GraphAggregateValue;
+
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    // Both the compact conjunction and the Boolean HAVING program must use
+    // the same numeric domain. The inputs sum to 7 and average to 1.75;
+    // adding a quarter per input gives floating SUM=8 and AVG=2.
+    for predicate in [
+        "SUM(n.p+0.25)>0",
+        "(SUM(n.p+0.25)>0 AND AVG(n.p+0.25)=2)",
+        "SUM(n.p+0.25)>AVG(n.p)",
+        "AVG(n.p)<AVG(n.p+0.25)",
+        "COUNT(*)=4.0",
+        "SUM(n.p)=7.0",
+        "AVG(n.p)=1.75",
+    ] {
+        let text = format!("MATCH (n) RETURN COUNT(*) AS count HAVING {predicate}");
+        let rows = run(&prepare(&text), &vertices, &[], &props).unwrap().value;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0].values(), &[GraphAggregateValue::Count(4)], "{text}");
+    }
+    for predicate in ["COUNT(*)<4.0", "SUM(n.p)>7.0", "AVG(n.p)>1.75"] {
+        let text = format!("MATCH (n) RETURN COUNT(*) AS count HAVING {predicate}");
+        assert!(
+            run(&prepare(&text), &vertices, &[], &props)
+                .unwrap()
+                .value
+                .is_empty(),
+            "{text}"
+        );
+    }
+    let plan = prepare(
+        "MATCH (n) RETURN CASE WHEN AVG(n.p)=1.75 AND COUNT(*)=4.0 AND 8.0>SUM(n.p) THEN SUM(n.p)*2 ELSE 0 END AS value",
+    );
+    let rows = run(&plan, &vertices, &[], &props).unwrap().value;
+    assert_eq!(rows[0].values(), &[GraphAggregateValue::Integer(14)]);
+}
+
+#[test]
 fn computed_group_keys_products_distinct_and_exact_averages_have_native_syntax() {
     let text = "MATCH (n) RETURN ABS(n.p) AS bucket,SUM(n.p*n.q) AS total, \
         AVG(COALESCE(n.q,0)) AS mean,COUNT(DISTINCT ABS(n.p)) AS unique \
