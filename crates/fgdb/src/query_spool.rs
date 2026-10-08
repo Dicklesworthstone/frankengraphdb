@@ -364,13 +364,22 @@ where
 }
 
 impl<V: Vfs + Clone> SpoolInput for crate::BufferedQueryCursor<'_, '_, V> {
-    async fn pull(&mut self) -> Option<Result<SpoolRow, NativeSpoolError>> {
-        self.next().await.map(|row| {
-            row.map(|row| SpoolRow::buffered(row.into_parts()))
-                .map_err(|error| {
-                    NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Vertex)))
-                })
-        })
+    // Type-erased like the spool and commit chokepoints (fgdb-a5y6m): a
+    // caller's `Send` proof stops at `dyn Future + Send` instead of
+    // descending through the buffered read cursor, which the external sort
+    // of buffered reads otherwise pushed past the recursion limit.
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow, NativeSpoolError>>> + Send {
+        let pulled: crate::SendFuture<'_, _> = Box::pin(async move {
+            self.next().await.map(|row| {
+                row.map(|row| SpoolRow::buffered(row.into_parts()))
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Vertex),
+                        ))
+                    })
+            })
+        });
+        pulled
     }
     fn spool_state(&self) -> ScanState {
         self.state()
