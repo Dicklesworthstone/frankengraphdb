@@ -104,11 +104,37 @@ impl AsyncEdgeScanPlan {
             return Err(EdgeScanBuildError { operator });
         }
         let inner = EdgeScanPlan::compile(plan)?;
+        Ok(Self::from_inner(inner))
+    }
+
+    fn from_inner(inner: EdgeScanPlan) -> Self {
         let GlaOperator::ProjectValues { columns } = inner.projection.as_ref() else {
             unreachable!("the ordinary edge compiler proves the projection")
         };
         let columns = columns.len();
-        Ok(Self { inner, columns })
+        debug_assert!(
+            inner.joined.is_none(),
+            "async intake has no nested source access"
+        );
+        Self { inner, columns }
+    }
+
+    /// Compile all single-edge occurrences for a blocking ORDER BY/DISTINCT.
+    /// Predicates, properties, captures and orientation use the SAME local GLA
+    /// compiler and evaluator as ordinary async rows. Expansion and probes
+    /// refuse before source construction; a joined plan never enters this lane.
+    ///
+    /// The returned tail retains every hidden key and final clause. Its host
+    /// must sort, deduplicate when requested, window, then hide trailing cells.
+    /// This input ignores final SKIP/LIMIT (including LIMIT zero), and its
+    /// ResultRows allowance counts intermediate occurrences rather than output.
+    pub fn compile_sort_input(
+        plan: &GlaPlan<GraphValueRow>,
+    ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
+        let tail = crate::scan_stream::ScanSortTail::compile(plan)
+            .map_err(|operator| EdgeScanBuildError { operator })?;
+        let inner = EdgeScanPlan::compile_local(plan, LocalOutput::SortInput)?;
+        Ok((Self::from_inner(inner), tail))
     }
 }
 impl core::fmt::Debug for AsyncEdgeScanPlan {

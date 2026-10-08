@@ -95,6 +95,11 @@ pub struct AsyncVertexScanPlan<Row = VId> {
 impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
         let inner = VertexScanPlan::compile(plan)?;
+        Self::check_source(plan)?;
+        Ok(Self::from_inner(inner))
+    }
+
+    fn check_source(plan: &GlaPlan<Row>) -> Result<(), VertexScanBuildError> {
         if let Some(operator) = plan
             .operators()
             .iter()
@@ -102,12 +107,35 @@ impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
         {
             return Err(VertexScanBuildError { operator });
         }
+        Ok(())
+    }
+
+    fn from_inner(inner: VertexScanPlan<Row>) -> Self {
         let columns = match inner.projection.as_ref() {
             GlaOperator::Project { .. } => 1,
             GlaOperator::ProjectValues { columns } => columns.len(),
             _ => unreachable!("the existing physical compiler proves the projection"),
         };
-        Ok(Self { inner, columns })
+        Self { inner, columns }
+    }
+}
+
+impl AsyncVertexScanPlan<crate::algebra::GraphValueRow> {
+    /// Compile the private source of a blocking ORDER BY or DISTINCT.
+    /// The ordinary compiler owns every predicate, projected cell and terminal
+    /// clause. This relaxes only its leading-identity order proof; probes still
+    /// refuse before a source is constructed. No hidden key is discarded here.
+    ///
+    /// Every matching occurrence is emitted in source identity order, including
+    /// duplicates and the complete suffix when the requested LIMIT is zero.
+    /// ResultRows counts intermediate occurrences. A host must budget them and
+    /// apply the returned sort/distinct/window contract before exposing results.
+    pub fn compile_sort_input(
+        plan: &GlaPlan<crate::algebra::GraphValueRow>,
+    ) -> Result<(Self, crate::scan_stream::ScanSortTail), VertexScanBuildError> {
+        Self::check_source(plan)?;
+        let (inner, tail) = VertexScanPlan::compile_sort_input(plan)?;
+        Ok((Self::from_inner(inner), tail))
     }
 }
 

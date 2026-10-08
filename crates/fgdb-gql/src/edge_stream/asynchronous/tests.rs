@@ -150,6 +150,7 @@ struct Source {
     fail_reserve: bool,
     fail_evaluation: bool,
     fail_result: bool,
+    expected_columns: usize,
 }
 impl Source {
     fn new(input: Inputs) -> Self {
@@ -162,6 +163,7 @@ impl Source {
             fail_reserve: false,
             fail_evaluation: false,
             fail_result: false,
+            expected_columns: 6,
         }
     }
 }
@@ -239,7 +241,7 @@ impl AsyncEdgeScanSource for Source {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
-        assert_eq!(columns, 6);
+        assert_eq!(columns, self.expected_columns);
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
         self.counts.reservations.fetch_add(1, Ordering::SeqCst);
         if self.fail_reserve {
@@ -411,6 +413,114 @@ fn awaited_orientations_filters_parallel_edges_and_windows_match_independent_row
                 }
             }
         }
+    }
+}
+
+#[test]
+fn async_sort_inputs_keep_local_predicates_captures_and_every_orientation_before_windowing() {
+    for direction in [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ] {
+        for filter in [0, 1, 2, 3] {
+            for distinct in [false, true] {
+                let (left, right) = match direction {
+                    GlaDirection::Forward => ("-", "->"),
+                    GlaDirection::Reverse => ("<-", "-"),
+                    GlaDirection::Undirected => ("-", "-"),
+                };
+                let predicate = match filter {
+                    0 => "",
+                    1 => "WHERE r.p > 0",
+                    2 => "WHERE a.p < b.p",
+                    _ => "WHERE r.p IS NULL",
+                };
+                let quantifier = if distinct { "DISTINCT" } else { "ALL" };
+                let text = format!(
+                    "MATCH (a){left}[r:R]{right}(b) {predicate} RETURN {quantifier} \
+                     r.p AS ep, a.p AS ap, b.p AS bp ORDER BY ep DESC SKIP 1 LIMIT 0"
+                );
+                let prepared = PreparedGraphText::prepare(&text, symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+                let before = prepared.plan().canonical_bytes();
+                assert!(AsyncEdgeScanPlan::compile(prepared.plan()).is_err());
+                let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(prepared.plan()).unwrap();
+                assert_eq!(prepared.plan().canonical_bytes(), before);
+                assert_eq!(tail.visible_width(), 3);
+                assert_eq!(tail.evaluation_width(), 3);
+                assert_eq!(tail.distinct(), distinct);
+                assert_eq!((tail.offset(), tail.count()), (1, Some(0)));
+                let mut source = Source::new(inputs());
+                source.expected_columns = 3;
+                let counts = source.counts.clone();
+                let mut cursor = AsyncEdgeScanCursor::new(source, plan, policy(), ok);
+                let mut actual = Vec::new();
+                while let Some(row) = run(cursor.next()) {
+                    actual.push(row.unwrap().values().to_vec());
+                }
+                let expected: Vec<_> = oracle(&inputs(), direction, false, filter, 0, usize::MAX)
+                    .into_iter()
+                    .map(|values| values[3..].to_vec())
+                    .collect();
+                assert_eq!(actual, expected, "{text}");
+                assert_eq!(cursor.row_stats().snapshot_records, inputs().len() as u64);
+                assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                assert_eq!(counts.maximum_records.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+                assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn async_edge_sort_input_retains_hidden_keys_and_refuses_nested_access_before_limit_zero() {
+    let prepared = PreparedGraphText::prepare(
+        "MATCH (a)-[r:R]->(b) RETURN r.p AS ep ORDER BY a.p DESC LIMIT 0",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(prepared.plan()).unwrap();
+    assert_eq!(tail.visible_width(), 1);
+    assert_eq!(tail.evaluation_width(), 2);
+    let mut source = Source::new(inputs());
+    source.expected_columns = 2;
+    let counts = source.counts.clone();
+    let mut cursor = AsyncEdgeScanCursor::new(source, plan, policy(), ok);
+    let first = run(cursor.next()).unwrap().unwrap();
+    assert_eq!(
+        first.values(),
+        &[
+            GraphValue::Scalar(CanonicalScalar::Int(5)),
+            GraphValue::Scalar(CanonicalScalar::Int(9))
+        ]
+    );
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 1);
+    cursor.close();
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 1);
+    drop(first);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN c.p LIMIT 0",
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN r.p LIMIT 0",
+    ] {
+        let query = PreparedGraphText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(
+            AsyncEdgeScanPlan::compile_sort_input(query.plan()).is_err(),
+            "{text}"
+        );
     }
 }
 

@@ -72,6 +72,16 @@ pub struct EdgeScanPlan {
     count: Option<u64>,
     joined: Option<Arc<join::JoinPlan>>,
 }
+
+// Output admission changes only the terminal proof. The single-edge compiler
+// and evaluator continue to own every binding, filter and path capture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalOutput {
+    OrderedRows,
+    AggregateInput,
+    SortInput,
+}
+
 impl EdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
@@ -81,6 +91,14 @@ impl EdgeScanPlan {
         {
             return join::compile(plan);
         }
+        Self::compile_local(plan, LocalOutput::OrderedRows)
+    }
+
+    fn compile_local(
+        plan: &GlaPlan<GraphValueRow>,
+        output: LocalOutput,
+    ) -> Result<Self, EdgeScanBuildError> {
+        let ops = plan.operators();
         let Some(GlaOperator::ScanEdges {
             relation,
             direction,
@@ -153,13 +171,14 @@ impl EdgeScanPlan {
                         }
                         _ => false,
                     };
-                    if !matches!(
-                        columns.first(),
-                        Some(ValueProjection::Path {
-                            function: GraphPathFunction::Edge,
-                            ..
-                        })
-                    ) || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                    if (output == LocalOutput::OrderedRows
+                        && (!matches!(
+                            columns.first(),
+                            Some(ValueProjection::Path {
+                                function: GraphPathFunction::Edge,
+                                ..
+                            })
+                        ) || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)))
                         || !columns.iter().all(column_valid)
                     {
                         return Err(bad());
@@ -174,10 +193,15 @@ impl EdgeScanPlan {
         let projection = Arc::new(ops[at].clone());
         at += 1;
         if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
+            if output == LocalOutput::AggregateInput {
+                return Err(EdgeScanBuildError { operator: at });
+            }
             at += 1;
         }
-        if plan.visible_columns.is_some()
+        if (plan.visible_columns.is_some() && output != LocalOutput::SortInput)
             || !matches!(ops.get(at), Some(GlaOperator::OrderByValues))
+                && !(output == LocalOutput::SortInput
+                    && matches!(ops.get(at), Some(GlaOperator::OrderByValueColumns { .. })))
         {
             return Err(EdgeScanBuildError { operator: at });
         }
@@ -185,6 +209,9 @@ impl EdgeScanPlan {
         let Some(GlaOperator::Limit { offset, count }) = ops.get(at) else {
             return Err(EdgeScanBuildError { operator: at });
         };
+        if output == LocalOutput::AggregateInput && (*offset != 0 || count.is_some()) {
+            return Err(EdgeScanBuildError { operator: at });
+        }
         if at + 1 != ops.len() {
             return Err(EdgeScanBuildError { operator: at + 1 });
         }
@@ -193,8 +220,16 @@ impl EdgeScanPlan {
             direction: *direction,
             instructions: instructions.into(),
             projection,
-            offset: *offset,
-            count: *count,
+            offset: if output == LocalOutput::SortInput {
+                0
+            } else {
+                *offset
+            },
+            count: if output == LocalOutput::SortInput {
+                None
+            } else {
+                *count
+            },
             joined: None,
         })
     }

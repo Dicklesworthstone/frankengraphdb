@@ -614,3 +614,99 @@ fn source_errors_bad_identity_and_unsupported_profiles_never_become_empty_succes
         assert!(AsyncVertexScanPlan::compile(&plan(text)).is_err(), "{text}");
     }
 }
+
+#[test]
+fn async_sort_input_preserves_duplicate_occurrences_hidden_keys_and_the_entire_limit_zero_input() {
+    for (text, hidden) in [
+        (
+            "MATCH (n:L) RETURN DISTINCT n.p AS p ORDER BY p DESC SKIP 1 LIMIT 0",
+            false,
+        ),
+        (
+            "MATCH (n:L) RETURN n.p AS p ORDER BY n DESC SKIP 1 LIMIT 0",
+            true,
+        ),
+    ] {
+        let logical = plan(text);
+        let bytes = logical.canonical_bytes();
+        assert!(AsyncVertexScanPlan::compile(&logical).is_err());
+        let (compiled, tail) = AsyncVertexScanPlan::compile_sort_input(&logical).unwrap();
+        assert_eq!(logical.canonical_bytes(), bytes);
+        assert_eq!(tail.visible_width(), 1);
+        assert_eq!(tail.evaluation_width(), if hidden { 2 } else { 1 });
+        assert_eq!(tail.distinct(), !hidden);
+        assert_eq!(tail.offset(), 1);
+        assert_eq!(tail.count(), Some(0));
+
+        let input = source(vec![
+            sample(1, Some(CanonicalScalar::Int(7)), true),
+            sample(2, Some(CanonicalScalar::Int(2)), true),
+            sample(3, Some(CanonicalScalar::Int(7)), true),
+            sample(4, Some(CanonicalScalar::Int(99)), false),
+        ]);
+        let signals = input.signals.clone();
+        let mut cursor = AsyncVertexScanCursor::new(input, compiled, wide(), || Ok::<_, ()>(()));
+        let mut actual = Vec::new();
+        while let Some(row) = ready(cursor.next()) {
+            actual.push(row.unwrap());
+        }
+        assert_eq!(
+            actual.len(),
+            3,
+            "LIMIT/DISTINCT belong to the blocking consumer"
+        );
+        for (index, value) in [7, 2, 7].into_iter().enumerate() {
+            assert_eq!(
+                actual[index].values()[0],
+                GraphValue::Scalar(CanonicalScalar::Int(value))
+            );
+            assert_eq!(actual[index].len(), tail.evaluation_width());
+            if hidden {
+                assert_eq!(
+                    actual[index].values()[1],
+                    GraphValue::Vertex(VId(index as u128 + 1))
+                );
+            }
+        }
+        assert_eq!(cursor.row_stats().snapshot_records, 4);
+        assert_eq!(cursor.row_stats().result_rows, 3);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(signals.dropped.get());
+        assert_eq!(signals.live_evaluation.get(), 0);
+        assert_eq!(signals.live_outputs.get(), 3);
+        drop(actual);
+        assert_eq!(signals.live_outputs.get(), 0);
+    }
+}
+
+#[test]
+fn async_sort_input_refuses_nested_access_and_propagates_late_source_errors_before_final_window() {
+    for text in [
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
+        "MATCH (n)-[:R]->(m) RETURN m.p LIMIT 0",
+    ] {
+        assert!(
+            AsyncVertexScanPlan::compile_sort_input(&plan(text)).is_err(),
+            "{text}"
+        );
+    }
+    let (compiled, _) = AsyncVertexScanPlan::compile_sort_input(&plan(
+        "MATCH (n) RETURN n.p AS p ORDER BY p LIMIT 0",
+    ))
+    .unwrap();
+    let mut input = source(vec![sample(1, Some(CanonicalScalar::Int(1)), true)]);
+    input.fail_at = Some(1);
+    let signals = input.signals.clone();
+    let mut cursor = AsyncVertexScanCursor::new(input, compiled, wide(), || Ok::<_, ()>(()));
+    drop(ready(cursor.next()).unwrap().unwrap());
+    assert!(matches!(
+        ready(cursor.next()),
+        Some(Err(GqlQueryError::Source(VertexScanError::Source(
+            "source failed"
+        ))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(signals.dropped.get());
+    assert_eq!(signals.live_outputs.get(), 0);
+    assert!(ready(cursor.next()).is_none());
+}
