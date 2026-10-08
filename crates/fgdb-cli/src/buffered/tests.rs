@@ -100,7 +100,7 @@ fn buffered_vertex_edge_and_temporal_cli_delivery_matches_native_rows() {
         let commit = contexts.commit();
         let (vfs, resident) = fixture(&commit).await;
         for (text, seq, count) in [
-            ("MATCH (n:L) RETURN n,n.p,n.missing,n.p", 2, 3),
+            ("MATCH (n:L) RETURN n,n.p,n.missing,n.p AS again", 2, 3),
             (
                 "MATCH (n:L) WHERE n.p > 2 RETURN DISTINCT n,n.p SKIP 1 LIMIT 1",
                 2,

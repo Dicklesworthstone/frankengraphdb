@@ -434,7 +434,7 @@ fn buffered_gql_uses_native_predicates_projection_and_windows_at_every_historica
         let statements = [
             "MATCH (n:L) WHERE n.p >= 2 RETURN n, n.p",
             "MATCH (n:L) WHERE n.p > 0 AND (n.p = 2 OR n.p = 11) RETURN DISTINCT n, n.p SKIP 1 LIMIT 2",
-            "MATCH (n) RETURN ALL n, n.missing, n.p, n.p",
+            "MATCH (n) RETURN ALL n, n.missing, n.p, n.p AS again",
             "MATCH (n) RETURN n, n.p SKIP 2 LIMIT 1",
         ];
         for text in statements {
