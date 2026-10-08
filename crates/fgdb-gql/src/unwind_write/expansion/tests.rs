@@ -128,7 +128,8 @@ fn final_and_intermediate_expansion_limits_refuse_before_native_resolution() {
 #[test]
 fn malformed_late_sources_and_incompatible_leaves_cannot_publish_a_prefix() {
     let plan = GraphUnwindWriteText::parse(QUERY).unwrap();
-    for bad in [object(vec![("children", int(42))])] {
+    {
+        let bad = object(vec![("children", int(42))]);
         let args = GqlParameters::new().with_list("rows", vec![root(1,vec![item(3)],vec![]), bad]).unwrap();
         let frozen = args.canonical_bytes();
         assert!(matches!(plan.bind(&args, RelationId(1), |_, _| panic!("catalog before admission")),

@@ -146,7 +146,7 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         db.write(&commit, seed).await.unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let mut prefix = WriteBatch::new(R);
-        prefix.set_vertex_property(VId(1), P, CanonicalScalar::Int(77));
+        prefix.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(77)));
         txn.write(&mut db, prefix).unwrap();
         let digest = txn.staged_effect_digest().unwrap();
         let query = "UNWIND /* é */ $rows AS x MATCH (n:Entity {id:$target}) SET n.p=100/x;";

@@ -18,6 +18,11 @@ pub struct AsyncVertexCandidate<Record> {
     pub record: Option<Record>,
 }
 
+/// What one [`AsyncVertexScanSource::next_candidate`] resolves to: the next
+/// candidate, `None` at EOF, or the source's or a control's refusal.
+pub type AsyncVertexCandidateResult<Record, Error, Control> =
+    Result<Option<AsyncVertexCandidate<Record>>, VertexScanSourceError<Error, Control>>;
+
 /// One source callback keeps work and candidate admission in the same meter
 /// without a lock or a shared mutable borrow spanning asynchronous I/O.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,12 +59,8 @@ pub trait AsyncVertexScanSource: Send {
     fn next_candidate<C: Send>(
         &mut self,
         control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
-    ) -> impl core::future::Future<
-        Output = Result<
-            Option<AsyncVertexCandidate<Self::Record>>,
-            VertexScanSourceError<Self::Error, C>,
-        >,
-    > + Send;
+    ) -> impl core::future::Future<Output = AsyncVertexCandidateResult<Self::Record, Self::Error, C>>
+    + Send;
 
     fn reserve_output<C>(
         &self,

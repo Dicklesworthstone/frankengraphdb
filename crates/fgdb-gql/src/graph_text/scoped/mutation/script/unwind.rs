@@ -128,7 +128,7 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
             }
             if is_word(token, "MERGE") && is_punct(next, b'(')
                 || (is_word(token, "SET") || is_word(token, "REMOVE")) && target
-                    && [b'.', b':', b'+'].iter().any(|byte| is_punct(tokens.get(index + 2), *byte))
+                    && b".:+".iter().any(|byte| is_punct(tokens.get(index + 2), *byte))
                 || is_word(token, "DETACH") && next.is_some_and(|(token, _)| is_word(token, "DELETE"))
                 || is_word(token, "DELETE") && target
                     && (tokens.get(index + 2).is_none() || is_punct(tokens.get(index + 2), b','))

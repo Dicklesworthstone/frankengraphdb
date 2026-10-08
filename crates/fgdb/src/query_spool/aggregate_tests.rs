@@ -1,6 +1,7 @@
 //! Production source -> input partitions -> shared reducer -> typed result laws.
 use super::*;
 use crate::{NativeAggregateSpool, NativeAggregateSpoolError};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GraphAggregateRow, GraphAggregateValue};
 
 const AGGREGATE: &str = "MATCH (n:L) RETURN n.p AS category, COUNT(*) AS rows, COUNT(n.q) AS present, SUM(n.q) AS total, AVG(n.q) AS average, MIN(n.q) AS minimum, MAX(n.q) AS maximum";
