@@ -123,7 +123,8 @@ fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
     for tail in [
         "HAVING missing > 0",
         "HAVING MIN(*) > 0",
-        "HAVING total > 1.5",
+        // A finite decimal compares since ad2a4059; a non-finite one refuses.
+        "HAVING total > 1e309",
         "HAVING total IS TRUE",
         "HAVING total IS NOT",
         "HAVING total > 0 OR OR n > 0",

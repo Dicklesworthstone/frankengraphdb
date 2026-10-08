@@ -1458,7 +1458,8 @@ impl PreparedGraphText {
     /// positive WHERE expressions inside EXISTS and OPTIONAL are supported.
     /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
-    /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
+    /// Ordering precedes SKIP/LIMIT. An unprojected property, path function
+    /// or bound variable sorts through a hidden cell, refused under DISTINCT.
     ///
     /// Plain MATCH and explicit MATCH WALK accept bounded `[:R*min..max]`,
     /// `[:R*k]` and `[:R*..max]` atoms. The omitted minimum is one; zero is
@@ -2303,6 +2304,57 @@ mod tests {
             .unwrap();
         assert_eq!(vertex_rows(&actual.value), vec![vec![VId(1)], vec![VId(1)]]);
         assert!(calls > 0, "legal input must reach name resolution");
+    }
+
+    #[test]
+    fn unprojected_bound_variables_sort_through_hidden_cells() {
+        // Edge ids rise with (source, target), so the order below holds
+        // whichever of the two an edge value compares by first.
+        let edges = [
+            (fgdb_types::EId(1), VId(1), RelationId(1), VId(2)),
+            (fgdb_types::EId(2), VId(1), RelationId(1), VId(3)),
+            (fgdb_types::EId(3), VId(3), RelationId(1), VId(1)),
+        ];
+        for (text, expected) in [
+            ("MATCH (a)-[e:R]->(b) RETURN b ORDER BY e", [2, 3, 1]),
+            ("MATCH (a)-[e:R]->(b) RETURN b ORDER BY e DESC", [1, 3, 2]),
+            (
+                "MATCH (a)-[:R]->(b) RETURN b ORDER BY a DESC, b DESC",
+                [1, 3, 2],
+            ),
+        ] {
+            let pattern = query(text);
+            assert_eq!(pattern.columns(), &["b"], "{text}");
+            let actual = pattern
+                .plan()
+                .execute_governed_with_identified_properties(
+                    3,
+                    [],
+                    edges,
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let expected: Vec<_> = expected.into_iter().map(|b| vec![VId(b)]).collect();
+            assert_eq!(vertex_rows(&actual.value), expected, "{text}");
+        }
+        assert_eq!(
+            query("MATCH p = (a)-[:R]->(b) RETURN b ORDER BY p").columns(),
+            &["b"]
+        );
+        assert_eq!(
+            PreparedGraphText::prepare(
+                "MATCH (a)-[e:R]->(b) RETURN DISTINCT b ORDER BY e",
+                symbols
+            )
+            .unwrap_err()
+            .kind,
+            GraphPatternTextErrorKind::Expected(
+                "projected ORDER BY expression or alias under DISTINCT"
+            )
+        );
     }
 
     #[test]
