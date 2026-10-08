@@ -76,8 +76,8 @@ impl From<MemoryError> for BufferedOpenError {
 /// Chronicle recovery and its marker-chain metadata remain outside that pool,
 /// as in the ordinary opener. Initial admission verifies every named graph
 /// object, and can refuse when its bounded identity/history metadata does not
-/// fit. The governed query methods execute the native ordered single-vertex
-/// GQL profile through this same cache. Other physical profiles refuse before
+/// fit. The governed query methods execute native ordered vertex and single-edge
+/// GQL profiles through this same cache. Other physical profiles refuse before
 /// reading candidates. This is not an assertion that arbitrarily large
 /// databases can already be opened.
 ///

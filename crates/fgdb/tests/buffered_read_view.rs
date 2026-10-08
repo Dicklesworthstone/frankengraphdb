@@ -2,6 +2,9 @@
 //! Resident views are an independent oracle; explicit expected values also
 //! distinguish historical property changes, deletion and parallel incidence.
 
+#[path = "buffered_read_view/edge_query.rs"]
+mod edge_query;
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BufferLimits, BufferedOpenError, BufferedReadError, BufferedReadLimits, Database, DatabaseKeys,

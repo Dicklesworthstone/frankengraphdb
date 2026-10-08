@@ -2,6 +2,8 @@
 //! supplies rows and byte admission; the existing GQL operator owns predicates,
 //! projections, ordering, pagination, and cumulative logical budgets.
 
+mod edge;
+
 use super::{BufferedReadError, BufferedReadView, BufferedValue, MemoryPool};
 use crate::VertexRow;
 use asupersync::fs::Vfs;
