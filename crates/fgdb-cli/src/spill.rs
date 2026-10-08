@@ -4,8 +4,11 @@
 use super::{
     Failure, Options, emit, execution_failure, human_value, quoted, set_decimal, value_cell,
 };
-use asupersync::fs::File;
-use fgdb::{EmbeddedReadView, PreparedNativeRead};
+use asupersync::fs::{File, Vfs};
+use fgdb::{
+    BufferedReadView, EmbeddedReadView, NativeAggregateSpool, NativeResultSpool,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedNativeRead,
+};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
 use fgdb_types::{CanonicalScalarResolver, QueryCx};
@@ -160,6 +163,134 @@ impl Drop for ScratchOwner {
     }
 }
 
+// Resident and buffered sources share these exact spill limits, owned files,
+// result readers and retirement rules. File fields drop before their owner.
+struct Scratch {
+    source: SpillFile<File>,
+    partition: Option<SpillFile<File>>,
+    destination: SpillFile<File>,
+    run_rows: usize,
+    max_partitions: usize,
+    max_runs: usize,
+    input_rows: u64,
+    owner: ScratchOwner,
+}
+
+impl Scratch {
+    async fn new(cx: &QueryCx, options: &Options, aggregate: bool) -> Result<Self, Failure> {
+        let limits = &options.spill;
+        let directory = limits
+            .directory
+            .as_deref()
+            .ok_or_else(|| Failure::usage("--spill-dir required"))?;
+        let memory = usize::try_from(limits.memory.unwrap_or(DEFAULT_MEMORY))
+            .map_err(|_| Failure::usage("spill memory limit exceeds this platform"))?;
+        let file_count = if aggregate { 3 } else { 2 };
+        let per_file = limits.disk.unwrap_or(DEFAULT_DISK) / file_count;
+        if memory == 0 || per_file == 0 {
+            return Err(Failure::query(
+                "ResourceExhausted: spill needs resident memory and a nonzero allowance for every file",
+            ));
+        }
+        let pool = MemoryPool::new(memory, 0).map_err(execution_failure)?;
+        let input_rows = limits.rows.unwrap_or(DEFAULT_INPUT_ROWS);
+        let run_rows = (memory / (4 * MAX_ROW_BYTES)).clamp(1, 256);
+        let max_runs = usize::try_from(input_rows.div_ceil(run_rows as u64).max(1))
+            .map_err(|_| Failure::usage("spill run count exceeds this platform"))?;
+        // Initial runs, pairwise merge passes, parity copy and final window all
+        // spend append attempts; the allowance remains finite even for empty input.
+        let append_runs = u64::try_from(max_runs)
+            .ok()
+            .and_then(|runs| runs.checked_mul(4))
+            .and_then(|runs| runs.checked_add(16))
+            .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
+        let max_partitions = usize::try_from(append_runs)
+            .map_err(|_| Failure::usage("spill partition count exceeds this platform"))?;
+        let append_runs = if aggregate {
+            // Completed-group clauses can sort canonical keys, DISTINCT equality
+            // classes, and final representative rank. Every pass retains the same
+            // byte/work quotas; only the finite append-attempt envelope expands.
+            append_runs
+                .checked_mul(3)
+                .and_then(|runs| runs.checked_add(32))
+                .and_then(|runs| runs.checked_add(u64::try_from(max_partitions).ok()?))
+                .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
+        } else {
+            append_runs
+        };
+        let file_limits = SpillLimits {
+            max_file_bytes: per_file,
+            max_runs: append_runs,
+            max_run_bytes: usize::try_from(per_file).unwrap_or(usize::MAX),
+        };
+        let mut owner = ScratchOwner::new(cx, directory)?;
+        // Declaration order matters: dropping this async frame drops the files
+        // before their namespace owner, including cancellation during an append.
+        let source = SpillFile::new(cx, owner.file("scratch")?, pool.clone(), file_limits)
+            .await
+            .map_err(execution_failure)?;
+        let partition = if aggregate {
+            Some(
+                SpillFile::new(cx, owner.file("partitions")?, pool.clone(), file_limits)
+                    .await
+                    .map_err(execution_failure)?,
+            )
+        } else {
+            None
+        };
+        let destination = SpillFile::new(cx, owner.file("result")?, pool, file_limits)
+            .await
+            .map_err(execution_failure)?;
+        Ok(Self {
+            source,
+            partition,
+            destination,
+            run_rows,
+            max_partitions,
+            max_runs,
+            input_rows,
+            owner,
+        })
+    }
+
+    fn complete(
+        self,
+        outcome: Result<(u64, u64), Failure>,
+        cx: &QueryCx,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        let Self {
+            source,
+            partition,
+            destination,
+            mut owner,
+            ..
+        } = self;
+        // Success is withheld until scratch retirement succeeds. A transport or
+        // query error still retires every file, preserving that original error.
+        drop(destination);
+        drop(partition);
+        drop(source);
+        let cleanup = owner.close();
+        let (seq, sent) = outcome?;
+        cleanup?;
+        cx.checkpoint().map_err(Failure::query)?;
+        if robot {
+            emit(
+                out,
+                &format!(
+                    r#"{{"v":1,"event":"result","kind":"rows","stream":true,"seq":{seq},"count":{sent}}}"#
+                ),
+            )?;
+        } else {
+            writeln!(out, "{sent} row(s) (external query complete at seq {seq})")
+                .map_err(Failure::io)?;
+        }
+        out.flush().map_err(Failure::io)
+    }
+}
+
 pub(super) async fn run(
     view: &EmbeddedReadView,
     cx: &QueryCx,
@@ -170,91 +301,23 @@ pub(super) async fn run(
 ) -> Result<(), Failure> {
     let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
         .map_err(execution_failure)?;
-    let aggregate = matches!(
-        &prepared,
-        PreparedNativeRead::Aggregate(_)
-            | PreparedNativeRead::TemporalAggregate(_)
-            | PreparedNativeRead::PipelineAggregate(_)
-    );
-    let limits = &options.spill;
-    let directory = limits
-        .directory
-        .as_deref()
-        .ok_or_else(|| Failure::usage("--spill-dir required"))?;
-    let memory = usize::try_from(limits.memory.unwrap_or(DEFAULT_MEMORY))
-        .map_err(|_| Failure::usage("spill memory limit exceeds this platform"))?;
-    let file_count = if aggregate { 3 } else { 2 };
-    let per_file = limits.disk.unwrap_or(DEFAULT_DISK) / file_count;
-    if memory == 0 || per_file == 0 {
-        return Err(Failure::query(
-            "ResourceExhausted: spill needs resident memory and a nonzero allowance for every file",
-        ));
-    }
-    let pool = MemoryPool::new(memory, 0).map_err(execution_failure)?;
-    let input_rows = limits.rows.unwrap_or(DEFAULT_INPUT_ROWS);
-    let run_rows = (memory / (4 * MAX_ROW_BYTES)).clamp(1, 256);
-    let max_runs = usize::try_from(input_rows.div_ceil(run_rows as u64).max(1))
-        .map_err(|_| Failure::usage("spill run count exceeds this platform"))?;
-    // Initial runs, pairwise merge passes, parity copy and final window all
-    // spend append attempts; the allowance remains finite even for empty input.
-    let append_runs = u64::try_from(max_runs)
-        .ok()
-        .and_then(|runs| runs.checked_mul(4))
-        .and_then(|runs| runs.checked_add(16))
-        .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
-    let max_partitions = usize::try_from(append_runs)
-        .map_err(|_| Failure::usage("spill partition count exceeds this platform"))?;
-    let append_runs = if aggregate {
-        // Completed-group clauses can sort twice: canonical keys before
-        // HAVING, then typed user ordering before projection and pagination.
-        // Both phases retain the same shared byte/work budgets; only the
-        // finite append-attempt envelope accounts for the second sort.
-        append_runs
-            .checked_mul(2)
-            .and_then(|runs| runs.checked_add(32))
-            .and_then(|runs| runs.checked_add(u64::try_from(max_partitions).ok()?))
-            .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
-    } else {
-        append_runs
-    };
-    let file_limits = SpillLimits {
-        max_file_bytes: per_file,
-        max_runs: append_runs,
-        max_run_bytes: usize::try_from(per_file).unwrap_or(usize::MAX),
-    };
-    let mut owner = ScratchOwner::new(cx, directory)?;
-    // Declaration order matters: dropping this async frame drops the files
-    // before their namespace owner, including cancellation during an append.
-    let mut scratch = SpillFile::new(cx, owner.file("scratch")?, pool.clone(), file_limits)
-        .await
-        .map_err(execution_failure)?;
-    let mut partition = if aggregate {
-        Some(
-            SpillFile::new(cx, owner.file("partitions")?, pool.clone(), file_limits)
-                .await
-                .map_err(execution_failure)?,
-        )
-    } else {
-        None
-    };
-    let mut destination = SpillFile::new(cx, owner.file("result")?, pool, file_limits)
-        .await
-        .map_err(execution_failure)?;
+    let aggregate = is_aggregate(&prepared);
+    let mut scratch = Scratch::new(cx, options, aggregate).await?;
     let outcome = async {
-        if let Some(partition) = partition.as_mut() {
+        if let Some(partition) = scratch.partition.as_mut() {
             return run_aggregate(
                 &prepared,
                 view,
                 cx,
                 options,
                 resolver,
-                &mut scratch,
+                &mut scratch.source,
                 partition,
-                &mut destination,
-                run_rows,
-                max_partitions,
-                max_runs,
-                input_rows,
+                &mut scratch.destination,
+                scratch.run_rows,
+                scratch.max_partitions,
+                scratch.max_runs,
+                scratch.input_rows,
                 robot,
                 out,
             )
@@ -266,118 +329,205 @@ pub(super) async fn run(
                 cx,
                 &options.params,
                 options.budget.policy(),
-                &mut scratch,
-                &mut destination,
-                run_rows,
-                max_runs,
+                &mut scratch.source,
+                &mut scratch.destination,
+                scratch.run_rows,
+                scratch.max_runs,
                 PAGE_BYTES,
                 MAX_ROW_BYTES,
-                input_rows,
-                limits.work.unwrap_or(DEFAULT_SORT_WORK),
+                scratch.input_rows,
+                options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
             )
             .await
             .map_err(execution_failure)?;
-        let seq = spool.snapshot_seq().0;
-        cx.checkpoint().map_err(Failure::query)?;
-        if robot {
-            emit(
-                out,
-                &format!(
-                    r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"columns":[{}]}}"#,
-                    spool
-                        .columns()
-                        .iter()
-                        .map(|name| quoted(name))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                ),
-            )?;
-        } else {
-            emit(
-                out,
-                &spool
-                    .columns()
-                    .iter()
-                    .map(|name| {
-                        name.chars()
-                            .flat_map(char::escape_default)
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\t"),
-            )?;
-        }
-        out.flush().map_err(Failure::io)?;
-        let mut reader = spool.reader(&mut destination);
-        let mut sent = 0_u64;
-        loop {
-            cx.checkpoint().map_err(Failure::query)?;
-            let Some(frame) = reader.next_row(cx).await.map_err(execution_failure)? else {
-                break;
-            };
-            let row = match resolver {
-                Some(resolver) => {
-                    GraphValueRow::decode_canonical_with_resolver(frame.as_ref(), resolver)
-                }
-                None => GraphValueRow::decode_canonical(frame.as_ref()),
-            }
-            .map_err(execution_failure)?;
-            if row.values().len() != spool.columns().len() {
-                return Err(Failure::query("spill row does not match its native layout"));
-            }
-            let cells = row
-                .values()
-                .iter()
-                .map(|value| {
-                    cx.checkpoint().map_err(Failure::query)?;
-                    if robot {
-                        value_cell(value)
-                    } else {
-                        human_value(value)
-                    }
-                })
-                .collect::<Result<Vec<_>, Failure>>()?;
-            cx.checkpoint().map_err(Failure::query)?;
-            if robot {
-                emit(
-                    out,
-                    &format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, cells.join(",")),
-                )?;
-            } else {
-                emit(out, &cells.join("\t"))?;
-            }
-            out.flush().map_err(Failure::io)?;
-            sent = sent
-                .checked_add(1)
-                .ok_or_else(|| Failure::query("spill delivery counter overflow"))?;
-        }
-        if sent != spool.row_count() {
-            return Err(Failure::query("incomplete spill result"));
-        }
-        Ok::<_, Failure>((seq, sent))
+        deliver_ordered(&spool, &mut scratch.destination, cx, resolver, robot, out).await
     }
     .await;
-    // Success is withheld until scratch retirement succeeds. A transport or
-    // query error still retires every file, preserving that original error.
-    drop(destination);
-    drop(partition);
-    drop(scratch);
-    let cleanup = owner.close();
-    let (seq, sent) = outcome?;
-    cleanup?;
+    scratch.complete(outcome, cx, robot, out)
+}
+
+fn is_aggregate(prepared: &PreparedNativeRead) -> bool {
+    matches!(
+        prepared,
+        PreparedNativeRead::Aggregate(_)
+            | PreparedNativeRead::TemporalAggregate(_)
+            | PreparedNativeRead::PipelineAggregate(_)
+    )
+}
+
+/// Bind and admit the external physical definition before storage opens. The
+/// native statement class selects one compiler; errors never trigger retries.
+pub(super) enum PreparedBuffered {
+    Ordered(PreparedBufferedOrder),
+    Aggregate(PreparedBufferedAggregate),
+}
+
+pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Failure> {
+    let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
+        .map_err(execution_failure)?;
+    if is_aggregate(&prepared) {
+        prepared
+            .prepare_buffered_aggregate(&options.params)
+            .map(PreparedBuffered::Aggregate)
+            .map_err(execution_failure)
+    } else {
+        prepared
+            .prepare_buffered_order(&options.params)
+            .map(PreparedBuffered::Ordered)
+            .map_err(execution_failure)
+    }
+}
+
+pub(super) async fn run_buffered<V: Vfs + Clone>(
+    view: &mut BufferedReadView<V>,
+    cx: &QueryCx,
+    options: &Options,
+    prepared: &PreparedBuffered,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let aggregate = matches!(prepared, PreparedBuffered::Aggregate(_));
+    let mut scratch = Scratch::new(cx, options, aggregate).await?;
+    let outcome = async {
+        match prepared {
+            PreparedBuffered::Ordered(prepared) => {
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        view,
+                        cx,
+                        options.budget.policy(),
+                        &mut scratch.source,
+                        &mut scratch.destination,
+                        scratch.run_rows,
+                        scratch.max_runs,
+                        PAGE_BYTES,
+                        MAX_ROW_BYTES,
+                        scratch.input_rows,
+                        options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
+                    )
+                    .await
+                    .map_err(execution_failure)?;
+                deliver_ordered(&spool, &mut scratch.destination, cx, resolver, robot, out).await
+            }
+            PreparedBuffered::Aggregate(prepared) => {
+                let partition = scratch.partition.as_mut().ok_or_else(|| {
+                    Failure::query("aggregate spill is missing its private partition file")
+                })?;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        view,
+                        cx,
+                        options.budget.policy(),
+                        &mut scratch.source,
+                        partition,
+                        &mut scratch.destination,
+                        scratch.run_rows,
+                        scratch.max_partitions,
+                        scratch.run_rows,
+                        scratch.max_runs,
+                        PAGE_BYTES,
+                        MAX_ROW_BYTES,
+                        scratch.input_rows,
+                        options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
+                        resolver,
+                    )
+                    .await
+                    .map_err(execution_failure)?;
+                deliver_aggregate(&spool, &mut scratch.destination, cx, resolver, robot, out).await
+            }
+        }
+    }
+    .await;
+    scratch.complete(outcome, cx, robot, out)
+}
+
+async fn deliver_ordered(
+    spool: &NativeResultSpool,
+    destination: &mut SpillFile<File>,
+    cx: &QueryCx,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(u64, u64), Failure> {
+    let seq = spool.snapshot_seq().0;
     cx.checkpoint().map_err(Failure::query)?;
     if robot {
         emit(
             out,
             &format!(
-                r#"{{"v":1,"event":"result","kind":"rows","stream":true,"seq":{seq},"count":{sent}}}"#
+                r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"columns":[{}]}}"#,
+                spool
+                    .columns()
+                    .iter()
+                    .map(|name| quoted(name))
+                    .collect::<Vec<_>>()
+                    .join(","),
             ),
         )?;
     } else {
-        writeln!(out, "{sent} row(s) (external query complete at seq {seq})")
-            .map_err(Failure::io)?;
+        emit(
+            out,
+            &spool
+                .columns()
+                .iter()
+                .map(|name| {
+                    name.chars()
+                        .flat_map(char::escape_default)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\t"),
+        )?;
     }
-    out.flush().map_err(Failure::io)
+    out.flush().map_err(Failure::io)?;
+    let mut reader = spool.reader(destination);
+    let mut sent = 0_u64;
+    loop {
+        cx.checkpoint().map_err(Failure::query)?;
+        let Some(frame) = reader.next_row(cx).await.map_err(execution_failure)? else {
+            break;
+        };
+        let row = match resolver {
+            Some(resolver) => {
+                GraphValueRow::decode_canonical_with_resolver(frame.as_ref(), resolver)
+            }
+            None => GraphValueRow::decode_canonical(frame.as_ref()),
+        }
+        .map_err(execution_failure)?;
+        if row.values().len() != spool.columns().len() {
+            return Err(Failure::query("spill row does not match its native layout"));
+        }
+        let cells = row
+            .values()
+            .iter()
+            .map(|value| {
+                cx.checkpoint().map_err(Failure::query)?;
+                if robot {
+                    value_cell(value)
+                } else {
+                    human_value(value)
+                }
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        cx.checkpoint().map_err(Failure::query)?;
+        if robot {
+            emit(
+                out,
+                &format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, cells.join(",")),
+            )?;
+        } else {
+            emit(out, &cells.join("\t"))?;
+        }
+        out.flush().map_err(Failure::io)?;
+        sent = sent
+            .checked_add(1)
+            .ok_or_else(|| Failure::query("spill delivery counter overflow"))?;
+    }
+    if sent != spool.row_count() {
+        return Err(Failure::query("incomplete spill result"));
+    }
+    Ok((seq, sent))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -418,6 +568,17 @@ async fn run_aggregate(
         )
         .await
         .map_err(execution_failure)?;
+    deliver_aggregate(&spool, destination, cx, resolver, robot, out).await
+}
+
+async fn deliver_aggregate(
+    spool: &NativeAggregateSpool,
+    destination: &mut SpillFile<File>,
+    cx: &QueryCx,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(u64, u64), Failure> {
     let seq = spool.snapshot_seq().0;
     let columns = spool.columns();
     let slots = spool.output_slots();

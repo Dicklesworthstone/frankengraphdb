@@ -3364,3 +3364,82 @@ fn buffered_query_dispatch_uses_cold_admission_and_preserves_native_stream_contr
             .any(|event| event.get("event").string() == "result")
     );
 }
+
+#[test]
+fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
+    let db = TestDb::new("buffered-external-query");
+    db.create();
+    let basis = db.write(&["INSERT (a:Person {team:1}),(b:Person {team:2}),(c:Person {team:2}),(a)-[:KNOWS]->(b),(a)-[:KNOWS]->(c)"]);
+    let latest = db.write(&["MATCH (n:Person) WHERE n.team=1 SET n.team=3"]);
+    let directory = scratch("buffered-external-files");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    for (text, seq) in [
+        ("MATCH (n:Person) RETURN n.team AS team ORDER BY n DESC LIMIT 2".to_owned(), latest),
+        ("MATCH (n:Person) RETURN DISTINCT n.team AS team ORDER BY team DESC".to_owned(), latest),
+        ("MATCH (n:Person) RETURN n.team AS team,count(*) AS count,sum(n.team*2) AS total GROUP BY n.team ORDER BY total DESC".to_owned(), latest),
+        ("MATCH (n:Person) RETURN DISTINCT count(*) AS count GROUP BY n.team ORDER BY sum(n.team) DESC".to_owned(), latest),
+        ("MATCH (a)-[r:KNOWS]-(b) RETURN a.team AS team ORDER BY b.team DESC,team".to_owned(), latest),
+        (format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN n.team AS team ORDER BY team DESC"), basis),
+        (format!("MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN sum(a.team+b.team) AS total,count(*) AS count"), basis),
+    ] {
+        let expected = db.command("query", &[&text]);
+        expected.success();
+        let actual = db.command(
+            "query",
+            &[
+                "--buffered",
+                "--buffer-memory-bytes",
+                "8388608",
+                "--spill-dir",
+                spill,
+                "--spill-memory-bytes",
+                "524288",
+                &text,
+            ],
+        );
+        actual.success();
+        let expected_rows: Vec<_> = expected
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| event.get("cells"))
+            .collect();
+        let actual_rows: Vec<_> = actual
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| event.get("cells"))
+            .collect();
+        assert_eq!(actual_rows, expected_rows, "{text}");
+        assert_eq!(actual.sequence("rows"), seq);
+        assert_eq!(actual.terminal().get("stream"), &Json::Bool(true));
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+    for text in [
+        "MATCH (n) WHERE 10/(n.team-2)>0 RETURN n.team AS value LIMIT 0",
+        "MATCH (n) RETURN 10/(sum(n.team)-4) AS value GROUP BY n.team LIMIT 0",
+    ] {
+        let failed = db.command("query", &["--buffered", "--spill-dir", spill, text]);
+        failed.failure(3, "query");
+        assert!(
+            failed
+                .events
+                .iter()
+                .all(|event| !matches!(event.get("event").string(), "columns" | "row" | "result"))
+        );
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+    let missing = TestDb::new("buffered-external-unsupported-before-open");
+    for text in [
+        "MATCH (n) RETURN collect(n.team) LIMIT 0",
+        "MATCH (a)-[r:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.team LIMIT 0",
+        "MATCH (n) RETURN {value:n.team} AS value LIMIT 0",
+    ] {
+        missing
+            .command("query", &["--buffered", "--spill-dir", spill, text])
+            .failure(3, "query");
+        assert!(!std::path::Path::new(&missing.db).exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+}

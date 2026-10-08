@@ -8,6 +8,7 @@ use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -284,10 +285,6 @@ fn buffered_flags_are_query_only_unique_and_do_not_change_ordinary_streaming() {
         ),
         (
             "query",
-            vec!["--buffered", "--spill-dir", "unused", "MATCH (n) RETURN n"],
-        ),
-        (
-            "query",
             vec!["--buffered", "--certify-to", "unused", "MATCH (n) RETURN n"],
         ),
         (
@@ -333,6 +330,346 @@ fn buffered_flags_are_query_only_unique_and_do_not_change_ordinary_streaming() {
     let options = okay(crate::parse(&args, "query"));
     assert!(options.stream);
     assert!(!options.buffered.enabled());
+    for flags in [
+        ["--buffered", "--spill-dir", "unused"],
+        ["--spill-dir", "unused", "--buffered"],
+    ] {
+        let args = base
+            .into_iter()
+            .chain(flags)
+            .chain(["MATCH (n) RETURN n ORDER BY n DESC LIMIT 0"])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let options = okay(crate::parse(&args, "query"));
+        assert!(options.buffered.enabled());
+        assert!(options.spill.enabled());
+        assert!(matches!(
+            okay(prepare_query(&options)),
+            PreparedQuery::Spilling(_)
+        ));
+    }
+}
+
+fn spill_parent() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "fgdb-cli-buffered-spill-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&path).unwrap();
+    path
+}
+
+fn spill_options(parent: &Path, text: &str) -> Options {
+    options(&[
+        "--spill-dir",
+        parent.to_str().unwrap(),
+        "--spill-memory-bytes",
+        "524288",
+        text,
+    ])
+}
+
+fn no_scratch(parent: &Path) {
+    assert_eq!(std::fs::read_dir(parent).unwrap().count(), 0);
+}
+
+#[test]
+fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_history() {
+    let ((), report) = run_async_under_lab(0x636c_7510, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        for (text, seq) in [
+            (
+                "MATCH (n) RETURN n.p AS value ORDER BY n DESC SKIP 1 LIMIT 2",
+                2,
+            ),
+            ("MATCH (n) WHERE n.p%2=1 RETURN n.p AS value", 2),
+            (
+                "MATCH (n) RETURN [n.p%2,sum(n.p)] AS value GROUP BY n.p ORDER BY sum(n.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN {bucket:n.p%2,nested:[sum(n.p),null]} AS value GROUP BY n.p ORDER BY sum(n.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN DISTINCT {bucket:count(*)} AS value GROUP BY n.p ORDER BY sum(n.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) RETURN {bucket:a.p%2,total:sum(r.p+b.p)} AS value GROUP BY a.p ORDER BY sum(r.p+b.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN DISTINCT n.p AS value ORDER BY value DESC",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS value ORDER BY value DESC",
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY b.p DESC,r.p DESC",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) RETURN DISTINCT a.p AS value ORDER BY value",
+                2,
+            ),
+            (
+                "MATCH (a)<-[r:R]-(b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN r.p AS value ORDER BY value DESC",
+                1,
+            ),
+            (
+                "MATCH (n) RETURN count(*) AS count,sum(n.p) AS total,avg(n.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN n.p%2 AS bucket,sum(n.p*2) AS total GROUP BY n.p%2 HAVING total>0 ORDER BY total DESC",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN {bucket:n.p%2,total:sum(n.p)*2} AS value GROUP BY n.p ORDER BY sum(n.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN DISTINCT count(*) AS count GROUP BY n.p ORDER BY sum(n.p) DESC",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) RETURN a.p%2 AS bucket,count(*) AS count,sum(r.p+b.p) AS total GROUP BY a.p%2 ORDER BY total DESC",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN count(*) AS count,sum(r.p) AS total",
+                1,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 0 RETURN count(*) AS count,sum(n.p) AS total",
+                0,
+            ),
+            ("MATCH (n) RETURN DISTINCT n.p AS value LIMIT 0", 2),
+        ] {
+            let mut options = spill_options(&directory, text);
+            let prepared = okay(prepare_query(&options));
+            let eager = resident
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, seq, "rows", true, &mut expected));
+            // Intermediate occurrences spend their own quota, even when the
+            // final allowance is zero or smaller than the matched input.
+            options.budget.rows = Some(rows(&expected).len() as u64);
+            let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                pool.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let mut output = Vec::new();
+            okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            let output = std::str::from_utf8(&output).unwrap();
+            assert!(output.starts_with(&format!(
+                r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"#
+            )));
+            assert!(output.contains(r#""event":"result""#));
+            if seq != 0 {
+                assert!(view.buffer_stats().bypasses > 0, "{text}");
+            }
+            no_scratch(&directory);
+            drop(view);
+            assert_eq!(pool.used(), 0, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_external_admission_limits_and_late_expressions_never_publish_partial_results() {
+    let ((), report) = run_async_under_lab(0x636c_7511, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let directory = spill_parent();
+        // Standalone computed projections use the native relational facade;
+        // physical refusal must precede opening any database or scratch file.
+        for text in [
+            "MATCH (n) RETURN n.p%2 AS value LIMIT 0",
+            "MATCH (n) RETURN [n.p,null] AS value LIMIT 0",
+            "MATCH (n) RETURN {value:n.p} AS value LIMIT 0",
+        ] {
+            let options = spill_options(&directory, text);
+            let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
+            assert!(matches!(native, PreparedNativeRead::Set(_)), "{text}");
+            assert!(prepare_query(&options).is_err(), "{text}");
+            no_scratch(&directory);
+        }
+        for text in [
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN r.p LIMIT 0",
+            "MATCH (n) RETURN count(DISTINCT n.p) LIMIT 0",
+            "MATCH (n) RETURN collect(n.p) LIMIT 0",
+            "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
+        ] {
+            assert!(
+                prepare_query(&spill_options(&directory, text)).is_err(),
+                "{text}"
+            );
+            no_scratch(&directory);
+        }
+        let (vfs, _resident) = fixture(&commit).await;
+        for (text, limit) in [
+            (
+                "MATCH (n) RETURN n.p AS value ORDER BY value",
+                Some(("--max-spill-rows", "1")),
+            ),
+            (
+                "MATCH (n) RETURN n.p AS value ORDER BY value",
+                Some(("--max-sort-work", "0")),
+            ),
+            (
+                "MATCH (n) RETURN n.p AS value ORDER BY value",
+                Some(("--spill-disk-bytes", "128")),
+            ),
+            (
+                "MATCH (n) RETURN n.p AS value ORDER BY value",
+                Some(("--max-result-rows", "1")),
+            ),
+            (
+                "MATCH (n) WHERE 10/(n.p-2)>0 RETURN n.p AS value LIMIT 0",
+                None,
+            ),
+            ("MATCH (n) RETURN sum(10/(n.p-2)) AS value LIMIT 0", None),
+            (
+                "MATCH (n) RETURN 10/(sum(n.p)-2) AS value GROUP BY n.p LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WHERE 10/(r.p-8)>0 RETURN r.p AS value LIMIT 1",
+                None,
+            ),
+        ] {
+            let mut options = spill_options(&directory, text);
+            if let Some((flag, value)) = limit {
+                if flag == "--max-result-rows" {
+                    options.budget.rows = Some(1);
+                } else {
+                    okay(options.spill.set(flag, value));
+                }
+            }
+            let prepared = okay(prepare_query(&options));
+            let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                pool.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let mut output = Vec::new();
+            let error = run_query(&mut view, &cx, &options, &prepared, None, true, &mut output)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{text} must refuse"));
+            assert_eq!(error.class, "query", "{text}");
+            assert!(output.is_empty(), "{text}");
+            no_scratch(&directory);
+            drop(view);
+            assert_eq!(pool.used(), 0, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_external_output_failure_retires_all_files_without_a_success_record() {
+    struct BrokenOutput {
+        bytes: Vec<u8>,
+        flushes: usize,
+        fail_at: usize,
+    }
+    impl Write for BrokenOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == self.fail_at {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "receiver closed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let ((), report) = run_async_under_lab(0x636c_7512, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, _resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        for text in [
+            "MATCH (n) RETURN n.p AS value ORDER BY value DESC",
+            "MATCH (n) RETURN sum(n.p) AS total GROUP BY n.p ORDER BY total DESC",
+        ] {
+            let options = spill_options(&directory, text);
+            let prepared = okay(prepare_query(&options));
+            for fail_at in [1, 2, 3] {
+                let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+                let mut view = Database::open_buffered_read_view_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    vfs.database_dir(),
+                    keys(),
+                    pool.clone(),
+                    limits,
+                )
+                .await
+                .unwrap();
+                let mut output = BrokenOutput {
+                    bytes: Vec::new(),
+                    flushes: 0,
+                    fail_at,
+                };
+                let error = run_query(&mut view, &cx, &options, &prepared, None, true, &mut output)
+                    .await
+                    .err()
+                    .expect("output failure");
+                assert_eq!(error.class, "io");
+                assert_eq!(output.flushes, fail_at);
+                assert!(
+                    !std::str::from_utf8(&output.bytes)
+                        .unwrap()
+                        .contains(r#""event":"result""#)
+                );
+                assert!(view.buffer_stats().bypasses > 0);
+                no_scratch(&directory);
+                drop(view);
+                assert_eq!(pool.used(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -392,6 +729,57 @@ fn buffered_cli_reads_vertex_payloads_larger_than_its_graph_memory_cap() {
             view.buffer_stats().bypasses >= COUNT as u64,
             "delivery used the extent source"
         );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        // Reuse the same committed source with an external property order.
+        // Source payload alone exceeds both simultaneously admitted pools.
+        const SPILL_MEMORY: u64 = 262_144;
+        assert!(COUNT * PAYLOAD > (MEMORY + SPILL_MEMORY) as usize);
+        let directory = spill_parent();
+        let mut options = self::options(&[
+            "--spill-dir",
+            directory.to_str().unwrap(),
+            "--spill-memory-bytes",
+            "262144",
+            "MATCH (n) RETURN n.p AS payload ORDER BY payload DESC",
+        ]);
+        options.buffered.memory = Some(MEMORY);
+        options.budget.work = Some(1_000_000_000);
+        let prepared = okay(prepare_query(&options));
+        let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            pool.clone(),
+            limits,
+        )
+        .await
+        .unwrap();
+        let mut output = Vec::new();
+        okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+        let mut payloads = (1..=COUNT)
+            .map(|index| {
+                let mut payload = vec![0x47; PAYLOAD];
+                payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                payload
+            })
+            .collect::<Vec<_>>();
+        // Bytes use lexicographic content order. This oracle sorts source byte
+        // strings, independently of the external row codec and comparator.
+        payloads.sort_by(|left, right| right.cmp(left));
+        let actual = rows(&output);
+        assert_eq!(actual.len(), COUNT);
+        for (row, payload) in actual.into_iter().zip(payloads) {
+            let cell = okay(crate::value_cell(&GraphValue::Scalar(
+                CanonicalScalar::bytes(payload).unwrap(),
+            )));
+            assert_eq!(row, format!(r#"{{"v":1,"event":"row","cells":[{cell}]}}"#));
+        }
+        assert!(view.buffer_stats().bypasses >= COUNT as u64);
+        assert!(output.len() > (MEMORY + SPILL_MEMORY) as usize);
+        no_scratch(&directory);
         drop(view);
         assert_eq!(pool.used(), 0);
     });

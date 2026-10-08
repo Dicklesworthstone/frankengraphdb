@@ -396,7 +396,7 @@ fn external_grouping_enforces_full_input_and_final_result_allowances() {
         for text in [
             "MATCH (n) RETURN count(DISTINCT n.p) AS count",
             "MATCH (n) RETURN collect(n.p) AS values",
-            "MATCH (n) RETURN DISTINCT count(*) AS count GROUP BY n.p",
+            "UNWIND [1,2] AS value RETURN count(*) AS count",
         ] {
             let options = options(&directory, text);
             let mut output = Vec::new();
@@ -409,6 +409,33 @@ fn external_grouping_enforces_full_input_and_final_result_allowances() {
             assert!(output.is_empty(), "{text}");
             empty(&directory);
         }
+        let mut distinct = options(
+            &directory,
+            "MATCH (n) RETURN DISTINCT count(*) AS count GROUP BY n.p ORDER BY count",
+        );
+        distinct.spill.memory = Some(262_144);
+        let eager = view
+            .query(
+                &cx,
+                &distinct.text,
+                &distinct.params,
+                &distinct,
+                distinct.budget.policy(),
+            )
+            .unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        let mut output = Vec::new();
+        okay(run(&view, &cx, &distinct, None, true, &mut output).await);
+        assert_eq!(rows(&output), rows(&expected));
+        assert_eq!(
+            rows(&output),
+            [
+                r#"{"v":1,"event":"row","cells":[{"type":"count","value":"7"}]}"#,
+                r#"{"v":1,"event":"row","cells":[{"type":"count","value":"8"}]}"#,
+            ]
+        );
+        empty(&directory);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

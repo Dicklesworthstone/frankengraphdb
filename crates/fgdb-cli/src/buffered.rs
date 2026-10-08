@@ -100,6 +100,19 @@ pub(super) struct Prepared {
     edge: bool,
 }
 
+pub(super) enum PreparedQuery {
+    Streaming(Prepared),
+    Spilling(super::spill::PreparedBuffered),
+}
+
+pub(super) fn prepare_query(options: &Options) -> Result<PreparedQuery, Failure> {
+    if options.spill.enabled() {
+        super::spill::prepare_buffered(options).map(PreparedQuery::Spilling)
+    } else {
+        prepare(options).map(PreparedQuery::Streaming)
+    }
+}
+
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let native = PreparedNativeRead::prepare(&options.text, &options.params, options)
         .map_err(execution_failure)?;
@@ -187,6 +200,23 @@ pub(super) async fn run<V: Vfs + Clone>(
         .await;
         cursor.close();
         result
+    }
+}
+
+pub(super) async fn run_query<V: Vfs + Clone>(
+    view: &mut BufferedReadView<V>,
+    cx: &QueryCx,
+    options: &Options,
+    prepared: &PreparedQuery,
+    resolver: Option<&(dyn fgdb_types::CanonicalScalarResolver + Send + Sync)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    match prepared {
+        PreparedQuery::Streaming(prepared) => run(view, cx, options, prepared, robot, out).await,
+        PreparedQuery::Spilling(prepared) => {
+            super::spill::run_buffered(view, cx, options, prepared, resolver, robot, out).await
+        }
     }
 }
 
