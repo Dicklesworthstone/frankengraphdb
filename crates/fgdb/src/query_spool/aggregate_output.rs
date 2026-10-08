@@ -1,7 +1,9 @@
 //! Completed-group result clauses over private aggregate runs. Canonical key
 //! order fixes the first HAVING/output-expression domain error; typed rank
-//! order then selects the output window. Computed outputs travel beside their
-//! complete ranking cells, so no expression executes again after pagination.
+//! order then selects the output window. Computed and DISTINCT outputs travel
+//! beside their complete ranking cells. External DISTINCT keeps one fully
+//! ranked representative per visible tuple, without a resident set of groups.
+//! No expression executes again during equality comparison or pagination.
 
 use super::super::sort::FrameOrder;
 use super::*;
@@ -124,6 +126,38 @@ struct AggregateOrder<'a> {
     input: &'a mut dyn GroupInput,
     pool: MemoryPool,
     resolver: Option<&'a (dyn CanonicalScalarResolver + Send + Sync)>,
+    distinct: bool,
+}
+
+impl AggregateOrder<'_> {
+    fn compare_projected(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        work: &mut Work<'_>,
+    ) -> Result<Ordering> {
+        let left = split_projected_frame(left)?.1;
+        let right = split_projected_frame(right)?.1;
+        // No normalized keys or seen set: two borrowed decoded rows use the
+        // same exact native equality domain as the resident result operator.
+        let _left_charge = decoded_reservation(&self.pool, work.cx, left, 2)?;
+        let left = decode_row(left, self.resolver)?;
+        let left = decode_envelope(
+            &left,
+            self.definition.key_columns().len(),
+            self.definition.aggregate_columns().len(),
+        )?;
+        let _right_charge = decoded_reservation(&self.pool, work.cx, right, 2)?;
+        let right = decode_row(right, self.resolver)?;
+        let right = decode_envelope(
+            &right,
+            self.definition.key_columns().len(),
+            self.definition.aggregate_columns().len(),
+        )?;
+        self.definition
+            .compare_projected_output(&left, &right, &mut |event| self.input.charge(event))
+            .map_err(execute_error)
+    }
 }
 
 impl FrameOrder for AggregateOrder<'_> {
@@ -142,7 +176,7 @@ impl FrameOrder for AggregateOrder<'_> {
     fn validate(&mut self, bytes: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
         self.admit(columns)?;
         work.charge(bytes.len())?;
-        let (bytes, projected) = if self.definition.has_computed_output() {
+        let (bytes, projected) = if self.definition.has_precomputed_output() {
             let (complete, projected) = split_projected_frame(bytes)?;
             (complete, Some(projected))
         } else {
@@ -179,7 +213,13 @@ impl FrameOrder for AggregateOrder<'_> {
                 .checked_add(right.len())
                 .ok_or(SpillError::SizeOverflow)?,
         )?;
-        let (left, right) = if self.definition.has_computed_output() {
+        if self.distinct {
+            let order = self.compare_projected(left, right, work)?;
+            if order != Ordering::Equal {
+                return Ok(order);
+            }
+        }
+        let (left, right) = if self.definition.has_precomputed_output() {
             (
                 split_projected_frame(left)?.0,
                 split_projected_frame(right)?.0,
@@ -273,7 +313,7 @@ where
     } else {
         copy_result(&spool, destination, source, page_bytes, work).await?
     };
-    let filtered = filter(
+    let mut filtered = filter(
         opened,
         &canonical,
         source,
@@ -284,12 +324,48 @@ where
         resolver,
     )
     .await?;
-    if !opened.definition.ordering().is_empty() && filtered.row_count() > 1 {
+    if opened.definition.has_distinct_output() && filtered.row_count() > 1 {
         let mut comparator = AggregateOrder {
             definition: &opened.definition,
             input: opened.input.as_mut(),
             pool: partition.memory_pool().clone(),
             resolver,
+            distinct: true,
+        };
+        let (sorted, used) = filtered
+            .sort_with(
+                cx,
+                partition,
+                source,
+                &mut comparator,
+                run_rows,
+                max_runs,
+                page_bytes,
+                remaining(work)?,
+            )
+            .await?;
+        add_sort_work(work, used)?;
+        filtered = distinct(
+            &sorted,
+            source,
+            partition,
+            &mut comparator,
+            page_bytes,
+            work,
+        )
+        .await?;
+    }
+    // Equality grouping rearranges rows even without ORDER BY. Restore the
+    // native complete-key order after deduplication before applying a window.
+    if (opened.definition.has_distinct_output() || !opened.definition.ordering().is_empty())
+        && filtered.row_count() > 1
+    {
+        let mut comparator = AggregateOrder {
+            definition: &opened.definition,
+            input: opened.input.as_mut(),
+            pool: partition.memory_pool().clone(),
+            resolver,
+            distinct: false,
         };
         let (sorted, used) = filtered
             .sort_with(
@@ -331,6 +407,54 @@ where
     }
 }
 
+async fn distinct<A, B>(
+    spool: &NativeResultSpool,
+    source: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    comparator: &mut AggregateOrder<'_>,
+    page_bytes: usize,
+    work: &mut Work<'_>,
+) -> Result<NativeResultSpool>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+{
+    let mut reader = spool.reader(source);
+    let mut writer = destination.paged_writer(work.cx, page_bytes)?;
+    let mut previous: Option<TrackedBytes> = None;
+    let mut seen = 0_u64;
+    let mut count = 0_u64;
+    let mut largest = 0;
+    while let Some(bytes) = reader.next_row(work.cx).await? {
+        work.charge(bytes.len())?;
+        seen = seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+        let duplicate = if let Some(previous) = &previous {
+            work.charge(previous.len())?;
+            comparator.compare_projected(previous.as_ref(), bytes.as_ref(), work)?
+                == Ordering::Equal
+        } else {
+            false
+        };
+        if !duplicate {
+            // The equality sort already put the best complete rank first.
+            // Keep that original projected representation, not its equality
+            // key. At most one charged previous frame survives this pull.
+            work.write(&mut writer, bytes.as_ref()).await?;
+            largest = largest.max(bytes.len());
+            count = count.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            previous = Some(bytes);
+        }
+    }
+    if seen != spool.row_count() || reader.state() != ScanState::Exhausted {
+        return Err(NativeSpoolError::IncompleteCursor.into());
+    }
+    let mut output = spool.clone();
+    output.rows.result_rows = count;
+    output.max_row_bytes = largest;
+    output.run = writer.finish(work.cx).await?;
+    Ok(output)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn filter<A, B>(
     opened: &mut Opened<'_>,
@@ -360,12 +484,29 @@ where
             opened.definition.evaluation_key_columns().len(),
             opened.definition.evaluation_aggregate_columns().len(),
         )?;
+        // The complete row now owns its values. Retire the decoded wire
+        // envelope before admitting output projection and another envelope.
+        drop(frame);
         if opened
             .definition
             .qualifies_output(&row, &mut |event| opened.input.charge(event))
             .map_err(execute_error)?
         {
-            if opened.definition.has_computed_output() {
+            if opened.definition.has_precomputed_output() {
+                // A plain identity projection can emit no allocation events;
+                // its output envelope still clones keys and aggregate payloads.
+                // Match late projection's explicit copy reservation instead
+                // of consuming spare capacity in the source decode charge.
+                let _plain_projection = if opened.definition.has_computed_output() {
+                    None
+                } else {
+                    let copies = opened
+                        .definition
+                        .output_payload_copies()
+                        .checked_mul(2)
+                        .ok_or(SpillError::SizeOverflow)?;
+                    Some(decoded_reservation(&pool, work.cx, bytes.as_ref(), copies)?)
+                };
                 let mut charge = pool.reserve(work.cx, 512).map_err(SpillError::Memory)?;
                 let row = project_computed(
                     &opened.definition,
@@ -428,7 +569,7 @@ where
         if !take {
             continue;
         }
-        if opened.definition.has_computed_output() {
+        if opened.definition.has_precomputed_output() {
             let (_, projected) = split_projected_frame(bytes.as_ref())?;
             // Every qualified expression already ran in canonical group order.
             // Preserve its exact numeric variants and never recharge/evaluate
@@ -729,6 +870,7 @@ mod tests {
                 input: &mut control,
                 pool: pool.clone(),
                 resolver: None,
+                distinct: false,
             };
             comparator.validate(a.as_ref(), 2, &mut work).unwrap();
             assert_eq!(
@@ -760,6 +902,126 @@ mod tests {
             drop(a);
             drop(b);
             assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn distinct_comparison_uses_exact_visible_equality_before_hidden_rank_and_refunds_errors() {
+        let ((), report) = run_async_under_lab(0x5ba1_1005, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let pool = MemoryPool::new(1_000_000, 0).unwrap();
+            let definition = computed_definition();
+            let mut work = Work {
+                cx: &cx,
+                used: 0,
+                limit: u64::MAX,
+            };
+            let complete = |key, count| {
+                envelope(&GraphAggregateRow::from_group_values(
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
+                    vec![GraphAggregateValue::Count(count)],
+                ))
+                .canonical_bytes()
+                .unwrap()
+            };
+            let visible = |value| {
+                envelope(&GraphAggregateRow::from_group_values(vec![], vec![value]))
+                    .canonical_bytes()
+                    .unwrap()
+            };
+            for value in [
+                GraphAggregateValue::Count(2),
+                GraphAggregateValue::Integer(2),
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+                GraphAggregateValue::Average(GraphExactAverage::new(6, 3).unwrap()),
+            ] {
+                let a = projected_frame(&complete(9, 20), &visible(value), &pool, &mut work, 4096)
+                    .unwrap();
+                let b = projected_frame(
+                    &complete(1, 10),
+                    &visible(GraphAggregateValue::Integer(2)),
+                    &pool,
+                    &mut work,
+                    4096,
+                )
+                .unwrap();
+                let retained = pool.used();
+                let mut baseline = Control {
+                    calls: 0,
+                    stop: usize::MAX,
+                };
+                let mut comparator = AggregateOrder {
+                    definition: &definition,
+                    input: &mut baseline,
+                    pool: pool.clone(),
+                    resolver: None,
+                    distinct: true,
+                };
+                assert_eq!(
+                    comparator
+                        .compare_projected(a.as_ref(), b.as_ref(), &mut work)
+                        .unwrap(),
+                    Ordering::Equal
+                );
+                drop(comparator);
+                baseline.calls = 0;
+                let mut comparator = AggregateOrder {
+                    definition: &definition,
+                    input: &mut baseline,
+                    pool: pool.clone(),
+                    resolver: None,
+                    distinct: true,
+                };
+                assert_eq!(
+                    comparator
+                        .compare(a.as_ref(), b.as_ref(), 2, &mut work)
+                        .unwrap(),
+                    Ordering::Less,
+                    "COUNT 20 wins the hidden descending rank despite its larger key and equal visible tuple"
+                );
+                drop(comparator);
+                assert_eq!(pool.used(), retained);
+                for stop in 1..=baseline.calls {
+                    let mut control = Control { calls: 0, stop };
+                    let mut comparator = AggregateOrder {
+                        definition: &definition,
+                        input: &mut control,
+                        pool: pool.clone(),
+                        resolver: None,
+                        distinct: true,
+                    };
+                    assert!(matches!(
+                        comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work),
+                        Err(NativeAggregateSpoolError::Execute(_))
+                    ));
+                    drop(comparator);
+                    assert_eq!(control.calls, stop);
+                    assert_eq!(pool.used(), retained);
+                }
+                let mut control = Control {
+                    calls: 0,
+                    stop: usize::MAX,
+                };
+                let mut comparator = AggregateOrder {
+                    definition: &definition,
+                    input: &mut control,
+                    pool: MemoryPool::new(1, 0).unwrap(),
+                    resolver: None,
+                    distinct: true,
+                };
+                assert!(matches!(
+                    comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work),
+                    Err(NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(
+                        SpillError::Memory(_)
+                    )))
+                ));
+                assert_eq!(comparator.pool.used(), 0);
+                assert_eq!(pool.used(), retained);
+                drop(a);
+                drop(b);
+                assert_eq!(pool.used(), 0);
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -840,6 +1102,7 @@ mod tests {
                             input: &mut baseline,
                             pool: pool.clone(),
                             resolver: None,
+                            distinct: false,
                         };
                         assert_eq!(comparator.compare(&a, &b, 4, &mut work).unwrap(), expected);
                         drop(comparator);
@@ -851,6 +1114,7 @@ mod tests {
                                 input: &mut control,
                                 pool: pool.clone(),
                                 resolver: None,
+                                distinct: false,
                             };
                             assert!(matches!(
                                 comparator.compare(&a, &b, 4, &mut work),
@@ -890,6 +1154,7 @@ mod tests {
                 input: &mut control,
                 pool: pool.clone(),
                 resolver: None,
+                distinct: false,
             };
             assert_eq!(
                 comparator.compare(&a, &b, 4, &mut work).unwrap(),

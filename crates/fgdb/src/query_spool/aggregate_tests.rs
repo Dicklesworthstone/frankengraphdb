@@ -72,6 +72,325 @@ async fn aggregate_contents(
 }
 
 #[test]
+fn output_distinct_spills_visible_classes_and_preserves_the_first_ranked_representation() {
+    let ((), report) = run_async_under_lab(0x5ba1_000c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for (case, text) in [
+            "MATCH (n:L) RETURN DISTINCT COUNT(*) AS rows GROUP BY n.p ORDER BY SUM(n.p) DESC",
+            "MATCH (n:L) RETURN DISTINCT MIN(n.p)%3 AS category,COUNT(*) AS rows GROUP BY n.p",
+            "MATCH (n:L) RETURN DISTINCT MIN(n.p)%3 AS category,COUNT(*) AS rows GROUP BY n.p ORDER BY SUM(n.p) DESC",
+            "MATCH (n:L) RETURN DISTINCT MIN(n.p)%3 AS category,COUNT(*) AS rows GROUP BY n.p ORDER BY SUM(n.p) DESC SKIP 1 LIMIT 1",
+            "MATCH (n:L) RETURN DISTINCT CASE WHEN n.p%2=0 THEN COUNT(*) ELSE COUNT(*)+0 END AS rows GROUP BY n.p ORDER BY n.p DESC",
+            "MATCH (n:L) RETURN DISTINCT CASE WHEN n.p%2=0 THEN COUNT(*) ELSE COUNT(*)+0 END AS rows GROUP BY n.p",
+            "MATCH (n:L) RETURN DISTINCT {count:COUNT(*),values:range(0,COUNT(*)-7)} AS value GROUP BY n.p ORDER BY SUM(n.p) DESC",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN DISTINCT COUNT(*) AS rows GROUP BY n.p HAVING n.p>1 ORDER BY SUM(n.p) DESC",
+            "MATCH (a)-[e:R]->(b) RETURN DISTINCT COUNT(*) AS rows GROUP BY e.p ORDER BY SUM(e.q) DESC",
+            "MATCH (a)-[e:R]-(b) RETURN DISTINCT COUNT(*) AS rows GROUP BY b.p ORDER BY SUM(e.q) DESC SKIP 1 LIMIT 1",
+            "MATCH (n:L) WHERE n.p<0 RETURN DISTINCT COUNT(*)+1 AS rows",
+            "MATCH (n:L) WHERE n.p<0 RETURN DISTINCT COUNT(*) AS rows GROUP BY n.p",
+        ].into_iter().enumerate() {
+            let prepared = plan(text);
+            let parameters = GqlParameters::new();
+            let ordinary = prepared
+                .stream_aggregate_in_view(&view, &cx, &parameters, policy())
+                .unwrap();
+            let columns = ordinary.columns().to_vec();
+            let slots = ordinary.output_slots().to_vec();
+            let expected = ordinary.collect::<Result<Vec<_>, _>>().unwrap();
+            match case {
+                0 | 7 => assert_eq!(expected[0].values(), &[GraphAggregateValue::Count(8)]),
+                1..=3 => {
+                    let categories: Vec<_> = expected.iter().map(|row| row.values()[0].clone()).collect();
+                    let values: &[i64] = match case {
+                        1 => &[0, 1, 2],
+                        2 => &[1, 0, 2],
+                        _ => &[0],
+                    };
+                    assert_eq!(categories, values.iter().copied().map(|value| GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))).collect::<Vec<_>>());
+                }
+                4 => assert_eq!(expected[0].values(), &[GraphAggregateValue::Integer(8)]),
+                5 => assert_eq!(expected[0].values(), &[GraphAggregateValue::Count(8)]),
+                10 => assert_eq!(expected[0].values(), &[GraphAggregateValue::Integer(1)]),
+                11 => assert!(expected.is_empty()),
+                _ => {}
+            }
+            for (capacity, run_rows) in [(1, 1), (3, 3)] {
+                let pool = MemoryPool::new(4_000_000, 0).unwrap();
+                let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+                let (spool, _) = prepared.spool_aggregate_in_view(
+                    &view, &cx, &parameters,
+                    GqlQueryPolicy::new(10_000, expected.len() as u64, 100_000_000, 1_000_000),
+                    &mut a, &mut b, &mut c, capacity, 256, run_rows, 128, 257, 16_384, 1000, 100_000_000, None,
+                ).await.unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(spool.columns(), columns, "{text}");
+                assert_eq!(spool.output_slots(), slots, "{text}");
+                assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+                assert_eq!(aggregate_contents(&spool, &mut c, &cx).await, expected, "{text}");
+                assert_eq!(pool.used(), 0, "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_output_errors_and_projection_admission_do_not_depend_on_the_page() {
+    let ((), report) = run_async_under_lab(0x5ba1_000d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let mut baseline = None;
+        for window in ["", " LIMIT 0", " LIMIT 1", " SKIP 1000 LIMIT 1"] {
+            let pool = MemoryPool::new(4_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let text = format!(
+                "MATCH (n:L) RETURN DISTINCT range(0,COUNT(*)-7) AS value GROUP BY n.p ORDER BY SUM(n.p) DESC{window}"
+            );
+            let (spool, _) = plan(&text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    1,
+                    128,
+                    257,
+                    16_384,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                spool.row_count(),
+                u64::from(window.is_empty() || window == " LIMIT 1")
+            );
+            let entries = spool.evaluator_stats().scratch_entries;
+            if let Some(expected) = baseline {
+                assert_eq!(
+                    entries, expected,
+                    "all qualified outputs run once before DISTINCT/window"
+                );
+            } else {
+                baseline = Some(entries);
+            }
+            assert_eq!(pool.used(), 0);
+
+            let text = format!(
+                "MATCH (n:L) RETURN DISTINCT 10/(SUM(n.p)-56) AS value GROUP BY n.p ORDER BY n.p{window}"
+            );
+            let result = plan(&text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    1,
+                    128,
+                    257,
+                    4096,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(NativeAggregateSpoolError::Execute(error))
+                if matches!(*error, GqlQueryError::Source(fgdb_gql::GraphAggregateError::OutputExpression { error, .. })
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
+                "{text}"
+            );
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_partitioning_comparison_and_ranking_share_exact_cumulative_budgets() {
+    let ((), report) = run_async_under_lab(0x5ba1_000e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let prepared = plan(
+            "MATCH (n:L) RETURN DISTINCT MIN(n.p)%3 AS category,COUNT(*) AS rows GROUP BY n.p ORDER BY SUM(n.p) DESC SKIP 1 LIMIT 2",
+        );
+        let mut budget = policy();
+        let mut spill_work = 100_000_000;
+        let mut baseline = None;
+        for case in 0..7 {
+            let pool = MemoryPool::new(1_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let result = prepared
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    budget,
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    1,
+                    128,
+                    257,
+                    4096,
+                    64,
+                    spill_work,
+                    None,
+                )
+                .await;
+            if case < 2 {
+                let (spool, used) = result.unwrap();
+                assert_eq!(spool.row_count(), 2);
+                let rows = aggregate_contents(&spool, &mut c, &cx).await;
+                assert_eq!(
+                    rows[0].values()[0],
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(0)))
+                );
+                assert_eq!(
+                    rows[1].values()[0],
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2)))
+                );
+                if let Some((expected, _, _, original_work)) = &baseline {
+                    assert_eq!(&rows, expected);
+                    assert_eq!(used, *original_work);
+                } else {
+                    baseline = Some((rows, spool.row_stats(), spool.evaluator_stats(), used));
+                }
+            } else {
+                assert!(
+                    result.is_err(),
+                    "one-less allowance {case} must refuse the whole DISTINCT result"
+                );
+            }
+            assert_eq!(pool.used(), 0);
+            let (_, rows, evaluator, used) = baseline.as_ref().unwrap();
+            budget = GqlQueryPolicy::new(
+                rows.snapshot_records - u64::from(case == 1),
+                rows.result_rows - u64::from(case == 2),
+                evaluator.work_units - u64::from(case == 3),
+                evaluator.scratch_entries - u64::from(case == 4),
+            );
+            spill_work = *used - u64::from(case == 5);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_distinct_sort_write_failure_after_projection_releases_all_memory_without_a_result() {
+    let ((), report) = run_async_under_lab(0x5ba1_000f, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(1_000_000, 0).unwrap();
+        let (mut a, file) = aggregate_scratch(&cx, &pool).await;
+        let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+        // These two queries share the complete input, reduction, canonical
+        // order and projection stages. The non-DISTINCT run then windows
+        // directly from b, so a's exact end is the next DISTINCT write boundary.
+        let (ordinary, _) = plan("MATCH (n:L) RETURN COUNT(*)+0 AS rows GROUP BY n.p")
+            .spool_aggregate_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut a,
+                &mut b,
+                &mut c,
+                1,
+                256,
+                1,
+                128,
+                257,
+                4096,
+                64,
+                100_000_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ordinary.row_count(), 8);
+        let before_distinct = file.0.lock().unwrap().bytes.get_ref().len();
+        let projected_runs = b.stats().published_runs;
+        assert_eq!(pool.used(), 0);
+
+        let (mut a, file) = aggregate_scratch(&cx, &pool).await;
+        let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+        {
+            let mut file = file.0.lock().unwrap();
+            file.write_limit = Some(
+                before_distinct
+                    .checked_sub(file.bytes.get_ref().len())
+                    .unwrap(),
+            );
+        }
+        let result = plan("MATCH (n:L) RETURN DISTINCT COUNT(*)+0 AS rows GROUP BY n.p")
+            .spool_aggregate_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                policy(),
+                &mut a,
+                &mut b,
+                &mut c,
+                1,
+                256,
+                1,
+                128,
+                257,
+                4096,
+                64,
+                100_000_000,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(_)))
+        ));
+        assert_eq!(
+            b.stats().published_runs,
+            projected_runs,
+            "all projected groups precede the injected equality-sort write failure"
+        );
+        assert_eq!(
+            file.0.lock().unwrap().bytes.get_ref().len(),
+            before_distinct
+        );
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn computed_vertex_and_edge_inputs_partition_the_native_projected_schema() {
     let ((), report) = run_async_under_lab(0x5ba1_0007, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

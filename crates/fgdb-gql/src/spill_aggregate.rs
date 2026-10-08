@@ -32,7 +32,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT or collection")
+                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT arguments or collection")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -111,8 +111,7 @@ impl core::fmt::Debug for SpillAggregateState {
 
 impl SpillAggregateDefinition {
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        if aggregate.incremental_output_is_distinct()
-            || aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
+        if aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
             || aggregate
                 .input_projection()
                 .is_some_and(|projection| projection.len() > MAX_PATTERN_VERTICES)
@@ -172,6 +171,14 @@ impl SpillAggregateDefinition {
     }
     pub fn has_computed_output(&self) -> bool {
         self.aggregate.output_projection().is_some()
+    }
+    pub fn has_distinct_output(&self) -> bool {
+        self.aggregate.incremental_output_is_distinct()
+    }
+    /// DISTINCT observes the final visible tuple before ranking or pagination,
+    /// even when that tuple only hides or repeats ordinary group columns.
+    pub fn has_precomputed_output(&self) -> bool {
+        self.has_computed_output() || self.has_distinct_output()
     }
     pub fn ordering(&self) -> &[GraphAggregateOrder] {
         self.aggregate.ordering()
@@ -256,6 +263,32 @@ impl SpillAggregateDefinition {
         .ok_or(GqlQueryError::Source(
             GraphAggregateError::InvalidReductionInput,
         ))
+    }
+
+    /// Compare only projected visible cells for output DISTINCT. Equal values
+    /// retain their original representation; compare_output() separately picks
+    /// the first fully ranked group as each equivalence class's representative.
+    pub fn compare_projected_output<E, C>(
+        &self,
+        left: &GraphAggregateRow,
+        right: &GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        if left.keys().len() != self.key_columns().len()
+            || left.values().len() != self.aggregate_columns().len()
+            || right.keys().len() != self.key_columns().len()
+            || right.values().len() != self.aggregate_columns().len()
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        left.compare_incremental_distinct(right, &mut |event| control(result_event(event)))?
+            .ok_or(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ))
     }
 
     /// Cells that may retain one variable-size argument value. COUNT/SUM/AVG

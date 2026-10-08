@@ -149,6 +149,53 @@ impl PreparedGraphAggregate {
 }
 
 impl GraphAggregateRow {
+    /// Compare final visible tuples for post-aggregate DISTINCT with the same
+    /// exact cell comparison as snapshot results. Complete grouping keys and
+    /// hidden sort cells do not belong in these projected rows. The owning
+    /// operator separately chooses the first ranked complete representative.
+    ///
+    /// Top-level numeric summaries share the native exact rational domain;
+    /// Count(2), Integer(2), scalar Int(2), and Average(2/1) compare equal.
+    /// Nested GraphValue equality and ordinary grouping-key equality remain
+    /// unchanged. Rows and payloads are borrowed, so this does not allocate a
+    /// normalized copy. None refuses unequal schemas before any early exit.
+    pub fn compare_incremental_distinct<E>(
+        &self,
+        other: &Self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<Ordering>, E> {
+        control(GlaExecutionEvent::Work)?;
+        if self.keys.len() != other.keys.len() || self.values.len() != other.values.len() {
+            return Ok(None);
+        }
+        for (left, right) in self.keys.iter().zip(&other.keys) {
+            control(GlaExecutionEvent::Work)?;
+            for _ in 0..value_ref(left)
+                .payload_units()
+                .max(value_ref(right).payload_units())
+            {
+                control(GlaExecutionEvent::Work)?;
+            }
+            let order = left.cmp(right);
+            if order != Ordering::Equal {
+                return Ok(Some(order));
+            }
+        }
+        for (left, right) in self.values.iter().zip(&other.values) {
+            let order = compare_cell(
+                result_cell(left),
+                result_cell(right),
+                false,
+                GraphNullPlacement::First,
+                control,
+            )?;
+            if order != Ordering::Equal {
+                return Ok(Some(order));
+            }
+        }
+        Ok(Some(Ordering::Equal))
+    }
+
     /// An equality key for post-aggregate DISTINCT, NOT a row to release or a
     /// canonical result encoding. Top-level numeric cells share the exact
     /// rational domain used by the snapshot result comparator. In particular,
@@ -327,6 +374,22 @@ mod tests {
             GraphAggregateValue::Integer(i128::MAX),
             GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
             GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                fgdb_types::CanonicalF64::new(2.0),
+            ))),
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                fgdb_types::CanonicalF64::new(f64::NAN),
+            ))),
+            GraphAggregateValue::Value(GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(2))].into_boxed_slice(),
+            )),
+            GraphAggregateValue::Value(
+                GraphValue::map(vec![(
+                    "payload".into(),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"z".repeat(512)).unwrap()),
+                )])
+                .unwrap(),
+            ),
         ];
         for a in &choices {
             for b in &choices {
@@ -353,9 +416,74 @@ mod tests {
                             .unwrap(),
                     expected
                 );
+                let mut calls = 0;
+                let observed = left
+                    .compare_incremental_distinct(&right, &mut |event| {
+                        assert_eq!(event, GlaExecutionEvent::Work, "comparison only borrows");
+                        calls += 1;
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(observed == Ordering::Equal, expected);
+                assert_eq!(
+                    right
+                        .compare_incremental_distinct(&left, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    Some(observed.reverse())
+                );
+                for stop in 1..=calls {
+                    let mut count = 0;
+                    assert_eq!(
+                        left.compare_incremental_distinct(&right, &mut |_| {
+                            count += 1;
+                            if count == stop { Err(stop) } else { Ok(()) }
+                        }),
+                        Err(stop)
+                    );
+                    assert_eq!(count, stop);
+                }
                 assert_eq!(left.values(), std::slice::from_ref(a));
             }
         }
+    }
+
+    #[test]
+    fn borrowed_distinct_checks_full_schema_and_preserves_nested_numeric_domains() {
+        let integer = GraphValue::Scalar(CanonicalScalar::Int(2));
+        let float = GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.0)));
+        let row = |key: GraphValue, value: GraphValue| {
+            GraphAggregateRow::from_group_values(vec![key], vec![GraphAggregateValue::Value(value)])
+        };
+        let left = row(
+            integer.clone(),
+            GraphValue::List(vec![integer.clone()].into_boxed_slice()),
+        );
+        let right = row(
+            integer.clone(),
+            GraphValue::List(vec![float.clone()].into_boxed_slice()),
+        );
+        assert_ne!(
+            left.compare_incremental_distinct(&right, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(Ordering::Equal)
+        );
+        let other_key = row(float, GraphValue::List(vec![integer].into_boxed_slice()));
+        assert_ne!(
+            left.compare_incremental_distinct(&other_key, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(Ordering::Equal)
+        );
+        let wrong_width = GraphAggregateRow::from_group_values(
+            vec![GraphValue::Scalar(CanonicalScalar::Int(-100))],
+            vec![],
+        );
+        assert_eq!(
+            left.compare_incremental_distinct(&wrong_width, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            None,
+            "a decisive key must not hide a missing later value"
+        );
     }
 
     #[test]

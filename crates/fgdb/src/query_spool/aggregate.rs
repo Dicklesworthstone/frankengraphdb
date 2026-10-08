@@ -53,7 +53,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::Execute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT or collection"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT arguments or collection"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -573,7 +573,8 @@ impl PreparedNativeRead {
     /// A partition that exceeds group/memory capacity is repartitioned. A single
     /// group that cannot fit, hash-depth exhaustion, disk/run/work limits and
     /// cancellation refuse without publishing a result. Completed-group clauses
-    /// may require two bounded sort passes in the same files. No quota is refunded
+    /// may require three bounded sort passes in the same files: canonical group
+    /// order, DISTINCT equivalence classes, and final representative rank. No quota is refunded
     /// for abandoned reduction attempts or completed intermediate runs.
     ///
     /// max_row_bytes bounds every full input frame and result envelope;
