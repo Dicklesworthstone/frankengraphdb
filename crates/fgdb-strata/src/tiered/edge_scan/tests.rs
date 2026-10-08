@@ -103,15 +103,8 @@ async fn fixture(
             vec![90, 40, 60, 99],
             None,
         ),
-        (
-            vec![
-                entry(2, 2, 1, S, 1, None),
-                entry(0, 2, 2, S, 1, None),
-                entry(8, 2, 2, S, 4, None),
-            ],
-            vec![20, 0, 80],
-            None,
-        ),
+        // Publication order keeps every block's upper frontier
+        // non-decreasing (2, 3, 4, 5), as the root's validation requires.
         (
             vec![
                 entry(90, 1, 1, R, 1, Some(3)),
@@ -122,9 +115,18 @@ async fn fixture(
             Some(0usize),
         ),
         (
+            vec![
+                entry(2, 2, 1, S, 1, None),
+                entry(0, 2, 2, S, 1, None),
+                entry(8, 2, 2, S, 4, None),
+            ],
+            vec![20, 0, 80],
+            None,
+        ),
+        (
             vec![entry(4, 1, 2, R, 3, Some(5)), entry(4, 1, 2, R, 5, None)],
             vec![43, 45],
-            Some(2usize),
+            Some(1usize),
         ),
     ];
     let mut ids: Vec<DeltaBlockVersion> = Vec::new();
