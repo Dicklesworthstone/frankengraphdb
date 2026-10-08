@@ -40,6 +40,7 @@ enum MetadataKind {
     Manifest,
     Root,
     Segment,
+    IndexSegment,
 }
 
 fn record_verification(
@@ -122,7 +123,13 @@ impl<V: Vfs + Clone> Database<V> {
             (self.snapshot.manifest.0, MetadataKind::Manifest),
             (self.snapshot.root.0, MetadataKind::Root),
         ]);
-        metadata.extend(segments.map(|id| (id, MetadataKind::Segment)));
+        metadata.extend(segments.map(|(id, level)| {
+            let kind = match level {
+                fgdb_strata::root_segment::SegmentLevel::Leaf => MetadataKind::Segment,
+                fgdb_strata::root_segment::SegmentLevel::Index => MetadataKind::IndexSegment,
+            };
+            (id, kind)
+        }));
         let capsules = self
             .coordinator
             .scrub_capsules(
@@ -191,6 +198,9 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 MetadataKind::Root => self.store.get_root_bytes(cx, self.snapshot.root).await,
                 MetadataKind::Segment => self.store.get_root_segment_bytes(cx, object_id).await,
+                MetadataKind::IndexSegment => {
+                    self.store.get_root_index_segment_bytes(cx, object_id).await
+                }
             };
             record_verification(
                 object_id,

@@ -2387,19 +2387,32 @@ fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
 /// its segments.
 #[test]
 fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
-    const FAMILIES: u128 = 300;
-    fn families(commit: u128) -> WriteBatch {
+    segmented_root_publication_faults_recover(300, 0xd500, 0);
+}
+
+/// **THE SAME MATRIX ACROSS AN INDEX BOUNDARY (fgdb-5gzaa).** 2,100 families
+/// per commit put the first commit at 2,100 block references and the faulted
+/// second at 4,200, so the faulted publication seals the first full index
+/// segment (4,096 references) beside its segments, and recovery re-seals it
+/// with a cold cache. The reopened root resolves through that index segment.
+#[test]
+fn three_level_root_publication_faults_recover_and_reopen_through_an_index_segment() {
+    segmented_root_publication_faults_recover(2_100, 0x5a00, 1);
+}
+
+fn segmented_root_publication_faults_recover(per_commit: u128, seed: u64, index_segments: usize) {
+    let families = move |commit: u128| {
         let mut batch = WriteBatch::new(KNOWS);
         if commit == 0 {
             batch.create_vertex(VId(1), vec![], vec![]);
         }
-        for k in 0..FAMILIES {
-            let src = 1_000 * (commit + 1) + k;
+        for k in 0..per_commit {
+            let src = 10_000 * (commit + 1) + k;
             batch.create_vertex(VId(src), vec![], vec![]);
             batch.add_edge(EId(src), VId(src), VId(1), vec![]);
         }
         batch
-    }
+    };
     for (ordinal, stage) in [
         fgdb::DerivedPublicationStage::PublishPartitionRoot,
         fgdb::DerivedPublicationStage::PublishManifest,
@@ -2409,7 +2422,7 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
     .into_iter()
     .enumerate()
     {
-        under_lab(0xd500 + ordinal as u64, move |cx| async move {
+        under_lab(seed + ordinal as u64, move |cx| async move {
             let cx = &cx;
             let vfs = fgdb::MemVfs::new().expect("memory vfs");
             let path = vfs.database_dir();
@@ -2447,8 +2460,8 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
                 "{stage:?}"
             );
             for commit in 0..3 {
-                for k in 0..FAMILIES {
-                    let src = VId(1_000 * (commit + 1) + k);
+                for k in 0..per_commit {
+                    let src = VId(10_000 * (commit + 1) + k);
                     assert_eq!(
                         db.neighbours(src, KNOWS).expect("reads"),
                         vec![VId(1)],
@@ -2466,10 +2479,21 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
                 .await
                 .expect("the root resolves through its segments");
             assert!(
-                root.blocks.len() >= 3 * FAMILIES as usize,
+                root.blocks.len() >= 3 * per_commit as usize,
                 "{stage:?}: {} blocks is fewer than the fixture's families",
                 root.blocks.len()
             );
+            // Writers emit V5; the stored frame names exactly the full index
+            // segments the block list has.
+            let frame = fgdb_strata::root::decode_root_frame(
+                &store.get_root_bytes(cx, root_id).await.expect("root bytes"),
+            )
+            .expect("decodes");
+            let named = match frame {
+                fgdb_strata::root::RootFrame::V5(frame) => Some(frame.block_index.len()),
+                _ => None,
+            };
+            assert_eq!(named, Some(index_segments), "{stage:?}");
         });
     }
 }
@@ -2898,9 +2922,9 @@ fn every_publish_leaves_a_resolvable_manifest() {
             .await
             .expect("the manifest resolves");
         assert_eq!(resolved.len(), 1, "one partition in the spine");
-        // Roots publish as format V4 (fgdb-d5vo4); a cold re-encode derives
+        // Roots publish as format V5 (fgdb-5gzaa); a cold re-encode derives
         // the same identity the warm, segment-cached writer published.
-        let root_bytes = fgdb_strata::root::encode_root_v4(
+        let root_bytes = fgdb_strata::root::encode_root_v5(
             &resolved[0].1,
             &K_OID,
             NAMESPACE,

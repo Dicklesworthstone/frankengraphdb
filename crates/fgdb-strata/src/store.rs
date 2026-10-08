@@ -245,8 +245,10 @@ struct ObjectPublicationPermit {
 enum StoredObjectKind {
     Block,
     Root,
-    /// A V4 root's full reference segment (fgdb-d5vo4).
+    /// A V4 or V5 root's full reference segment (fgdb-d5vo4).
     Segment,
+    /// A V5 root's full index segment (fgdb-5gzaa).
+    IndexSegment,
     VertexPatch,
     EdgePropertyPatch,
     Manifest,
@@ -263,6 +265,7 @@ impl StoredObjectKind {
             Self::Block => block_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
             Self::Segment => crate::root_segment::segment_id(k_oid, namespace, bytes),
+            Self::IndexSegment => crate::root_segment::index_id(k_oid, namespace, bytes),
             Self::VertexPatch => crate::vertex::vertex_patch_id(k_oid, namespace, bytes),
             Self::EdgePropertyPatch => {
                 crate::edge_props::property_patch_id(k_oid, namespace, bytes)
@@ -284,6 +287,7 @@ impl StoredObjectKind {
         match self {
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
             Self::Segment => crate::root_segment::SEGMENT_BYTES as u64,
+            Self::IndexSegment => crate::root_segment::INDEX_BYTES as u64,
             _ => MAX_STORED_OBJECT_BYTES,
         }
     }
@@ -1300,8 +1304,9 @@ impl<V: Vfs> BlockStore<V> {
         .await
     }
 
-    /// Re-read an admitted V3 or V4 partition-root frame without loading its
-    /// segments. The exact root identity is checked under the root byte cap.
+    /// Re-read an admitted V3, V4 or V5 partition-root frame without loading
+    /// its segments. The exact root identity is checked under the root byte
+    /// cap.
     pub async fn get_root_bytes(
         &self,
         cx: &impl StorageReadCx,
@@ -1316,7 +1321,7 @@ impl<V: Vfs> BlockStore<V> {
         .await
     }
 
-    /// Re-read one admitted V4 root segment under its own identity transcript
+    /// Re-read one admitted root segment under its own identity transcript
     /// and fixed format ceiling, without following its block/patch references.
     pub async fn get_root_segment_bytes(
         &self,
@@ -1328,6 +1333,23 @@ impl<V: Vfs> BlockStore<V> {
             id,
             StoredObjectKind::Segment,
             crate::root_segment::SEGMENT_BYTES as u64,
+        )
+        .await
+    }
+
+    /// Re-read one admitted V5 root index segment under its own identity
+    /// transcript and fixed format ceiling, without following the segments it
+    /// names.
+    pub async fn get_root_index_segment_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id,
+            StoredObjectKind::IndexSegment,
+            crate::root_segment::INDEX_BYTES as u64,
         )
         .await
     }
@@ -1939,9 +1961,10 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<PartitionRootVersion, StoreError> {
-        // Encoded from scratch: every full segment this root names is sealed.
-        // Re-putting a segment an earlier root already named is idempotent.
-        let encoded = crate::root::encode_root_v4(
+        // Encoded from scratch: every full segment and index segment this
+        // root names is sealed. Re-putting one an earlier root already named
+        // is idempotent.
+        let encoded = crate::root::encode_root_v5(
             root,
             self.k_oid.expose(),
             self.namespace,
@@ -1950,10 +1973,8 @@ impl<V: Vfs> BlockStore<V> {
         .map_err(StoreError::MalformedRoot)?;
         self.inspect_root_blocks(cx, root, |_, _| false).await?;
         self.inspect_root_patches(cx, root, |_, _| false).await?;
-        for (_, segment) in &encoded.new_segments {
-            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
-                .await?;
-        }
+        self.put_segments(cx, &encoded.new_segments, &encoded.new_index_segments)
+            .await?;
         self.put_object_with_steps(
             StoredObjectKind::Root,
             cx,
@@ -1964,6 +1985,26 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await
         .map(PartitionRootVersion)
+    }
+
+    /// Write a root's new segments, then its new index segments, each under
+    /// its own kind, before the root that names them.
+    async fn put_segments(
+        &self,
+        cx: &CommitCx,
+        segments: &[(ObjectId, Vec<u8>)],
+        index_segments: &[(ObjectId, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        for (kind, objects) in [
+            (StoredObjectKind::Segment, segments),
+            (StoredObjectKind::IndexSegment, index_segments),
+        ] {
+            for (_, bytes) in objects {
+                self.put_object_with_steps(kind, cx, bytes, None, || {}, || {})
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// [`BlockStore::put_patch`], memoised under `receipts` — the patch
@@ -2140,10 +2181,8 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
         let verified = self.verify_root(cx, root, receipts).await?;
-        for (_, segment) in &verified.segments {
-            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
-                .await?;
-        }
+        self.put_segments(cx, &verified.segments, &verified.index_segments)
+            .await?;
         let published = self
             .put_object_with_steps(
                 StoredObjectKind::Root,
@@ -2183,11 +2222,11 @@ impl<V: Vfs> BlockStore<V> {
             mut segments,
             ..
         } = memo.unwrap_or_default();
-        // The memo's segments chunk the prefix it just proved this root
-        // extends, so only segments this root newly fills are sealed and
-        // hashed (fgdb-d5vo4).
+        // The memo's segments and index segments chunk the prefix it just
+        // proved this root extends, so only those this root newly fills are
+        // sealed and hashed (fgdb-d5vo4, fgdb-5gzaa).
         let encoded =
-            crate::root::encode_root_v4(root, self.k_oid.expose(), self.namespace, &mut segments)
+            crate::root::encode_root_v5(root, self.k_oid.expose(), self.namespace, &mut segments)
                 .map_err(StoreError::MalformedRoot)?;
         let (block_start, patch_start) = (verified_blocks.len(), verified_patches.len());
         for (at, reference) in root.blocks.iter().enumerate().skip(block_start) {
@@ -2257,6 +2296,7 @@ impl<V: Vfs> BlockStore<V> {
             id: PartitionRootVersion(id),
             bytes: encoded.bytes,
             segments: encoded.new_segments,
+            index_segments: encoded.new_index_segments,
             memo: RootMemo {
                 partition: root.partition,
                 blocks: verified_blocks,
@@ -2293,15 +2333,20 @@ impl<V: Vfs> BlockStore<V> {
             id,
             bytes,
             segments,
+            index_segments,
             memo,
         } = root;
         let mut batch = self.publication_batch(cx, receipts, None)?;
-        // A root's new segments ride its batch, staged before it: nothing
-        // names them until the root slot names this manifest.
-        for (segment_id, segment) in &segments {
-            batch
-                .put_object(cx, StoredObjectKind::Segment, *segment_id, segment)
-                .await?;
+        // A root's new segments and index segments ride its batch, staged
+        // before it: nothing names them until the root slot names this
+        // manifest.
+        for (kind, objects) in [
+            (StoredObjectKind::Segment, &segments),
+            (StoredObjectKind::IndexSegment, &index_segments),
+        ] {
+            for (segment_id, segment) in objects {
+                batch.put_object(cx, kind, *segment_id, segment).await?;
+            }
         }
         batch
             .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
@@ -2319,8 +2364,9 @@ impl<V: Vfs> BlockStore<V> {
 
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
-    /// A V4 root's segments are read, authenticated and flattened back into
-    /// the one [`crate::root::PartitionRoot`] every reader sees.
+    /// A V4 or V5 root's segments (a V5 root's index segments first) are read,
+    /// authenticated and flattened back into the one
+    /// [`crate::root::PartitionRoot`] every reader sees.
     pub async fn get_root(
         &self,
         cx: &impl StorageReadCx,
@@ -2690,6 +2736,8 @@ pub struct VerifiedRoot {
     /// Full segments this root names that were never published before; they
     /// are written, before the root, in the same publication.
     segments: Vec<(ObjectId, Vec<u8>)>,
+    /// The same for full index segments (fgdb-5gzaa).
+    index_segments: Vec<(ObjectId, Vec<u8>)>,
     memo: RootMemo,
 }
 
@@ -2707,8 +2755,9 @@ struct RootMemo {
     blocks: Vec<crate::root::BlockRef>,
     chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
     patches: Vec<crate::root::PatchRef>,
-    /// The full V4 segments chunking the verified prefix. Valid exactly as
-    /// long as the memo is: a root that does not extend the prefix drops both.
+    /// The full segments and index segments chunking the verified prefix.
+    /// Valid exactly as long as the memo is: a root that does not extend the
+    /// prefix drops both.
     segments: crate::root::SegmentCache,
 }
 
@@ -2717,16 +2766,17 @@ impl PublishReceipts {
         Self::default()
     }
 
-    /// Enumerate root segments only when this memo covers the caller's exact
-    /// admitted partition membership. An absent or prefix-only memo refuses;
-    /// neither can silently certify an incomplete scrub inventory. This lends
-    /// identities for re-verification and mints no new durability receipts.
+    /// Enumerate root segments and index segments, each with its level, only
+    /// when this memo covers the caller's exact admitted partition
+    /// membership. An absent or prefix-only memo refuses; neither can silently
+    /// certify an incomplete scrub inventory. This lends identities for
+    /// re-verification and mints no new durability receipts.
     pub fn root_segment_ids(
         &self,
         partition: u64,
         blocks: &[crate::root::BlockRef],
         patches: &[crate::root::PatchRef],
-    ) -> Option<impl Iterator<Item = ObjectId> + '_> {
+    ) -> Option<impl Iterator<Item = (ObjectId, crate::root_segment::SegmentLevel)> + '_> {
         self.root_memo
             .as_ref()
             .filter(|memo| {
@@ -3211,6 +3261,7 @@ mod durability_tests {
                 (0, super::MANIFEST_HEADER_AND_RECORDS_CEILING),
                 (1, crate::root::MAX_ENCODED_ROOT_BYTES as u64),
                 (2, crate::root_segment::SEGMENT_BYTES as u64),
+                (3, crate::root_segment::INDEX_BYTES as u64),
             ] {
                 let id = ObjectId([0x60 + kind; 32]);
                 let file = File::create(store.path(id)).expect("private sparse fixture");
@@ -3226,7 +3277,8 @@ mod durability_tests {
                             .get_root_bytes(&cx, crate::PartitionRootVersion(id))
                             .await
                     }
-                    _ => store.get_root_segment_bytes(&cx, id).await,
+                    2 => store.get_root_segment_bytes(&cx, id).await,
+                    _ => store.get_root_index_segment_bytes(&cx, id).await,
                 };
                 assert!(
                     matches!(result, Err(StoreError::ObjectTooLarge {
@@ -3240,7 +3292,7 @@ mod durability_tests {
 
     #[test]
     fn scrub_segment_inventory_requires_the_exact_admitted_membership() {
-        use crate::root::{BlockRef, PartitionRoot, PatchRef, SegmentCache, encode_root_v4};
+        use crate::root::{BlockRef, PartitionRoot, PatchRef, SegmentCache, encode_root_v5};
         use crate::root_segment::SEGMENT_REFS;
         use fgdb_types::{BranchId, CommitSeq, GraphId};
 
@@ -3270,7 +3322,7 @@ mod durability_tests {
                 .collect(),
         };
         let mut segments = SegmentCache::default();
-        let encoded = encode_root_v4(&root, &K_OID, NAMESPACE, &mut segments).unwrap();
+        let encoded = encode_root_v5(&root, &K_OID, NAMESPACE, &mut segments).unwrap();
         assert_eq!(
             encoded.new_segments.len(),
             2,
@@ -3294,7 +3346,7 @@ mod durability_tests {
             encoded
                 .new_segments
                 .iter()
-                .map(|(id, _)| *id)
+                .map(|(id, _)| (*id, crate::root_segment::SegmentLevel::Leaf))
                 .collect::<Vec<_>>()
         );
         for (partition, blocks, patches) in [
@@ -3325,16 +3377,19 @@ mod durability_tests {
 
     /// fgdb-a7sz, pinned where the seam lives: a lawful root larger than the
     /// block-derived bound is admitted under the root family's own ceiling.
-    /// A stored V4 root (fgdb-d5vo4) outgrows 16 KiB only at 51 full
-    /// segments plus a full tail -- 13,311 references, which end to end costs
-    /// as many synced blocks -- so the root object here names no stored ones.
+    /// A stored V5 root (fgdb-5gzaa) outgrows 16 KiB only once it names 51
+    /// segment references beside a full tail. At most 15 of those can be
+    /// segments, so it needs 36 index references: 151,551 references, which
+    /// end to end costs as many synced blocks. The root object here therefore
+    /// names no stored ones.
     #[test]
     fn a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling() {
-        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v4};
-        use crate::root_segment::SEGMENT_REFS;
+        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v5};
+        use crate::root_segment::{INDEX_REFS, SEGMENT_REFS};
         use fgdb_types::{BranchId, CommitSeq, GraphId};
 
-        let refs = 51 * SEGMENT_REFS + (SEGMENT_REFS - 1);
+        let refs =
+            36 * INDEX_REFS * SEGMENT_REFS + (INDEX_REFS - 1) * SEGMENT_REFS + (SEGMENT_REFS - 1);
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -3353,7 +3408,7 @@ mod durability_tests {
                 .collect(),
             vertex_patches: vec![],
         };
-        let bytes = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+        let bytes = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
             .expect("a lawful root")
             .bytes;
         assert!(
@@ -3379,6 +3434,123 @@ mod durability_tests {
                 .await
                 .expect("admitted under the root family's ceiling");
             assert_eq!(std::fs::read(store.path(id)).expect("stored"), bytes);
+        });
+    }
+
+    /// fgdb-5gzaa at the object layer: a V5 root naming an index segment is
+    /// read back through it. The index segment is authenticated like any
+    /// object (a flipped byte is refused, restoring it restores the read), its
+    /// bytes are charged to the read budget (the exact sum admits, one byte
+    /// less is refused), and the scrub inventory names it as an index. A full
+    /// index covers 4,096 references, as many synced blocks end to end, so
+    /// the root names no stored ones: the read path proves the root, the index
+    /// and the segments, never the blocks.
+    #[test]
+    fn a_v5_root_reads_through_its_index_segment_under_its_budget() {
+        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v5};
+        use crate::root_segment::{INDEX_BYTES, INDEX_REFS, SEGMENT_BYTES, SEGMENT_REFS};
+        use fgdb_types::{BranchId, CommitSeq, GraphId};
+
+        let refs = SEGMENT_REFS * INDEX_REFS + 300;
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: (0..refs)
+                .map(|k| {
+                    let mut id = [0x0b; 32];
+                    id[..8].copy_from_slice(&(k as u64).to_be_bytes());
+                    BlockRef {
+                        block_id: ObjectId(id),
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }
+                })
+                .collect(),
+            vertex_patches: vec![],
+        };
+        let encoded = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            .expect("a lawful root");
+        assert_eq!(encoded.new_segments.len(), INDEX_REFS + 1);
+        assert_eq!(encoded.new_index_segments.len(), 1);
+        // The index, one more segment, and the 44-reference tail.
+        assert_eq!(encoded.bytes.len(), 94 + 2 * 80 + 44 * 48);
+
+        let dir = scratch_dir("v5-root-index-segment");
+        under_lab(53, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            for (kind, objects) in [
+                (super::StoredObjectKind::Segment, &encoded.new_segments),
+                (
+                    super::StoredObjectKind::IndexSegment,
+                    &encoded.new_index_segments,
+                ),
+            ] {
+                for (_, bytes) in objects {
+                    store
+                        .put_object_with_steps(kind, &cx, bytes, None, || {}, || {})
+                        .await
+                        .expect("segment stored");
+                }
+            }
+            let id = crate::PartitionRootVersion(
+                store
+                    .put_object_with_steps(
+                        super::StoredObjectKind::Root,
+                        &cx,
+                        &encoded.bytes,
+                        None,
+                        || {},
+                        || {},
+                    )
+                    .await
+                    .expect("root stored"),
+            );
+            assert_eq!(store.get_root(&cx, id).await.expect("reads"), root);
+
+            let exact = encoded.bytes.len() + INDEX_BYTES + (INDEX_REFS + 1) * SEGMENT_BYTES;
+            let (read, segments) = store
+                .get_root_and_segments(&cx, id, exact)
+                .await
+                .expect("the exact budget admits");
+            assert_eq!(read, root);
+            let (index_id, _) = encoded.new_index_segments[0];
+            assert_eq!(
+                segments
+                    .object_ids()
+                    .filter(|(_, level)| *level == crate::root_segment::SegmentLevel::Index)
+                    .collect::<Vec<_>>(),
+                [(index_id, crate::root_segment::SegmentLevel::Index)]
+            );
+            assert_eq!(segments.object_ids().count(), INDEX_REFS + 2);
+            assert!(matches!(
+                store.get_root_and_segments(&cx, id, exact - 1).await,
+                Err(StoreError::ObjectTooLarge { .. })
+            ));
+            assert_eq!(
+                store
+                    .get_root_index_segment_bytes(&cx, index_id)
+                    .await
+                    .expect("re-reads"),
+                encoded.new_index_segments[0].1
+            );
+
+            let path = store.path(index_id);
+            let genuine = std::fs::read(&path).expect("index object");
+            let mut flipped = genuine.clone();
+            flipped[300] ^= 1;
+            std::fs::write(&path, &flipped).expect("plant damage");
+            assert!(matches!(
+                store.get_root(&cx, id).await,
+                Err(StoreError::MalformedRoot(crate::root::RootError::Segment(
+                    crate::root_segment::SegmentError::IdentityMismatch { .. }
+                )))
+            ));
+            std::fs::write(&path, &genuine).expect("restore");
+            assert_eq!(store.get_root(&cx, id).await.expect("restored"), root);
         });
     }
 

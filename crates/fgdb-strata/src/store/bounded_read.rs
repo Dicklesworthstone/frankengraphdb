@@ -16,8 +16,9 @@ use fgdb_types::{CommitSeq, QueryCx, StorageReadCx};
 /// allocator-byte quota or an external-memory implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootReadLimits {
-    /// Encoded root bytes, including every segment a V4 root names. Enforced
-    /// by the bounded file reader before each decode.
+    /// Encoded root bytes, including every segment a V4 or V5 root names and
+    /// every index segment a V5 root names. Enforced by the bounded file
+    /// reader before each decode.
     pub max_root_bytes: usize,
     /// Sum of encoded block, hosted-property and vertex-patch bytes, excluding
     /// the separately bounded root. A single format-bounded object is in hand
@@ -251,6 +252,12 @@ impl<V: Vfs> BlockStore<V> {
                 Ok(())
             }
         };
+        // The references a segmented list declares: each full index segment
+        // covers INDEX_REFS full segments, each of SEGMENT_REFS references.
+        let declared = |index: usize, segments: usize, tail: usize| {
+            (index * crate::root_segment::INDEX_REFS + segments) * crate::root_segment::SEGMENT_REFS
+                + tail
+        };
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
         let bytes = self
             .read_object_bytes(
@@ -268,37 +275,102 @@ impl<V: Vfs> BlockStore<V> {
                 },
             ));
         }
-        let frame =
-            match crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)? {
-                crate::root::RootFrame::V3(root) => {
-                    check("root blocks", root.blocks.len(), max_blocks)?;
-                    check(
-                        "root vertex patches",
-                        root.vertex_patches.len(),
-                        max_patches,
-                    )?;
-                    return Ok((root, crate::root::SegmentCache::default()));
-                }
-                crate::root::RootFrame::V4(frame) => frame,
-            };
-        // Full segments have a fixed cardinality; refuse their declared total
-        // before loading segments or allocating the flattened reference lists.
-        check(
-            "root blocks",
-            frame.block_segments.len() * crate::root_segment::SEGMENT_REFS
-                + frame.tail_blocks.len(),
-            max_blocks,
-        )?;
-        check(
-            "root vertex patches",
-            frame.patch_segments.len() * crate::root_segment::SEGMENT_REFS
-                + frame.tail_patches.len(),
-            max_patches,
-        )?;
-        let segments = crate::root::SegmentCache::of_frame(&frame);
-        // A V4 root's segments share the caller's byte ceiling with the root
-        // itself, so a two-level root reads no more than a flat one could.
+        // A segmented root's index segments and segments share the caller's
+        // byte ceiling with the root itself.
         let mut remaining = maximum.saturating_sub(bytes.len() as u64);
+        let (frame, block_index, patch_index) = match crate::root::decode_root_frame(&bytes)
+            .map_err(StoreError::MalformedRoot)?
+        {
+            crate::root::RootFrame::V3(root) => {
+                check("root blocks", root.blocks.len(), max_blocks)?;
+                check(
+                    "root vertex patches",
+                    root.vertex_patches.len(),
+                    max_patches,
+                )?;
+                return Ok((root, crate::root::SegmentCache::default()));
+            }
+            // Full segments and full index segments have fixed
+            // cardinalities; refuse each list's declared total before
+            // loading any of them or allocating the flattened lists.
+            crate::root::RootFrame::V4(frame) => {
+                check(
+                    "root blocks",
+                    declared(0, frame.block_segments.len(), frame.tail_blocks.len()),
+                    max_blocks,
+                )?;
+                check(
+                    "root vertex patches",
+                    declared(0, frame.patch_segments.len(), frame.tail_patches.len()),
+                    max_patches,
+                )?;
+                (frame, Vec::new(), Vec::new())
+            }
+            crate::root::RootFrame::V5(frame) => {
+                check(
+                    "root blocks",
+                    declared(
+                        frame.block_index.len(),
+                        frame.block_segments.len(),
+                        frame.tail_blocks.len(),
+                    ),
+                    max_blocks,
+                )?;
+                check(
+                    "root vertex patches",
+                    declared(
+                        frame.patch_index.len(),
+                        frame.patch_segments.len(),
+                        frame.tail_patches.len(),
+                    ),
+                    max_patches,
+                )?;
+                // Each index segment is proven to be the one the frame
+                // names before any segment it names is read.
+                let coordinate = frame.coordinate();
+                let mut children = [Vec::new(), Vec::new()];
+                for ((class, named), list) in [
+                    (
+                        crate::root_segment::SegmentClass::Blocks,
+                        &frame.block_index,
+                    ),
+                    (
+                        crate::root_segment::SegmentClass::VertexPatches,
+                        &frame.patch_index,
+                    ),
+                ]
+                .into_iter()
+                .zip(&mut children)
+                {
+                    for (at, reference) in named.iter().enumerate() {
+                        let limit = remaining.min(crate::root_segment::INDEX_BYTES as u64);
+                        let index = self
+                            .read_object_bytes(cx, reference.segment_id, limit)
+                            .await?;
+                        remaining = remaining.saturating_sub(index.len() as u64);
+                        list.push(
+                            crate::root_segment::read_index(
+                                self.k_oid.expose(),
+                                self.namespace,
+                                &index,
+                                reference,
+                                at,
+                                coordinate,
+                                class,
+                            )
+                            .map_err(|error| {
+                                StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                            })?,
+                        );
+                    }
+                }
+                let (block_index, patch_index) =
+                    (frame.block_index.clone(), frame.patch_index.clone());
+                let [blocks, patches] = children;
+                (frame.flatten(blocks, patches), block_index, patch_index)
+            }
+        };
+        let segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
         let coordinate = frame.coordinate();
         let mut lists = [Vec::new(), Vec::new()];
         for ((class, named), list) in [

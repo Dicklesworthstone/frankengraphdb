@@ -585,17 +585,35 @@ mod publication_metadata {
         for (record, root) in roots {
             remember(&mut objects, vfs, store, record.root.0, Kind::Root).await;
             let bytes = vfs.read(&store.path(record.root.0)).await.unwrap();
-            if let RootFrame::V4(frame) = fgdb_strata::root::decode_root_frame(&bytes).unwrap() {
-                for reference in frame.block_segments.iter().chain(&frame.patch_segments) {
-                    remember(
-                        &mut objects,
-                        vfs,
-                        store,
-                        reference.segment_id,
-                        Kind::Segment,
-                    )
-                    .await;
+            // Segments and V5 index segments are all root metadata.
+            let mut segments = Vec::new();
+            match fgdb_strata::root::decode_root_frame(&bytes).unwrap() {
+                RootFrame::V3(_) => {}
+                RootFrame::V4(frame) => segments.extend(
+                    frame
+                        .block_segments
+                        .iter()
+                        .chain(&frame.patch_segments)
+                        .map(|reference| reference.segment_id),
+                ),
+                RootFrame::V5(frame) => {
+                    for index in frame.block_index.iter().chain(&frame.patch_index) {
+                        segments.push(index.segment_id);
+                        let bytes = vfs.read(&store.path(index.segment_id)).await.unwrap();
+                        let (index, _) = fgdb_strata::root_segment::decode_index(&bytes).unwrap();
+                        segments.extend(index.segments.iter().map(|named| named.segment_id));
+                    }
+                    segments.extend(
+                        frame
+                            .block_segments
+                            .iter()
+                            .chain(&frame.patch_segments)
+                            .map(|reference| reference.segment_id),
+                    );
                 }
+            }
+            for segment_id in segments {
+                remember(&mut objects, vfs, store, segment_id, Kind::Segment).await;
             }
             for reference in root.blocks {
                 let bytes = vfs.read(&store.path(reference.block_id)).await.unwrap();

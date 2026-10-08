@@ -830,9 +830,9 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
             }
             store.put_root(&cx, &root).await.expect("stores the root")
         };
-        // Publication writes format V4 (fgdb-d5vo4); its identity is the V4
+        // Publication writes format V5 (fgdb-5gzaa); its identity is the V5
         // encoding's, whatever cache produced it.
-        let encoded_root = fgdb_strata::root::encode_root_v4(
+        let encoded_root = fgdb_strata::root::encode_root_v5(
             &root,
             &K_OID,
             NAMESPACE,
@@ -2456,9 +2456,10 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
 /// rebuild re-offered the same root on every later open: the directory
 /// admitted no recovery. The store now applies each family's own ceiling.
 ///
-/// Roots publish as format V4 (fgdb-d5vo4), which stores these 400 refs as
-/// one segment plus a 144-reference tail in about 7 KiB. A stored V4 root
-/// crosses 16 KiB only at 13,311 references, so the object-layer seam itself
+/// Roots publish as format V5 (fgdb-5gzaa; V4's layout below 4,096
+/// references), which stores these 400 refs as one segment plus a
+/// 144-reference tail in about 7 KiB. A stored root crosses 16 KiB only at
+/// 151,551 references, so the object-layer seam itself
 /// is pinned by the store's own unit law
 /// (`a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling`).
 #[test]
@@ -2492,7 +2493,8 @@ fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
 // ---------------------------------------------------------------------------
 
 use fgdb_strata::root::{
-    MAX_ENCODED_ROOT_V4_BYTES, MAX_ROOT_READ_BYTES, SegmentCache, encode_root_v4,
+    MAX_ENCODED_ROOT_V4_BYTES, MAX_ENCODED_ROOT_V5_BYTES, MAX_ROOT_READ_BYTES, SegmentCache,
+    encode_root_v5,
 };
 use fgdb_strata::root_segment::{SEGMENT_BYTES, SEGMENT_REFS, SegmentError};
 use fgdb_strata::store::{RootReadError, RootReadLimits};
@@ -2546,10 +2548,14 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
             94 + 2 * 80 + 88 * 48,
             "two segment refs + the tail"
         );
-        let cold = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+        let cold = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
             .expect("encodes");
         assert_eq!(stored, cold.bytes);
         assert_eq!(cold.new_segments.len(), 2);
+        assert!(
+            cold.new_index_segments.is_empty(),
+            "no full index below 4,096"
+        );
         for (segment_id, bytes) in &cold.new_segments {
             assert_eq!(bytes.len(), SEGMENT_BYTES);
             assert_eq!(
@@ -2687,7 +2693,7 @@ fn a_damaged_or_substituted_segment_refuses_the_root() {
             .expect("opens");
         let root = batch_of_blocks(&cx, &store, 2 * SEGMENT_REFS + 1).await;
         let root_id = store.put_root(&cx, &root).await.expect("publishes");
-        let segments = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+        let segments = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
             .expect("encodes")
             .new_segments;
         let (first, genuine) = &segments[0];
@@ -2725,8 +2731,15 @@ fn a_damaged_or_substituted_segment_refuses_the_root() {
 fn a_bounded_root_read_charges_every_segment_it_names() {
     const LARGEST_V4_READ: usize =
         MAX_ENCODED_ROOT_V4_BYTES + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+    // A V5 read at the ceilings: the root, every full index segment of both
+    // lists, and every segment.
+    const LARGEST_V5_READ: usize = MAX_ENCODED_ROOT_V5_BYTES
+        + (2 << 20) / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
+            * fgdb_strata::root_segment::INDEX_BYTES
+        + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
     const _: () = assert!(LARGEST_V4_READ > MAX_ENCODED_ROOT_BYTES);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V4_READ);
+    const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V5_READ);
     assert_eq!(
         RootReadLimits::default().max_root_bytes,
         MAX_ROOT_READ_BYTES
@@ -2797,7 +2810,7 @@ fn a_warm_segment_cache_publishes_exactly_what_a_cold_one_would() {
                 .put_root_verified(&cx, root, &mut receipts)
                 .await
                 .expect("publishes");
-            let cold = encode_root_v4(root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            let cold = encode_root_v5(root, &K_OID, NAMESPACE, &mut SegmentCache::default())
                 .expect("encodes");
             assert_eq!(
                 warm.0,
