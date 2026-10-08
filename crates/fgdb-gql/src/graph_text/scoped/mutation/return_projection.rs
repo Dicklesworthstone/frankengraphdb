@@ -767,11 +767,11 @@ impl<'a> Parser<'a> {
                             ),
                         });
                     }
-                    let key = self.name()?;
+                    let key = self.map_key()?;
                     let column = self.mutation_projection(columns, source, Some(key))?;
                     (key.text.into(), ReadValueTemplate::Column(column))
                 } else {
-                    let key = self.name()?;
+                    let key = self.map_key()?;
                     if self.take(b':')? {
                         let value = self.read_recursive_value(
                             Some(&mut *columns),
@@ -926,7 +926,7 @@ impl<'a> Parser<'a> {
                         crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
                         crate::algebra::PatternLimitDimension::Columns,
                     )?;
-                    let key = self.name()?;
+                    let key = self.map_key()?;
                     self.punct(b':', ":")?;
                     let value = self.read_recursive_value(
                         inputs.as_deref_mut(),
@@ -1037,7 +1037,10 @@ impl<'a> Parser<'a> {
             // other value the `.` stays unconsumed, so a vertex column's `.p`
             // past its readable scope still refuses at preparation.
             if self.is_punct(b'.')
-                && matches!(self.lexer.clone().next()?.kind, TokenKind::Word(_))
+                && matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+                )
                 && map_capable(
                     &value,
                     (inputs.is_none() && resolve.is_none()).then_some(schema),
@@ -1045,7 +1048,7 @@ impl<'a> Parser<'a> {
                 )
             {
                 self.advance()?;
-                let key = self.name()?;
+                let key = self.map_key()?;
                 value = ReadValueTemplate::MapGet {
                     map: Box::new(value),
                     key: key.text.into(),

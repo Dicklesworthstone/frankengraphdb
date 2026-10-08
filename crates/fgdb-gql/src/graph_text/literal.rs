@@ -11,10 +11,10 @@ use super::*;
 use crate::algebra::ScalarPredicate;
 use fgdb_types::CanonicalScalar;
 
-/// Every word the fgdb-gql grammars compare a Word token against. Keywords
-/// are plain Word tokens, so a delimited identifier spelling one would be
-/// read as that keyword; the lexer refuses it instead. The plain spelling of
-/// a non-reserved name (`n.type`) is unaffected.
+/// Every word the fgdb-gql grammars compare a Word token against. A delimited
+/// spelling keeps a distinct token so it can serve as a map key without ever
+/// becoming a clause, literal or function name. Other identifier positions
+/// refuse it explicitly. Plain non-reserved names (`n.type`) are unaffected.
 const KEYWORDS: &[&str] = &[
     "ABS",
     "ACYCLIC",
@@ -202,8 +202,9 @@ impl<'a> Lexer<'a> {
     /// Called after the shared token counter admits one opening delimiter.
     /// A text literal's token is the whole literal, delimiters included, so
     /// text_scalar knows which doubled delimiter to decode. A delimited
-    /// identifier is a Word of its body; Word borrows the statement, so a
-    /// doubled backtick inside one cannot be decoded and is refused.
+    /// identifier borrows its body, so a doubled backtick inside one cannot
+    /// be decoded and is refused. Reserved spellings retain delimiter provenance
+    /// for the map-key parser and remain opaque to every keyword lookahead.
     pub(super) fn quoted(&mut self) -> Result<Token<'a>, GraphPatternTextError> {
         let at = self.at;
         let delimiter = self.text.as_bytes()[at];
@@ -241,10 +242,10 @@ impl<'a> Lexer<'a> {
             .iter()
             .any(|keyword| body.eq_ignore_ascii_case(keyword))
         {
-            return Err(error(
+            return Ok(Token {
+                kind: TokenKind::DelimitedKeyword(body),
                 at,
-                GraphPatternTextErrorKind::Expected("a delimited identifier that is not a keyword"),
-            ));
+            });
         }
         Ok(Token {
             kind: TokenKind::Word(body),

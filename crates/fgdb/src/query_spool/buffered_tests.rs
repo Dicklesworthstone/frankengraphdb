@@ -216,9 +216,9 @@ fn bound_historical_order_keeps_hidden_keys_and_cumulative_encoding_sort_window_
             let parameters = GqlParameters::new()
                 .with_int64("floor", floor)
                 .unwrap()
-                .with_int64("skip", 1)
+                .with_uint64("skip", 1)
                 .unwrap()
-                .with_int64("take", 2)
+                .with_uint64("take", 2)
                 .unwrap();
             let prepared = PreparedNativeRead::prepare(text, &parameters, resolve)
                 .unwrap()

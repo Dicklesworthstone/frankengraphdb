@@ -53,7 +53,9 @@ impl PreparedGraphText {
                 TokenKind::Word(word) => TextKind::Word(word),
                 TokenKind::Digits(digits) => TextKind::Digits(digits),
                 TokenKind::Parameter(name) => TextKind::Parameter(name),
-                TokenKind::Quoted(_) => TextKind::Quoted,
+                // Both are opaque to composition delimiters. The original
+                // native parser still distinguishes a text value from a key.
+                TokenKind::Quoted(_) | TokenKind::DelimitedKeyword(_) => TextKind::Quoted,
                 TokenKind::Punct(ch) => TextKind::Punct(ch),
                 TokenKind::End => TextKind::End,
             };

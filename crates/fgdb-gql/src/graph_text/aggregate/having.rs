@@ -343,6 +343,14 @@ impl HavingParser<'_, '_> {
     }
     fn operand(&mut self) -> Result<Operand, GraphPatternTextError> {
         let at = self.parser.current.at;
+        // Reuse the ordinary finite decimal/exponent parser on either side
+        // of a comparison and in IN/BETWEEN. A float remains a canonical
+        // scalar operand; integer-only predicates keep their legacy lowering.
+        if let Some(value) = self.parser.float_literal()? {
+            return ScalarPredicate::new(value, IntegerComparison::Equal)
+                .map(Operand::Scalar)
+                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
+        }
         let scalar = match self.parser.current.kind {
             TokenKind::Quoted(raw) => Some(super::super::literal::text_scalar(raw, at)?),
             TokenKind::Word(word) => {

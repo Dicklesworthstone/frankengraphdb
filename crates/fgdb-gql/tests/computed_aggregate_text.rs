@@ -127,12 +127,81 @@ fn aggregates_inside_nested_maps_lists_and_scalar_outputs_share_the_native_group
     .unwrap();
     assert_eq!(template.columns(), &["result"]);
     let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+    let rows = run(&bound, &[VId(2)], &[], &properties()).unwrap().value;
+    assert_eq!(rows.len(), 1);
     assert_eq!(
-        run(&bound, &[VId(2)], &[], &properties())
+        rows[0].values(),
+        &[GraphAggregateValue::Value(map(vec![
+            (
+                "AS",
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("x,y").unwrap())
+            ),
+            (
+                "GROUP",
+                map(vec![
+                    (
+                        "label",
+                        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("COUNT(*)").unwrap())
+                    ),
+                    ("total", integer(2)),
+                ])
+            ),
+        ]))]
+    );
+}
+
+#[test]
+fn reserved_delimited_map_keys_stay_opaque_to_functions_and_composition() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GraphAggregateValue, PreparedGraphSetText};
+
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let plan =
+        prepare("MATCH (n) RETURN {`COUNT`:COUNT(*),`SUM`:SUM(n.p),`UNION`:'kept'} AS value");
+    let rows = run(&plan, &vertices, &[], &props).unwrap().value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].values(),
+        &[GraphAggregateValue::Value(
+            GraphValue::map(vec![
+                ("COUNT".into(), integer(4)),
+                ("SUM".into(), integer(7)),
+                (
+                    "UNION".into(),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("kept").unwrap())
+                ),
+            ])
             .unwrap()
-            .value
-            .len(),
-        1
+        )]
+    );
+    let plan = prepare("MATCH (n) RETURN {`AS`:COUNT(*)}.`AS` AS value");
+    let rows = run(&plan, &vertices, &[], &props).unwrap().value;
+    assert_eq!(rows[0].values(), &[GraphAggregateValue::Value(integer(4))]);
+
+    // The shared composition tokenizer must keep keys opaque in both a map
+    // projection and a literal, including a key equal to its set operator.
+    let text = "MATCH (n) RETURN n{`AS`:n.p,`GROUP`:n.q} AS value UNION ALL MATCH (n) RETURN {`UNION`:n.p,`RETURN`:n.q} AS value";
+    let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+    assert_eq!(prepared.columns(), &["value"]);
+    assert!(prepared.bind_parameters(&GqlParameters::new()).is_ok());
+
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN {`COUNT`:COUNT(*),`COUNT`:SUM(n.p)} AS value",
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "duplicate keys refuse before catalog resolution"
     );
 }
 
@@ -153,13 +222,28 @@ fn floating_aggregate_having_and_case_compare_exact_counts_sums_and_averages() {
         "COUNT(*)=4.0",
         "SUM(n.p)=7.0",
         "AVG(n.p)=1.75",
+        "4.0=COUNT(*)",
+        "-0.25<AVG(n.p)",
+        "COUNT(*)=4e0",
+        "AVG(n.p) IN [0.0,1.75,NULL]",
+        "AVG(n.p) BETWEEN 1.5 AND 2e0",
+        "COUNT(*) NOT IN [0.0,3.0]",
+        "AVG(n.p) NOT BETWEEN -1.0 AND 1.5",
     ] {
         let text = format!("MATCH (n) RETURN COUNT(*) AS count HAVING {predicate}");
         let rows = run(&prepare(&text), &vertices, &[], &props).unwrap().value;
         assert_eq!(rows.len(), 1, "{text}");
         assert_eq!(rows[0].values(), &[GraphAggregateValue::Count(4)], "{text}");
     }
-    for predicate in ["COUNT(*)<4.0", "SUM(n.p)>7.0", "AVG(n.p)>1.75"] {
+    for predicate in [
+        "COUNT(*)<4.0",
+        "SUM(n.p)>7.0",
+        "AVG(n.p)>1.75",
+        "4e0<COUNT(*)",
+        "AVG(n.p) IN [1.5,2.0]",
+        "AVG(n.p) BETWEEN -2.0 AND -0.5",
+        "COUNT(*) NOT IN [4.0,NULL]",
+    ] {
         let text = format!("MATCH (n) RETURN COUNT(*) AS count HAVING {predicate}");
         assert!(
             run(&prepare(&text), &vertices, &[], &props)
@@ -174,6 +258,26 @@ fn floating_aggregate_having_and_case_compare_exact_counts_sums_and_averages() {
     );
     let rows = run(&plan, &vertices, &[], &props).unwrap().value;
     assert_eq!(rows[0].values(), &[GraphAggregateValue::Integer(14)]);
+
+    for predicate in ["COUNT(*)<1e309", "-1e309<COUNT(*)"] {
+        let text = format!("MATCH (n) RETURN COUNT(*) AS count HAVING {predicate}");
+        let calls = Cell::new(0);
+        let error = PreparedGraphAggregateText::prepare(&text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphPatternTextErrorKind::ScalarLiteral,
+            "{text}"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "non-finite literals refuse before catalog resolution"
+        );
+    }
 }
 
 #[test]

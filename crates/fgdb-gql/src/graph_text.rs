@@ -260,6 +260,9 @@ fn reference_text<'a>(statement: &'a str, variable: Name<'a>, property: Name<'a>
 #[derive(Clone, Copy)]
 enum TokenKind<'a> {
     Word(&'a str),
+    // Keep reserved delimited map keys distinct from grammar words. Other
+    // identifier/operand positions retain their existing explicit refusal.
+    DelimitedKeyword(&'a str),
     Digits(&'a str),
     Parameter(&'a str),
     Quoted(&'a str),
@@ -633,6 +636,7 @@ impl<'a> Parser<'a> {
         }
     }
     fn name(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        self.reject_delimited_keyword()?;
         let TokenKind::Word(text) = self.current.kind else {
             return Err(error(
                 self.current.at,
@@ -663,6 +667,29 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
+        self.advance()?;
+        Ok(name)
+    }
+    fn reject_delimited_keyword(&self) -> Result<(), GraphPatternTextError> {
+        if matches!(self.current.kind, TokenKind::DelimitedKeyword(_)) {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("a delimited identifier that is not a keyword"),
+            ));
+        }
+        Ok(())
+    }
+    /// A map key is an identifier position without clause/function dispatch.
+    /// Admit a reserved spelling only when its original token was delimited;
+    /// plain names still follow the existing identifier and namespace checks.
+    fn map_key(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let TokenKind::DelimitedKeyword(text) = self.current.kind else {
+            return self.name();
+        };
+        let name = Name {
+            text,
+            at: self.current.at,
+        };
         self.advance()?;
         Ok(name)
     }
@@ -923,6 +950,7 @@ impl<'a> Parser<'a> {
     }
 
     fn number(&mut self, expected: GqlParameterType) -> Result<Number, GraphPatternTextError> {
+        self.reject_delimited_keyword()?;
         let at = self.current.at;
         if let TokenKind::Parameter(name) = self.current.kind {
             self.check_declared_parameter(name, expected, at)?;
