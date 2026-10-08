@@ -710,6 +710,10 @@ fn corrupt_cold_refault_is_rejected_and_refunds_the_pending_frame() {
 
 #[test]
 fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
+    // Each property patch must fit the store's per-object ceiling (16 KiB):
+    // a 15,000-byte payload encodes to a 16,911-byte patch the store refuses.
+    // 240 patches of this payload still exceed the 3 MiB shared ceiling.
+    const PAYLOAD: usize = 14_000;
     run(|contexts, dir| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -719,7 +723,7 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
         // Distinct payload identities prevent content-addressed deduplication
         // from making this merely a small object referenced many times.
         for index in 0..240u128 {
-            let mut payload = vec![0x55; 15_000];
+            let mut payload = vec![0x55; PAYLOAD];
             payload[..16].copy_from_slice(&index.to_le_bytes());
             let rows = vec![vec![(
                 PropertyKeyId(11),
@@ -775,7 +779,7 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
                 .unwrap()
                 .unwrap();
             assert_eq!(found.entry, edge(eid, eid, 999, 1, None));
-            let mut expected = vec![0x55; 15_000];
+            let mut expected = vec![0x55; PAYLOAD];
             expected[..16].copy_from_slice(&(eid - 1).to_le_bytes());
             assert_eq!(
                 found.props,
