@@ -78,6 +78,8 @@ impl SealedBlock {
     }
 }
 
+/// An encoded edge seal: its blocks, and the chain heads of only the families
+/// it advanced, which committing the seal merges into the writer's heads.
 type EncodedEdgeSeal = (
     Vec<SealedBlock>,
     BTreeMap<(VId, RelationId), DeltaBlockVersion>,
@@ -768,16 +770,16 @@ impl BlockWriter {
                 // apply returned a no-op-shaped error.
                 if need_vertex_seal && need_edge_seal {
                     let vertex_sealed = self.encode_pending_vertices(keys)?;
-                    let (edge_sealed, next_heads) =
+                    let (edge_sealed, advanced) =
                         self.encode_pending_edges_except(keys, &deferred_same_commit)?;
                     self.commit_vertex_seal(vertex_sealed);
-                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
+                    self.commit_edge_seal_except(edge_sealed, advanced, &deferred_same_commit);
                 } else if need_vertex_seal {
                     self.seal_vertices(keys)?;
                 } else if need_edge_seal {
-                    let (edge_sealed, next_heads) =
+                    let (edge_sealed, advanced) =
                         self.encode_pending_edges_except(keys, &deferred_same_commit)?;
-                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
+                    self.commit_edge_seal_except(edge_sealed, advanced, &deferred_same_commit);
                 }
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
@@ -1118,11 +1120,13 @@ impl BlockWriter {
             )
         });
         // Encode every chunk before committing. Intra-seal predecessor
-        // links still advance — but only on a local copy — so a later
-        // chunk's refusal leaves `chain_heads` and `pending` exactly as
-        // they were (`seal_vertices` already does this; the public apply
-        // contract is that every typed refusal is a no-op).
-        let mut next_heads = self.chain_heads.clone();
+        // links still advance, but only in a local overlay of the families
+        // this seal touches, so a later chunk's refusal leaves `chain_heads`
+        // and `pending` exactly as they were (`seal_vertices` already does
+        // this; the public apply contract is that every typed refusal is a
+        // no-op). The overlay, not a copy of every head ever sealed, keeps a
+        // commit's seal from growing with the partition's history.
+        let mut advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion> = BTreeMap::new();
         let mut sealed = Vec::with_capacity(staged.len());
         for chunk in staged {
             let StagedChunk {
@@ -1144,7 +1148,10 @@ impl BlockWriter {
                     locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
                 }
             }
-            let predecessor = next_heads.get(&family).copied();
+            let predecessor = advanced
+                .get(&family)
+                .or_else(|| self.chain_heads.get(&family))
+                .copied();
             let (bytes, property_patch) = if rows.is_empty() {
                 (
                     encode_block(self.partition, predecessor, &entries)
@@ -1174,7 +1181,7 @@ impl BlockWriter {
             let sealed_id = block_id(keys.0, keys.1, &bytes);
             // The family's chain advances to this block; the next chunk of
             // the same family — even within THIS seal — links to it.
-            next_heads.insert(family, DeltaBlockVersion(sealed_id));
+            advanced.insert(family, DeltaBlockVersion(sealed_id));
             sealed.push(SealedBlock {
                 block_id: sealed_id,
                 bytes,
@@ -1183,15 +1190,15 @@ impl BlockWriter {
                 property_patch,
             });
         }
-        Ok((sealed, next_heads))
+        Ok((sealed, advanced))
     }
 
     fn commit_edge_seal(
         &mut self,
         sealed: Vec<SealedBlock>,
-        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
     ) {
-        self.commit_edge_seal_except(sealed, next_heads, &BTreeSet::new());
+        self.commit_edge_seal_except(sealed, advanced, &BTreeSet::new());
     }
 
     /// Commit an edge seal while retaining same-commit creations that the
@@ -1199,7 +1206,7 @@ impl BlockWriter {
     fn commit_edge_seal_except(
         &mut self,
         sealed: Vec<SealedBlock>,
-        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
         deferred: &BTreeSet<EdgeStatementKey>,
     ) {
         for (key, statement) in &self.pending {
@@ -1208,7 +1215,7 @@ impl BlockWriter {
                     .insert((statement.entry.eid, statement.entry.created_at));
             }
         }
-        self.chain_heads = next_heads;
+        self.chain_heads.extend(advanced);
         self.pending.retain(|key, _| deferred.contains(key));
         self.sealed.extend(sealed);
     }
@@ -1224,9 +1231,9 @@ impl BlockWriter {
         if self.pending.is_empty() {
             return Ok(None);
         }
-        let (sealed, next_heads) = self.encode_pending_edges(keys)?;
+        let (sealed, advanced) = self.encode_pending_edges(keys)?;
         let first = sealed.first().cloned();
-        self.commit_edge_seal(sealed, next_heads);
+        self.commit_edge_seal(sealed, advanced);
         Ok(first)
     }
 
