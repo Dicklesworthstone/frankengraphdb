@@ -461,7 +461,12 @@ impl<V: Vfs + Clone> Database<V> {
                     commit_cx,
                     &query,
                     budget.vertex_upsert_policy(),
-                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
                 )
                 .await
                 .map_err(QueryWriteError::VertexUpsert)?;
@@ -553,7 +558,12 @@ impl WriteTxn {
                     cx,
                     &query,
                     budget.vertex_upsert_policy(),
-                    |request| allocate(GraphWriteIdentityRequest { statement: 0, request }),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
                 )
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));

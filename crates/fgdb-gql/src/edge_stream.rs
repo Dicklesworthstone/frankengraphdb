@@ -98,8 +98,11 @@ impl EdgeScanPlan {
             };
             match op {
                 GlaOperator::Select { slot, .. } if slot.ordinal() < 2 => {}
-                GlaOperator::VertexIdentity { left, right, equal: _ }
-                    if left.ordinal() < 2 && right.ordinal() < 2 => {}
+                GlaOperator::VertexIdentity {
+                    left,
+                    right,
+                    equal: _,
+                } if left.ordinal() < 2 && right.ordinal() < 2 => {}
                 GlaOperator::CompareProperties { left, right, .. }
                     if left.ordinal() < 2 && right.ordinal() < 2 => {}
                 GlaOperator::CapturePath {

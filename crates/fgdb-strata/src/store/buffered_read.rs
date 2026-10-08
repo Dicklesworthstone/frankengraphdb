@@ -172,7 +172,10 @@ pub struct BufferedValue<T> {
 }
 impl<T> BufferedValue<T> {
     pub(crate) fn from_reserved(value: T, charge: MemoryCharge) -> Self {
-        Self { value, _charge: charge }
+        Self {
+            value,
+            _charge: charge,
+        }
     }
 
     /// The conservative reservation retained by this value. This is database
@@ -644,10 +647,11 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut usize,
     ) -> Result<(Vec<AdjacencyEntry>, Option<BlockProps>), BufferedReadError> {
         let maximum = self.limits.max_work;
-        self.block_controlled::<core::convert::Infallible>(
-            cx, at, Admission::Normal,
-            &mut || advance(work, 1, maximum).map_err(BufferedScanError::Read),
-        ).await.map_err(|error| match error {
+        self.block_controlled::<core::convert::Infallible>(cx, at, Admission::Normal, &mut || {
+            advance(work, 1, maximum).map_err(BufferedScanError::Read)
+        })
+        .await
+        .map_err(|error| match error {
             BufferedScanError::Read(error) => error,
             BufferedScanError::Control(never) => match never {},
         })

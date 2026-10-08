@@ -6,8 +6,8 @@
 
 use super::{Lexer, Token, TokenKind, next_script_token, scan};
 use crate::unwind_write::{
-    GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS,
-    MAX_UNWIND_SOURCES, UnwindField, UnwindFieldAccess, UnwindSource, UnwindSourceOffset,
+    GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS, MAX_UNWIND_SOURCES,
+    UnwindField, UnwindFieldAccess, UnwindSource, UnwindSourceOffset,
 };
 use crate::{GraphPatternTextErrorKind, GraphWriteScriptError, GraphWriteScriptErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +59,14 @@ fn field_path(
             return Err(syntax(offset, "at most 64 row-field selectors"));
         }
         if is_punct(tokens.get(next), b'.') {
-            let Some((Token { kind: TokenKind::Word(name), .. }, last)) = tokens.get(next + 1) else {
+            let Some((
+                Token {
+                    kind: TokenKind::Word(name),
+                    ..
+                },
+                last,
+            )) = tokens.get(next + 1)
+            else {
                 return Err(syntax(offset, "a map field name after '.'"));
             };
             path.push(UnwindFieldAccess::Key((*name).to_owned()));
@@ -71,12 +78,24 @@ fn field_path(
             if negative || is_punct(tokens.get(next), b'+') {
                 next += 1;
             }
-            let Some((Token { kind: TokenKind::Digits(digits), .. }, _)) = tokens.get(next) else {
+            let Some((
+                Token {
+                    kind: TokenKind::Digits(digits),
+                    ..
+                },
+                _,
+            )) = tokens.get(next)
+            else {
                 return Err(syntax(offset, "a constant signed integer list index"));
             };
-            let magnitude = digits.parse::<u64>()
+            let magnitude = digits
+                .parse::<u64>()
                 .map_err(|_| syntax(offset, "a list index in the Int64 range"))?;
-            let signed = if negative { -i128::from(magnitude) } else { i128::from(magnitude) };
+            let signed = if negative {
+                -i128::from(magnitude)
+            } else {
+                i128::from(magnitude)
+            };
             let index = i64::try_from(signed)
                 .map_err(|_| syntax(offset, "a list index in the Int64 range"))?;
             next += 1;
@@ -116,21 +135,26 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
         if depth == 0
             && !is_punct(index.checked_sub(1).and_then(|i| tokens.get(i)), b'.')
             && !is_punct(tokens.get(index + 1), b'.')
-            && !index.checked_sub(1).and_then(|i| tokens.get(i))
+            && !index
+                .checked_sub(1)
+                .and_then(|i| tokens.get(i))
                 .is_some_and(|(previous, _)| is_word(previous, "AS"))
         {
             let next = tokens.get(index + 1);
             let target = next.is_some_and(|(token, _)| matches!(token.kind, TokenKind::Word(_)));
-            if (is_word(token, "CREATE") || is_word(token, "INSERT"))
-                && is_punct(next, b'(')
-            {
+            if (is_word(token, "CREATE") || is_word(token, "INSERT")) && is_punct(next, b'(') {
                 return false;
             }
             if is_word(token, "MERGE") && is_punct(next, b'(')
-                || (is_word(token, "SET") || is_word(token, "REMOVE")) && target
-                    && b".:+".iter().any(|byte| is_punct(tokens.get(index + 2), *byte))
-                || is_word(token, "DETACH") && next.is_some_and(|(token, _)| is_word(token, "DELETE"))
-                || is_word(token, "DELETE") && target
+                || (is_word(token, "SET") || is_word(token, "REMOVE"))
+                    && target
+                    && b".:+"
+                        .iter()
+                        .any(|byte| is_punct(tokens.get(index + 2), *byte))
+                || is_word(token, "DETACH")
+                    && next.is_some_and(|(token, _)| is_word(token, "DELETE"))
+                || is_word(token, "DELETE")
+                    && target
                     && (tokens.get(index + 2).is_none() || is_punct(tokens.get(index + 2), b','))
             {
                 return true;
@@ -192,8 +216,7 @@ impl GraphUnwindWriteText {
             return Ok(None);
         };
         let tail = token(&mut lexer)?;
-        if !is_word(&tail.0, "MERGE") && !is_word(&tail.0, "MATCH")
-            && !is_word(&tail.0, "UNWIND") {
+        if !is_word(&tail.0, "MERGE") && !is_word(&tail.0, "MATCH") && !is_word(&tail.0, "UNWIND") {
             return Ok(None);
         }
 
@@ -220,7 +243,10 @@ impl GraphUnwindWriteText {
         let mut aliases = BTreeMap::from([(alias, 0usize)]);
         let mut sources = Vec::new();
         let mut tail_at = 0;
-        while tokens.get(tail_at).is_some_and(|(token, _)| is_word(token, "UNWIND")) {
+        while tokens
+            .get(tail_at)
+            .is_some_and(|(token, _)| is_word(token, "UNWIND"))
+        {
             let at = tokens[tail_at].0.at;
             if sources.len() + 1 == MAX_UNWIND_SOURCES {
                 return Err(syntax(at, "at most eight UNWIND sources"));
@@ -241,12 +267,30 @@ impl GraphUnwindWriteText {
                     let (path, next, _) = field_path(&tokens, start)?;
                     (source, None, path, next)
                 }
-                _ => return Err(syntax(input.at, "a list parameter or an earlier UNWIND alias")),
+                _ => {
+                    return Err(syntax(
+                        input.at,
+                        "a list parameter or an earlier UNWIND alias",
+                    ));
+                }
             };
-            if !tokens.get(next).is_some_and(|(token, _)| is_word(token, "AS")) {
-                return Err(syntax(tokens[start].0.at, "a static list path followed by AS"));
+            if !tokens
+                .get(next)
+                .is_some_and(|(token, _)| is_word(token, "AS"))
+            {
+                return Err(syntax(
+                    tokens[start].0.at,
+                    "a static list path followed by AS",
+                ));
             }
-            let Some((Token { kind: TokenKind::Word(name), at: alias_at }, _)) = tokens.get(next + 1) else {
+            let Some((
+                Token {
+                    kind: TokenKind::Word(name),
+                    at: alias_at,
+                },
+                _,
+            )) = tokens.get(next + 1)
+            else {
                 return Err(syntax(at, "a fresh alias after AS"));
             };
             if aliases.contains_key(name) {
@@ -262,8 +306,14 @@ impl GraphUnwindWriteText {
             tail_at = next + 2;
         }
         let tokens = &tokens[tail_at..];
-        if !tokens.first().is_some_and(|(token, _)| is_word(token, "MERGE") || is_word(token, "MATCH")) {
-            return Err(syntax(text.len(), "MERGE or MATCH after the UNWIND sources"));
+        if !tokens
+            .first()
+            .is_some_and(|(token, _)| is_word(token, "MERGE") || is_word(token, "MATCH"))
+        {
+            return Err(syntax(
+                text.len(),
+                "MERGE or MATCH after the UNWIND sources",
+            ));
         }
         let external_parameters: Vec<String> = statements[0]
             .parameters
@@ -276,9 +326,14 @@ impl GraphUnwindWriteText {
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
-        let global_parameter_count = external_parameters.iter().filter(|name| {
-            !sources.iter().any(|source| source.parameter.as_deref() == Some(name.as_str()))
-        }).count();
+        let global_parameter_count = external_parameters
+            .iter()
+            .filter(|name| {
+                !sources
+                    .iter()
+                    .any(|source| source.parameter.as_deref() == Some(name.as_str()))
+            })
+            .count();
         let mut cursor = 0;
         let mut fields: Vec<UnwindField> = Vec::new();
         let mut field_index = BTreeMap::new();

@@ -64,7 +64,11 @@ pub(super) fn prepare_parameter_sources<C>(
     arguments: &GqlParameters,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<Vec<Option<GqlParameterValue>>, GraphUnwindBindError<C>> {
-    if definition.sources.iter().all(|source| source.parameter.is_none()) {
+    if definition
+        .sources
+        .iter()
+        .all(|source| source.parameter.is_none())
+    {
         return Ok(Vec::new());
     }
     work(control, definition.sources.len() as u64)?;
@@ -75,7 +79,9 @@ pub(super) fn prepare_parameter_sources<C>(
             continue;
         };
         work(control, 1)?;
-        let value = arguments.get(name).ok_or(GraphUnwindWriteError::ArgumentNames)?;
+        let value = arguments
+            .get(name)
+            .ok_or(GraphUnwindWriteError::ArgumentNames)?;
         parameters.push(Some(value));
     }
     Ok(parameters)
@@ -99,21 +105,28 @@ fn parameter_list<'a, C>(
     let value = match value {
         GqlParameterValue::List(value) => value.value(),
         GqlParameterValue::Map(value) => value.value(),
-        GqlParameterValue::Scalar(value) if value.kind() == fgdb_types::CanonicalScalarKind::Null => {
+        GqlParameterValue::Scalar(value)
+            if value.kind() == fgdb_types::CanonicalScalarKind::Null =>
+        {
             return Ok(&[]);
         }
-        _ => return Err(refusal(match source.path.first() {
-            Some(UnwindFieldAccess::Key(_)) => GraphUnwindRowError::ExpectedMapField,
-            _ => GraphUnwindRowError::ExpectedListField,
-        }).into()),
+        _ => {
+            return Err(refusal(match source.path.first() {
+                Some(UnwindFieldAccess::Key(_)) => GraphUnwindRowError::ExpectedMapField,
+                _ => GraphUnwindRowError::ExpectedListField,
+            })
+            .into());
+        }
     };
-    let value = field_value(value, &source.path, source.offset, 0, control)
-        .map_err(|error| match error {
-            GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
-                GraphUnwindBindError::Binding(refusal(kind))
-            }
-            error => error,
-        })?;
+    let value =
+        field_value(value, &source.path, source.offset, 0, control).map_err(
+            |error| match error {
+                GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
+                    GraphUnwindBindError::Binding(refusal(kind))
+                }
+                error => error,
+            },
+        )?;
     match value {
         None | Some(GraphValue::Scalar(CanonicalScalar::Null)) => Ok(&[]),
         Some(GraphValue::List(values)) => Ok(values.as_ref()),
@@ -149,7 +162,8 @@ pub(super) fn expand_with_parameters<'a, C>(
             return Err(GraphUnwindWriteError::TooManyRows {
                 limit,
                 observed: values.len(),
-            }.into());
+            }
+            .into());
         }
         parameter_rows.push(Some(values));
     }
@@ -234,7 +248,8 @@ impl<'a> Expansion<'a, '_> {
                     limit: self.limit,
                     // The caller clamps the limit to 65,536 before expansion.
                     observed: self.limit + 1,
-                }.into());
+                }
+                .into());
             }
             self.counts[at] += 1;
             // UNWIND binds values, not just documents. Subsequent sources

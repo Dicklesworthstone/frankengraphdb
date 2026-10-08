@@ -97,14 +97,21 @@ impl core::fmt::Display for GraphUnwindWriteError {
             Self::Syntax(source) | Self::Definition(source) => source.fmt(f),
             Self::SourceParameter => f.write_str("UNWIND requires its named list parameter"),
             Self::ArgumentNames => f.write_str("UNWIND argument names do not match its definition"),
-            Self::Empty => f.write_str("UNWIND write batch requires at least one expanded input row"),
+            Self::Empty => {
+                f.write_str("UNWIND write batch requires at least one expanded input row")
+            }
             Self::TooManyRows { limit, observed } => {
                 write!(f, "UNWIND write batch has {observed} rows; limit {limit}")
             }
             Self::Row { row, offset, kind } => {
                 write!(f, "UNWIND input row {row} at byte {offset}: {kind:?}")
             }
-            Self::Expansion { row, clause, offset, kind } => write!(
+            Self::Expansion {
+                row,
+                clause,
+                offset,
+                kind,
+            } => write!(
                 f,
                 "UNWIND root row {row}, clause {clause} at byte {offset}: {kind:?}"
             ),
@@ -288,7 +295,8 @@ fn scalar_field<'a, C>(
             row: row_index,
             offset: field.offset,
             kind: GraphUnwindRowError::ExpectedScalarField,
-        }.into()),
+        }
+        .into()),
     }
 }
 
@@ -301,7 +309,11 @@ fn field_value<'a, C>(
     row_index: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<Option<&'a GraphValue>, GraphUnwindBindError<C>> {
-    let refusal = |kind| GraphUnwindWriteError::Row { row: row_index, offset, kind };
+    let refusal = |kind| GraphUnwindWriteError::Row {
+        row: row_index,
+        offset,
+        kind,
+    };
     let mut current = row;
     if path.is_empty() {
         // A direct scalar/list alias is a real operand lookup too. Admission
@@ -332,7 +344,8 @@ fn field_value<'a, C>(
                 // unsigned_abs handles i64::MIN; checked conversion/subtraction
                 // also works on narrower hosts and never wraps an invalid index.
                 let position = if *index < 0 {
-                    usize::try_from(index.unsigned_abs()).ok()
+                    usize::try_from(index.unsigned_abs())
+                        .ok()
                         .and_then(|distance| values.len().checked_sub(distance))
                 } else {
                     usize::try_from(*index).ok()
@@ -604,8 +617,11 @@ mod tests {
             // aliases now lower to parameter operands; the native compiler
             // still refuses them in graph binding/identity positions.
             let result = GraphUnwindWriteText::parse(query).and_then(|parsed| {
-                parsed.bind(&rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
-                    RelationId(1), |_, _| panic!("invalid binding cannot enter catalog"))
+                parsed.bind(
+                    &rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
+                    RelationId(1),
+                    |_, _| panic!("invalid binding cannot enter catalog"),
+                )
             });
             assert!(result.is_err(), "{query}");
         }

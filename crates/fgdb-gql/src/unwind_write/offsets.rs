@@ -18,8 +18,13 @@ impl GraphUnwindWriteText {
     /// The parser seals sorted, nonoverlapping expansions only; no contraction
     /// or untrusted caller-supplied mapping is possible.
     pub(crate) fn original_offset(&self, generated: usize) -> usize {
-        let before = self.source_offsets.partition_point(|edit| edit.generated.start <= generated);
-        let Some(edit) = before.checked_sub(1).map(|index| &self.source_offsets[index]) else {
+        let before = self
+            .source_offsets
+            .partition_point(|edit| edit.generated.start <= generated);
+        let Some(edit) = before
+            .checked_sub(1)
+            .map(|index| &self.source_offsets[index])
+        else {
             return generated;
         };
         if generated < edit.generated.end {
@@ -44,8 +49,9 @@ impl GraphUnwindWriteText {
                 W::EdgeUpsertBind { source, .. } => Some(&mut source.offset),
                 W::DeleteBind { source, .. } => Some(&mut source.offset),
                 W::Program(M::Bind { source, .. }) => Some(&mut source.offset),
-                W::Program(M::ConflictingParameterTypes { .. }
-                    | M::Definition(_) | M::UnexpectedArguments) => None,
+                W::Program(
+                    M::ConflictingParameterTypes { .. } | M::Definition(_) | M::UnexpectedArguments,
+                ) => None,
             },
             _ => None,
         };

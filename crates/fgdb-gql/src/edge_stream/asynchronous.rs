@@ -96,7 +96,10 @@ pub struct AsyncEdgeScanPlan {
 impl AsyncEdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         if let Some(operator) = plan.operators().iter().position(|operator| {
-            matches!(operator, GlaOperator::Expand { .. } | GlaOperator::Probe { .. })
+            matches!(
+                operator,
+                GlaOperator::Expand { .. } | GlaOperator::Probe { .. }
+            )
         }) {
             return Err(EdgeScanBuildError { operator });
         }
@@ -170,12 +173,7 @@ pub struct AsyncEdgeScanCursor<S: AsyncEdgeScanSource, F> {
     state: EdgeScanState,
 }
 impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
-    pub fn new(
-        source: S,
-        plan: AsyncEdgeScanPlan,
-        policy: GqlQueryPolicy,
-        checkpoint: F,
-    ) -> Self {
+    pub fn new(source: S, plan: AsyncEdgeScanPlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
         Self {
             seq: source.snapshot_seq(),
             skip: plan.inner.offset,
@@ -185,7 +183,10 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
             meter: Meter {
                 checkpoint,
                 policy,
-                rows: GqlExecutionStats { snapshot_records: 0, result_rows: 0 },
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
                 evaluator: GlaExecutionStats::default(),
             },
             last: None,
@@ -266,35 +267,50 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
                 let meter = &mut self.meter;
                 let last = &mut self.last;
                 let mut admitted = None;
-                let candidate = flatten(source.next_candidate(self.plan.inner.relation, &mut |event| {
-                    match event {
-                        AsyncEdgeScanEvent::Work => meter.event(GlaExecutionEvent::Work),
-                        AsyncEdgeScanEvent::ScratchEntry => meter.event(GlaExecutionEvent::ScratchEntry),
-                        AsyncEdgeScanEvent::Candidate(eid) => {
-                            meter.event(GlaExecutionEvent::Work)?;
-                            if admitted.is_some() {
-                                return Err(GqlQueryError::Source(EdgeScanError::InvalidCandidateAdmission));
+                let candidate = flatten(
+                    source
+                        .next_candidate(self.plan.inner.relation, &mut |event| match event {
+                            AsyncEdgeScanEvent::Work => meter.event(GlaExecutionEvent::Work),
+                            AsyncEdgeScanEvent::ScratchEntry => {
+                                meter.event(GlaExecutionEvent::ScratchEntry)
                             }
-                            if last.is_some_and(|previous| eid <= previous) {
-                                return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                            AsyncEdgeScanEvent::Candidate(eid) => {
+                                meter.event(GlaExecutionEvent::Work)?;
+                                if admitted.is_some() {
+                                    return Err(GqlQueryError::Source(
+                                        EdgeScanError::InvalidCandidateAdmission,
+                                    ));
+                                }
+                                if last.is_some_and(|previous| eid <= previous) {
+                                    return Err(GqlQueryError::Source(
+                                        EdgeScanError::NonIncreasingIdentity,
+                                    ));
+                                }
+                                meter.rows.snapshot_records = meter.increment(
+                                    GqlBudgetDimension::SnapshotRecords,
+                                    meter.rows.snapshot_records,
+                                )?;
+                                *last = Some(eid);
+                                admitted = Some(eid);
+                                Ok(())
                             }
-                            meter.rows.snapshot_records = meter.increment(
-                                GqlBudgetDimension::SnapshotRecords, meter.rows.snapshot_records,
-                            )?;
-                            *last = Some(eid);
-                            admitted = Some(eid);
-                            Ok(())
-                        }
-                    }
-                }).await)?;
+                        })
+                        .await,
+                )?;
                 // Cancellation after a suspension still wins, even at EOF or
                 // when the last candidate is invisible and needs no projection.
                 meter.event(GlaExecutionEvent::Work)?;
                 if candidate.as_ref().map(|candidate| candidate.eid) != admitted {
-                    return Err(GqlQueryError::Source(EdgeScanError::InvalidCandidateAdmission));
+                    return Err(GqlQueryError::Source(
+                        EdgeScanError::InvalidCandidateAdmission,
+                    ));
                 }
-                let Some(candidate) = candidate else { return Ok(None) };
-                let Some(record) = candidate.record else { continue };
+                let Some(candidate) = candidate else {
+                    return Ok(None);
+                };
+                let Some(record) = candidate.record else {
+                    continue;
+                };
                 (candidate.eid, record, false)
             };
             row_event(&mut self.meter, source, &record, GlaExecutionEvent::Work)?;
@@ -303,14 +319,17 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
                 continue;
             }
             let reverse = self.plan.inner.direction == GlaDirection::Undirected
-                && edge.source != edge.target && !second;
+                && edge.source != edge.target
+                && !second;
             let (from, to) = match self.plan.inner.direction {
                 GlaDirection::Forward => (edge.source, edge.target),
                 GlaDirection::Reverse => (edge.target, edge.source),
-                GlaDirection::Undirected if second =>
-                    (edge.source.max(edge.target), edge.source.min(edge.target)),
-                GlaDirection::Undirected =>
-                    (edge.source.min(edge.target), edge.source.max(edge.target)),
+                GlaDirection::Undirected if second => {
+                    (edge.source.max(edge.target), edge.source.min(edge.target))
+                }
+                GlaDirection::Undirected => {
+                    (edge.source.min(edge.target), edge.source.max(edge.target))
+                }
             };
             let output = self.project_record(source, eid, &record, from, to)?;
             // Even a rejected or skipped first orientation leaves the second
@@ -337,11 +356,16 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
     {
         let meter = &mut self.meter;
         row_event(meter, source, record, GlaExecutionEvent::Work)?;
-        let left = record.vertex(from)
+        let left = record
+            .vertex(from)
             .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?;
-        let right = if from == to { left } else {
+        let right = if from == to {
+            left
+        } else {
             row_event(meter, source, record, GlaExecutionEvent::Work)?;
-            record.vertex(to).ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?
+            record
+                .vertex(to)
+                .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?
         };
         let image = Binding {
             eid,
@@ -349,17 +373,21 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
             vertices: [left, right],
             edge: record.edge().properties,
         };
-        let Some(paths) = self.plan.inner.test(&image, &mut |event| {
-            row_event(meter, source, record, event)
-        })? else { return Ok(None) };
+        let Some(paths) = self
+            .plan
+            .inner
+            .test(&image, &mut |event| row_event(meter, source, record, event))?
+        else {
+            return Ok(None);
+        };
         if self.skip != 0 {
             self.skip -= 1;
             return Ok(None);
         }
         let next = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
-        let guard = flatten(source.reserve_output(record, self.plan.columns, &mut |event| {
-            meter.event(event)
-        }))?;
+        let guard = flatten(
+            source.reserve_output(record, self.plan.columns, &mut |event| meter.event(event)),
+        )?;
         let row = self.plan.inner.project(&image, &paths, &mut |event| {
             row_event(meter, source, record, event)
         })?;
@@ -379,7 +407,8 @@ where
     F: FnMut() -> Result<(), C>,
 {
     meter.event(event)?;
-    source.evaluation_event(record, event)
+    source
+        .evaluation_event(record, event)
         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
 }
 

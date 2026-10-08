@@ -91,9 +91,11 @@ impl<V: Vfs> BufferedPartition<V> {
             work.step(cx, observe)?;
         }
         let charge = self.reserve_scan_workspace(cx)?;
-        let image = self.block_controlled(
-            cx, at, Admission::ScanBypass, &mut || work.step(cx, observe),
-        ).await?;
+        let image = self
+            .block_controlled(cx, at, Admission::ScanBypass, &mut || {
+                work.step(cx, observe)
+            })
+            .await?;
         if image.0.len() != descriptor.rows
             || image.0.iter().map(|row| (row.eid, row.created_at)).min() != descriptor.first_edge
         {
@@ -130,18 +132,29 @@ impl<V: Vfs> BufferedPartition<V> {
                 work.step(cx, observe)?;
             }
             let _workspace = self.reserve_scan_workspace(cx)?;
-            let bytes = self.pin(cx, descriptor.extent, Admission::ScanBypass).await?;
+            let bytes = self
+                .pin(cx, descriptor.extent, Admission::ScanBypass)
+                .await?;
             let rows = crate::root::resolve_patch_ref(
-                self.store.k_oid.expose(), self.store.namespace, at,
-                &self.root.vertex_patches[at], bytes.as_ref(), self.store.decode_resolver(),
-            ).map_err(StoreError::MalformedRoot).map_err(BufferedReadError::from)?;
+                self.store.k_oid.expose(),
+                self.store.namespace,
+                at,
+                &self.root.vertex_patches[at],
+                bytes.as_ref(),
+                self.store.decode_resolver(),
+            )
+            .map_err(StoreError::MalformedRoot)
+            .map_err(BufferedReadError::from)?;
             if rows.len() != descriptor.rows {
                 return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
             }
             for row in &rows {
                 work.step(cx, observe)?;
-                if row.vid == vid && row.created_at <= as_of
-                    && result.as_ref().is_none_or(|old| old.created_at <= row.created_at)
+                if row.vid == vid
+                    && row.created_at <= as_of
+                    && result
+                        .as_ref()
+                        .is_none_or(|old| old.created_at <= row.created_at)
                 {
                     match result.as_mut() {
                         Some(old) => old.value = row.clone(),

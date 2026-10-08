@@ -135,12 +135,10 @@ impl GraphUnwindWriteText {
 
         // Expand parameter documents, not graph state. Preserve earlier alias
         // bindings by reference; every intermediate cardinality is admitted.
-        let parameter_sources = expansion::prepare_parameter_sources(
-            self, arguments, &mut control,
-        )?;
-        let rows = expansion::expand_with_parameters(
-            self, rows, &parameter_sources, limit, &mut control,
-        )?;
+        let parameter_sources =
+            expansion::prepare_parameter_sources(self, arguments, &mut control)?;
+        let rows =
+            expansion::expand_with_parameters(self, rows, &parameter_sources, limit, &mut control)?;
         work(&mut control, self.fields.len() as u64 + 1)?;
         let mut kinds = vec![CanonicalScalarKind::Null; self.fields.len()];
         for row_index in 0..rows.len() {
@@ -171,7 +169,11 @@ impl GraphUnwindWriteText {
             // Independent source lists are borrowed once by expansion. They
             // are not native mutation arguments and must not be cloned and
             // transcribed once per product row (including unused payloads).
-            if self.sources.iter().any(|source| source.parameter.as_deref() == Some(name.as_str())) {
+            if self
+                .sources
+                .iter()
+                .any(|source| source.parameter.as_deref() == Some(name.as_str()))
+            {
                 continue;
             }
             let value = arguments
