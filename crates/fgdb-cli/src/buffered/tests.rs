@@ -852,6 +852,38 @@ impl AsRef<GraphValueRow> for GuardedRow {
     }
 }
 
+// Two admitted rows, then exhaustion. Each pull first checks that the previous
+// row's admission was released, so a guard held past its flush fails here.
+struct GuardedRows<'a> {
+    cx: &'a QueryCx,
+    pool: MemoryPool,
+    pulls: Arc<AtomicUsize>,
+}
+impl NativeRows for GuardedRows<'_> {
+    type Row = GuardedRow;
+    type Error = io::Error;
+    fn pull(&mut self) -> Pulled<'_, GuardedRow, io::Error> {
+        Box::pin(async move {
+            let at = self.pulls.fetch_add(1, Ordering::SeqCst);
+            if at == 2 {
+                return None;
+            }
+            assert_eq!(
+                self.pool.used(),
+                0,
+                "previous row released before next demand"
+            );
+            let charge = self.pool.reserve(self.cx, 1024).unwrap();
+            Some(Ok(GuardedRow {
+                row: GraphValueRow::from_owned_values(vec![GraphValue::Vertex(
+                    VId(at as u128 + 1),
+                )]),
+                _charge: charge,
+            }))
+        })
+    }
+}
+
 struct GuardedOutput {
     bytes: Vec<u8>,
     pool: MemoryPool,
@@ -894,21 +926,20 @@ fn async_delivery_retains_row_admission_until_flush_and_stops_on_broken_output()
                 flushes: 0,
                 fail_at,
             };
-            let next = async || {
-                let at = pulls.fetch_add(1, Ordering::SeqCst);
-                if at == 2 {
-                    return None;
-                }
-                assert_eq!(pool.used(), 0, "previous row released before next demand");
-                let charge = pool.reserve(&cx, 1024).unwrap();
-                Some(Ok::<_, io::Error>(GuardedRow {
-                    row: GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(at
-                        as u128
-                        + 1))]),
-                    _charge: charge,
-                }))
+            let mut rows = GuardedRows {
+                cx: &cx,
+                pool: pool.clone(),
+                pulls: pulls.clone(),
             };
-            let result = deliver(&["n".to_owned()], 2, next, true, &mut output, || Ok(())).await;
+            let result = deliver(
+                &["n".to_owned()],
+                2,
+                &mut rows,
+                true,
+                &mut output,
+                || Ok(()),
+            )
+            .await;
             assert_eq!(result.is_err(), fail_at.is_some());
             assert_eq!(pulls.load(Ordering::SeqCst), fail_at.map_or(3, |at| at - 1));
             assert_eq!(pool.used(), 0);

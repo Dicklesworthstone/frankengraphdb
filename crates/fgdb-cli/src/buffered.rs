@@ -5,14 +5,19 @@
 use super::{Failure, Options, emit, execution_failure, set_decimal, stream};
 use asupersync::fs::Vfs;
 use fgdb::{
-    BufferedOpenError, BufferedReadLimits, BufferedReadView, MemoryPool, PreparedNativeRead,
+    BufferedOpenError, BufferedQueryCursor, BufferedQueryError, BufferedQueryRow,
+    BufferedReadLimits, BufferedReadView, MemoryPool, PreparedNativeRead,
 };
-use fgdb_gql::GqlQueryPolicy;
 use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::edge_stream::AsyncEdgeScanPlan;
+use fgdb_gql::edge_stream::{
+    AsyncEdgeScanCursor, AsyncEdgeScanOutput, AsyncEdgeScanPlan, AsyncEdgeScanSource, EdgeScanError,
+};
 use fgdb_gql::stream::AsyncVertexScanPlan;
+use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{CommitSeq, QueryCx};
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 
 const DEFAULT_MEMORY: u64 = 64 * 1024 * 1024;
 const DEFAULT_SOURCE: u64 = 1024 * 1024 * 1024;
@@ -174,14 +179,9 @@ pub(super) async fn run<V: Vfs + Clone>(
         let mut cursor = view
             .stream_graph_edges_governed_at(cx, &prepared.pattern, seq, options.budget.policy())
             .map_err(execution_failure)?;
-        let result = deliver(
-            columns,
-            seq.0,
-            async || cursor.next().await,
-            robot,
-            out,
-            || cx.checkpoint().map_err(Failure::query),
-        )
+        let result = deliver(columns, seq.0, &mut cursor, robot, out, || {
+            cx.checkpoint().map_err(Failure::query)
+        })
         .await;
         cursor.close();
         result
@@ -189,14 +189,9 @@ pub(super) async fn run<V: Vfs + Clone>(
         let mut cursor = view
             .stream_graph_values_governed_at(cx, &prepared.pattern, seq, options.budget.policy())
             .map_err(execution_failure)?;
-        let result = deliver(
-            columns,
-            seq.0,
-            async || cursor.next().await,
-            robot,
-            out,
-            || cx.checkpoint().map_err(Failure::query),
-        )
+        let result = deliver(columns, seq.0, &mut cursor, robot, out, || {
+            cx.checkpoint().map_err(Failure::query)
+        })
         .await;
         cursor.close();
         result
@@ -220,13 +215,47 @@ pub(super) async fn run_query<V: Vfs + Clone>(
     }
 }
 
-// This is a delivery seam, not a new graph source. The closure makes exactly
+type Pulled<'a, Row, E> = Pin<Box<dyn Future<Output = Option<Result<Row, E>>> + Send + 'a>>;
+type Cancel = Box<asupersync::error::Error>;
+
+// One pull from the selected native async cursor. The pull is boxed as
+// `dyn Future + Send` so a caller's Send proof stops here. An `AsyncFnMut`
+// seam returns a lifetime-generic future that rustc cannot prove Send
+// ("higher-ranked lifetime error") once a lab root holds the delivery loop.
+trait NativeRows {
+    type Row: AsRef<GraphValueRow>;
+    type Error: std::error::Error + 'static;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error>;
+}
+
+impl<V: Vfs + Clone> NativeRows for BufferedQueryCursor<'_, '_, V> {
+    type Row = BufferedQueryRow<GraphValueRow>;
+    type Error = BufferedQueryError;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
+        Box::pin(self.next())
+    }
+}
+
+impl<S, F> NativeRows for AsyncEdgeScanCursor<S, F>
+where
+    S: AsyncEdgeScanSource,
+    S::Error: std::error::Error + 'static,
+    F: FnMut() -> Result<(), Cancel> + Send,
+{
+    type Row = AsyncEdgeScanOutput<S::OutputGuard>;
+    type Error = GqlQueryError<EdgeScanError<S::Error>, Cancel>;
+    fn pull(&mut self) -> Pulled<'_, Self::Row, Self::Error> {
+        Box::pin(self.next())
+    }
+}
+
+// This is a delivery seam, not a new graph source. Each loop makes exactly
 // one pull from the selected native async cursor. AsRef borrows the value from
 // its owner; the owner and its MemoryCharge live through encoding and flush.
-async fn deliver<Row: AsRef<GraphValueRow>, E: std::error::Error + 'static>(
+async fn deliver(
     columns: &[String],
     seq: u64,
-    mut next: impl AsyncFnMut() -> Option<Result<Row, E>>,
+    rows: &mut impl NativeRows,
     robot: bool,
     out: &mut impl Write,
     mut checkpoint: impl FnMut() -> Result<(), Failure>,
@@ -238,7 +267,7 @@ async fn deliver<Row: AsRef<GraphValueRow>, E: std::error::Error + 'static>(
         out.flush().map_err(Failure::io)?;
         loop {
             checkpoint()?;
-            let Some(row) = next().await else { break };
+            let Some(row) = rows.pull().await else { break };
             let row = row.map_err(execution_failure)?;
             if row.as_ref().values().len() != columns.len() {
                 return Err(Failure::query(
