@@ -27,7 +27,7 @@ impl<V: Vfs> BufferedPartition<V> {
     }
 
     pub(crate) fn reserve_scan_bytes(
-        &self,
+        &mut self,
         cx: &QueryCx,
         bytes: usize,
     ) -> Result<MemoryCharge, BufferedReadError> {
@@ -35,7 +35,7 @@ impl<V: Vfs> BufferedPartition<V> {
     }
 
     pub(crate) fn reserve_scan_workspace(
-        &self,
+        &mut self,
         cx: &QueryCx,
     ) -> Result<MemoryCharge, BufferedReadError> {
         self.reserve_scan_bytes(cx, OBJECT_WORKSPACE_BYTES)

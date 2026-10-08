@@ -190,6 +190,7 @@ fn unpack<E>(error: EdgeScanError<VertexScanError<E>>) -> VertexScanError<E> {
         EdgeScanError::Source(error) => return error,
         EdgeScanError::Plan(error) => EdgeScanError::Plan(error),
         EdgeScanError::NonIncreasingIdentity => EdgeScanError::NonIncreasingIdentity,
+        EdgeScanError::InvalidCandidateAdmission => EdgeScanError::InvalidCandidateAdmission,
         EdgeScanError::DanglingEndpoint => EdgeScanError::DanglingEndpoint,
         EdgeScanError::CounterExhausted => EdgeScanError::CounterExhausted,
         EdgeScanError::ExpansionUnavailable => EdgeScanError::ExpansionUnavailable,
