@@ -486,12 +486,14 @@ fn independent_parameters_form_ordered_borrowed_products_and_native_programs() {
     )
     .unwrap();
     for (at, (x, y)) in expected.into_iter().enumerate() {
+        // The reference declares exact canonical Int scalars, as UNWIND list
+        // items carry; an Int64 parameter is a different type, never coerced.
         let params = GqlParameters::new()
-            .with_int64("lhs", x)
+            .with_scalar("lhs", CanonicalScalar::Int(x))
             .unwrap()
-            .with_int64("rhs", y)
+            .with_scalar("rhs", CanonicalScalar::Int(y))
             .unwrap()
-            .with_int64("aa", 100)
+            .with_scalar("aa", CanonicalScalar::Int(100))
             .unwrap();
         let statement = reference.bind_parameters(&params).unwrap();
         assert_eq!(
