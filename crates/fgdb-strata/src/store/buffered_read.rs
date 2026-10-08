@@ -6,6 +6,8 @@
 //! set would fit. This is not an unbounded external history validator. No durable
 //! format changes or permission to reclaim objects follow from this reader.
 
+mod scan_access;
+
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
@@ -60,8 +62,8 @@ pub struct BufferedReadLimits {
     pub max_blocks: usize,
     pub max_vertex_patches: usize,
     /// Object visits plus decoded row visits, separately per open/read call.
-    /// A vertex scan also counts head initialization/consumption and shares
-    /// this one cumulative ceiling across every pull of the cursor.
+    /// Scans also count head initialization/consumption and share this one
+    /// cumulative ceiling across every pull, including edge endpoint reads.
     pub max_work: usize,
     pub buffer: BufferLimits,
 }
@@ -107,6 +109,8 @@ pub enum BufferedReadError {
     VertexHistoryConflict {
         vid: VId,
     },
+    /// A visible edge has no visible source or target at the same cut.
+    DanglingEndpoint,
     SizeOverflow,
 }
 
@@ -153,6 +157,7 @@ impl core::fmt::Display for BufferedReadError {
                 "buffered root has incompatible vertex history for {vid:?}"
             ),
             Self::SizeOverflow => f.write_str("buffered read accounting overflow"),
+            Self::DanglingEndpoint => f.write_str("buffered edge has a missing visible endpoint"),
         }
     }
 }
@@ -166,6 +171,10 @@ pub struct BufferedValue<T> {
     _charge: MemoryCharge,
 }
 impl<T> BufferedValue<T> {
+    pub(crate) fn from_reserved(value: T, charge: MemoryCharge) -> Self {
+        Self { value, _charge: charge }
+    }
+
     /// The conservative reservation retained by this value. This is database
     /// accounting, not allocator/RSS telemetry or permission to detach a clone.
     pub const fn charged_bytes(&self) -> usize {
@@ -194,12 +203,17 @@ pub struct BufferedEdge {
 struct BlockDescriptor {
     block: ExtentKey,
     properties: Option<ExtentKey>,
+    // Adjacency order is not EId order. This is the minimum identity/version
+    // in the authenticated block, not necessarily its first physical row.
+    first_edge: Option<(EId, CommitSeq)>,
+    rows: usize,
 }
 
 #[derive(Clone, Copy)]
 struct PatchDescriptor {
     extent: ExtentKey,
     first: Option<(VId, CommitSeq)>,
+    last: Option<VId>,
     rows: usize,
 }
 
@@ -470,6 +484,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     .as_ref()
                     .map(|(id, bytes)| descriptor(*id, bytes))
                     .transpose()?,
+                first_edge: entries.iter().map(|row| (row.eid, row.created_at)).min(),
+                rows: entries.len(),
             });
         }
         for (at, reference) in root.vertex_patches.iter().enumerate() {
@@ -504,6 +520,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             patches.push(PatchDescriptor {
                 extent: descriptor(reference.patch_id, &bytes)?,
                 first: rows.first().map(|row| (row.vid, row.created_at)),
+                last: rows.last().map(|row| row.vid),
                 rows: rows.len(),
             });
         }
@@ -626,32 +643,14 @@ impl<V: Vfs> BufferedPartition<V> {
         at: usize,
         work: &mut usize,
     ) -> Result<(Vec<AdjacencyEntry>, Option<BlockProps>), BufferedReadError> {
-        let descriptor = self.blocks[at];
-        let bytes = self.pin(cx, descriptor.block, Admission::Normal).await?;
-        // These exact bytes were keyed-identity, span, digest and partition
-        // admitted before the descriptor was issued; refault checks its full
-        // extent checksum again before any decoded value can escape.
-        let (entries, patch) =
-            crate::decode_block_with_properties(bytes.as_ref()).map_err(StoreError::Malformed)?;
-        drop(bytes);
-        let properties = match (patch, descriptor.properties) {
-            (Some((_, locators)), Some(key)) => {
-                advance(work, 1, self.limits.max_work)?;
-                let bytes = self.pin(cx, key, Admission::Normal).await?;
-                let rows = crate::edge_props::read_property_patch_inner(
-                    self.store.k_oid.expose(),
-                    self.store.namespace,
-                    bytes.as_ref(),
-                    crate::edge_props::EdgePropertyPatchVersion(key.object()),
-                    self.store.decode_resolver(),
-                )
-                .map_err(StoreError::MalformedEdgePropertyPatch)?;
-                Some(BlockProps { locators, rows })
-            }
-            (None, None) => None,
-            _ => return Err(BufferError::InvalidLoad.into()),
-        };
-        Ok((entries, properties))
+        let maximum = self.limits.max_work;
+        self.block_controlled::<core::convert::Infallible>(
+            cx, at, Admission::Normal,
+            &mut || advance(work, 1, maximum).map_err(BufferedScanError::Read),
+        ).await.map_err(|error| match error {
+            BufferedScanError::Read(error) => error,
+            BufferedScanError::Control(never) => match never {},
+        })
     }
 
     pub async fn vertex_at(
