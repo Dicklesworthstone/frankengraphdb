@@ -22,6 +22,11 @@ pub struct AsyncEdgeCandidate<Record> {
     pub record: Option<Record>,
 }
 
+/// What one [`AsyncEdgeScanSource::next_candidate`] resolves to: the next
+/// candidate, `None` at EOF, or the source's or a control's refusal.
+pub type AsyncEdgeCandidateResult<Record, Error, Control> =
+    Result<Option<AsyncEdgeCandidate<Record>>, EdgeScanSourceError<Error, Control>>;
+
 /// Source work and history admission enter the SAME cumulative query meter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsyncEdgeScanEvent {
@@ -62,12 +67,7 @@ pub trait AsyncEdgeScanSource: Send {
         &mut self,
         relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> impl core::future::Future<
-        Output = Result<
-            Option<AsyncEdgeCandidate<Self::Record>>,
-            EdgeScanSourceError<Self::Error, C>,
-        >,
-    > + Send;
+    ) -> impl core::future::Future<Output = AsyncEdgeCandidateResult<Self::Record, Self::Error, C>> + Send;
 
     fn reserve_output<C>(
         &self,

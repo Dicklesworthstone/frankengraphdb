@@ -177,67 +177,61 @@ impl AsyncEdgeScanSource for Source {
     fn snapshot_seq(&self) -> CommitSeq {
         CommitSeq(11)
     }
-    fn next_candidate<C: Send>(
+    async fn next_candidate<C: Send>(
         &mut self,
         _relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> impl Future<
-        Output = Result<Option<AsyncEdgeCandidate<Record>>, EdgeScanSourceError<Self::Error, C>>,
-    > + Send {
-        async move {
-            control(AsyncEdgeScanEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            let at = self.counts.reads.fetch_add(1, Ordering::SeqCst);
-            if self.fail_at == Some(at) {
-                return Err(EdgeScanSourceError::Source("read"));
-            }
-            let Some((eid, image)) = self.input.pop_front() else {
-                return Ok(None);
-            };
-            if !matches!(self.admission, Admission::Missing) {
-                control(AsyncEdgeScanEvent::Candidate(eid))
-                    .map_err(EdgeScanSourceError::Control)?;
-            }
-            if matches!(self.admission, Admission::Twice) {
-                control(AsyncEdgeScanEvent::Candidate(eid))
-                    .map_err(EdgeScanSourceError::Control)?;
-            }
-            if self.suspend {
-                let mut yielded = false;
-                std::future::poll_fn(|cx| {
-                    if yielded {
-                        Poll::Ready(())
-                    } else {
-                        yielded = true;
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                })
-                .await;
-            }
-            if matches!(self.admission, Admission::Eof) {
-                return Ok(None);
-            }
-            let record = if let Some(image) = image {
-                control(AsyncEdgeScanEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
-                self.counts.built.fetch_add(1, Ordering::SeqCst);
-                let live = self.counts.records.fetch_add(1, Ordering::SeqCst) + 1;
-                self.counts
-                    .maximum_records
-                    .fetch_max(live, Ordering::SeqCst);
-                Some(Record {
-                    image,
-                    counts: self.counts.clone(),
-                })
-            } else {
-                None
-            };
-            let eid = if matches!(self.admission, Admission::Different) {
-                EId(19)
-            } else {
-                eid
-            };
-            Ok(Some(AsyncEdgeCandidate { eid, record }))
+    ) -> AsyncEdgeCandidateResult<Record, Self::Error, C> {
+        control(AsyncEdgeScanEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        let at = self.counts.reads.fetch_add(1, Ordering::SeqCst);
+        if self.fail_at == Some(at) {
+            return Err(EdgeScanSourceError::Source("read"));
         }
+        let Some((eid, image)) = self.input.pop_front() else {
+            return Ok(None);
+        };
+        if !matches!(self.admission, Admission::Missing) {
+            control(AsyncEdgeScanEvent::Candidate(eid)).map_err(EdgeScanSourceError::Control)?;
+        }
+        if matches!(self.admission, Admission::Twice) {
+            control(AsyncEdgeScanEvent::Candidate(eid)).map_err(EdgeScanSourceError::Control)?;
+        }
+        if self.suspend {
+            let mut yielded = false;
+            std::future::poll_fn(|cx| {
+                if yielded {
+                    Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+        }
+        if matches!(self.admission, Admission::Eof) {
+            return Ok(None);
+        }
+        let record = if let Some(image) = image {
+            control(AsyncEdgeScanEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+            self.counts.built.fetch_add(1, Ordering::SeqCst);
+            let live = self.counts.records.fetch_add(1, Ordering::SeqCst) + 1;
+            self.counts
+                .maximum_records
+                .fetch_max(live, Ordering::SeqCst);
+            Some(Record {
+                image,
+                counts: self.counts.clone(),
+            })
+        } else {
+            None
+        };
+        let eid = if matches!(self.admission, Admission::Different) {
+            EId(19)
+        } else {
+            eid
+        };
+        Ok(Some(AsyncEdgeCandidate { eid, record }))
     }
     fn reserve_output<C>(
         &self,
