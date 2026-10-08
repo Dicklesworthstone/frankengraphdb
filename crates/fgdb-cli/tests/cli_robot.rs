@@ -3266,3 +3266,101 @@ fn external_order_delivers_the_native_page_and_retires_private_scratch() {
         .failure(2, "usage");
     assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
 }
+
+#[test]
+fn buffered_query_dispatch_uses_cold_admission_and_preserves_native_stream_contracts() {
+    let db = TestDb::new("buffered-query");
+    db.create();
+    let basis = db.write(&["INSERT (a:Person {team:1}),(b:Person {team:2}),(c:Person {team:3}),(a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c)"]);
+    let latest = db.write(&["MATCH (n:Person) WHERE n.team=1 SET n.born=9"]);
+    for (text, seq) in [
+        ("MATCH (n:Person) RETURN n,n.team,n.born".to_owned(), latest),
+        (
+            "MATCH (a)-[r:KNOWS]-(b) RETURN r,a,b,a.team".to_owned(),
+            latest,
+        ),
+        (
+            format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN n,n.team,n.born"),
+            basis,
+        ),
+        (
+            format!("MATCH (a)-[r:KNOWS]->(b) FOR SYSTEM_TIME AS OF SEQ {basis} RETURN r,a,b"),
+            basis,
+        ),
+    ] {
+        let expected = db.command("query", &[&text]);
+        expected.success();
+        let actual = db.command(
+            "query",
+            &["--buffered", "--buffer-memory-bytes", "8388608", &text],
+        );
+        actual.success();
+        let expected_rows: Vec<_> = expected
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| event.get("cells"))
+            .collect();
+        let actual_rows: Vec<_> = actual
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| event.get("cells"))
+            .collect();
+        assert_eq!(actual_rows, expected_rows, "{text}");
+        assert_eq!(actual.sequence("rows"), seq);
+        assert_eq!(actual.terminal().get("stream"), &Json::Bool(true));
+        assert_eq!(actual.events[1].get("seq").unsigned(), seq);
+    }
+    for flag in [
+        "--buffer-memory-bytes",
+        "--buffer-source-bytes",
+        "--max-work-units",
+    ] {
+        db.command("query", &["--buffered", flag, "0", "MATCH (n) RETURN n"])
+            .failure(4, "open");
+    }
+    // The physical compiler runs before even a missing database is opened.
+    let missing = TestDb::new("buffered-unsupported-before-open");
+    missing
+        .command(
+            "query",
+            &["--buffered", "MATCH (n) RETURN count(*) LIMIT 0"],
+        )
+        .failure(3, "query");
+    assert!(!std::path::Path::new(&missing.db).exists());
+    db.command(
+        "query",
+        &[
+            "--buffered",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 999 RETURN n LIMIT 0",
+        ],
+    )
+    .failure(3, "query");
+    db.command("query", &["--buffered", "--stream", "MATCH (n) RETURN n"])
+        .failure(2, "usage");
+    let late = db.command(
+        "query",
+        &[
+            "--buffered",
+            "--max-result-rows",
+            "1",
+            "MATCH (n) RETURN n,n.team",
+        ],
+    );
+    assert_eq!(late.code, 3);
+    assert_eq!(
+        late.events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .count(),
+        1
+    );
+    assert_eq!(late.terminal().get("class").string(), "query");
+    assert!(
+        !late
+            .events
+            .iter()
+            .any(|event| event.get("event").string() == "result")
+    );
+}
