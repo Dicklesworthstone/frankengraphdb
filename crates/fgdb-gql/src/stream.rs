@@ -33,6 +33,7 @@ mod asynchronous;
 pub use asynchronous::{
     AsyncVertexCandidate, AsyncVertexScanCursor, AsyncVertexScanEvent, AsyncVertexScanOutput,
     AsyncVertexScanPlan, AsyncVertexScanRecord, AsyncVertexScanSource,
+    AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan,
 };
 mod output;
 mod probe;
@@ -584,7 +585,10 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
 }
 impl<F> Meter<F> {
-    fn event<E, C>(&mut self, event: VertexScanEvent) -> ScanResult<(), E, C>
+    fn control<C>(
+        &mut self,
+        event: VertexScanEvent,
+    ) -> Result<(), GqlQueryError<core::convert::Infallible, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
@@ -598,6 +602,13 @@ impl<F> Meter<F> {
                 },
             )
             .map_err(GqlQueryError::Evaluator)
+    }
+    fn event<E, C>(&mut self, event: VertexScanEvent) -> ScanResult<(), E, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        self.control(event)
+            .map_err(|error| error.map_source(|never| match never {}))
     }
     fn record<E, C>(&mut self) -> ScanResult<(), E, C> {
         let count = self

@@ -419,13 +419,13 @@ where
     }
     Ok(states)
 }
-fn value_event(event: VertexScanEvent) -> GlaExecutionEvent {
+pub(super) fn value_event(event: VertexScanEvent) -> GlaExecutionEvent {
     match event {
         VertexScanEvent::Work => GlaExecutionEvent::Work,
         VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
     }
 }
-fn lift<E, C>(error: GqlQueryError<EdgeScanError<E>, C>) -> EdgeAggregateError<E, C> {
+pub(super) fn lift<E, C>(error: GqlQueryError<EdgeScanError<E>, C>) -> EdgeAggregateError<E, C> {
     error.map_source(GraphAggregateError::Source)
 }
 impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggregateCursor<S, F> {

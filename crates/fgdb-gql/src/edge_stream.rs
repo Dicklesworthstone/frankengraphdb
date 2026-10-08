@@ -9,7 +9,8 @@ pub mod aggregate;
 mod asynchronous;
 pub use asynchronous::{
     AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanOutput,
-    AsyncEdgeScanPlan, AsyncEdgeScanRecord, AsyncEdgeScanSource,
+    AsyncEdgeScanPlan, AsyncEdgeScanRecord, AsyncEdgeScanSource, AsyncEdgeSpillAggregateCursor,
+    AsyncEdgeSpillAggregatePlan,
 };
 mod join;
 pub(crate) use join::Probe;
@@ -474,7 +475,10 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
 }
 impl<F> Meter<F> {
-    fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ScanResult<(), E, C>
+    fn control<C>(
+        &mut self,
+        event: GlaExecutionEvent,
+    ) -> Result<(), GqlQueryError<core::convert::Infallible, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
@@ -482,6 +486,13 @@ impl<F> Meter<F> {
         self.evaluator
             .charge_event(self.policy.evaluator, event)
             .map_err(GqlQueryError::Evaluator)
+    }
+    fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ScanResult<(), E, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        self.control(event)
+            .map_err(|error| error.map_source(|never| match never {}))
     }
     fn increment<E, C>(&self, dimension: GqlBudgetDimension, prior: u64) -> ScanResult<u64, E, C> {
         let next = prior

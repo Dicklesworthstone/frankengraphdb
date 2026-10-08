@@ -4,6 +4,9 @@
 
 use super::*;
 
+mod aggregate;
+pub use aggregate::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
+
 /// One owned, admitted vertex record. A host can keep its byte reservation in
 /// this object while the ordinary GLA evaluator borrows its canonical fields.
 /// This interface conveys no authority; the source owns visibility and scope.
@@ -260,6 +263,18 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
+        self.next_inner::<true, C>().await
+    }
+
+    // Blocking reducers consume private occurrences through this same source
+    // and projection loop, without spending the final result-row allowance.
+    async fn next_inner<const EMIT: bool, C>(
+        &mut self,
+    ) -> Option<ScanResult<AsyncVertexScanOutput<Row, S::OutputGuard>, S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
         if self.state != VertexScanState::Open {
             return None;
         }
@@ -267,9 +282,9 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
         // or unwind drops it and leaves the persistent cursor terminal.
         self.state = VertexScanState::Failed;
         let mut source = self.source.take().expect("open cursor owns its source");
-        match self.advance(&mut source).await {
+        match self.advance::<EMIT, C>(&mut source).await {
             Ok(Some(value)) => {
-                if self.plan.inner.count == Some(self.meter.rows.result_rows) {
+                if EMIT && self.plan.inner.count == Some(self.meter.rows.result_rows) {
                     self.state = VertexScanState::Exhausted;
                 } else {
                     self.state = VertexScanState::Open;
@@ -285,7 +300,7 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
         }
     }
 
-    async fn advance<C>(
+    async fn advance<const EMIT: bool, C>(
         &mut self,
         source: &mut S,
     ) -> ScanResult<Option<AsyncVertexScanOutput<Row, S::OutputGuard>>, S::Error, C>
@@ -345,7 +360,7 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
                 snapshot_seq: self.snapshot_seq,
                 error: core::marker::PhantomData,
             };
-            if let Some((row, guard)) = self.plan.inner.project_record::<true, _, _, _, _>(
+            if let Some((row, guard)) = self.plan.inner.project_record::<EMIT, _, _, _, _>(
                 candidate.vid,
                 row,
                 &local,

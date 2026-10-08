@@ -535,7 +535,7 @@ fn project_input_row<Row: VertexScanOutput, E>(
     Row::project(vid, row, projection, control)
 }
 
-fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
+pub(super) fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
     match event {
         GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
         // A private projection cannot spend the public result-row allowance.
@@ -609,7 +609,9 @@ where
     }
     Ok(states)
 }
-fn lift<E, C>(error: GqlQueryError<VertexScanError<E>, C>) -> VertexAggregateError<E, C> {
+pub(super) fn lift<E, C>(
+    error: GqlQueryError<VertexScanError<E>, C>,
+) -> VertexAggregateError<E, C> {
     error.map_source(GraphAggregateError::Source)
 }
 

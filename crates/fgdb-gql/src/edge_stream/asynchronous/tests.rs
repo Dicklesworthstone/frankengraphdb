@@ -7,6 +7,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod aggregate;
+
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
 const P: PropertyKeyId = PropertyKeyId(9);

@@ -20,7 +20,9 @@ use fgdb_types::CanonicalScalar;
 use std::sync::Arc;
 
 pub use crate::edge_stream::aggregate::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
+pub use crate::edge_stream::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
 pub use crate::stream::aggregate::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
+pub use crate::stream::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillAggregateBuildError {
@@ -71,6 +73,46 @@ impl SpillAggregatePlan {
         }
     }
 
+    pub fn kind(&self) -> ScanKind {
+        match self {
+            Self::Vertex(_) => ScanKind::Vertex,
+            Self::Edge(_) => ScanKind::Edge,
+        }
+    }
+}
+
+/// A complete aggregate input admitted for asynchronous local source access.
+/// The ordinary numeric definition and row evaluators own every semantic step.
+/// Vertex probes, edge expansion/probes and relational input refuse before the
+/// host opens storage. This is a physical source plan, not a result or authority.
+#[derive(Clone, Debug)]
+pub enum AsyncSpillAggregatePlan {
+    Vertex(AsyncVertexSpillAggregatePlan),
+    Edge(AsyncEdgeSpillAggregatePlan),
+}
+
+impl AsyncSpillAggregatePlan {
+    pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        let definition = SpillAggregateDefinition::compile(aggregate)?;
+        if matches!(
+            aggregate.input_pattern().plan().operators().first(),
+            Some(GlaOperator::ScanEdges { .. })
+        ) {
+            AsyncEdgeSpillAggregatePlan::compile(definition)
+                .map(Self::Edge)
+                .map_err(SpillAggregateBuildError::Edge)
+        } else {
+            AsyncVertexSpillAggregatePlan::compile(definition)
+                .map(Self::Vertex)
+                .map_err(SpillAggregateBuildError::Vertex)
+        }
+    }
+    pub fn definition(&self) -> &SpillAggregateDefinition {
+        match self {
+            Self::Vertex(plan) => plan.definition(),
+            Self::Edge(plan) => plan.definition(),
+        }
+    }
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Vertex(_) => ScanKind::Vertex,

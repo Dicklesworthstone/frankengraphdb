@@ -5,6 +5,9 @@
 use super::*;
 use crate::algebra::EdgeRelation;
 
+mod aggregate;
+pub use aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
+
 /// An owned, source-admitted edge and its endpoint images at one immutable cut.
 /// The source must mask relation, endpoint and field visibility BEFORE exposing
 /// the record. It may retain buffer reservations here while the evaluator lends
@@ -246,6 +249,16 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
+        self.next_inner::<true, C>().await
+    }
+
+    async fn next_inner<const EMIT: bool, C>(
+        &mut self,
+    ) -> Option<ScanResult<AsyncEdgeScanOutput<S::OutputGuard>, S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
         if self.state != EdgeScanState::Open {
             return None;
         }
@@ -254,9 +267,9 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         self.state = EdgeScanState::Failed;
         let mut source = self.source.take().expect("open cursor owns its source");
         let mut pending = self.pending.take();
-        match self.advance(&mut source, &mut pending).await {
+        match self.advance::<EMIT, C>(&mut source, &mut pending).await {
             Ok(Some(row)) => {
-                if self.plan.inner.count == Some(self.meter.rows.result_rows) {
+                if EMIT && self.plan.inner.count == Some(self.meter.rows.result_rows) {
                     self.state = EdgeScanState::Exhausted;
                 } else {
                     self.state = EdgeScanState::Open;
@@ -273,7 +286,7 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         }
     }
 
-    async fn advance<C>(
+    async fn advance<const EMIT: bool, C>(
         &mut self,
         source: &mut S,
         pending: &mut Option<(EId, S::Record)>,
@@ -357,7 +370,7 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
                     (edge.source.min(edge.target), edge.source.max(edge.target))
                 }
             };
-            let output = self.project_record(source, eid, &record, from, to)?;
+            let output = self.project_record::<EMIT, C>(source, eid, &record, from, to)?;
             // Even a rejected or skipped first orientation leaves the second
             // eligible. Moving the record preserves its reservation, no clone.
             if reverse {
@@ -369,7 +382,7 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         }
     }
 
-    fn project_record<C>(
+    fn project_record<const EMIT: bool, C>(
         &mut self,
         source: &S,
         eid: EId,
@@ -410,15 +423,23 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
             self.skip -= 1;
             return Ok(None);
         }
-        let next = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
+        let next = if EMIT {
+            Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
+        } else {
+            None
+        };
         let guard = flatten(
             source.reserve_output(record, self.plan.columns, &mut |event| meter.event(event)),
         )?;
         let row = self.plan.inner.project(&image, &paths, &mut |event| {
             row_event(meter, source, record, event)
         })?;
-        row_event(meter, source, record, GlaExecutionEvent::ResultRow)?;
-        meter.rows.result_rows = next;
+        if let Some(next) = next {
+            row_event(meter, source, record, GlaExecutionEvent::ResultRow)?;
+            meter.rows.result_rows = next;
+        } else {
+            row_event(meter, source, record, GlaExecutionEvent::Work)?;
+        }
         Ok(Some(AsyncEdgeScanOutput { row, guard }))
     }
 }

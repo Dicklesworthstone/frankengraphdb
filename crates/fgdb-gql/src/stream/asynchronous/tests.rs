@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod aggregate;
+
 #[derive(Clone)]
 struct Sample {
     vid: VId,

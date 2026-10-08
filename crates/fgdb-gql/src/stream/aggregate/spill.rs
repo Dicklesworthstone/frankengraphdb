@@ -32,6 +32,12 @@ impl VertexSpillAggregatePlan {
     pub fn definition(&self) -> &SpillAggregateDefinition {
         &self.definition
     }
+
+    pub(in crate::stream) fn into_parts(
+        self,
+    ) -> (VertexScanPlan<GraphValueRow>, SpillAggregateDefinition) {
+        (self.input, self.definition)
+    }
 }
 impl core::fmt::Debug for VertexSpillAggregatePlan {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
