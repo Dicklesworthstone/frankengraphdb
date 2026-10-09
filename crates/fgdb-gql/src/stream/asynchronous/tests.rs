@@ -261,6 +261,7 @@ fn sample(vid: u128, value: Option<CanonicalScalar>, visible: bool) -> Sample {
 fn plan(text: &str) -> GlaPlan<GraphValueRow> {
     PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Property, "rank") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Relation, "R") => {
             Some(GraphSymbol::Relation(fgdb_delta_types::RelationId(1)))
@@ -625,7 +626,7 @@ fn async_sort_input_preserves_duplicate_occurrences_hidden_keys_and_the_entire_l
             false,
         ),
         (
-            "MATCH (n:L) RETURN n.p AS p ORDER BY n DESC SKIP 1 LIMIT 0",
+            "MATCH (n:L) RETURN n.p AS p ORDER BY n.rank DESC SKIP 1 LIMIT 0",
             true,
         ),
     ] {
@@ -640,12 +641,17 @@ fn async_sort_input_preserves_duplicate_occurrences_hidden_keys_and_the_entire_l
         assert_eq!(tail.offset(), 1);
         assert_eq!(tail.count(), Some(0));
 
-        let input = source(vec![
+        let mut rows = vec![
             sample(1, Some(CanonicalScalar::Int(7)), true),
             sample(2, Some(CanonicalScalar::Int(2)), true),
             sample(3, Some(CanonicalScalar::Int(7)), true),
             sample(4, Some(CanonicalScalar::Int(99)), false),
-        ]);
+        ];
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.properties
+                .push((PropertyKeyId(2), CanonicalScalar::Int(index as i64 + 1)));
+        }
+        let input = source(rows);
         let signals = input.signals.clone();
         let mut cursor = AsyncVertexScanCursor::new(input, compiled, wide(), || Ok::<_, ()>(()));
         let mut actual = Vec::new();
@@ -666,7 +672,7 @@ fn async_sort_input_preserves_duplicate_occurrences_hidden_keys_and_the_entire_l
             if hidden {
                 assert_eq!(
                     actual[index].values()[1],
-                    GraphValue::Vertex(VId(index as u128 + 1))
+                    GraphValue::Scalar(CanonicalScalar::Int(index as i64 + 1))
                 );
             }
         }

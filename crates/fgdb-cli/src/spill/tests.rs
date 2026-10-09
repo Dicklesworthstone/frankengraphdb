@@ -141,6 +141,26 @@ fn external_grouping_matches_eager_rows_for_vertices_edges_nulls_and_history() {
                 "MATCH (n) WHERE n.p < 0 RETURN n.p AS p, count(*) AS count",
                 2,
             ),
+            (
+                "MATCH (n) RETURN count(*) AS count,count(DISTINCT n.p) AS unique,sum(DISTINCT n.p) AS total,avg(DISTINCT n.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p,count(*) AS count,count(DISTINCT n.p) AS unique,sum(DISTINCT n.p) AS total,avg(DISTINCT n.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (a)-[e:R]-(b) RETURN b.p AS p,count(*) AS count,count(DISTINCT a.p) AS unique,avg(DISTINCT a.p) AS mean",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN count(DISTINCT n.p) AS unique,sum(DISTINCT n.p) AS total,avg(DISTINCT n.p) AS mean",
+                1,
+            ),
+            (
+                "MATCH (n) WHERE n.p < 0 RETURN count(DISTINCT n.p) AS unique,sum(DISTINCT n.p) AS total,avg(DISTINCT n.p) AS mean",
+                2,
+            ),
         ] {
             let mut options = options(&directory, text);
             // This derives one resident group, forcing repeated partitioning
@@ -310,6 +330,10 @@ fn external_computed_aggregate_inputs_match_eager_rows_and_retire_failed_scratch
             "MATCH (n) RETURN n.p+1 AS p,count(*) AS count",
             "MATCH (n) RETURN {bucket:n.p,total:SUM(n.p)*2,sample:range(0,COUNT(*)-6)} AS value GROUP BY n.p ORDER BY n.p DESC SKIP 1 LIMIT 3",
             "MATCH (a)-[e:R]->(b) RETURN SUM(a.p+b.p)*2 AS total,toString(COUNT(*)) AS count GROUP BY b.p ORDER BY SUM(a.p+b.p) DESC",
+            "MATCH (n) RETURN n.p%3 AS bucket,COUNT(DISTINCT n.p) AS unique,SUM(DISTINCT n.p*2) AS total,AVG(DISTINCT n.p+1) AS average GROUP BY n.p%3 ORDER BY total DESC",
+            "MATCH (n) RETURN DISTINCT COUNT(DISTINCT n.p%2) AS unique GROUP BY n.p%3 HAVING SUM(DISTINCT n.p)>0 ORDER BY AVG(DISTINCT n.p) DESC LIMIT 1",
+            "MATCH (n) RETURN COUNT(DISTINCT [n.p%3,n.p]) AS lists,COUNT(DISTINCT {bucket:n.p%3}) AS maps",
+            "MATCH (n) RETURN COUNT(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS unique,SUM(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS total",
         ] {
             let mut options = options(&directory, text);
             options.spill.memory = Some(262_144);
@@ -338,6 +362,8 @@ fn external_computed_aggregate_inputs_match_eager_rows_and_retire_failed_scratch
             "MATCH (n) RETURN n.p AS bucket,10/(SUM(n.p)-96) AS total GROUP BY n.p ORDER BY n.p LIMIT 1",
             "MATCH (n) WHERE n.p<0 RETURN 1/COUNT(*) AS total LIMIT 0",
             "MATCH (n) RETURN range(0,COUNT(*)*100) AS values LIMIT 0",
+            "MATCH (n) RETURN SUM(DISTINCT 10/(n.p-12)) AS total LIMIT 0",
+            "MATCH (n) RETURN COUNT(DISTINCT n.note) AS unique,SUM(DISTINCT n.note) AS total LIMIT 0",
         ] {
             let mut options = options(&directory, text);
             options.spill.memory = Some(262_144);

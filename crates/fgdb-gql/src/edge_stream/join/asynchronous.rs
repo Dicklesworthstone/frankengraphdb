@@ -102,7 +102,13 @@ impl AsyncEdgeJoinPlan {
     }
 
     pub fn hop_count(&self) -> usize {
-        self.inner.joined.as_ref().expect("compiled join").expansions.len() + 1
+        self.inner
+            .joined
+            .as_ref()
+            .expect("compiled join")
+            .expansions
+            .len()
+            + 1
     }
 }
 impl core::fmt::Debug for AsyncEdgeJoinPlan {
@@ -195,17 +201,28 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             meter: Meter {
                 checkpoint,
                 policy,
-                rows: GqlExecutionStats { snapshot_records: 0, result_rows: 0 },
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
                 evaluator: GlaExecutionStats::default(),
             },
             last: None,
             state: EdgeScanState::Open,
         }
     }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.seq }
-    pub fn state(&self) -> EdgeScanState { self.state }
-    pub fn row_stats(&self) -> GqlExecutionStats { self.meter.rows }
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.meter.evaluator }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.seq
+    }
+    pub fn state(&self) -> EdgeScanState {
+        self.state
+    }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.meter.rows
+    }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.meter.evaluator
+    }
 
     pub fn close(&mut self) {
         if self.state == EdgeScanState::Open {
@@ -290,18 +307,27 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                     (eid, record, true)
                 } else {
                     let mut admitted = None;
-                    let candidate = flatten(source.next_candidate(
-                        self.plan.inner.relation,
-                        &mut |event| admit(meter, &mut self.last, &mut admitted, event),
-                    ).await)?;
+                    let candidate = flatten(
+                        source
+                            .next_candidate(self.plan.inner.relation, &mut |event| {
+                                admit(meter, &mut self.last, &mut admitted, event)
+                            })
+                            .await,
+                    )?;
                     check_admission(&candidate, admitted)?;
-                    let Some(candidate) = candidate else { return Ok(None); };
-                    let Some(record) = candidate.record else { continue; };
+                    let Some(candidate) = candidate else {
+                        return Ok(None);
+                    };
+                    let Some(record) = candidate.record else {
+                        continue;
+                    };
                     (candidate.eid, record, false)
                 };
                 meter.event(GlaExecutionEvent::Work)?;
                 let edge = record.edge();
-                if !self.plan.inner.relation.matches(edge.relation) { continue; }
+                if !self.plan.inner.relation.matches(edge.relation) {
+                    continue;
+                }
                 let (from, to) = match self.plan.inner.direction {
                     GlaDirection::Forward => (edge.source, edge.target),
                     GlaDirection::Reverse => (edge.target, edge.source),
@@ -318,10 +344,15 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 let from = frame.traversal.bindings[expansion.source].expect("bound endpoint");
                 let after = &mut frame.traversal.after[depth];
                 let mut admitted = None;
-                let next = source.next_incident_candidate(
-                    from, expansion.relation, expansion.direction, *after,
-                    &mut |event| admit(meter, after, &mut admitted, event),
-                ).await;
+                let next = source
+                    .next_incident_candidate(
+                        from,
+                        expansion.relation,
+                        expansion.direction,
+                        *after,
+                        &mut |event| admit(meter, after, &mut admitted, event),
+                    )
+                    .await;
                 let candidate = match next {
                     Ok(candidate) => candidate,
                     Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
@@ -334,10 +365,14 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                     frame.pop();
                     continue;
                 };
-                let Some(record) = candidate.record else { continue; };
+                let Some(record) = candidate.record else {
+                    continue;
+                };
                 meter.event(GlaExecutionEvent::Work)?;
                 let edge = record.edge();
-                if !expansion.relation.matches(edge.relation) { continue; }
+                if !expansion.relation.matches(edge.relation) {
+                    continue;
+                }
                 // An index may include retired/nonincident historical members.
                 // Rechecking cannot invent an orientation or resurrect an edge.
                 let to = match expansion.direction {
@@ -355,7 +390,9 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                     return Err(GqlQueryError::Source(EdgeScanError::DanglingEndpoint));
                 }
             }
-            if depth == 0 { frame.traversal.bindings.push(Some(from)); }
+            if depth == 0 {
+                frame.traversal.bindings.push(Some(from));
+            }
             frame.traversal.choices.push(Choice { eid, target: to });
             frame.traversal.bindings.push(Some(to));
             frame.records.push(record);
@@ -367,32 +404,47 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             };
             let mut control = |event| {
                 meter.event(event)?;
-                source.evaluation_event(&frame.records[depth], event)
+                source
+                    .evaluation_event(&frame.records[depth], event)
                     .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
             };
             let paths = test_stage(
-                &plan.stages[depth], &frame.traversal, &local, &mut control,
+                &plan.stages[depth],
+                &frame.traversal,
+                &local,
+                &mut control,
                 &mut || Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable)),
             )?;
-            let Some(paths) = paths else { frame.pop(); continue; };
+            let Some(paths) = paths else {
+                frame.pop();
+                continue;
+            };
             if depth + 1 < hops {
                 frame.traversal.after[depth + 1] = None;
                 continue;
             }
             if self.skip != 0 {
                 self.skip -= 1;
+                // Path allocations are charged to the record popped below.
+                drop(paths);
                 frame.pop();
                 continue;
             }
             let count = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
             let guard = flatten(source.reserve_join_output(
-                &frame.records, self.plan.columns, &mut |event| meter.event(event),
+                &frame.records,
+                self.plan.columns,
+                &mut |event| meter.event(event),
             ))?;
             let row = project(
-                &self.plan.inner.projection, &frame.traversal.bindings, &paths, &local,
+                &self.plan.inner.projection,
+                &frame.traversal.bindings,
+                &paths,
+                &local,
                 &mut |event| {
                     meter.event(event)?;
-                    source.evaluation_event(&frame.records[depth], event)
+                    source
+                        .evaluation_event(&frame.records[depth], event)
                         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 },
             )?;
@@ -427,12 +479,17 @@ fn admit<F: FnMut() -> Result<(), C>, E, C>(
         AsyncEdgeScanEvent::Candidate(eid) => {
             meter.event(GlaExecutionEvent::Work)?;
             if admitted.is_some() {
-                return Err(GqlQueryError::Source(EdgeScanError::InvalidCandidateAdmission));
+                return Err(GqlQueryError::Source(
+                    EdgeScanError::InvalidCandidateAdmission,
+                ));
             }
             if after.is_some_and(|prior| eid <= prior) {
                 return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
             }
-            let count = meter.increment(GqlBudgetDimension::SnapshotRecords, meter.rows.snapshot_records)?;
+            let count = meter.increment(
+                GqlBudgetDimension::SnapshotRecords,
+                meter.rows.snapshot_records,
+            )?;
             meter.rows.snapshot_records = count;
             *after = Some(eid);
             *admitted = Some(eid);
@@ -445,7 +502,9 @@ fn check_admission<R, E, C>(
     admitted: Option<EId>,
 ) -> ScanResult<(), E, C> {
     if candidate.as_ref().map(|value| value.eid) != admitted {
-        return Err(GqlQueryError::Source(EdgeScanError::InvalidCandidateAdmission));
+        return Err(GqlQueryError::Source(
+            EdgeScanError::InvalidCandidateAdmission,
+        ));
     }
     Ok(())
 }
@@ -462,7 +521,9 @@ struct FrameSource<'a, R, E> {
 }
 impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for FrameSource<'_, R, E> {
     type Error = E;
-    fn snapshot_seq(&self) -> CommitSeq { self.seq }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.seq
+    }
     fn next_edge<C>(
         &mut self,
         _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -470,23 +531,29 @@ impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for FrameSource<'_, R, E> {
         unreachable!("a borrowed binding is never driven as a graph scan")
     }
     fn edge<'a, C>(
-        &'a self, eid: EId,
+        &'a self,
+        eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<E, C>> {
         for (choice, record) in self.choices.iter().zip(self.records) {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            if choice.eid == eid { return Ok(Some(record.edge())); }
+            if choice.eid == eid {
+                return Ok(Some(record.edge()));
+            }
         }
         Ok(None)
     }
     fn vertex<'a, C>(
-        &'a self, vid: VId,
+        &'a self,
+        vid: VId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<E, C>> {
         for record in self.records {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             let edge = record.edge();
-            if vid == edge.source || vid == edge.target { return Ok(record.vertex(vid)); }
+            if vid == edge.source || vid == edge.target {
+                return Ok(record.vertex(vid));
+            }
         }
         Ok(None)
     }

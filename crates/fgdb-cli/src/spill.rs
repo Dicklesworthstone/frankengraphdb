@@ -177,7 +177,12 @@ struct Scratch {
 }
 
 impl Scratch {
-    async fn new(cx: &QueryCx, options: &Options, aggregate: bool) -> Result<Self, Failure> {
+    async fn new(
+        cx: &QueryCx,
+        options: &Options,
+        aggregate: bool,
+        stages: usize,
+    ) -> Result<Self, Failure> {
         let limits = &options.spill;
         let directory = limits
             .directory
@@ -210,13 +215,40 @@ impl Scratch {
             // Completed-group clauses can sort canonical keys, DISTINCT equality
             // classes, and final representative rank. Every pass retains the same
             // byte/work quotas; only the finite append-attempt envelope expands.
-            append_runs
+            let completed = append_runs
                 .checked_mul(3)
                 .and_then(|runs| runs.checked_add(32))
                 .and_then(|runs| runs.checked_add(u64::try_from(max_partitions).ok()?))
+                .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
+            // For one argument, all accepted partitions together have at most
+            // initial_runs + partitions initial sort runs. Four appends per
+            // run plus sixteen per partition cover merge/parity overhead.
+            // The compiler caps DISTINCT argument columns by the native width;
+            // no upfront memory reservation scales with this attempt allowance.
+            let argument_passes = u64::try_from(max_runs)
+                .ok()
+                .and_then(|runs| runs.checked_mul(4))
+                .and_then(|runs| {
+                    u64::try_from(max_partitions)
+                        .ok()?
+                        .checked_mul(20)?
+                        .checked_add(runs)
+                })
+                .and_then(|runs| runs.checked_mul(fgdb_gql::algebra::MAX_PATTERN_VERTICES as u64))
+                .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
+            completed
+                .checked_add(argument_passes)
                 .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
         } else {
-            append_runs
+            // Each admitted unary stage may need canonical, DISTINCT and
+            // ranking passes plus window/copy runs. Stages share the original
+            // byte/work caps; none resets a file's append history.
+            u64::try_from(stages)
+                .ok()
+                .and_then(|stages| stages.checked_mul(4))
+                .and_then(|passes| passes.checked_add(1))
+                .and_then(|passes| append_runs.checked_mul(passes))
+                .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
         };
         let file_limits = SpillLimits {
             max_file_bytes: per_file,
@@ -302,7 +334,7 @@ pub(super) async fn run(
     let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
         .map_err(execution_failure)?;
     let aggregate = is_aggregate(&prepared);
-    let mut scratch = Scratch::new(cx, options, aggregate).await?;
+    let mut scratch = Scratch::new(cx, options, aggregate, 0).await?;
     let outcome = async {
         if let Some(partition) = scratch.partition.as_mut() {
             return run_aggregate(
@@ -388,12 +420,16 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let aggregate = matches!(prepared, PreparedBuffered::Aggregate(_));
-    let mut scratch = Scratch::new(cx, options, aggregate).await?;
+    let stages = match prepared {
+        PreparedBuffered::Ordered(prepared) => prepared.stage_count(),
+        PreparedBuffered::Aggregate(_) => 0,
+    };
+    let mut scratch = Scratch::new(cx, options, aggregate, stages).await?;
     let outcome = async {
         match prepared {
             PreparedBuffered::Ordered(prepared) => {
                 let (spool, _) = prepared
-                    .spool_in_view(
+                    .spool_in_view_with_resolver(
                         view,
                         cx,
                         options.budget.policy(),
@@ -405,6 +441,7 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
                         MAX_ROW_BYTES,
                         scratch.input_rows,
                         options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
+                        resolver,
                     )
                     .await
                     .map_err(execution_failure)?;

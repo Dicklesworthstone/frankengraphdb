@@ -1902,6 +1902,8 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
     .with_scalar_resolver(std::sync::Arc::new(
         fgdb::PinnedTzdb::decode(&artifact_bytes).unwrap(),
     ));
+    let spill_directory = artifact_path.parent().unwrap().join("staged-scratch");
+    std::fs::create_dir(&spill_directory).unwrap();
     for phase in ["after close", "after reopen", "after open_rebuilding"] {
         if phase != "after close" {
             let opened = if phase == "after open_rebuilding" {
@@ -1918,6 +1920,32 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
             );
             assert_rows(&output, expected);
             assert_eq!(output.sequence("rows"), advanced, "CLI {phase}: {query}");
+        }
+        // The same pinned artifact must survive decoding at every native
+        // relational stage, not only the database read and final rendering.
+        for (query, expected, seq) in [
+            (
+                "MATCH (p:Person) WITH p.born AS born RETURN [born] AS value ORDER BY value DESC LIMIT 1".to_owned(),
+                format!(r#"[[{{"type":"list","value":[{expected_cell}]}}]]"#),
+                advanced,
+            ),
+            (
+                format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {written} WITH p.born AS born RETURN born AS value"),
+                format!("[[{expected_cell}]]"),
+                written,
+            ),
+        ] {
+            let output = db.command(
+                "query",
+                &[
+                    "--tzdb-file", artifact_path.to_str().unwrap(),
+                    "--buffered", "--spill-dir", spill_directory.to_str().unwrap(),
+                    "--max-result-rows", "1", &query,
+                ],
+            );
+            assert_rows(&output, &expected);
+            assert_eq!(output.sequence("rows"), seq, "buffered CLI {phase}: {query}");
+            assert_eq!(std::fs::read_dir(&spill_directory).unwrap().count(), 0);
         }
     }
 }

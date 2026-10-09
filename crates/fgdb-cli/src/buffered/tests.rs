@@ -40,6 +40,8 @@ fn options(extra: &[&str]) -> Options {
         "p=1",
         "--property",
         "missing=2",
+        "--property",
+        "rank=3",
         "--buffered",
         "--buffer-memory-bytes",
         "8388608",
@@ -60,7 +62,10 @@ async fn fixture(cx: &CommitCx) -> (MemVfs, EmbeddedReadView) {
         batch.create_vertex(
             VId(vid),
             vec![LabelId(1)],
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))],
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(vid as i64)),
+                (PropertyKeyId(3), CanonicalScalar::Int(vid as i64)),
+            ],
         );
     }
     for (eid, source, target, value) in [(1, 1, 2, 7), (2, 1, 2, 8), (3, 2, 2, 9)] {
@@ -385,10 +390,44 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
         let directory = spill_parent();
         for (text, seq) in [
             (
-                "MATCH (n) RETURN n.p AS value ORDER BY n DESC SKIP 1 LIMIT 2",
+                "MATCH (n) RETURN n.p AS value ORDER BY n.rank DESC SKIP 1 LIMIT 2",
                 2,
             ),
             ("MATCH (n) WHERE n.p%2=1 RETURN n.p AS value", 2),
+            ("MATCH (n) RETURN n.p%2 AS value ORDER BY value DESC", 2),
+            (
+                "MATCH (n) RETURN {bucket:n.p%2,nested:[n.p,null]} AS value ORDER BY value DESC",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS x WHERE x%2=1 RETURN [x,x+1] AS value ORDER BY value DESC LIMIT 1",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS x ORDER BY x DESC SKIP 1 LIMIT 2 RETURN 10-x AS value ORDER BY value DESC LIMIT 1",
+                2,
+            ),
+            (
+                "MATCH (n) WITH DISTINCT n.p%2 AS bucket ORDER BY bucket DESC SKIP 1 LIMIT 1 RETURN bucket+10 AS value",
+                2,
+            ),
+            (
+                "MATCH (n) RETURN [x IN [n.p,2,3] WHERE x>1 | x*2] AS value ORDER BY value",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 WITH n.p AS x ORDER BY x DESC LIMIT 2 RETURN {value:x*2} AS result ORDER BY result",
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) FOR SYSTEM_TIME AS OF SEQ 1 WITH a.p AS source,r.p+b.p AS total ORDER BY total DESC SKIP 1 LIMIT 3 RETURN {source:source,values:[total,null]} AS result ORDER BY result DESC LIMIT 1",
+                1,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 0 RETURN {value:n.p} AS result",
+                0,
+            ),
+            ("MATCH (n) RETURN n.p*2 AS value LIMIT 0", 2),
             (
                 "MATCH (n) RETURN [n.p%2,sum(n.p)] AS value GROUP BY n.p ORDER BY sum(n.p) DESC",
                 2,
@@ -428,6 +467,10 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
             (
                 "MATCH (n) RETURN count(*) AS count,sum(n.p) AS total,avg(n.p) AS mean",
                 2,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN count(DISTINCT a.p) AS count,sum(DISTINCT r.p) AS total,avg(DISTINCT r.p) AS mean,count(*) AS occurrences",
+                1,
             ),
             (
                 "MATCH (n) RETURN n.p%2 AS bucket,sum(n.p*2) AS total GROUP BY n.p%2 HAVING total>0 ORDER BY total DESC",
@@ -508,12 +551,12 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         let cx = contexts.query();
         let commit = contexts.commit();
         let directory = spill_parent();
-        // Standalone computed projections use the native relational facade;
-        // physical refusal must precede opening any database or scratch file.
+        // Unsupported relational descendants remain visible through an outer
+        // computed projection and LIMIT zero, before database/scratch opening.
         for text in [
-            "MATCH (n) RETURN n.p%2 AS value LIMIT 0",
-            "MATCH (n) RETURN [n.p,null] AS value LIMIT 0",
-            "MATCH (n) RETURN {value:n.p} AS value LIMIT 0",
+            "MATCH (n) WITH n.p AS value UNWIND [value,value] AS item RETURN item+1 AS result LIMIT 0",
+            "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
+            "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m) RETURN {value:m.p} AS value LIMIT 0",
         ] {
             let options = spill_options(&directory, text);
             let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
@@ -524,7 +567,6 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         for text in [
             "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
             "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN r.p LIMIT 0",
-            "MATCH (n) RETURN count(DISTINCT n.p) LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
             "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
@@ -555,6 +597,19 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             (
                 "MATCH (n) WHERE 10/(n.p-2)>0 RETURN n.p AS value LIMIT 0",
                 None,
+            ),
+            ("MATCH (n) RETURN 10/(n.p-2) AS value LIMIT 0", None),
+            (
+                "MATCH (n) WITH 10/(n.p-2) AS value RETURN [value,value+1] AS result LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 WITH 12/(3-n.p) AS value RETURN 1/(value-6) AS result LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result",
+                Some(("--max-result-rows", "1")),
             ),
             ("MATCH (n) RETURN sum(10/(n.p-2)) AS value LIMIT 0", None),
             (
@@ -631,6 +686,7 @@ fn buffered_external_output_failure_retires_all_files_without_a_success_record()
         for text in [
             "MATCH (n) RETURN n.p AS value ORDER BY value DESC",
             "MATCH (n) RETURN sum(n.p) AS total GROUP BY n.p ORDER BY total DESC",
+            "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result ORDER BY result DESC",
         ] {
             let options = spill_options(&directory, text);
             let prepared = okay(prepare_query(&options));
