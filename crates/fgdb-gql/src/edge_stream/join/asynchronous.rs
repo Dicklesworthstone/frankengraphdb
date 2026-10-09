@@ -4,6 +4,10 @@
 
 use super::*;
 use crate::algebra::EdgeRelation;
+use crate::edge_stream::aggregate::{EdgeAggregateError, lift, value_event};
+use crate::spill_aggregate::SpillAggregateDefinition;
+use crate::stream::VertexScanEvent;
+use crate::GraphAggregateError;
 
 /// An asynchronous source with independent strict-successor incidence reads.
 /// Root and nested reads share one immutable cut and masking policy. Nested
@@ -68,6 +72,16 @@ impl AsyncEdgeJoinPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         Self::check_access(plan)?;
         Ok(Self::from_inner(compile_output(plan, Output::OrderedRows)?))
+    }
+
+    // Only the sealed external-aggregate definition may relax the identity
+    // prefix. Reuse the ordinary aggregate input proof: no child DISTINCT,
+    // window, hidden keys, probes or unsupported expansion can be discarded.
+    pub(crate) fn compile_aggregate(
+        plan: &GlaPlan<GraphValueRow>,
+    ) -> Result<Self, EdgeScanBuildError> {
+        Self::check_access(plan)?;
+        Ok(Self::from_inner(compile_output(plan, Output::AggregateInput)?))
     }
 
     /// ALL occurrences for a blocking consumer. The returned native tail must
@@ -239,6 +253,16 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
+        self.next_inner::<true, C>().await
+    }
+
+    async fn next_inner<const EMIT: bool, C>(
+        &mut self,
+    ) -> Option<ScanResult<AsyncEdgeJoinOutput<S::OutputGuard>, S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
         if self.state != EdgeScanState::Open {
             return None;
         }
@@ -247,7 +271,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
         self.state = EdgeScanState::Failed;
         let mut source = self.source.take().expect("open cursor owns source");
         let mut frame = self.frame.take();
-        match self.advance(&mut source, &mut frame).await {
+        match self.advance::<EMIT, C>(&mut source, &mut frame).await {
             Ok(Some(row)) => {
                 if self.plan.inner.count == Some(self.meter.rows.result_rows) {
                     self.state = EdgeScanState::Exhausted;
@@ -266,7 +290,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
         }
     }
 
-    async fn advance<C>(
+    async fn advance<const EMIT: bool, C>(
         &mut self,
         source: &mut S,
         frame: &mut Option<Frame<S::Record, S::TraversalGuard>>,
@@ -430,7 +454,11 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 frame.pop();
                 continue;
             }
-            let count = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
+            let count = if EMIT {
+                Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
+            } else {
+                None
+            };
             let guard = flatten(source.reserve_join_output(
                 &frame.records,
                 self.plan.columns,
@@ -448,11 +476,117 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 },
             )?;
-            meter.event(GlaExecutionEvent::ResultRow)?;
-            meter.rows.result_rows = count;
+            if let Some(count) = count {
+                meter.event(GlaExecutionEvent::ResultRow)?;
+                meter.rows.result_rows = count;
+            } else {
+                // A complete private occurrence is work, not a delivered
+                // aggregate group. The host separately bounds input rows.
+                meter.event(GlaExecutionEvent::Work)?;
+            }
             frame.traversal.resume = true;
             return Ok(Some(AsyncEdgeJoinOutput { row, guard }));
         }
+    }
+
+    fn fail(&mut self) {
+        self.state = EdgeScanState::Failed;
+        self.close();
+    }
+
+    // The public aggregate adapter seals this definition together with the
+    // physical plan. Keep the source AND every ancestor record owned by this
+    // call until computed input and domain validation have both succeeded.
+    // This shares traversal, projection and native input evaluation; there is
+    // no second join driver or reducer, and no input-sized table is retained.
+    pub(crate) async fn next_aggregate_input<C>(
+        &mut self,
+        definition: &SpillAggregateDefinition,
+        output_event: &mut (
+                 impl FnMut(&mut S::OutputGuard, VertexScanEvent) -> Result<(), S::Error> + Send
+             ),
+    ) -> Result<Option<AsyncEdgeJoinOutput<S::OutputGuard>>, EdgeAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        let Some(output) = self.next_inner::<false, C>().await else {
+            return Ok(None);
+        };
+        let (row, mut guard) = output.map_err(lift)?.into_parts();
+        self.state = EdgeScanState::Failed;
+        let source = self.source.take();
+        let frame = self.frame.take();
+        let result = (|| {
+            let meter = &mut self.meter;
+            let mut control = |event| {
+                meter.event(value_event(event)).map_err(lift)?;
+                output_event(&mut guard, event).map_err(|error| {
+                    GqlQueryError::Source(GraphAggregateError::Source(EdgeScanError::Source(error)))
+                })
+            };
+            let row = definition.aggregate.evaluate_streamed_input(row, &mut |event| {
+                control(match event {
+                    GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
+                })
+            })?;
+            definition.validate_input(&row, &mut control)?;
+            Ok(AsyncEdgeJoinOutput { row, guard })
+        })();
+        match result {
+            Ok(row) => {
+                self.source = source;
+                self.frame = frame;
+                self.state = EdgeScanState::Open;
+                Ok(Some(row))
+            }
+            Err(error) => {
+                self.fail();
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn charge_aggregate<E, C>(
+        &mut self,
+        event: VertexScanEvent,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let result = self.meter.control(value_event(event))
+            .map_err(|error| error.map_source(|never| match never {}));
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    pub(crate) fn finish_aggregate_result<E, C>(
+        &mut self,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Exhausted {
+            self.fail();
+            return Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput));
+        }
+        let result = (|| {
+            let count = self.meter.rows.result_rows.checked_add(1)
+                .ok_or(GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
+            self.meter.policy.rows.check(GqlBudgetDimension::ResultRows, count)
+                .map_err(GqlQueryError::Rows)?;
+            self.meter.control(GlaExecutionEvent::ResultRow)
+                .map_err(|error| error.map_source(|never| match never {}))?;
+            self.meter.rows.result_rows = count;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.fail();
+        }
+        result
     }
 }
 impl<S: AsyncEdgeJoinSource, F> core::fmt::Debug for AsyncEdgeJoinCursor<S, F> {

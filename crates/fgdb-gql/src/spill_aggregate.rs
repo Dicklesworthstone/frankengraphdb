@@ -24,6 +24,9 @@ pub use crate::edge_stream::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggreg
 pub use crate::stream::aggregate::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 pub use crate::stream::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
 
+mod join;
+pub use join::{AsyncEdgeJoinSpillAggregateCursor, AsyncEdgeJoinSpillAggregatePlan};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillAggregateBuildError {
     Unsupported,
