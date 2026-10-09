@@ -88,15 +88,16 @@ pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(governed.value, limited.value);
         assert_eq!(governed.rows.snapshot_records, 2);
         // Since commit e104b59a, governed queries dispatch through the FreeJoin
-        // physical engine (charging index/trie work: 59 work units, 18 scratch entries),
+        // physical engine (charging index/trie work: 64 work units, 18 scratch entries),
         // whereas the ungoverned `limited` API stays on the legacy evaluator (21, 6).
-        // The bound `b.age >= $min_age` seeks the age index (fgdb-2n2a2): one
-        // unit more than testing these three vertices, but the seek grows with
-        // log V and its candidates, where the test grew with every vertex.
+        // The bound `b.age >= $min_age` seeks the age index (fgdb-2n2a2), and
+        // each candidate's seek charges every identity-tree node it visits
+        // (fddf91d0, fgdb-bwxsi). The seek grows with log V and its candidates,
+        // where testing every vertex grew with V.
         assert_eq!(
             governed.evaluator,
             fgdb_gql::GlaExecutionStats {
-                work_units: 59,
+                work_units: 64,
                 scratch_entries: 18,
             }
         );

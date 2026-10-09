@@ -460,14 +460,28 @@ fn two_sided_range_charges_ignore_unrelated_vertex_growth() {
         charges[0].0, charges[1].0,
         "SnapshotRecord charges must count resolved range candidates, not the graph"
     );
-    assert_eq!(
-        charges[0].1, charges[1].1,
-        "Work charges must not grow with unrelated vertices"
+    // Work may grow only by the deeper identity-tree descent of each of the
+    // ten candidates (fgdb-bwxsi: seeks are metered per tree node); a scan of
+    // the unrelated vertices would add tens of thousands of units.
+    let (small, large) = (charges[0].1, charges[1].1);
+    assert!(
+        small <= large && large - small <= 10 * avl_max_height(50_000),
+        "Work charges {small} -> {large} exceed ten identity descents"
     );
     assert!(
         charges[0].0 > 0,
         "the nonempty matching range must be charged"
     );
+}
+
+/// Most nodes a root-to-leaf AVL path over `keys` can hold: the largest h
+/// whose sparsest tree, N(h) = N(h-1) + N(h-2) + 1, still fits.
+fn avl_max_height(keys: u64) -> u64 {
+    let (mut sparser, mut sparsest, mut height) = (0_u64, 1_u64, 1_u64);
+    while sparsest + sparser < keys {
+        (sparser, sparsest, height) = (sparsest, sparsest + sparser + 1, height + 1);
+    }
+    height
 }
 
 #[test]

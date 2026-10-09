@@ -523,8 +523,22 @@ fn narrow_prefix_charges_ignore_growth_from_one_thousand_to_fifty_thousand() {
     }
     assert_eq!(charges[0].0, 10);
     assert_eq!(charges[1].0, 10);
-    assert_eq!(
-        charges[0].1, charges[1].1,
-        "prefix work must not grow with unrelated vertices"
+    // Work may grow only by the deeper identity-tree descent of each of the
+    // ten candidates (fgdb-bwxsi: seeks are metered per tree node); a scan of
+    // the unrelated vertices would add tens of thousands of units.
+    let (small, large) = (charges[0].1, charges[1].1);
+    assert!(
+        small <= large && large - small <= 10 * avl_max_height(50_000),
+        "prefix work {small} -> {large} exceeds ten identity descents"
     );
+}
+
+/// Most nodes a root-to-leaf AVL path over `keys` can hold: the largest h
+/// whose sparsest tree, N(h) = N(h-1) + N(h-2) + 1, still fits.
+fn avl_max_height(keys: u64) -> u64 {
+    let (mut sparser, mut sparsest, mut height) = (0_u64, 1_u64, 1_u64);
+    while sparsest + sparser < keys {
+        (sparser, sparsest, height) = (sparsest, sparsest + sparser + 1, height + 1);
+    }
+    height
 }
