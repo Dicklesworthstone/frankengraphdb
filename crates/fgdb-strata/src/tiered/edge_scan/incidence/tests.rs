@@ -2,8 +2,8 @@ use super::*;
 use crate::edge_props::encode_property_patch;
 use crate::root::{BlockRef, PartitionRoot, PatchRef};
 use crate::store::{BlockStore, BufferedReadLimits};
-use crate::tiered::buffer::BufferLimits;
-use crate::tiered::memory::MemoryPool;
+use crate::tiered::buffer::{BufferError, BufferLimits};
+use crate::tiered::memory::{MemoryError, MemoryPool};
 use crate::vertex::encode_patch;
 use crate::{DeltaBlockVersion, PartitionRootVersion, encode_block_with_properties};
 use asupersync::lab::run_async_under_lab;
@@ -545,11 +545,51 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
             drop(scan);
             assert_eq!(pool.used(), baseline);
         }
+        // Scratch admission reclaims unpinned resident frames before it
+        // refuses (fgdb-6iqxz), so pool headroom alone cannot force a refusal
+        // while a frame is resident. A scratch request for the whole pool
+        // evicts every unpinned frame before it returns, whether it then
+        // admits or refuses, and its charge (if any) is released at once.
+        // Opening the scan charges only scratch and loads no frame, so a hold
+        // that then leaves 512 bytes sits below routing's opening 1 KiB scan
+        // reservation, with nothing left to evict. A scratch refusal reports
+        // through the buffer manager as Buffer(Memory(ResourceExhausted)),
+        // and the 1024 requested names routing's opening reservation.
+        drop(view.reserve_scan_bytes(&cx, pool.limit()));
+        let evicted = pool.used();
         let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
-        let hold = pool
-            .reserve(&cx, pool.limit() - pool.used() - 32 * 1024)
-            .unwrap();
-        assert!(matches!(
+        let hold = pool.reserve(&cx, pool.limit() - pool.used() - 512).unwrap();
+        let refused = scan
+            .next_incident_with_endpoints(
+                &cx,
+                VId(1),
+                None,
+                BufferedEdgeDirection::Outgoing,
+                None,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                    BufferError::Memory(MemoryError::ResourceExhausted {
+                        requested: 1024,
+                        ..
+                    })
+                )))
+            ),
+            "{:?}",
+            refused.as_ref().map(Option::is_some)
+        );
+        assert!(scan.is_closed());
+        drop(scan);
+        drop(hold);
+        assert_eq!(pool.used(), evicted);
+        // Control: the same all-relations read admits once the hold is gone,
+        // so memory was the only difference.
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        assert!(
             scan.next_incident_with_endpoints(
                 &cx,
                 VId(1),
@@ -558,13 +598,11 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
                 None,
                 &mut |_| Ok::<_, ()>(())
             )
-            .await,
-            Err(BufferedScanError::Read(BufferedReadError::Memory(_)))
-        ));
-        assert!(scan.is_closed());
+            .await
+            .unwrap()
+            .is_some()
+        );
         drop(scan);
-        drop(hold);
-        assert_eq!(pool.used(), baseline);
         drop(view);
         assert_eq!(pool.used(), 0);
     });
