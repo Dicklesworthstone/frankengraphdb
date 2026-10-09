@@ -848,6 +848,30 @@ fn writes_and_reads_round_trip_with_flow_control_refusals_and_drain() {
             .await
             .unwrap();
         assert_eq!(count.rows, [[WireValue::Count(22)]]);
+        // EXPLAIN reads through the authorized session (fgdb-ooiik): the
+        // listing derives from the text, and the certificate form refuses.
+        let explained = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "EXPLAIN MATCH (p:Person) RETURN p.name AS name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(explained.columns, ["operator", "detail"]);
+        assert_eq!(explained.outcome, Outcome::Rows { seq: 2 });
+        assert_eq!(explained.rows[0][0], text("NativeRead"));
+        let certificate = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "EXPLAIN (CERTIFICATE) MATCH (p:Person) RETURN p.name AS name",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(certificate), ErrorCode::Statement);
         client.close(cx).await.unwrap();
 
         // A read-only capability cannot write, and its refusal is typed.
@@ -1496,6 +1520,22 @@ fn http_adapter_serves_the_same_authorized_statements() {
             body,
             r#"{"v":1,"columns":["age"],"rows":[[{"type":"int","value":"32"}]],"seq":3,"statements":1,"committed":false}"#
         );
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            host,
+            Some(&ro),
+            r#"{"statement":"EXPLAIN MATCH (p:Person) RETURN p.age AS age"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.starts_with(
+                r#"{"v":1,"columns":["operator","detail"],"rows":[[{"type":"text","value":"NativeRead"}"#
+            ),
+            "{body}"
+        );
 
         // Typed refusals map onto statuses; none reveals a hidden fact.
         let refusals = [
@@ -2001,6 +2041,25 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
         assert_eq!(record[1], Value::Int(30));
         assert_eq!(get(&done, "type").and_then(Value::as_str), Some("r"));
         assert!(get(&done, "bookmark").is_some());
+
+        // EXPLAIN streams the authorized session's text-derived listing as
+        // operator/detail records (fgdb-ooiik), not a Neo4j summary plan.
+        let fields = client
+            .expect(
+                0x10,
+                run_message("EXPLAIN MATCH (p:Person) RETURN p.age AS age", vec![]),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            get(&fields, "fields"),
+            Some(&Value::List(vec![
+                Value::string("operator"),
+                Value::string("detail")
+            ]))
+        );
+        let (records, _) = client.pull_all().await;
+        assert_eq!(records[0][0], Value::string("NativeRead"), "{records:?}");
 
         // A write is refused before graph access; the failure state ignores
         // further requests until RESET.
