@@ -173,25 +173,35 @@ fn prepare_root(
             }
         }
         // Keep checking exact domains even if another member is dynamic/null.
+        // Outside an integer root, result branches mixing Integer and Float
+        // (CASE WHEN c THEN 1 ELSE 1.0 END, fgdb-0g2ou) merge to Dynamic, as a
+        // property load does: each row keeps its own numeric type, and a
+        // non-numeric member still refuses. Integer roots stay strict.
         let merge_positions = |positions: &[usize],
                                numeric_comparison: bool|
          -> Result<Kind, GraphIntegerBuildError> {
             let mut known = Kind::Null;
             let mut dynamic = false;
+            let mut mixed = false;
             for &position in positions {
                 let kind = child_kind(position);
                 if kind == Kind::Dynamic {
                     dynamic = true;
                 } else {
+                    let merged = known.merge(kind);
                     known = if numeric_comparison {
                         known.merge_comparison(kind)
+                    } else if merged.is_none() && !integer_root {
+                        let numeric = known.merge_comparison(kind);
+                        mixed |= numeric.is_some();
+                        numeric
                     } else {
-                        known.merge(kind)
+                        merged
                     }
                     .ok_or_else(wrong)?;
                 }
             }
-            Ok(if dynamic && known == Kind::Null {
+            Ok(if mixed || (dynamic && known == Kind::Null) {
                 Kind::Dynamic
             } else {
                 known
@@ -727,11 +737,11 @@ mod tests {
                 Op::Literal(Some(1)),
                 Op::Binary(GraphIntegerBinary::Add),
             ],
-            vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
+            vec![floating(1.0), Op::Truth(Some(true)), Op::Coalesce],
             vec![
                 Op::Truth(Some(true)),
                 floating(1.0),
-                Op::Literal(Some(1)),
+                Op::Truth(Some(false)),
                 Op::Case,
             ],
             vec![
@@ -743,6 +753,24 @@ mod tests {
         ] {
             assert!(matches!(
                 prepare_scalar(&ops),
+                Err(GraphIntegerBuildError::OperandType { .. })
+            ));
+        }
+        // Owner ruling 2026-10-09 (fgdb-0g2ou): an Integer/Float result mix
+        // is a per-row dynamic value in a scalar root, as in openCypher, and
+        // stays refused in an integer root.
+        for ops in [
+            vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
+            vec![
+                Op::Truth(Some(true)),
+                floating(1.0),
+                Op::Literal(Some(1)),
+                Op::Case,
+            ],
+        ] {
+            assert!(prepare_scalar(&ops).is_ok());
+            assert!(matches!(
+                prepare(&ops),
                 Err(GraphIntegerBuildError::OperandType { .. })
             ));
         }

@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphMutationText,
     PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -533,4 +533,94 @@ fn exact_query_limits_and_each_conditional_checkpoint_refuse_without_output() {
     ] {
         assert!(run(&query, &vertices, &[], &props, refusal, || Ok::<_, ()>(())).is_err());
     }
+}
+
+#[test]
+fn mixed_numeric_branches_keep_each_rows_type_and_integer_roots_stay_strict() {
+    // openCypher lets one CASE yield an Int on some rows and a Float on
+    // others (fgdb-0g2ou). Independent expectation over p = 1..=4: even p
+    // gives Int 1 and odd p gives Float 1.0. 1 and 1.0 are different DISTINCT
+    // members (aggregate_text pins that), and a SUM over them is a Float.
+    let props: Props = (1..=4)
+        .map(|p| ((VId(p), P), CanonicalScalar::Int(p as i64)))
+        .collect();
+    let vertices: Vec<VId> = (1..=4).map(VId).collect();
+    let int = CanonicalScalar::Int;
+    let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+    let projected = |text: &str| -> Vec<CanonicalScalar> {
+        run(&prepare(text), &vertices, &[], &props, policy(), || {
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .value
+        .iter()
+        .map(|row| row.values()[0].as_scalar().unwrap().clone())
+        .collect()
+    };
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END AS value, n.p AS p ORDER BY p"
+        ),
+        [float(1.0), int(1), float(1.0), int(1)]
+    );
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN CASE n.p WHEN 1 THEN 0.5 WHEN 2 THEN 2 END AS value, n.p AS p \
+             ORDER BY p"
+        ),
+        [
+            float(0.5),
+            int(2),
+            CanonicalScalar::Null,
+            CanonicalScalar::Null
+        ]
+    );
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN COALESCE(CASE WHEN n.p>2 THEN n.p*10 END, 0.5) AS value, n.p AS p \
+             ORDER BY p"
+        ),
+        [float(0.5), float(0.5), int(30), int(40)]
+    );
+    let text = "MATCH (n) RETURN COUNT(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS unique, \
+        SUM(CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS total, \
+        SUM(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS distinct_total";
+    let result = PreparedGraphAggregateText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed(
+            4,
+            (1..=4).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok(props.get(&(vid, key))),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let values = result.value[0].values();
+    assert_eq!(values[0].as_count(), Some(2));
+    for (at, total) in [(1, 4.0), (2, 2.0)] {
+        assert_eq!(
+            values[at].as_value().and_then(GraphValue::as_scalar),
+            Some(&float(total)),
+            "{text}"
+        );
+    }
+    // A non-numeric branch still refuses.
+    let text = "MATCH (n) RETURN CASE WHEN n.p>0 THEN 1.0 ELSE 'text' END AS value";
+    assert!(PreparedGraphSetText::prepare(text, symbols).is_err());
+    // The same CASE compiles as a scalar root, while an integer root (the
+    // strict contract) still admits no Float branch.
+    use fgdb_gql::algebra::{IntegerComparison, ScalarPredicate};
+    use fgdb_gql::{GraphIntegerExpression, GraphIntegerOp};
+    let ops = [
+        GraphIntegerOp::Truth(Some(true)),
+        GraphIntegerOp::Literal(Some(1)),
+        GraphIntegerOp::Scalar(ScalarPredicate::new(float(1.0), IntegerComparison::Equal).unwrap()),
+        GraphIntegerOp::Case,
+    ];
+    assert!(GraphIntegerExpression::prepare_scalar(&ops).is_ok());
+    assert!(GraphIntegerExpression::prepare(&ops).is_err());
 }
