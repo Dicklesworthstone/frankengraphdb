@@ -3458,15 +3458,37 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         );
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
+    // COLLECT refuses before the missing database is opened. Under --spill-dir
+    // a fixed-hop join is a buffered source and a computed map a native stage
+    // (owner ruling 2026-10-09, fgdb-5ppbz), so both pass preparation and fail
+    // only at the open; without --spill-dir the join still refuses first.
     let missing = TestDb::new("buffered-external-unsupported-before-open");
-    for text in [
-        "MATCH (n) RETURN collect(n.team) LIMIT 0",
-        "MATCH (a)-[r:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.team LIMIT 0",
-        "MATCH (n) RETURN {value:n.team} AS value LIMIT 0",
+    let join = "MATCH (a)-[r:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.team LIMIT 0";
+    for (arguments, code, class) in [
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH (n) RETURN collect(n.team) LIMIT 0",
+            ],
+            3,
+            "query",
+        ),
+        (vec!["--buffered", join], 3, "query"),
+        (vec!["--buffered", "--spill-dir", spill, join], 4, "open"),
+        (
+            vec![
+                "--buffered",
+                "--spill-dir",
+                spill,
+                "MATCH (n) RETURN {value:n.team} AS value LIMIT 0",
+            ],
+            4,
+            "open",
+        ),
     ] {
-        missing
-            .command("query", &["--buffered", "--spill-dir", spill, text])
-            .failure(3, "query");
+        missing.command("query", &arguments).failure(code, class);
         assert!(!std::path::Path::new(&missing.db).exists());
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
