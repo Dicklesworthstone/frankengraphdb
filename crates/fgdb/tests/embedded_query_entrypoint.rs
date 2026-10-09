@@ -399,13 +399,14 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
         let db = seeded(&contexts.commit()).await;
         let cx = contexts.query();
         for (text, expected_facade) in [
-            // The refusal names the facade whose parser got furthest. Since the
-            // source-free pipeline aggregates (df505256, 60d2041e), the pipeline
-            // facade reads further into `RETURN 1` than the set facade does. The
-            // laws below (typed refusal, in-text offset, deterministic diagnostics,
-            // cached misses) are unchanged. That the winner moves at all is the
-            // parser race tracked by fgdb-crate-layer-drift-phjcs.
-            ("EXPLAIN RETURN 1", fgdb::NativeReadClass::PipelineAggregate),
+            // The refusal names the facade whose parser got furthest.
+            // `EXPLAIN RETURN 1` itself is answered at ad2a4059, so the probe
+            // repeats an alias, which every facade refuses; the set facade reads
+            // furthest into it (observed at 3c44cc6a). The laws below (typed
+            // refusal, in-text offset, deterministic diagnostics, cached misses)
+            // are unchanged. That the winner moves at all is the parser race
+            // tracked by fgdb-crate-layer-drift-phjcs.
+            ("EXPLAIN RETURN 1 AS x, 2 AS x", fgdb::NativeReadClass::Set),
             (
                 "MATCH (n:Missing) RETURN n",
                 fgdb::NativeReadClass::Aggregate,
