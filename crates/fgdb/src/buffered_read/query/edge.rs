@@ -323,7 +323,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
         let source = Source {
-            scan: self.partition.edge_scan(cx, as_of).map_err(source_error)?.into_join_scan(),
+            scan: self
+                .partition
+                .edge_scan(cx, as_of)
+                .map_err(source_error)?
+                .into_join_scan(),
             cx,
             pool,
         };

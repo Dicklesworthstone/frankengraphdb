@@ -22,7 +22,8 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<BufferedReadError, C>> {
+    ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<BufferedReadError, C>>
+    {
         let relation = match relation {
             EdgeRelation::One(relation) => Some(relation),
             EdgeRelation::Any => None,
@@ -32,22 +33,32 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
             GlaDirection::Reverse => BufferedEdgeDirection::Incoming,
             GlaDirection::Undirected => BufferedEdgeDirection::Undirected,
         };
-        let candidate = self.cx.with_restriction_async(
-            self.scan.next_incident_with_endpoints(
-                self.cx, endpoint, relation, direction, after, &mut |event| {
+        let candidate = self
+            .cx
+            .with_restriction_async(self.scan.next_incident_with_endpoints(
+                self.cx,
+                endpoint,
+                relation,
+                direction,
+                after,
+                &mut |event| {
                     control(match event {
                         BufferedEdgeScanEvent::Work => AsyncEdgeScanEvent::Work,
                         BufferedEdgeScanEvent::Identity(eid) => AsyncEdgeScanEvent::Candidate(eid),
                     })
                 },
-            ),
-        ).await.map_err(|error| EdgeExpansionSourceError::Read(match error {
-            BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
-            BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
-        }))?;
+            ))
+            .await
+            .map_err(|error| {
+                EdgeExpansionSourceError::Read(match error {
+                    BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
+                    BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
+                })
+            })?;
         // History, fields and their charges move together. The independent
         // successor position never replaces or advances the root scan position.
-        self.admit_record(candidate).map_err(EdgeExpansionSourceError::Read)
+        self.admit_record(candidate)
+            .map_err(EdgeExpansionSourceError::Read)
     }
 
     fn reserve_traversal<C>(
@@ -59,12 +70,15 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
         // Record slots plus Choice, binding and successor vectors, including
         // their headers and one pending undirected record. Source payloads and
         // routed block directories carry their own existing pool reservations.
-        let bytes = core::mem::size_of::<Record>().checked_add(512)
+        let bytes = core::mem::size_of::<Record>()
+            .checked_add(512)
             .and_then(|slot| slot.checked_mul(hops.saturating_add(1)))
             .and_then(|bytes| bytes.checked_add(2048))
             .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
-        self.pool.reserve(self.cx, bytes)
-            .map_err(BufferedReadError::Memory).map_err(EdgeScanSourceError::Source)
+        self.pool
+            .reserve(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(EdgeScanSourceError::Source)
     }
 
     fn reserve_join_output<C>(
@@ -79,28 +93,37 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
         let mut bytes = 1024usize;
         for record in records {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            bytes = bytes.checked_add(1024)
+            bytes = bytes
+                .checked_add(1024)
                 .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
             let image = &record.image;
             let edge = image.edge();
             let target = (edge.entry.src != edge.entry.dst).then(|| image.target_vertex());
-            for (_, value) in edge.props.iter()
+            for (_, value) in edge
+                .props
+                .iter()
                 .chain(image.source_vertex().props.iter())
                 .chain(target.into_iter().flat_map(|row| row.props.iter()))
             {
                 control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-                let payload = value.canonical_encoded_len()
+                let payload = value
+                    .canonical_encoded_len()
                     .map_err(|_| EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
-                bytes = payload.checked_mul(4).and_then(|payload| payload.checked_add(256))
+                bytes = payload
+                    .checked_mul(4)
+                    .and_then(|payload| payload.checked_add(256))
                     .and_then(|payload| bytes.checked_add(payload))
                     .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
             }
         }
-        let bytes = bytes.checked_mul(columns.max(1))
+        let bytes = bytes
+            .checked_mul(columns.max(1))
             .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
-        self.pool.reserve(self.cx, bytes)
-            .map_err(BufferedReadError::Memory).map_err(EdgeScanSourceError::Source)
+        self.pool
+            .reserve(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(EdgeScanSourceError::Source)
     }
 }
 
@@ -130,8 +153,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
-            impl AsyncEdgeJoinSource<Error = BufferedReadError, OutputGuard = MemoryCharge,
-                TraversalGuard = MemoryCharge> + use<'view, 'q, V>,
+            impl AsyncEdgeJoinSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
         >,
         EdgeQueryError,
@@ -150,8 +176,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
-            impl AsyncEdgeJoinSource<Error = BufferedReadError, OutputGuard = MemoryCharge,
-                TraversalGuard = MemoryCharge> + use<'view, 'q, V>,
+            impl AsyncEdgeJoinSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
         >,
         EdgeQueryError,
@@ -178,8 +207,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
-            impl AsyncEdgeJoinSource<Error = BufferedReadError, OutputGuard = MemoryCharge,
-                TraversalGuard = MemoryCharge> + use<'view, 'q, V>,
+            impl AsyncEdgeJoinSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
         >,
         EdgeQueryError,
