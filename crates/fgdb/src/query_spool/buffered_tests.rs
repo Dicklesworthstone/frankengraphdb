@@ -296,6 +296,18 @@ fn historical_computed_aggregates_charge_only_final_results_and_keep_exact_work(
                 ScanKind::Edge,
                 150,
             ),
+            (
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(*) AS rows,SUM(DISTINCT n.p%2*$factor) AS total",
+                4,
+                ScanKind::Vertex,
+                3,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) FOR SYSTEM_TIME AS OF SEQ 1 WHERE a <> b RETURN COUNT(*) AS rows,SUM(DISTINCT r.p*$factor) AS total",
+                6,
+                ScanKind::Edge,
+                75,
+            ),
         ] {
             let parameters = GqlParameters::new().with_int64("factor", 3).unwrap();
             let prepared = PreparedNativeRead::prepare(text, &parameters, resolve)
@@ -451,6 +463,181 @@ fn buffered_row_cap_and_encoding_work_precede_encoder_memory_and_scratch_writes(
 struct OneGuardedInput {
     row: Option<SpoolRow>,
     exhausted: bool,
+}
+
+#[test]
+fn buffered_unary_stages_preserve_inner_pages_exact_order_and_final_only_row_quota() {
+    let ((), report) = run_async_under_lab(0xb0ff_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let nested = GraphValue::map(vec![
+            (
+                "items".into(),
+                GraphValue::List(vec![integer(1), integer(2)]),
+            ),
+            ("value".into(), integer(2)),
+        ])
+        .unwrap();
+        for (text, inputs, kind, expected) in [
+            (
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p*2+1 AS value ORDER BY value DESC SKIP 1 LIMIT 2",
+                4,
+                ScanKind::Vertex,
+                scalar_frames(&[7, 5]),
+            ),
+            (
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 WITH DISTINCT n.p%2 AS bucket ORDER BY bucket DESC SKIP 1 LIMIT 1 RETURN bucket+10 AS value",
+                4,
+                ScanKind::Vertex,
+                scalar_frames(&[10]),
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) FOR SYSTEM_TIME AS OF SEQ 1 WHERE a <> b RETURN r.p*2 AS value ORDER BY value ASC SKIP 1 LIMIT 3",
+                6,
+                ScanKind::Edge,
+                scalar_frames(&[14, 16, 16]),
+            ),
+            (
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN {value:n.p*2,items:[n.p,n.p+1]} AS value ORDER BY value LIMIT 1",
+                4,
+                ScanKind::Vertex,
+                vec![
+                    GraphValueRow::from_owned_values(vec![nested])
+                        .canonical_bytes()
+                        .unwrap(),
+                ],
+            ),
+        ] {
+            let params = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(text, &params, resolve)
+                .unwrap()
+                .prepare_buffered_order(&params)
+                .unwrap();
+            assert!(prepared.stage_count() >= 2, "{text}");
+            let mut exact_work = None;
+            let mut exact_evaluator = None;
+            for trial in 0..4 {
+                let source_pool = MemoryPool::new(8_000_000, 0).unwrap();
+                let spill_pool = MemoryPool::new(262_144, 0).unwrap();
+                let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let limit = exact_work.map_or(WORK, |work| work - u64::from(trial == 2));
+                let mut policy = policy(expected.len() as u64);
+                if let Some(stats) = exact_evaluator {
+                    let stats: GlaExecutionStats = stats;
+                    policy.evaluator.max_work_units = stats.work_units - u64::from(trial == 3);
+                    policy.evaluator.max_scratch_entries = stats.scratch_entries;
+                }
+                let result = prepared
+                    .spool_in_view(
+                        &mut view,
+                        &cx,
+                        policy,
+                        &mut scratch,
+                        &mut destination,
+                        1,
+                        16,
+                        1024,
+                        4096,
+                        inputs,
+                        limit,
+                    )
+                    .await;
+                match trial {
+                    2 => assert!(matches!(result, Err(NativeSpoolError::SortWorkLimit {
+                        attempted, limit: reported,
+                    }) if reported == limit && attempted > limit)),
+                    3 => assert!(
+                        matches!(result, Err(NativeSpoolError::BufferedExecute(error))
+                        if matches!(*error, GqlQueryError::Evaluator(ref exceeded)
+                            if exceeded.dimension == fgdb_gql::GlaLimitDimension::WorkUnits
+                                && exceeded.limit == policy.evaluator.max_work_units))
+                    ),
+                    _ => {
+                        let (spool, work) =
+                            result.unwrap_or_else(|error| panic!("{text}: {error}"));
+                        assert_eq!(spool.snapshot_seq(), CommitSeq(1));
+                        assert_eq!(spool.kind(), kind);
+                        assert_eq!(spool.columns(), &["value"]);
+                        assert_eq!(spool.row_count(), expected.len() as u64);
+                        assert_eq!(spool.row_stats().snapshot_records, 4);
+                        assert_eq!(
+                            contents(&spool, &mut destination, &cx).await,
+                            expected,
+                            "{text}"
+                        );
+                        assert!(scratch.stats().published_runs > 1);
+                        if let Some(exact) = exact_work {
+                            assert_eq!(work, exact);
+                        }
+                        if let Some(exact) = exact_evaluator {
+                            assert_eq!(spool.evaluator_stats(), exact);
+                        }
+                        exact_work = Some(work);
+                        exact_evaluator = Some(spool.evaluator_stats());
+                    }
+                }
+                assert_eq!(spill_pool.used(), 0, "{text}");
+                drop(view);
+                assert_eq!(source_pool.used(), 0, "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_unary_failure_barriers_survive_limit_zero_and_release_all_reservations() {
+    let ((), report) = run_async_under_lab(0xb0ff_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let source_pool = MemoryPool::new(8_000_000, 0).unwrap();
+        let spill_pool = MemoryPool::new(262_144, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
+        let (mut scratch, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 WITH 12/(3-n.p) AS value RETURN 1/(value-6) AS result LIMIT 0",
+            &params, resolve,
+        ).unwrap().prepare_buffered_order(&params).unwrap();
+        let error = prepared
+            .spool_in_view(
+                &mut view,
+                &cx,
+                policy(0),
+                &mut scratch,
+                &mut destination,
+                1,
+                16,
+                1024,
+                4096,
+                4,
+                WORK,
+            )
+            .await
+            .unwrap_err();
+        // Child p=3 fails at its canonical row2. A fused evaluation would
+        // incorrectly observe the parent division by zero at child row0.
+        assert!(
+            matches!(
+                error,
+                NativeSpoolError::SetExecution(fgdb_gql::GraphSetExecutionError::Projection {
+                    row: 2,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 impl SpoolInput for OneGuardedInput {
     async fn pull(&mut self) -> Option<Result<SpoolRow, NativeSpoolError>> {

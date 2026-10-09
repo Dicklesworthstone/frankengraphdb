@@ -27,8 +27,10 @@ pub enum NativeSpoolError {
     Prepare(Box<QueryError>),
     Execute(Box<GqlQueryError<ScanError<ReadError>, Cancel>>),
     BufferedExecute(Box<GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>>),
+    SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
     Spill(SpillError),
     Encode(fgdb_types::ScalarEncodeError),
+    Decode(fgdb_gql::algebra::GraphValueDecodeError),
     RowTooLarge { bytes: usize, limit: usize },
     SortOrder(fgdb_gql::algebra::GraphOrderError),
     SortRunLimit { required: u64, limit: usize },
@@ -41,8 +43,10 @@ impl core::fmt::Display for NativeSpoolError {
             Self::Prepare(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
             Self::BufferedExecute(e) => e.fmt(f),
+            Self::SetExecution(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
+            Self::Decode(e) => e.fmt(f),
             Self::SortOrder(e) => e.fmt(f),
             Self::SortRunLimit { required, limit } => {
                 write!(f, "result sort needs {required} runs, limit {limit}")
@@ -66,8 +70,10 @@ impl core::error::Error for NativeSpoolError {
             Self::Prepare(e) => Some(e.as_ref()),
             Self::Execute(e) => Some(e.as_ref()),
             Self::BufferedExecute(e) => Some(e.as_ref()),
+            Self::SetExecution(e) => Some(e),
             Self::Spill(e) => Some(e),
             Self::Encode(e) => Some(e),
+            Self::Decode(e) => Some(e),
             Self::SortOrder(e) => Some(e),
             _ => None,
         }

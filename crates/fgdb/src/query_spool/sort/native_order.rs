@@ -11,6 +11,8 @@ use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 #[path = "buffered_order.rs"]
 mod buffered;
 pub use buffered::PreparedBufferedOrder;
+#[path = "staged.rs"]
+mod staged;
 
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {
@@ -325,11 +327,55 @@ where
     Ok((result, work.used))
 }
 
+trait Window: Sync {
+    fn evaluation_width(&self) -> usize;
+    fn visible_width(&self) -> usize;
+    fn distinct(&self) -> bool;
+    fn offset(&self) -> u64;
+    fn count(&self) -> Option<u64>;
+}
+
+impl Window for ScanSortTail {
+    fn evaluation_width(&self) -> usize {
+        ScanSortTail::evaluation_width(self)
+    }
+    fn visible_width(&self) -> usize {
+        ScanSortTail::visible_width(self)
+    }
+    fn distinct(&self) -> bool {
+        ScanSortTail::distinct(self)
+    }
+    fn offset(&self) -> u64 {
+        ScanSortTail::offset(self)
+    }
+    fn count(&self) -> Option<u64> {
+        ScanSortTail::count(self)
+    }
+}
+
+impl Window for fgdb_gql::spill_set::SpillSetStage {
+    fn evaluation_width(&self) -> usize {
+        self.columns().len()
+    }
+    fn visible_width(&self) -> usize {
+        self.columns().len()
+    }
+    fn distinct(&self) -> bool {
+        fgdb_gql::spill_set::SpillSetStage::distinct(self)
+    }
+    fn offset(&self) -> u64 {
+        fgdb_gql::spill_set::SpillSetStage::offset(self)
+    }
+    fn count(&self) -> Option<u64> {
+        fgdb_gql::spill_set::SpillSetStage::count(self)
+    }
+}
+
 async fn window<A, B>(
     sorted: &NativeResultSpool,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
-    tail: &ScanSortTail,
+    tail: &impl Window,
     budget: GqlExecutionBudget,
     page_bytes: usize,
     work: &mut Work<'_>,
@@ -412,7 +458,7 @@ where
 async fn write_visible_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     writer: &mut PagedSpillWriter<'_, F>,
     row: &[u8],
-    tail: &ScanSortTail,
+    tail: &impl Window,
     work: &mut Work<'_>,
 ) -> Result<usize> {
     let frames =
