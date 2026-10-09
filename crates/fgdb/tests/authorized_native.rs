@@ -18,7 +18,8 @@ use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use fgdb_warden::{
-    Authority, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope,
+    Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights,
+    Scope,
 };
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x6d; 32]);
@@ -1153,8 +1154,35 @@ fn source_free_and_empty_pages_authenticate_and_unsupported_text_never_falls_bac
                 | Err(QueryError::Aggregate(GqlQueryError::Source(_)))
         ));
         let before = db.frontier().unwrap();
+        // EXPLAIN lists the text-derived plan (fgdb-ooiik) and writes nothing.
+        // Its listing is delivered rows, so this token's zero row allowance
+        // refuses it while a token without that limit receives it.
+        let explain = |token: &CapabilityToken| {
+            db.query_authorized(
+                &cx,
+                &issuer,
+                token,
+                BRANCH,
+                "EXPLAIN MATCH (n) RETURN n",
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+        };
+        assert!(matches!(
+            explain(&token),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Rows
+            )))
+        ));
+        let listed = explain(&issuer.issue_at(&grant(), 100).unwrap()).unwrap();
+        assert!(matches!(&listed, QueryResult::Rows { columns, rows }
+            if *columns == ["operator", "detail"] && !rows.is_empty()));
+        assert_eq!(db.frontier().unwrap(), before);
         for refused in [
-            "EXPLAIN MATCH (n) RETURN n",
+            "EXPLAIN (CERTIFICATE) MATCH (n) RETURN n",
+            "EXPLAIN INSERT (n:L)",
             "INSERT (n:L)",
             "CALL fnx.pagerank()",
             "MATCH (",

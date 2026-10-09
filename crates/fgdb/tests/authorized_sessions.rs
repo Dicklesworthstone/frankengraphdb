@@ -322,11 +322,22 @@ fn branch_selectors_and_argument_rebinding_do_not_redirect_session_authority() {
                 .query(&cx, "CREATE (n)", &GqlParameters::new())
                 .is_err()
         );
-        assert!(
-            session
-                .query(&cx, "EXPLAIN MATCH (n) RETURN n", &GqlParameters::new())
-                .is_err()
-        );
+        // EXPLAIN of a read lists its plan (fgdb-ooiik); neither the
+        // certificate form nor an explained write is expressible here.
+        let listed = session
+            .query(&cx, "EXPLAIN MATCH (n) RETURN n", &GqlParameters::new())
+            .unwrap();
+        assert!(matches!(&listed, QueryResult::Rows { columns, .. }
+            if *columns == ["operator", "detail"]));
+        for refused in [
+            "EXPLAIN (CERTIFICATE) MATCH (n) RETURN n",
+            "EXPLAIN CREATE (n)",
+        ] {
+            assert!(
+                session.query(&cx, refused, &GqlParameters::new()).is_err(),
+                "{refused}"
+            );
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

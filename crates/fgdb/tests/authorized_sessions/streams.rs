@@ -845,3 +845,62 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// EXPLAIN through an authorized session (fgdb-ooiik). The listing comes from
+/// the statement text and the session's catalog, so two databases differing
+/// only in records hidden from the token answer byte-identically. The
+/// certificate form, whose digest binds the snapshot sequence that hidden
+/// commits advance, refuses with a public reason.
+#[test]
+fn authorized_explain_lists_the_text_plan_and_cannot_see_hidden_records() {
+    let ((), report) = run_async_under_lab(0x5ec0_6102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let visible_only = stream_database(&c.commit(), false).await;
+        let with_hidden = stream_database(&c.commit(), true).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        fn explain_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                _ => symbols(kind, name),
+            }
+        }
+        let explain = |db: &Database<MemVfs>, text: &str| {
+            db.authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                explain_symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap()
+            .query(&cx, text, &args)
+        };
+        for text in [
+            "MATCH (n) RETURN n AS id, n.p AS p",
+            "MATCH (n:L) RETURN n AS id",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n AS id",
+        ] {
+            let statement = format!("EXPLAIN {text}");
+            let listed = explain(&visible_only, &statement).unwrap();
+            assert_eq!(listed, explain(&with_hidden, &statement).unwrap(), "{text}");
+            assert!(
+                matches!(&listed, QueryResult::Rows { columns, rows }
+                    if *columns == ["operator", "detail"] && !rows.is_empty()),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            explain(
+                &with_hidden,
+                "EXPLAIN (CERTIFICATE) MATCH (n) RETURN n AS id"
+            ),
+            Err(QueryError::Unsupported { .. })
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

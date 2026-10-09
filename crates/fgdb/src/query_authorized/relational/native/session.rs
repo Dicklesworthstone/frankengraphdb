@@ -311,6 +311,14 @@ fn text_at<R: GraphSymbolResolver>(
     let selected = selector.bind_parameters(params).map_err(selector_error)?;
     check_branch(&selected, branch)?;
     execution.borrow_mut().checkpoint()?;
+    if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
+        return result_rows(explain_authorized(
+            explain,
+            selected.parameters(),
+            BorrowedResolver(resolver),
+            || execution.borrow_mut().checkpoint(),
+        )?);
+    }
     let prepared = PreparedNativeRead::prepare(
         selected.statement(),
         selected.parameters(),

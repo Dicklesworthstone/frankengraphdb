@@ -34,6 +34,31 @@ fn rows_of(
     }
 }
 
+// EXPLAIN on an authorized surface (fgdb-ooiik). The listing derives from the
+// statement text, its parameters and the caller's catalog, never from records,
+// so nothing hidden from the capability can change it. The certificate form
+// binds the snapshot sequence, which hidden commits advance, so it refuses.
+// Invalidation is checked after preparation even when preparation fails.
+fn explain_authorized(
+    explain: Result<(&str, bool), QueryError>,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    checkpoint: impl FnOnce() -> Result<(), QueryError>,
+) -> Result<QueryResult, QueryError> {
+    let (statement, certificate) = explain?;
+    if certificate {
+        return Err(QueryError::Unsupported {
+            diagnostics: vec![
+                "EXPLAIN (CERTIFICATE) is not available under a capability".to_owned(),
+            ],
+        });
+    }
+    let prepared = PreparedNativeRead::prepare(statement, params, resolver);
+    checkpoint()?;
+    let listing = crate::query::explain::explain_rows(&prepared?);
+    crate::query::explain::explain_result(listing, None)
+}
+
 fn native_at<Clock: FnMut() -> u64>(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
@@ -176,9 +201,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// consumed there, while all other arguments retain native validation.
     ///
     /// Keep the issuer, raw Database, catalog mapping and monotone clock in the
-    /// trusted host. Ordinary Database methods are still privileged. Writes,
-    /// EXPLAIN/certified replay and unsupported classes refuse; this adds no
-    /// server session, streaming delivery, spill or physical noninterference.
+    /// trusted host. Ordinary Database methods are still privileged. EXPLAIN
+    /// lists the text-derived plan; writes, EXPLAIN (CERTIFICATE), certified
+    /// replay and unsupported classes refuse. This adds no server session,
+    /// streaming delivery, spill or physical noninterference.
     #[allow(clippy::too_many_arguments)]
     pub fn query_authorized(
         &self,
@@ -212,6 +238,14 @@ impl<V: Vfs + Clone> Database<V> {
                     return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
                 }
                 execution.borrow_mut().checkpoint()?;
+                if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
+                    return rows_of(
+                        explain_authorized(explain, selected.parameters(), resolver, || {
+                            execution.borrow_mut().checkpoint()
+                        })?,
+                        &mut columns,
+                    );
+                }
                 let prepared = PreparedNativeRead::prepare(
                     selected.statement(),
                     selected.parameters(),
