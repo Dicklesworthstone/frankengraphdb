@@ -196,7 +196,7 @@ fn computed_values_predicates_and_complete_inner_pages_match_native_relations() 
         "MATCH (n) RETURN n.p%2 AS value",
         "MATCH (n) RETURN DISTINCT n.p%2 AS value ORDER BY value DESC SKIP 1 LIMIT 2",
         "MATCH (n) RETURN {bucket:n.p%2,nested:[n.p,null]} AS value ORDER BY value",
-        "MATCH (n) RETURN [x IN [n.p,2,3] WHERE x > 1 | x*2] AS value ORDER BY value DESC",
+        "MATCH (n) RETURN [x IN [n.p,2,3] WHERE x > 1 | x * 2] AS value ORDER BY value DESC",
         "MATCH (n) RETURN reduce(total=0,x IN [n.p,2] | total+x) AS value",
         "MATCH (n) WITH n.p AS x WHERE x>1 RETURN x*2 AS value ORDER BY value DESC",
         "MATCH (n) WITH n.p AS x ORDER BY x DESC SKIP 1 LIMIT 3 RETURN 10-x AS value",
@@ -256,6 +256,7 @@ fn source_page_precedes_visible_row_canonicalization_and_scopes_preserve_selecte
     assert_eq!(plan.stages()[0].order(), Some(&[][..]));
     assert_eq!(plan.stages()[2].order(), None);
     assert_eq!(plan.stages()[2].offset(), 1);
+    assert_eq!(plan.stages()[2].count(), Some(1));
     assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(1)])]);
     assert_eq!(
         staged(&graph, &query).unwrap(),
@@ -335,7 +336,7 @@ fn projected_allocations_and_refusals_use_the_host_control_without_final_row_cha
 #[test]
 fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
     for text in [
-        "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a.p+c.p AS value LIMIT 0",
+        "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN a.p+c.p AS value LIMIT 0",
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(x) } RETURN a.p+1 AS value LIMIT 0",
     ] {
         let error = AsyncSpillSetPlan::compile(&prepare(text)).unwrap_err();
@@ -416,4 +417,31 @@ fn bound_parameters_and_cloned_definitions_outlive_the_template_and_arguments() 
         AsyncSpillSetPlan::compile(&projected).unwrap().columns(),
         &["renamed"]
     );
+}
+
+#[test]
+fn fixed_hop_sources_preserve_computed_barriers_multiplicity_and_hidden_source_windows() {
+    let graph = Graph::sample();
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r.p+s.p AS value ORDER BY value DESC",
+        "MATCH (a)-[r:R]-(b)-[s:R]-(c) RETURN {from:a.p,total:r.p+s.p,to:c.p} AS value ORDER BY value LIMIT 5",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN value*2 AS result",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH DISTINCT c.p AS value ORDER BY value DESC RETURN [value,value+1] AS result",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value WHERE value>9 RETURN value+1 AS result",
+    ] {
+        let query = prepare(text);
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        assert!(matches!(plan.source(), AsyncSpillSetSourcePlan::Join(_)));
+        assert_eq!(staged(&graph, &query).unwrap(), graph.native(&query).unwrap(), "{text}");
+    }
+    let query = prepare("MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN value*2 AS result");
+    assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(20)]), row(vec![scalar(20)]), row(vec![scalar(18)])]);
+    let source = leaf("MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN c.p AS value ORDER BY s.p DESC SKIP 1 LIMIT 3");
+    let query = PreparedGraphSet::from(source).nested().unwrap().with_page(1, Some(1));
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    assert!(matches!(plan.source(), AsyncSpillSetSourcePlan::Join(_)));
+    assert!(plan.source_tail().evaluation_width() > plan.source_tail().visible_width());
+    assert_eq!(plan.source_tail().offset(), 1);
+    assert_eq!(plan.source_tail().count(), Some(3));
+    assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(4)])]);
 }

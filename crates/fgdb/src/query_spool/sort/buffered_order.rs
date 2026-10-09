@@ -3,15 +3,19 @@
 
 use super::*;
 use crate::BufferedReadView;
-use fgdb_gql::edge_stream::AsyncEdgeScanPlan;
+use fgdb_gql::edge_stream::{
+    AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
+};
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::stream::AsyncVertexScanPlan;
+use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
 
 #[derive(Clone)]
 enum Input {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
+    Join(AsyncEdgeJoinPlan),
     Set(AsyncSpillSetPlan),
 }
 
@@ -33,12 +37,12 @@ impl core::fmt::Debug for PreparedBufferedOrder {
 }
 
 impl PreparedNativeRead {
-    /// Bind once and admit a vertex or single-edge local source for external
+    /// Bind once and admit a vertex, single-edge or fixed-hop source for external
     /// ordering. Property-only output, local predicates, hidden ordering keys,
     /// edge orientation and row DISTINCT use their existing GLA semantics.
     /// Native unary Project/Filter/Scope relations preserve every intermediate
     /// canonicalization, DISTINCT, order and window through external stages.
-    /// Expansion, probes, joins, UNWIND and aggregate shapes refuse here.
+    /// Probes, OPTIONAL/variable-length paths, relational joins and UNWIND refuse.
     /// Numeric aggregate plans have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -93,13 +97,18 @@ impl PreparedNativeRead {
             query.plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
         ) {
-            let (plan, tail) =
-                AsyncEdgeScanPlan::compile_sort_input(query.plan()).map_err(|error| {
-                    prepare(QueryError::EdgeStream(GqlQueryError::Source(
-                        EdgeScanError::Plan(error),
-                    )))
-                })?;
-            (Input::Edge(plan), tail)
+            let error = |error| {
+                prepare(QueryError::EdgeStream(GqlQueryError::Source(
+                    EdgeScanError::Plan(error),
+                )))
+            };
+            if query.plan().operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
+                let (plan, tail) = AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
+                (Input::Join(plan), tail)
+            } else {
+                let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(query.plan()).map_err(error)?;
+                (Input::Edge(plan), tail)
+            }
         } else {
             let (plan, tail) =
                 AsyncVertexScanPlan::compile_sort_input(query.plan()).map_err(|error| {
@@ -226,6 +235,7 @@ impl PreparedBufferedOrder {
                     input: match plan.source() {
                         AsyncSpillSetSourcePlan::Vertex(source) => Input::Vertex(source.clone()),
                         AsyncSpillSetSourcePlan::Edge(source) => Input::Edge(source.clone()),
+                        AsyncSpillSetSourcePlan::Join(source) => Input::Join(source.clone()),
                     },
                     tail,
                     as_of: Some(as_of),
@@ -294,6 +304,32 @@ impl PreparedBufferedOrder {
                     .await
                 })
             }
+            Input::Join(plan) => {
+                let opened = view
+                    .open_edge_join_input(cx, plan.clone(), as_of, input_policy)
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Edge),
+                        ))
+                    });
+                Box::pin(async move {
+                    evaluate(
+                        cx,
+                        columns,
+                        opened?,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_sort_work,
+                    )
+                    .await
+                })
+            }
             Input::Edge(plan) => {
                 let opened = view
                     .open_edge_input(cx, plan.clone(), as_of, input_policy)
@@ -323,3 +359,36 @@ impl PreparedBufferedOrder {
         }
     }
 }
+
+// Type adaptation only. Keep the guarded native row intact through canonical
+// encoding and awaited appends in the existing drain() loop. No second meter,
+// source collection, projection or row-count interpretation is added here.
+impl<S, C> SpoolInput for AsyncEdgeJoinCursor<S, C>
+where
+    S: AsyncEdgeJoinSource<Error = crate::BufferedReadError, OutputGuard = MemoryCharge>,
+    C: FnMut() -> Result<(), Cancel> + Send,
+{
+    async fn pull(&mut self) -> Option<Result<SpoolRow>> {
+        self.next().await.map(|row| {
+            row.map(|row| SpoolRow::buffered(row.into_parts())).map_err(|error| {
+                NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Edge)))
+            })
+        })
+    }
+    fn spool_state(&self) -> ScanState {
+        use fgdb_gql::edge_stream::EdgeScanState;
+        match self.state() {
+            EdgeScanState::Open => ScanState::Open,
+            EdgeScanState::Exhausted => ScanState::Exhausted,
+            EdgeScanState::Closed => ScanState::Closed,
+            EdgeScanState::Failed => ScanState::Failed,
+        }
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (self.snapshot_seq(), ScanKind::Edge, self.row_stats(), self.evaluator_stats())
+    }
+}
+
+#[cfg(test)]
+#[path = "buffered_join_tests.rs"]
+mod join_tests;

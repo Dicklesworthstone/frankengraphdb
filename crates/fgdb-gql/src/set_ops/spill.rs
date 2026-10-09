@@ -8,7 +8,7 @@ use super::{
 };
 use crate::GlaExecutionEvent;
 use crate::algebra::{GlaOperator, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
-use crate::edge_stream::{AsyncEdgeScanPlan, EdgeScanBuildError};
+use crate::edge_stream::{AsyncEdgeJoinPlan, AsyncEdgeScanPlan, EdgeScanBuildError};
 use crate::scan_stream::{ScanKind, ScanSortTail};
 use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use core::convert::Infallible;
@@ -46,12 +46,13 @@ impl core::error::Error for SpillSetBuildError {}
 pub enum AsyncSpillSetSourcePlan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
+    Join(AsyncEdgeJoinPlan),
 }
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
-            Self::Edge(_) => ScanKind::Edge,
+            Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
         }
     }
 }
@@ -79,9 +80,17 @@ impl AsyncSpillSetPlan {
             pattern.plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
         ) {
-            let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(pattern.plan())
-                .map_err(SpillSetBuildError::Edge)?;
-            (AsyncSpillSetSourcePlan::Edge(plan), tail)
+            // Choose the source contract from the complete native program,
+            // never by retrying a failed single-edge plan or storage operation.
+            if pattern.plan().operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
+                let (plan, tail) = AsyncEdgeJoinPlan::compile_sort_input(pattern.plan())
+                    .map_err(SpillSetBuildError::Edge)?;
+                (AsyncSpillSetSourcePlan::Join(plan), tail)
+            } else {
+                let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(pattern.plan())
+                    .map_err(SpillSetBuildError::Edge)?;
+                (AsyncSpillSetSourcePlan::Edge(plan), tail)
+            }
         } else {
             let (plan, tail) = AsyncVertexScanPlan::compile_sort_input(pattern.plan())
                 .map_err(SpillSetBuildError::Vertex)?;

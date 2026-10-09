@@ -566,7 +566,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         }
         for text in [
             "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN r.p LIMIT 0",
+            "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
             "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
@@ -919,6 +919,47 @@ fn async_delivery_retains_row_admission_until_flush_and_stops_on_broken_output()
                         .contains(r#""event":"result""#)
                 );
             }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_external_fixed_hop_joins_reach_cli_delivery_and_retire_scratch() {
+    let ((), report) = run_async_under_lab(0xc01d_3101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        for (text, seq) in [
+            ("MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r.p AS value ORDER BY value DESC SKIP 1 LIMIT 2", 2),
+            ("MATCH (a)-[r:R]-(b)-[s:R]-(c) FOR SYSTEM_TIME AS OF SEQ 1 RETURN DISTINCT c.p AS value ORDER BY value DESC", 1),
+            ("MATCH (a)-[r:R]->(b)-[s:R]->(c) FOR SYSTEM_TIME AS OF SEQ 1 WITH r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 2 RETURN {value:value,twice:value*2} AS result ORDER BY result", 1),
+            ("MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r.p AS value LIMIT 0", 2),
+        ] {
+            let mut options = spill_options(&directory, text);
+            // This profile retains two cold edge/endpoints records, not the
+            // single-edge working set used by the existing eight-MiB tests.
+            options.buffered.memory = Some(32 * 1024 * 1024);
+            let prepared = okay(prepare_query(&options));
+            let eager = resident.query(&cx, text, &options.params, &options,
+                options.budget.policy()).unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, seq, "rows", true, &mut expected));
+            options.budget.rows = Some(rows(&expected).len() as u64);
+            let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit, vfs.clone(), vfs.database_dir(), keys(), pool.clone(), limits,
+            ).await.unwrap();
+            let mut output = Vec::new();
+            okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            assert!(std::str::from_utf8(&output).unwrap().contains(r#""event":"result""#));
+            assert!(view.buffer_stats().bypasses > 0, "even final LIMIT zero completes input");
+            no_scratch(&directory);
+            drop(view);
+            assert_eq!(pool.used(), 0);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
