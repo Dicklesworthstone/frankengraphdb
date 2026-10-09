@@ -419,8 +419,26 @@ fn external_grouping_enforces_full_input_and_final_result_allowances() {
             );
             empty(&directory);
         }
+        // A DISTINCT argument spills since 4a84095f: the spilled count is the
+        // eager one. COLLECT and UNWIND still refuse below.
+        let text = "MATCH (n) RETURN count(DISTINCT n.p) AS count";
+        let counted = options(&directory, text);
+        let eager = view
+            .query(
+                &cx,
+                text,
+                &counted.params,
+                &counted,
+                counted.budget.policy(),
+            )
+            .unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        let mut actual = Vec::new();
+        okay(run(&view, &cx, &counted, None, true, &mut actual).await);
+        assert_eq!(rows(&actual), rows(&expected), "{text}");
+        empty(&directory);
         for text in [
-            "MATCH (n) RETURN count(DISTINCT n.p) AS count",
             "MATCH (n) RETURN collect(n.p) AS values",
             "UNWIND [1,2] AS value RETURN count(*) AS count",
         ] {
