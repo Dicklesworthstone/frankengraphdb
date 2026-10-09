@@ -3,11 +3,11 @@
 //! admitted records on the active traversal are retained, never neighbor bags.
 
 use super::*;
+use crate::GraphAggregateError;
 use crate::algebra::EdgeRelation;
 use crate::edge_stream::aggregate::{EdgeAggregateError, lift, value_event};
 use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::VertexScanEvent;
-use crate::GraphAggregateError;
 
 /// One nested incidence read: the next admitted candidate, or None at EOF.
 pub type AsyncIncidentCandidateResult<Record, Error, Control> =
@@ -82,7 +82,10 @@ impl AsyncEdgeJoinPlan {
         plan: &GlaPlan<GraphValueRow>,
     ) -> Result<Self, EdgeScanBuildError> {
         Self::check_access(plan)?;
-        Ok(Self::from_inner(compile_output(plan, Output::AggregateInput)?))
+        Ok(Self::from_inner(compile_output(
+            plan,
+            Output::AggregateInput,
+        )?))
     }
 
     /// ALL occurrences for a blocking consumer. The returned native tail must
@@ -526,12 +529,16 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                     GqlQueryError::Source(GraphAggregateError::Source(EdgeScanError::Source(error)))
                 })
             };
-            let row = definition.aggregate.evaluate_streamed_input(row, &mut |event| {
-                control(match event {
-                    GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
-                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
-                })
-            })?;
+            let row = definition
+                .aggregate
+                .evaluate_streamed_input(row, &mut |event| {
+                    control(match event {
+                        GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => {
+                            VertexScanEvent::Work
+                        }
+                    })
+                })?;
             definition.validate_input(&row, &mut control)?;
             Ok(AsyncEdgeJoinOutput { row, guard })
         })();
@@ -556,7 +563,9 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        let result = self.meter.control(value_event(event))
+        let result = self
+            .meter
+            .control(value_event(event))
             .map_err(|error| error.map_source(|never| match never {}));
         if result.is_err() {
             self.fail();
@@ -572,14 +581,26 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
     {
         if self.state != EdgeScanState::Exhausted {
             self.fail();
-            return Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput));
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
         }
         let result = (|| {
-            let count = self.meter.rows.result_rows.checked_add(1)
-                .ok_or(GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
-            self.meter.policy.rows.check(GqlBudgetDimension::ResultRows, count)
+            let count = self
+                .meter
+                .rows
+                .result_rows
+                .checked_add(1)
+                .ok_or(GqlQueryError::Source(
+                    GraphAggregateError::ResultCountOverflow,
+                ))?;
+            self.meter
+                .policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, count)
                 .map_err(GqlQueryError::Rows)?;
-            self.meter.control(GlaExecutionEvent::ResultRow)
+            self.meter
+                .control(GlaExecutionEvent::ResultRow)
                 .map_err(|error| error.map_source(|never| match never {}))?;
             self.meter.rows.result_rows = count;
             Ok(())

@@ -2,11 +2,11 @@
 //! External storage, group populations and argument DISTINCT remain host-owned.
 
 use super::{SpillAggregateBuildError, SpillAggregateDefinition};
+use crate::edge_stream::aggregate::EdgeAggregateError;
 use crate::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
     EdgeScanBuildError, EdgeScanState,
 };
-use crate::edge_stream::aggregate::EdgeAggregateError;
 use crate::stream::VertexScanEvent;
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryPolicy, GraphAggregateError,
@@ -32,7 +32,8 @@ impl AsyncEdgeJoinSpillAggregatePlan {
     pub(crate) fn from_definition(
         definition: SpillAggregateDefinition,
     ) -> Result<Self, EdgeScanBuildError> {
-        let input = AsyncEdgeJoinPlan::compile_aggregate(definition.aggregate.input_pattern().plan())?;
+        let input =
+            AsyncEdgeJoinPlan::compile_aggregate(definition.aggregate.input_pattern().plan())?;
         Ok(Self { input, definition })
     }
 
@@ -58,18 +59,35 @@ pub struct AsyncEdgeJoinSpillAggregateCursor<S: AsyncEdgeJoinSource, F> {
     definition: SpillAggregateDefinition,
 }
 impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinSpillAggregateCursor<S, F> {
-    pub fn new(source: S, plan: AsyncEdgeJoinSpillAggregatePlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
+    pub fn new(
+        source: S,
+        plan: AsyncEdgeJoinSpillAggregatePlan,
+        policy: GqlQueryPolicy,
+        checkpoint: F,
+    ) -> Self {
         Self {
             input: AsyncEdgeJoinCursor::new(source, plan.input, policy, checkpoint),
             definition: plan.definition,
         }
     }
-    pub fn definition(&self) -> &SpillAggregateDefinition { &self.definition }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.input.snapshot_seq() }
-    pub fn state(&self) -> EdgeScanState { self.input.state() }
-    pub fn row_stats(&self) -> GqlExecutionStats { self.input.row_stats() }
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.input.evaluator_stats() }
-    pub fn close(&mut self) { self.input.close(); }
+    pub fn definition(&self) -> &SpillAggregateDefinition {
+        &self.definition
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.input.snapshot_seq()
+    }
+    pub fn state(&self) -> EdgeScanState {
+        self.input.state()
+    }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.input.row_stats()
+    }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.input.evaluator_stats()
+    }
+    pub fn close(&mut self) {
+        self.input.close();
+    }
 
     /// Evaluate and validate one complete input before host partitioning.
     /// Each computed allocation is admitted through output_event AFTER native
@@ -84,17 +102,26 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinSpillAggregateCursor<S, F> {
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
-        self.input.next_aggregate_input(&self.definition, output_event).await
+        self.input
+            .next_aggregate_input(&self.definition, output_event)
+            .await
     }
 
     /// Source-free external reduction admission through the input's meter.
-    pub fn charge<E, C>(&mut self, event: VertexScanEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
-    where F: FnMut() -> Result<(), C> {
+    pub fn charge<E, C>(
+        &mut self,
+        event: VertexScanEvent,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         self.input.charge_aggregate(event)
     }
 
     pub fn finish_result<E, C>(&mut self) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
-    where F: FnMut() -> Result<(), C> {
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         self.input.finish_aggregate_result()
     }
 }
