@@ -7,8 +7,8 @@ use super::*;
 use fgdb_gql::algebra::{EdgeRelation, GlaDirection};
 use fgdb_gql::edge_stream::{
     AsyncEdgeCandidate, AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
-    AsyncEdgeScanEvent, AsyncEdgeScanRecord, AsyncEdgeScanSource, EdgeExpansionSourceError,
-    EdgeScanRecord, VertexScanRecord,
+    AsyncEdgeScanEvent, AsyncEdgeScanRecord, AsyncEdgeScanSource, AsyncIncidentCandidateResult,
+    EdgeExpansionSourceError, EdgeScanRecord, VertexScanRecord,
 };
 use fgdb_gql::stream::VertexScanEvent;
 
@@ -148,7 +148,7 @@ impl AsyncEdgeJoinSource for Source<'_> {
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<ReadError, C>> {
+    ) -> AsyncIncidentCandidateResult<Record, ReadError, C> {
         let id = self.0.next_incident_edge_for_relation(
             endpoint,
             relation,

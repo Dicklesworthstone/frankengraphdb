@@ -278,7 +278,7 @@ impl AsyncEdgeJoinSource for Source {
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<Self::Error, C>> {
+    ) -> AsyncIncidentCandidateResult<Record, Self::Error, C> {
         let seek = self.counts.seeks.fetch_add(1, Ordering::SeqCst);
         if self.unavailable {
             return Err(EdgeExpansionSourceError::Unavailable);

@@ -14,7 +14,10 @@ pub use asynchronous::{
 };
 mod join;
 pub(crate) use join::Probe;
-pub use join::{AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource};
+pub use join::{
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
+    AsyncIncidentCandidateResult,
+};
 mod record;
 pub use record::EdgeScanRecord;
 

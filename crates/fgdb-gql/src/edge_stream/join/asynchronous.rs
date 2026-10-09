@@ -9,6 +9,10 @@ use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::VertexScanEvent;
 use crate::GraphAggregateError;
 
+/// One nested incidence read: the next admitted candidate, or None at EOF.
+pub type AsyncIncidentCandidateResult<Record, Error, Control> =
+    Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<Error, Control>>;
+
 /// An asynchronous source with independent strict-successor incidence reads.
 /// Root and nested reads share one immutable cut and masking policy. Nested
 /// reads must not advance the root scan, scan unrelated graph edges, or collect
@@ -39,10 +43,7 @@ pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> impl core::future::Future<
-        Output = Result<
-            Option<AsyncEdgeCandidate<Self::Record>>,
-            EdgeExpansionSourceError<Self::Error, C>,
-        >,
+        Output = AsyncIncidentCandidateResult<Self::Record, Self::Error, C>,
     > + Send;
 
     fn reserve_traversal<C>(
