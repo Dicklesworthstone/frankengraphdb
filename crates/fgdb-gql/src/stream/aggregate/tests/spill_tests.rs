@@ -344,17 +344,27 @@ fn spill_rejects_unimplemented_semantics_and_cross_definition_states() {
         SpillAggregatePlan::compile(&relation),
         Err(SpillAggregateBuildError::Unsupported)
     ));
+    let definition = PreparedGraphAggregate::prepare(
+        input(),
+        &[],
+        &[GraphAggregate::collect("value", 0)],
+        0,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        SpillAggregatePlan::compile(&definition),
+        Err(SpillAggregateBuildError::Unsupported)
+    ));
+    // DISTINCT arguments spill through the host's canonical dedup since
+    // 4a84095f; collection is still refused above.
     for function in [
         GraphAggregate::count_distinct("value", 0),
-        GraphAggregate::collect("value", 0),
         GraphAggregate::sum_int_distinct("value", 0),
     ] {
         let definition =
             PreparedGraphAggregate::prepare(input(), &[], &[function], 0, None).unwrap();
-        assert!(matches!(
-            SpillAggregatePlan::compile(&definition),
-            Err(SpillAggregateBuildError::Unsupported)
-        ));
+        assert!(SpillAggregatePlan::compile(&definition).is_ok());
     }
     let paged = PreparedGraphAggregate::prepare(
         input(),
