@@ -6,6 +6,9 @@ use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, EdgeExpansionSourceError,
 };
+use fgdb_gql::spill_aggregate::{
+    AsyncEdgeJoinSpillAggregateCursor, AsyncEdgeJoinSpillAggregatePlan,
+};
 use fgdb_strata::tiered::edge_scan::BufferedEdgeDirection;
 use fgdb_types::EId;
 
@@ -183,6 +186,27 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     > {
         let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
         Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
+    }
+
+    // Numeric reducers consume private occurrences, not delivered join rows.
+    // Preserve the same routed source, cut, QueryCx and resident reservations;
+    // only the sealed native aggregate-input plan selects its accounting mode.
+    pub(crate) fn open_edge_join_aggregate_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncEdgeJoinSpillAggregatePlan,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncEdgeJoinSpillAggregateCursor<
+            impl AsyncEdgeJoinSource<Error = BufferedReadError, OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge> + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+        >,
+        EdgeQueryError,
+    > {
+        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        Ok(AsyncEdgeJoinSpillAggregateCursor::new(source, plan, policy, checkpoint))
     }
 }
 

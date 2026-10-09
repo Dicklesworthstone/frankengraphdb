@@ -156,11 +156,11 @@ fn async_edge_aggregate_refusals_keep_typed_failures_and_release_pending_orienta
 }
 
 #[test]
-fn async_edge_aggregate_admits_only_local_complete_inputs_and_reduction_requires_exhaustion() {
+fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustion() {
     for text in [
-        "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS rows LIMIT 0",
-        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS rows LIMIT 0",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.p) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS rows LIMIT 0",
     ] {
         assert!(
@@ -168,6 +168,16 @@ fn async_edge_aggregate_admits_only_local_complete_inputs_and_reduction_requires
             "{text}"
         );
     }
+    assert!(matches!(
+        AsyncSpillAggregatePlan::compile(&definition(
+            "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0"
+        )), Ok(AsyncSpillAggregatePlan::Join(_))
+    ));
+    assert!(matches!(
+        AsyncSpillAggregatePlan::compile(&definition(
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS rows LIMIT 0"
+        )), Ok(AsyncSpillAggregatePlan::Edge(_))
+    ));
     let query = definition("MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS rows");
     let AsyncSpillAggregatePlan::Edge(plan) = AsyncSpillAggregatePlan::compile(&query).unwrap()
     else {

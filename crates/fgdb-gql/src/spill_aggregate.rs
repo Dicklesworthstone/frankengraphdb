@@ -86,12 +86,14 @@ impl SpillAggregatePlan {
 
 /// A complete aggregate input admitted for asynchronous local source access.
 /// The ordinary numeric definition and row evaluators own every semantic step.
-/// Vertex probes, edge expansion/probes and relational input refuse before the
+/// Fixed-hop edge expansions use the native awaitable join driver. Probes,
+/// OPTIONAL/variable-length expansion and relational input refuse before the
 /// host opens storage. This is a physical source plan, not a result or authority.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillAggregatePlan {
     Vertex(AsyncVertexSpillAggregatePlan),
     Edge(AsyncEdgeSpillAggregatePlan),
+    Join(AsyncEdgeJoinSpillAggregatePlan),
 }
 
 impl AsyncSpillAggregatePlan {
@@ -101,9 +103,19 @@ impl AsyncSpillAggregatePlan {
             aggregate.input_pattern().plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
         ) {
-            AsyncEdgeSpillAggregatePlan::compile(definition)
-                .map(Self::Edge)
-                .map_err(SpillAggregateBuildError::Edge)
+            // Select the access contract from the bound program, never by
+            // retrying a rejected compiler or a failed storage operation.
+            if aggregate.input_pattern().plan().operators().iter()
+                .any(|operator| matches!(operator, GlaOperator::Expand { .. }))
+            {
+                AsyncEdgeJoinSpillAggregatePlan::from_definition(definition)
+                    .map(Self::Join)
+                    .map_err(SpillAggregateBuildError::Edge)
+            } else {
+                AsyncEdgeSpillAggregatePlan::compile(definition)
+                    .map(Self::Edge)
+                    .map_err(SpillAggregateBuildError::Edge)
+            }
         } else {
             AsyncVertexSpillAggregatePlan::compile(definition)
                 .map(Self::Vertex)
@@ -114,12 +126,13 @@ impl AsyncSpillAggregatePlan {
         match self {
             Self::Vertex(plan) => plan.definition(),
             Self::Edge(plan) => plan.definition(),
+            Self::Join(plan) => plan.definition(),
         }
     }
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
-            Self::Edge(_) => ScanKind::Edge,
+            Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
         }
     }
 }

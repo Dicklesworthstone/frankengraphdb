@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::BufferedReadView;
-use fgdb_gql::edge_stream::AsyncEdgeScanSource;
+use fgdb_gql::edge_stream::{AsyncEdgeJoinSource, AsyncEdgeScanSource};
 use fgdb_gql::spill_aggregate::{
-    AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan, AsyncVertexSpillAggregateCursor,
+    AsyncEdgeJoinSpillAggregateCursor, AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan,
+    AsyncVertexSpillAggregateCursor,
 };
 use fgdb_gql::stream::AsyncVertexScanSource;
 
@@ -25,8 +26,8 @@ macro_rules! buffered_input {
             fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>> {
                 Box::pin(async move {
                     let cx = self.cx;
-                    // The source record's temporary reservation has ended by
-                    // computed-input evaluation. Grow the returned row's own
+                    // Source-record reservations do not cover computed-input
+                    // allocations. Grow the returned row's independent
                     // guard BEFORE every native allocation and retain it until
                     // the shared drain has encoded and appended the occurrence.
                     let mut reserve = |guard: &mut MemoryCharge, event| {
@@ -91,6 +92,12 @@ buffered_input!(
     Edge,
     fgdb_gql::edge_stream::EdgeScanState::Exhausted
 );
+buffered_input!(
+    AsyncEdgeJoinSpillAggregateCursor,
+    AsyncEdgeJoinSource,
+    Edge,
+    fgdb_gql::edge_stream::EdgeScanState::Exhausted
+);
 
 /// A completely bound local aggregate source plus its ordinary numeric/output
 /// definition. Construction reads no graph. The only execution strategy is the
@@ -110,11 +117,13 @@ impl core::fmt::Debug for PreparedBufferedAggregate {
 
 impl PreparedNativeRead {
     /// Bind native COUNT/SUM/AVG/MIN/MAX and admit a local asynchronous vertex
-    /// or single-edge source before database opening. Computed inputs, HAVING,
+    /// or fixed-hop edge source before database opening. Computed inputs, HAVING,
     /// computed visible output, RETURN DISTINCT and exact numeric ordering use
     /// the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT arguments use
     /// bounded external support passes. COLLECT,
-    /// relational input, expansion and probes refuse at preparation.
+    /// relational input, OPTIONAL/variable-length expansion and probes refuse
+    /// at preparation. Join routing and one record per hop use the view pool;
+    /// routing metadata remains resident and may refuse when it does not fit.
     pub fn prepare_buffered_aggregate(
         &self,
         params: &GqlParameters,
@@ -208,6 +217,16 @@ impl PreparedBufferedAggregate {
                 }),
             AsyncSpillAggregatePlan::Edge(plan) => view
                 .open_edge_aggregate_input(cx, plan.clone(), as_of, policy)
+                .map(|cursor| -> Box<dyn GroupInput + 'q> {
+                    Box::new(BufferedInput { cursor, cx })
+                })
+                .map_err(|error| {
+                    NativeAggregateSpoolError::BufferedExecute(Box::new(error.map_source(
+                        |error| fgdb_gql::GraphAggregateError::Source(ScanError::Edge(error)),
+                    )))
+                }),
+            AsyncSpillAggregatePlan::Join(plan) => view
+                .open_edge_join_aggregate_input(cx, plan.clone(), as_of, policy)
                 .map(|cursor| -> Box<dyn GroupInput + 'q> {
                     Box::new(BufferedInput { cursor, cx })
                 })
