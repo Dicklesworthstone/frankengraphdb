@@ -4791,15 +4791,28 @@ fn vertex_statement_transcript(
     labels: &[LabelId],
     props: &[(PropertyKeyId, CanonicalScalar)],
 ) -> Result<Vec<u8>, CanonicalError> {
-    let mut out = vec![0x01];
+    let mut out = Vec::new();
+    write_vertex_statement_transcript(&mut out, vid, birth_ordinal, labels, props)?;
+    Ok(out)
+}
+
+/// [`vertex_statement_transcript`] into a reused buffer, which it clears.
+fn write_vertex_statement_transcript(
+    out: &mut Vec<u8>,
+    vid: VId,
+    birth_ordinal: u64,
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<(), CanonicalError> {
+    out.clear();
+    out.push(0x01);
     out.extend_from_slice(&vid.0.to_le_bytes());
     out.extend_from_slice(&birth_ordinal.to_le_bytes());
     out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
     for label in labels {
         out.extend_from_slice(&label.0.to_le_bytes());
     }
-    append_props_transcript(&mut out, props)?;
-    Ok(out)
+    append_props_transcript(out, props)
 }
 
 /// One edge statement's transcript: identity, immutable topology, content.
@@ -4810,13 +4823,27 @@ fn edge_statement_transcript(
     dst: VId,
     props: &[(PropertyKeyId, CanonicalScalar)],
 ) -> Result<Vec<u8>, CanonicalError> {
-    let mut out = vec![0x02];
+    let mut out = Vec::new();
+    write_edge_statement_transcript(&mut out, eid, src, relation, dst, props)?;
+    Ok(out)
+}
+
+/// [`edge_statement_transcript`] into a reused buffer, which it clears.
+fn write_edge_statement_transcript(
+    out: &mut Vec<u8>,
+    eid: EId,
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<(), CanonicalError> {
+    out.clear();
+    out.push(0x02);
     out.extend_from_slice(&eid.0.to_le_bytes());
     out.extend_from_slice(&src.0.to_le_bytes());
     out.extend_from_slice(&relation.0.to_le_bytes());
     out.extend_from_slice(&dst.0.to_le_bytes());
-    append_props_transcript(&mut out, props)?;
-    Ok(out)
+    append_props_transcript(out, props)
 }
 
 fn append_props_transcript(
@@ -5116,74 +5143,87 @@ fn derive_versions_and_ordinal(
     patches: &[VertexPatchRows],
     frontier: CommitSeq,
 ) -> Result<(std::collections::BTreeMap<ElementId, ObjectId>, u64), CanonicalError> {
-    let mut versions = std::collections::BTreeMap::new();
+    let live = |created_at: CommitSeq, retired_at: Option<CommitSeq>| {
+        retired_at.is_none_or(|r| r.0 > frontier.0) && created_at.0 <= frontier.0
+    };
+    // Statements are borrowed, sorted stably by (identity, created_at) and
+    // folded per identity. A later publication restates an equal key, so of a
+    // run of equal keys only the last (latest published) statement counts. An
+    // element's head is its last statement's version when that statement is
+    // live. Every identity with a statement was spent once.
+    let mut heads = Vec::new();
+    let mut spent = 0_u64;
+    let mut transcript = Vec::new();
 
-    // Vertices: statements keyed (vid, created_at), later patches restate.
-    let mut vertex_statements: std::collections::BTreeMap<(VId, u64), &VertexRow> =
-        std::collections::BTreeMap::new();
-    for rows in patches {
-        for row in rows {
-            vertex_statements.insert((row.vid, row.created_at.0), row);
+    let mut vertex_statements: Vec<&VertexRow> = patches.iter().flatten().collect();
+    vertex_statements.sort_by_key(|row| (row.vid, row.created_at));
+    for chain in vertex_statements.chunk_by(|a, b| a.vid == b.vid) {
+        spent += 1;
+        let mut version = None;
+        for (at, row) in chain.iter().enumerate() {
+            if chain
+                .get(at + 1)
+                .is_some_and(|next| next.created_at == row.created_at)
+            {
+                continue;
+            }
+            write_vertex_statement_transcript(
+                &mut transcript,
+                row.vid,
+                row.birth_ordinal,
+                &row.labels,
+                &row.props,
+            )?;
+            version = Some(statement_successor(version, &transcript));
         }
-    }
-    let mut spent_vertices = std::collections::BTreeSet::new();
-    let mut head: Option<(VId, ObjectId, bool)> = None;
-    for ((vid, _), row) in &vertex_statements {
-        spent_vertices.insert(*vid);
-        let previous = match &head {
-            Some((prev_vid, version, _)) if prev_vid == vid => Some(*version),
-            _ => None,
+        let (Some(last), Some(version)) = (chain.last(), version) else {
+            continue;
         };
-        let transcript =
-            vertex_statement_transcript(row.vid, row.birth_ordinal, &row.labels, &row.props)?;
-        let version = statement_successor(previous, &transcript);
-        let live =
-            row.retired_at.is_none_or(|r| r.0 > frontier.0) && row.created_at.0 <= frontier.0;
-        head = Some((*vid, version, live));
-        if live {
-            versions.insert(ElementId::Vertex(*vid), version);
-        } else {
-            versions.remove(&ElementId::Vertex(*vid));
+        if live(last.created_at, last.retired_at) {
+            heads.push((ElementId::Vertex(last.vid), version));
         }
     }
 
-    // Edges: statements keyed (eid, created_at) across publication order,
-    // later blocks restate (tombstone supersede).
-    let mut edge_statements: std::collections::BTreeMap<
-        (EId, u64),
-        (AdjacencyEntry, EdgePropertyRow),
-    > = std::collections::BTreeMap::new();
+    let mut edge_statements: Vec<(&AdjacencyEntry, &[(PropertyKeyId, CanonicalScalar)])> =
+        Vec::new();
     for (block, props) in blocks.iter().zip(block_props) {
         for (index, entry) in block.iter().enumerate() {
             let row = props
                 .as_ref()
-                .map(|props| props.props_of(index))
-                .unwrap_or_default();
-            edge_statements.insert((entry.eid, entry.created_at.0), (*entry, row));
+                .map_or(&[][..], |props| props.props_ref(index));
+            edge_statements.push((entry, row));
         }
     }
-    let mut spent_edges = std::collections::BTreeSet::new();
-    let mut head: Option<(EId, ObjectId)> = None;
-    for ((eid, _), (entry, row)) in &edge_statements {
-        spent_edges.insert(*eid);
-        let previous = match &head {
-            Some((prev_eid, version)) if prev_eid == eid => Some(*version),
-            _ => None,
+    edge_statements.sort_by_key(|(entry, _)| (entry.eid, entry.created_at));
+    for chain in edge_statements.chunk_by(|(a, _), (b, _)| a.eid == b.eid) {
+        spent += 1;
+        let mut version = None;
+        for (at, (entry, row)) in chain.iter().enumerate() {
+            if chain
+                .get(at + 1)
+                .is_some_and(|(next, _)| next.created_at == entry.created_at)
+            {
+                continue;
+            }
+            write_edge_statement_transcript(
+                &mut transcript,
+                entry.eid,
+                entry.src,
+                entry.relation,
+                entry.dst,
+                row,
+            )?;
+            version = Some(statement_successor(version, &transcript));
+        }
+        let (Some((last, _)), Some(version)) = (chain.last(), version) else {
+            continue;
         };
-        let transcript =
-            edge_statement_transcript(*eid, entry.src, entry.relation, entry.dst, row)?;
-        let version = statement_successor(previous, &transcript);
-        head = Some((*eid, version));
-        let live =
-            entry.retired_at.is_none_or(|r| r.0 > frontier.0) && entry.created_at.0 <= frontier.0;
-        if live {
-            versions.insert(ElementId::Edge(*eid), version);
-        } else {
-            versions.remove(&ElementId::Edge(*eid));
+        if live(last.created_at, last.retired_at) {
+            heads.push((ElementId::Edge(last.eid), version));
         }
     }
 
-    Ok((versions, (spent_vertices.len() + spent_edges.len()) as u64))
+    Ok((heads.into_iter().collect(), spent))
 }
 
 /// Post-verification checkpoint reopen (fgdb-ge6a): resolve the slot's

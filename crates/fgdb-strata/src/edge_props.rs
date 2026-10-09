@@ -66,13 +66,18 @@ impl BlockProps {
     /// The property list of the entry at `index`, empty when the entry's
     /// locator is 0 or the block hosts no patch at all.
     pub fn props_of(&self, index: usize) -> EdgePropertyRow {
+        self.props_ref(index).to_vec()
+    }
+
+    /// [`Self::props_of`] borrowed from the decoded patch, for a caller that
+    /// only reads the row.
+    pub fn props_ref(&self, index: usize) -> &[(PropertyKeyId, CanonicalScalar)] {
         match self.locators.get(index) {
             Some(&locator) if locator != 0 => self
                 .rows
                 .get(usize::from(locator) - 1)
-                .cloned()
-                .unwrap_or_default(),
-            _ => Vec::new(),
+                .map_or(&[], Vec::as_slice),
+            _ => &[],
         }
     }
 }
