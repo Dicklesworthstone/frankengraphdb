@@ -98,34 +98,63 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
-        let operand = if bare_variable {
+        // A list or map argument, as in COUNT(DISTINCT [a, b]), reads with the
+        // RETURN value grammar over the same input sources. The input binder
+        // already lowers every composite template, so no new evaluator exists.
+        let composite = self.is_punct(b'[') || self.is_punct(b'{');
+        let operand = if composite {
+            None
+        } else if bare_variable {
             let variable = self.any_variable()?;
-            Operand::Column(self.mutation_projection(&mut sources, variable, None)?)
+            Some(Operand::Column(self.mutation_projection(
+                &mut sources,
+                variable,
+                None,
+            )?))
         } else {
-            self.aggregate_value_expression(&mut sources)
-                .map_err(scalar_error)?
+            Some(
+                self.aggregate_value_expression(&mut sources)
+                    .map_err(scalar_error)?,
+            )
+        };
+        // Err carries a plain scalar/vertex input's column.
+        let value = match operand {
+            None => Ok(self.read_graph_value(&mut sources, 0).map_err(|source| {
+                let kind = match source.kind {
+                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                    _ => GraphPatternTextErrorKind::Expected(
+                        "valid bounded aggregate list or map argument",
+                    ),
+                };
+                error(source.offset, kind)
+            })?),
+            Some(Operand::Column(column)) => Err(column),
+            Some(Operand::Literal(value)) => Ok(ReadValueTemplate::Literal(value)),
+            Some(Operand::Number(Number::Literal(value))) => {
+                Ok(ReadValueTemplate::Literal(scalar(value, at)?))
+            }
+            Some(Operand::Number(Number::Parameter(index))) => {
+                Ok(ReadValueTemplate::Parameter { index, at })
+            }
+            Some(Operand::Integer { program, at }) => {
+                Ok(ReadValueTemplate::Integer { program, at })
+            }
         };
         computed.sources = sources
             .iter()
             .map(|source| (source.variable, source.property, source.path))
             .collect();
-        if let Operand::Column(column) = operand {
-            let source = sources[column];
-            return Ok(Expression {
-                variable: source.variable,
-                property: source.property,
-                path: source.path,
-                computed: None,
-            });
-        }
-        let value = match operand {
-            Operand::Literal(value) => ReadValueTemplate::Literal(value),
-            Operand::Number(Number::Literal(value)) => {
-                ReadValueTemplate::Literal(scalar(value, at)?)
+        let value = match value {
+            Ok(value) => value,
+            Err(column) => {
+                let source = sources[column];
+                return Ok(Expression {
+                    variable: source.variable,
+                    property: source.property,
+                    path: source.path,
+                    computed: None,
+                });
             }
-            Operand::Number(Number::Parameter(index)) => ReadValueTemplate::Parameter { index, at },
-            Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
-            Operand::Column(_) => unreachable!("plain scalar/vertex inputs returned above"),
         };
         let index = if let Some(index) = computed
             .operands

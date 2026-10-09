@@ -818,7 +818,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn read_graph_value(
+    pub(super) fn read_graph_value(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         depth: usize,

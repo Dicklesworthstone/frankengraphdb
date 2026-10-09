@@ -880,3 +880,79 @@ fn projected_function_keys_group_by_the_function_value_not_the_variable() {
         "type(r) and r are two keys"
     );
 }
+
+#[test]
+fn list_and_map_arguments_aggregate_as_whole_values() {
+    // Independent expectation over n = 1..=12 plus vertex 13 without n:
+    // twelve distinct [n % 3, n] pairs, three {bucket: n % 3} maps and six
+    // (n % 3, n % 2) residue pairs (Chinese remainder theorem). Vertex 13
+    // contributes [NULL, NULL] and {bucket: NULL}: a list or map holding NULL
+    // is itself not NULL, so COUNT counts it, unlike COUNT(a.n).
+    let properties: BTreeMap<_, _> = (1..=12)
+        .map(|n| (VId(n), CanonicalScalar::Int(n as i64)))
+        .collect();
+    let run = |text: &str, high: u128| {
+        prepare(text).execute_governed(
+            high as u64,
+            (1..=high).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, _| Ok(properties.get(&vid)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+    };
+    let counts = |text: &str, high: u128| -> Vec<Vec<Option<u64>>> {
+        run(text, high)
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values().iter().map(|cell| cell.as_count()).collect())
+            .collect()
+    };
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN COUNT(DISTINCT [a.n%3,a.n]) AS pairs,\
+             COUNT(DISTINCT {bucket:a.n%3}) AS buckets,COUNT([a.n%3]) AS lists,\
+             COUNT(a.n) AS present",
+            13
+        ),
+        [[Some(13), Some(4), Some(13), Some(12)]]
+    );
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN COUNT(DISTINCT [x IN [a.n%3,a.n%2] | x*2]) AS residues",
+            12
+        ),
+        [[Some(6)]]
+    );
+    // Each parity class meets all three buckets.
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN a.n%2 AS parity,COUNT(DISTINCT [a.n%3]) AS buckets \
+             GROUP BY a.n%2 ORDER BY parity",
+            12
+        ),
+        [[Some(3)], [Some(3)]]
+    );
+    // ORDER BY and HAVING may repeat a composite aggregate.
+    for (having, expected) in [(3, vec![vec![Some(12)]]), (4, Vec::new())] {
+        assert_eq!(
+            counts(
+                &format!(
+                    "MATCH (a) RETURN COUNT(*) AS rows HAVING COUNT(DISTINCT [a.n%3]) = {having} \
+                     ORDER BY COUNT(DISTINCT [a.n%3])"
+                ),
+                12
+            ),
+            expected
+        );
+    }
+    // A list never sums: the typed failure, not a coercion.
+    assert!(matches!(
+        run("MATCH (a) RETURN SUM([a.n]) AS total", 12),
+        Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+            aggregate: 0
+        }))
+    ));
+}
