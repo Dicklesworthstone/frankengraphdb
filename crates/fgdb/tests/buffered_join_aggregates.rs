@@ -18,7 +18,7 @@ use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
     QueryCx, VId,
 };
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::io::{self, Cursor, Seek, SeekFrom};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

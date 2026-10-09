@@ -12,7 +12,6 @@ use fgdb_strata::tiered::memory::{MemoryPool, SpillLimits};
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
-use std::future::Future;
 use std::io::{self, Cursor, Seek, SeekFrom};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -215,7 +214,7 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
             let mut maps: Vec<_> = pairs
                 .into_iter()
                 .map(|(sum, target)| GraphValue::Map {
-                    keys: vec!["target".to_owned(), "total".to_owned()].into_boxed_slice(),
+                    keys: vec!["target".into(), "total".into()].into_boxed_slice(),
                     values: vec![scalar(target), scalar(sum)].into_boxed_slice(),
                 })
                 .collect();

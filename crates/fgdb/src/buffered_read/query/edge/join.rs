@@ -146,6 +146,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// The view/context are borrowed, but the prepared definition is not.
     /// Initial admission/recovery retain their existing bounds. Owner-level API:
     /// no Warden grant, durable result lease, OPTIONAL/probe or unbounded walk.
+    // The cursor's source and checkpoint are opaque, and stable Rust cannot
+    // name an opaque type in an alias, so this and the three join openers
+    // below spell the type out (as the resident join entry points do).
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -168,6 +172,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
 
     /// Execute at the exact retained cut; a future cut refuses before source
     /// construction. No root, child or endpoint silently uses a newer frontier.
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed_at<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -199,6 +204,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
 
     // Also serves the existing external ordering consumer. Only a fully checked
     // native join plan can enter; this never retries a failed source as eager.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn open_edge_join_input<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -223,6 +229,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     // Numeric reducers consume private occurrences, not delivered join rows.
     // Preserve the same routed source, cut, QueryCx and resident reservations;
     // only the sealed native aggregate-input plan selects its accounting mode.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn open_edge_join_aggregate_input<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -231,14 +238,19 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinSpillAggregateCursor<
-            impl AsyncEdgeJoinSource<Error = BufferedReadError, OutputGuard = MemoryCharge,
-                TraversalGuard = MemoryCharge> + use<'view, 'q, V>,
+            impl AsyncEdgeJoinSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+                TraversalGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
         >,
         EdgeQueryError,
     > {
         let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
-        Ok(AsyncEdgeJoinSpillAggregateCursor::new(source, plan, policy, checkpoint))
+        Ok(AsyncEdgeJoinSpillAggregateCursor::new(
+            source, plan, policy, checkpoint,
+        ))
     }
 }
 
