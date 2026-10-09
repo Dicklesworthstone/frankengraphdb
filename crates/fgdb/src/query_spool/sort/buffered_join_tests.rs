@@ -237,7 +237,9 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                     }),
                 ),
                 (
-                    "WITH s.p AS x ORDER BY x DESC SKIP 1 LIMIT 3 RETURN x*2 AS value",
+                    // RETURN without ORDER BY is canonical row order, not the
+                    // WITH stage's (owner ruling 2026-10-09), so state it.
+                    "WITH s.p AS x ORDER BY x DESC SKIP 1 LIMIT 3 RETURN x*2 AS value ORDER BY value DESC",
                     frames(vec![scalar(20), scalar(20), scalar(18)]),
                 ),
                 (
@@ -454,8 +456,11 @@ fn dropped_pending_join_spill_refunds_native_records_output_and_encoder_but_not_
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
         let prepared = prepare(&format!("{MATCH} RETURN c.p AS value ORDER BY value"));
-        let (mut scratch, backing) = file(&cx, &spill_pool).await;
-        let (mut destination, _) = file(&cx, &spill_pool).await;
+        // Block the DESTINATION (fgdb-w6mpi): drain() writes the native input
+        // there while each row's source charge is live. A scratch block would
+        // land in the sort phase, after drain released the source by design.
+        let (mut scratch, _) = file(&cx, &spill_pool).await;
+        let (mut destination, backing) = file(&cx, &spill_pool).await;
         {
             let mut state = backing.0.lock().unwrap();
             state.pending = true;
@@ -485,10 +490,10 @@ fn dropped_pending_join_spill_refunds_native_records_output_and_encoder_but_not_
         drop(future);
         assert_eq!(source_pool.used(), baseline);
         assert_eq!(spill_pool.used(), 0);
-        assert!(scratch.is_poisoned());
-        assert_eq!(scratch.stats().published_runs, 0);
-        assert!(scratch.stats().reserved_bytes > 0);
+        assert!(destination.is_poisoned());
         assert_eq!(destination.stats().published_runs, 0);
+        assert!(destination.stats().reserved_bytes > 0);
+        assert_eq!(scratch.stats().published_runs, 0);
         drop(view);
         assert_eq!(source_pool.used(), 0);
     });

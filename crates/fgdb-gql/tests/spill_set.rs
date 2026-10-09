@@ -438,8 +438,11 @@ fn fixed_hop_sources_preserve_computed_barriers_multiplicity_and_hidden_source_w
             "{text}"
         );
     }
+    // A RETURN without ORDER BY yields canonical row order, not the WITH
+    // stage's (owner ruling 2026-10-09), so the expected order is explicit.
     let query = prepare(
-        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN value*2 AS result",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 \
+         RETURN value*2 AS result ORDER BY result DESC",
     );
     assert_eq!(
         staged(&graph, &query).unwrap(),
