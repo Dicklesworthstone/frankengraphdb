@@ -40,6 +40,63 @@ fn ints(result: &fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>) 
 }
 
 #[test]
+fn a_with_stage_after_the_system_time_clause_runs_at_the_selected_sequence() {
+    let ((), report) = run_async_under_lab(0x7e45_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut first = WriteBatch::new(R);
+        first.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+        first.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+        let seq1 = db.write(&commit, first).await.unwrap();
+        let mut second = WriteBatch::new(R);
+        second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(3)));
+        second.create_vertex(VId(3), vec![], vec![(P, CanonicalScalar::Int(4))]);
+        let seq2 = db.write(&commit, second).await.unwrap();
+        let mut third = WriteBatch::new(R);
+        third.delete_vertex(VId(2));
+        let seq3 = db.write(&commit, third).await.unwrap();
+
+        // The clause closes the first MATCH and a WITH stage follows it, as
+        // the aggregate facade already allows for its pipelines.
+        let template = PreparedTemporalGraphSetText::prepare(
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WITH a.p AS x WHERE x >= 2 RETURN x*2 AS p ORDER BY p",
+            symbols,
+        )
+        .unwrap();
+        for (seq, expected) in [(seq1, vec![4]), (seq2, vec![4, 6, 8]), (seq3, vec![6, 8])] {
+            let bound = template
+                .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap())
+                .unwrap();
+            let temporal = db
+                .execute_temporal_graph_set_text_governed(&query, &bound, policy())
+                .unwrap();
+            let explicit = db
+                .execute_graph_set_governed_at(&query, bound.query(), seq, policy())
+                .unwrap();
+            assert_eq!(temporal, explicit);
+            assert_eq!(ints(&temporal), expected, "WITH stage at {seq:?}");
+        }
+        // Any other clause after the selector still refuses its position.
+        assert!(matches!(
+            PreparedTemporalGraphSetText::prepare(
+                "MATCH (a) FOR SYSTEM_TIME AS OF SEQ 1 UNWIND [1] AS x RETURN x",
+                symbols,
+            )
+            .unwrap_err()
+            .kind,
+            fgdb_gql::GraphTemporalSetTextErrorKind::InvalidSystemTimePosition
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn union_uses_one_historical_sequence_for_every_operand_and_survives_reopen() {
     let ((), report) = run_async_under_lab(0x7e45_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -298,10 +298,11 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetT
             GraphTemporalSetTextErrorKind::InvalidSystemTimePosition,
         ));
     }
-    if !tokens
-        .get(at + 6)
-        .is_some_and(|next| next.word("WHERE") || next.word("OPTIONAL") || next.word("RETURN"))
-    {
+    // The clause closes the first MATCH, as in the aggregate facade: a WITH
+    // stage may follow it, and the set facade runs the stages at the cut.
+    if !tokens.get(at + 6).is_some_and(|next| {
+        next.word("WHERE") || next.word("OPTIONAL") || next.word("WITH") || next.word("RETURN")
+    }) {
         return Err(fail(
             end,
             GraphTemporalSetTextErrorKind::InvalidSystemTimePosition,

@@ -357,10 +357,12 @@ fn locate_clause(
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,
         ));
     }
+    // The clause closes the first MATCH, as in the aggregate facade: a WITH
+    // stage may follow it when the pattern facade's head accepts one.
     let next = tokens.get(token_at + 6);
-    if !next
-        .is_some_and(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"))
-    {
+    if !next.is_some_and(|token| {
+        token.word("WHERE") || token.word("OPTIONAL") || token.word("WITH") || token.word("RETURN")
+    }) {
         return Err(failure(
             end,
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,
