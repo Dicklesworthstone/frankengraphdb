@@ -371,7 +371,9 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         let Some(candidate) = self.advance(&mut state, cx, observe).await? else {
             return Ok(None);
         };
-        let candidate = self.resolve_endpoints(cx, candidate, relation, observe).await?;
+        let candidate = self
+            .resolve_endpoints(cx, candidate, relation, observe)
+            .await?;
         if !state.heads.is_empty() {
             self.state = Some(state);
         }

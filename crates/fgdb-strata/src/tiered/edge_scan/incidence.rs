@@ -60,7 +60,9 @@ impl Routes {
     ) -> Result<(), BufferedScanError<C>> {
         self.lookup_work(cx, work, observe)?;
         if !self.entries.contains(&route) {
-            self.charge.grow(cx, 512).map_err(BufferedReadError::Memory)?;
+            self.charge
+                .grow(cx, 512)
+                .map_err(BufferedReadError::Memory)?;
             self.lookup_work(cx, work, observe)?;
             self.entries.insert(route);
         }
@@ -84,10 +86,9 @@ impl Routes {
             }
             self.lookup_work(cx, work, observe)?;
             let prefix = (request.endpoint, incoming, request.relation);
-            let lower = after.map_or(
-                Included((prefix.0, prefix.1, prefix.2, 0)),
-                |block| Excluded((prefix.0, prefix.1, prefix.2, block)),
-            );
+            let lower = after.map_or(Included((prefix.0, prefix.1, prefix.2, 0)), |block| {
+                Excluded((prefix.0, prefix.1, prefix.2, block))
+            });
             if let Some(&(endpoint, face, relation, block)) =
                 self.entries.range((lower, Unbounded)).next()
                 && (endpoint, face, relation) == prefix
@@ -148,7 +149,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         BufferedEdgeJoinScan {
             as_of: self.as_of,
             work: self.work.used,
-            driver: Some(Driver { root: self, routes: None }),
+            driver: Some(Driver {
+                root: self,
+                routes: None,
+            }),
         }
     }
 }
@@ -165,11 +169,15 @@ impl<V: Vfs> core::fmt::Debug for BufferedEdgeJoinScan<'_, V> {
 }
 
 impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
-    pub const fn snapshot_seq(&self) -> CommitSeq { self.as_of }
+    pub const fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
     pub fn work_used(&self) -> usize {
         self.driver.as_ref().map_or(self.work, |d| d.root.work.used)
     }
-    pub fn is_closed(&self) -> bool { self.driver.is_none() }
+    pub fn is_closed(&self) -> bool {
+        self.driver.is_none()
+    }
     pub fn close(&mut self) {
         self.work = self.work_used();
         self.driver = None;
@@ -181,17 +189,24 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         relation: Option<RelationId>,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
-        let Some(mut driver) = self.driver.take() else { return Ok(None); };
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
         let used = &mut self.work;
-        let result = driver.root.next_with_endpoints(cx, relation, &mut |event| {
-            observe(event)?;
-            if event == BufferedEdgeScanEvent::Work {
-                *used = used.saturating_add(1);
-            }
-            Ok(())
-        }).await;
+        let result = driver
+            .root
+            .next_with_endpoints(cx, relation, &mut |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
         self.work = driver.root.work.used;
-        if result.is_ok() { self.driver = Some(driver); }
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
         result
     }
 
@@ -209,18 +224,29 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         after: Option<EId>,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
-        let Some(mut driver) = self.driver.take() else { return Ok(None); };
-        let request = Incidence { endpoint, relation, direction, after };
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        let request = Incidence {
+            endpoint,
+            relation,
+            direction,
+            after,
+        };
         let used = &mut self.work;
-        let result = driver.incident(cx, request, &mut |event| {
-            observe(event)?;
-            if event == BufferedEdgeScanEvent::Work {
-                *used = used.saturating_add(1);
-            }
-            Ok(())
-        }).await;
+        let result = driver
+            .incident(cx, request, &mut |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
         self.work = driver.root.work.used;
-        if result.is_ok() { self.driver = Some(driver); }
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
         result
     }
 }
@@ -231,20 +257,29 @@ impl<V: Vfs> Driver<'_, V> {
         cx: &QueryCx,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
-        if self.routes.is_some() { return Ok(()); }
+        if self.routes.is_some() {
+            return Ok(());
+        }
         self.root.work.step(cx, observe)?;
         let mut routes = Routes {
             entries: BTreeSet::new(),
             charge: self.root.partition.reserve_scan_bytes(cx, 1024)?,
         };
         for block in 0..self.root.blocks {
-            let image = self.root.partition
-                .edge_scan_block(cx, block, &mut self.root.work, observe).await?;
+            let image = self
+                .root
+                .partition
+                .edge_scan_block(cx, block, &mut self.root.work, observe)
+                .await?;
             for row in &image.0 {
                 for (endpoint, incoming) in [(row.src, false), (row.dst, true)] {
                     for relation in [None, Some(row.relation)] {
-                        routes.insert((endpoint, incoming, relation, block), cx,
-                            &mut self.root.work, observe)?;
+                        routes.insert(
+                            (endpoint, incoming, relation, block),
+                            cx,
+                            &mut self.root.work,
+                            observe,
+                        )?;
                     }
                 }
             }
@@ -272,9 +307,14 @@ impl<V: Vfs> Driver<'_, V> {
         };
         let mut after_block = None;
         loop {
-            let block = self.routes.as_ref().expect("complete routing directory")
+            let block = self
+                .routes
+                .as_ref()
+                .expect("complete routing directory")
                 .next_block(request, after_block, cx, &mut self.root.work, observe)?;
-            let Some(block) = block else { break; };
+            let Some(block) = block else {
+                break;
+            };
             after_block = Some(block);
             self.root.load(&mut state, cx, block, observe).await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
@@ -284,8 +324,11 @@ impl<V: Vfs> Driver<'_, V> {
                 while ordinal < end {
                     self.root.work.step(cx, observe)?;
                     let middle = ordinal + (end - ordinal) / 2;
-                    if active.order[middle].0 <= after { ordinal = middle + 1; }
-                    else { end = middle; }
+                    if active.order[middle].0 <= after {
+                        ordinal = middle + 1;
+                    } else {
+                        end = middle;
+                    }
                 }
             }
             let mut head = None;
@@ -293,21 +336,36 @@ impl<V: Vfs> Driver<'_, V> {
                 self.root.work.step(cx, observe)?;
                 let entry = active.image.0.get(original).ok_or_else(invalid_load)?;
                 if request.matches(entry) {
-                    head = Some(Reverse(Head { eid, created, block, ordinal: at }));
+                    head = Some(Reverse(Head {
+                        eid,
+                        created,
+                        block,
+                        ordinal: at,
+                    }));
                     break;
                 }
             }
             if let Some(head) = head {
-                state._head_charge.grow(cx, 512).map_err(BufferedReadError::Memory)?;
-                state.heads.try_reserve(1).map_err(|_| BufferedReadError::Memory(
-                    MemoryError::AllocationFailed { requested: state._head_charge.bytes() }
-                ))?;
-                if state.heads.capacity().checked_mul(size_of::<Reverse<Head>>())
+                state
+                    ._head_charge
+                    .grow(cx, 512)
+                    .map_err(BufferedReadError::Memory)?;
+                state.heads.try_reserve(1).map_err(|_| {
+                    BufferedReadError::Memory(MemoryError::AllocationFailed {
+                        requested: state._head_charge.bytes(),
+                    })
+                })?;
+                if state
+                    .heads
+                    .capacity()
+                    .checked_mul(size_of::<Reverse<Head>>())
                     .is_none_or(|bytes| bytes > state._head_charge.bytes())
                 {
                     return Err(BufferedReadError::SizeOverflow.into());
                 }
-                heap_push(&mut state.heads, head, &mut || self.root.work.step(cx, observe))?;
+                heap_push(&mut state.heads, head, &mut || {
+                    self.root.work.step(cx, observe)
+                })?;
             }
         }
         // The admission validator fixes each EId's endpoints and relation.
@@ -316,8 +374,11 @@ impl<V: Vfs> Driver<'_, V> {
         let candidate = self.root.advance(&mut state, cx, observe).await?;
         drop(state);
         match candidate {
-            Some(candidate) => self.root.resolve_endpoints(
-                cx, candidate, request.relation, observe).await.map(Some),
+            Some(candidate) => self
+                .root
+                .resolve_endpoints(cx, candidate, request.relation, observe)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }

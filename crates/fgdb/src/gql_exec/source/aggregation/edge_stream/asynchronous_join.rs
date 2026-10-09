@@ -18,12 +18,18 @@ struct Record {
     target: Option<VertexScanRecord<'static>>,
 }
 impl AsyncEdgeScanRecord for Record {
-    fn edge(&self) -> EdgeScanRow<'_> { self.edge.as_row() }
+    fn edge(&self) -> EdgeScanRow<'_> {
+        self.edge.as_row()
+    }
     fn vertex(&self, vid: VId) -> Option<VertexScanRow<'_>> {
         let edge = self.edge.as_row();
-        if vid == edge.source { self.source.as_ref().map(VertexScanRecord::as_row) }
-        else if vid == edge.target { self.target.as_ref().map(VertexScanRecord::as_row) }
-        else { None }
+        if vid == edge.source {
+            self.source.as_ref().map(VertexScanRecord::as_row)
+        } else if vid == edge.target {
+            self.target.as_ref().map(VertexScanRecord::as_row)
+        } else {
+            None
+        }
     }
 }
 
@@ -52,47 +58,77 @@ impl Source<'_> {
         control: &mut impl FnMut(AsyncEdgeScanEvent) -> Result<(), C>,
     ) -> Result<AsyncEdgeCandidate<Record>, EdgeScanSourceError<ReadError, C>> {
         control(AsyncEdgeScanEvent::Candidate(eid)).map_err(EdgeScanSourceError::Control)?;
-        let Some(edge) = self.0.edge(eid, &mut |event| control(source_event(event)))? else {
+        let Some(edge) = self
+            .0
+            .edge(eid, &mut |event| control(source_event(event)))?
+        else {
             return Ok(AsyncEdgeCandidate { eid, record: None });
         };
         if !relation.matches(edge.relation) {
             return Ok(AsyncEdgeCandidate { eid, record: None });
         }
-        let source = self.0.vertex(edge.source, &mut |event| control(source_event(event)))?
-            .map(|row| VertexScanRecord::copy_masked(row, |_| true, |_| true,
-                &mut |event| control(vertex_event(event))))
-            .transpose().map_err(EdgeScanSourceError::Control)?;
-        let target = if edge.source == edge.target { None } else {
-            self.0.vertex(edge.target, &mut |event| control(source_event(event)))?
-                .map(|row| VertexScanRecord::copy_masked(row, |_| true, |_| true,
-                    &mut |event| control(vertex_event(event))))
-                .transpose().map_err(EdgeScanSourceError::Control)?
+        let source = self
+            .0
+            .vertex(edge.source, &mut |event| control(source_event(event)))?
+            .map(|row| {
+                VertexScanRecord::copy_masked(row, |_| true, |_| true, &mut |event| {
+                    control(vertex_event(event))
+                })
+            })
+            .transpose()
+            .map_err(EdgeScanSourceError::Control)?;
+        let target = if edge.source == edge.target {
+            None
+        } else {
+            self.0
+                .vertex(edge.target, &mut |event| control(source_event(event)))?
+                .map(|row| {
+                    VertexScanRecord::copy_masked(row, |_| true, |_| true, &mut |event| {
+                        control(vertex_event(event))
+                    })
+                })
+                .transpose()
+                .map_err(EdgeScanSourceError::Control)?
         };
-        let edge = EdgeScanRecord::copy_masked(edge, |_| true,
-            &mut |event| control(source_event(event))).map_err(EdgeScanSourceError::Control)?;
+        let edge =
+            EdgeScanRecord::copy_masked(edge, |_| true, &mut |event| control(source_event(event)))
+                .map_err(EdgeScanSourceError::Control)?;
         // A missing endpoint stays absent; the ordinary async driver emits
         // DanglingEndpoint, never projects it as a NULL optional binding.
-        Ok(AsyncEdgeCandidate { eid, record: Some(Record { edge, source, target }) })
+        Ok(AsyncEdgeCandidate {
+            eid,
+            record: Some(Record {
+                edge,
+                source,
+                target,
+            }),
+        })
     }
 }
 impl AsyncEdgeScanSource for Source<'_> {
     type Error = ReadError;
     type Record = Record;
     type OutputGuard = ();
-    fn snapshot_seq(&self) -> CommitSeq { self.0.as_of }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.0.as_of
+    }
 
     async fn next_candidate<C: Send>(
         &mut self,
         relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeScanSourceError<ReadError, C>> {
-        let id = self.0.next_edge_for_relation(relation,
-            &mut |event| control(source_event(event)))?;
-        id.map(|eid| self.capture(eid, relation, control)).transpose()
+        let id = self
+            .0
+            .next_edge_for_relation(relation, &mut |event| control(source_event(event)))?;
+        id.map(|eid| self.capture(eid, relation, control))
+            .transpose()
     }
 
     fn reserve_output<C>(
-        &self, _: &Record, _: usize,
+        &self,
+        _: &Record,
+        _: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<(), EdgeScanSourceError<ReadError, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)
@@ -106,23 +142,35 @@ impl AsyncEdgeScanSource for Source<'_> {
 impl AsyncEdgeJoinSource for Source<'_> {
     type TraversalGuard = ();
     async fn next_incident_candidate<C: Send>(
-        &mut self, endpoint: VId, relation: EdgeRelation, direction: GlaDirection,
+        &mut self,
+        endpoint: VId,
+        relation: EdgeRelation,
+        direction: GlaDirection,
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<ReadError, C>> {
-        let id = self.0.next_incident_edge_for_relation(endpoint, relation, direction, after,
-            &mut |event| control(source_event(event)))?;
-        id.map(|eid| self.capture(eid, relation, control)).transpose()
+        let id = self.0.next_incident_edge_for_relation(
+            endpoint,
+            relation,
+            direction,
+            after,
+            &mut |event| control(source_event(event)),
+        )?;
+        id.map(|eid| self.capture(eid, relation, control))
+            .transpose()
             .map_err(EdgeExpansionSourceError::Read)
     }
     fn reserve_traversal<C>(
-        &self, _: usize,
+        &self,
+        _: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<(), EdgeScanSourceError<ReadError, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)
     }
     fn reserve_join_output<C>(
-        &self, _: &[Record], _: usize,
+        &self,
+        _: &[Record],
+        _: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<(), EdgeScanSourceError<ReadError, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)
@@ -130,8 +178,11 @@ impl AsyncEdgeJoinSource for Source<'_> {
 }
 
 fn open<'q>(
-    view: EmbeddedReadView, cx: &'q QueryCx,
-    pattern: &PreparedGraphPattern<GraphValueRow>, as_of: CommitSeq, policy: GqlQueryPolicy,
+    view: EmbeddedReadView,
+    cx: &'q QueryCx,
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    as_of: CommitSeq,
+    policy: GqlQueryPolicy,
 ) -> Result<
     AsyncEdgeJoinCursor<
         impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()> + use<'q>,
@@ -142,10 +193,12 @@ fn open<'q>(
     view.snapshot.check_frontier(as_of).map_err(source_error)?;
     let plan = AsyncEdgeJoinPlan::compile(pattern.plan())
         .map_err(|error| GqlQueryError::Source(EdgeScanError::Plan(error)))?;
-    cx.with_restriction(|| cx.checkpoint()).map_err(GqlQueryError::Interrupted)?;
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(GqlQueryError::Interrupted)?;
     let source = Source(view.edge_scan_source(cx, as_of).map_err(source_error)?);
-    Ok(AsyncEdgeJoinCursor::new(source, plan, policy,
-        move || cx.with_restriction(|| cx.checkpoint())))
+    Ok(AsyncEdgeJoinCursor::new(source, plan, policy, move || {
+        cx.with_restriction(|| cx.checkpoint())
+    }))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -164,10 +217,14 @@ impl<V: Vfs + Clone> Database<V> {
     /// Errors/drop/close release the active traversal without draining. Earlier
     /// rows remain delivered; successful completion requires Exhausted.
     pub fn stream_graph_edge_joins_governed<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>, policy: GqlQueryPolicy,
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
-            impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()> + use<'q, V>,
+            impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()>
+            + use<'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'q, V>,
         >,
         StreamError,
@@ -179,22 +236,35 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Identical source and evaluator at one exact retained CommitSeq.
     pub fn stream_graph_edge_joins_governed_at<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>,
-        as_of: CommitSeq, policy: GqlQueryPolicy,
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
-            impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()> + use<'q, V>,
+            impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()>
+            + use<'q, V>,
             impl FnMut() -> Result<(), Cancel> + Send + use<'q, V>,
         >,
         StreamError,
     > {
-        open(self.read_session().map_err(source_error)?, cx, pattern, as_of, policy)
+        open(
+            self.read_session().map_err(source_error)?,
+            cx,
+            pattern,
+            as_of,
+            policy,
+        )
     }
 }
 impl EmbeddedReadView {
     /// The same async join driver pinned to this immutable view's frontier.
     pub fn stream_graph_edge_joins_governed<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>, policy: GqlQueryPolicy,
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
             impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()> + use<'q>,
@@ -205,8 +275,11 @@ impl EmbeddedReadView {
         open(self.clone(), cx, pattern, self.frontier(), policy)
     }
     pub fn stream_graph_edge_joins_governed_at<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>,
-        as_of: CommitSeq, policy: GqlQueryPolicy,
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
     ) -> Result<
         AsyncEdgeJoinCursor<
             impl AsyncEdgeJoinSource<Error = ReadError, OutputGuard = (), TraversalGuard = ()> + use<'q>,
