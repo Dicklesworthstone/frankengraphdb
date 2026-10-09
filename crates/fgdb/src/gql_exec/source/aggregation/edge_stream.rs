@@ -3,6 +3,7 @@
 //! opening does not collect candidate IDs, visible edges, or projected rows.
 
 mod aggregate;
+mod asynchronous_join;
 mod expansion;
 pub(super) use expansion::next_from_view;
 
