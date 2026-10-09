@@ -475,7 +475,7 @@ fn buffered_unary_stages_preserve_inner_pages_exact_order_and_final_only_row_quo
         let nested = GraphValue::map(vec![
             (
                 "items".into(),
-                GraphValue::List(vec![integer(1), integer(2)]),
+                GraphValue::List(vec![integer(1), integer(2)].into()),
             ),
             ("value".into(), integer(2)),
         ])

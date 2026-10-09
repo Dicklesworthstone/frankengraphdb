@@ -177,6 +177,10 @@ impl AsyncEdgeJoinSource for Source<'_> {
     }
 }
 
+// The cursor's source and checkpoint are opaque, and stable Rust cannot name
+// an opaque type in an alias, so this and the four entry points below spell
+// the type out (as query_view's stream entry points do).
+#[allow(clippy::type_complexity)]
 fn open<'q>(
     view: EmbeddedReadView,
     cx: &'q QueryCx,
@@ -216,6 +220,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Probes, OPTIONAL, variable-length expansion and nonidentity order refuse.
     /// Errors/drop/close release the active traversal without draining. Earlier
     /// rows remain delivered; successful completion requires Exhausted.
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed<'q>(
         &self,
         cx: &'q QueryCx,
@@ -235,6 +240,7 @@ impl<V: Vfs + Clone> Database<V> {
     }
 
     /// Identical source and evaluator at one exact retained CommitSeq.
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed_at<'q>(
         &self,
         cx: &'q QueryCx,
@@ -260,6 +266,7 @@ impl<V: Vfs + Clone> Database<V> {
 }
 impl EmbeddedReadView {
     /// The same async join driver pinned to this immutable view's frontier.
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed<'q>(
         &self,
         cx: &'q QueryCx,
@@ -274,6 +281,7 @@ impl EmbeddedReadView {
     > {
         open(self.clone(), cx, pattern, self.frontier(), policy)
     }
+    #[allow(clippy::type_complexity)]
     pub fn stream_graph_edge_joins_governed_at<'q>(
         &self,
         cx: &'q QueryCx,
