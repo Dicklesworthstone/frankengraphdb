@@ -247,8 +247,7 @@ fn unsupported_definitions_and_open_budgets_refuse_before_delivery_while_late_er
             let mut output = Vec::new();
             let error = run(&mut view, &cx, &options, &prepared, true, &mut output)
                 .await
-                .err()
-                .expect("late refusal");
+                .expect_err("late refusal");
             assert_eq!(error.class, "query");
             assert!(
                 error
@@ -709,8 +708,7 @@ fn buffered_external_output_failure_retires_all_files_without_a_success_record()
                 };
                 let error = run_query(&mut view, &cx, &options, &prepared, None, true, &mut output)
                     .await
-                    .err()
-                    .expect("output failure");
+                    .expect_err("output failure");
                 assert_eq!(error.class, "io");
                 assert_eq!(output.flushes, fail_at);
                 assert!(
