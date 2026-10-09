@@ -65,7 +65,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::BufferedExecute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG/MIN/MAX without DISTINCT arguments or collection"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG (including DISTINCT arguments) or MIN/MAX, without collection"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -598,10 +598,13 @@ impl PreparedNativeRead {
     ///
     /// Row-local computed inputs use the ordinary projection VM before
     /// partitioning; every declared input column runs, including hidden ones.
-    /// The compiler refuses DISTINCT aggregate arguments, COLLECT and relational
-    /// input before source opening. Native completed-group expressions and
+    /// COUNT/SUM/AVG DISTINCT arguments use external canonical support passes;
+    /// the compiler refuses COLLECT and relational input before source opening.
+    /// Native completed-group expressions and
     /// RETURN DISTINCT run once before final ranking and pagination. Every partition
-    /// preserves original occurrence order within each group. All groups finish
+    /// preserves ordinary occurrence order within each group. DISTINCT numeric
+    /// cells consume one typed argument value per group; integer and float
+    /// arguments retain their distinct membership domains. All groups finish
     /// before HAVING, exact typed ordering, visible projection and SKIP/LIMIT.
     /// Hidden keys and clause-only summaries remain private until this stage.
     /// Canonical key order determines HAVING errors and breaks ordered ties;
@@ -614,7 +617,8 @@ impl PreparedNativeRead {
     /// A partition that exceeds group/memory capacity is repartitioned. A single
     /// group that cannot fit, hash-depth exhaustion, disk/run/work limits and
     /// cancellation refuse without publishing a result. Completed-group clauses
-    /// may require three bounded sort passes in the same files: canonical group
+    /// require one bounded sort per unique DISTINCT argument column per accepted
+    /// partition, then up to three completed-group sort passes: canonical group
     /// order, DISTINCT equivalence classes, and final representative rank. No quota is refunded
     /// for abandoned reduction attempts or completed intermediate runs.
     ///
@@ -863,6 +867,128 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     Ok(Some(groups))
 }
 
+// Membership can be much larger than the bounded table of groups. Each
+// DISTINCT argument therefore sorts the accepted partition by (keys, value),
+// then feeds only adjacent equivalence classes to ordinary numeric cells.
+// Both files append: original and pending partition handles remain valid.
+#[allow(clippy::too_many_arguments)]
+async fn reduce_distinct_arguments<A, B>(
+    spool: &NativeResultSpool,
+    source: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    groups: &mut Catalog<Group>,
+    definition: &SpillAggregateDefinition,
+    input: &mut dyn GroupInput,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    work: &mut Work<'_>,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<()>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    let pool = source.memory_pool().clone();
+    for column in definition.distinct_argument_columns() {
+        work.charge(1)?;
+        let mut order = Catalog::<GraphValueOrder>::new(
+            &pool,
+            work.cx,
+            definition.group_key_columns().len() + 1,
+        )?;
+        for &key in definition.group_key_columns() {
+            order
+                .values
+                .push(GraphValueOrder::ascending(key).with_nulls_first(true));
+        }
+        if !definition.group_key_columns().contains(&column) {
+            order
+                .values
+                .push(GraphValueOrder::ascending(column).with_nulls_first(true));
+        }
+        let (sorted, used) = spool
+            .sort_continuing(
+                work.cx,
+                source,
+                destination,
+                &order.values,
+                run_rows,
+                max_runs,
+                page_bytes,
+                work.limit,
+                work.used,
+            )
+            .await?;
+        work.used = used;
+        let mut reader = sorted.reader(destination);
+        let mut previous: Option<TrackedBytes> = None;
+        let mut active_group = None;
+        while let Some(bytes) = reader.next_row(work.cx).await? {
+            work.charge(1)?;
+            if let Some(previous) = &previous {
+                if super::sort::equal_columns(
+                    previous.as_ref(),
+                    bytes.as_ref(),
+                    &order.values,
+                    definition.input_width(),
+                    work,
+                )? {
+                    continue;
+                }
+                if !super::sort::equal_columns(
+                    previous.as_ref(),
+                    bytes.as_ref(),
+                    &order.values[..definition.group_key_columns().len()],
+                    definition.input_width(),
+                    work,
+                )? {
+                    active_group = None;
+                }
+            }
+            work.charge(bytes.len())?;
+            let charge = decoded_reservation(&pool, work.cx, bytes.as_ref(), 1)?;
+            let row = decode_row(bytes.as_ref(), resolver)?;
+            // Data drops before its reservation on every cancellation/error.
+            let decoded = (row, charge);
+            if decoded.0.len() != definition.input_width() {
+                return invalid();
+            }
+            if active_group.is_none() {
+                for (at, group) in groups.values.iter().enumerate() {
+                    work.charge(bytes.len().saturating_add(group.largest))?;
+                    if definition
+                        .group_key_columns()
+                        .iter()
+                        .all(|&key| decoded.0.values()[key] == group.exemplar.values()[key])
+                    {
+                        active_group = Some(at);
+                        break;
+                    }
+                }
+            }
+            let Some(at) = active_group else {
+                return invalid();
+            };
+            definition
+                .update_distinct_argument(
+                    &mut groups.values[at].state,
+                    &decoded.0,
+                    column,
+                    &mut |event| input.charge(event),
+                )
+                .map_err(execute_error)?;
+            drop(decoded);
+            // The charged authenticated bytes remain live across next_row().
+            previous = Some(bytes);
+        }
+        if reader.state() != ScanState::Exhausted {
+            return Err(NativeSpoolError::IncompleteCursor.into());
+        }
+    }
+    Ok(())
+}
+
 fn key_hash(
     row: &GraphValueRow,
     definition: &SpillAggregateDefinition,
@@ -1096,6 +1222,37 @@ where
             .await?
         };
         if let Some(mut groups) = groups {
+            if next.in_source {
+                reduce_distinct_arguments(
+                    &next.spool,
+                    source,
+                    partition,
+                    &mut groups,
+                    &opened.definition,
+                    opened.input.as_mut(),
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    &mut work,
+                    resolver,
+                )
+                .await?;
+            } else {
+                reduce_distinct_arguments(
+                    &next.spool,
+                    partition,
+                    source,
+                    &mut groups,
+                    &opened.definition,
+                    opened.input.as_mut(),
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    &mut work,
+                    resolver,
+                )
+                .await?;
+            }
             for group in groups.values.drain(..) {
                 work.charge(group.largest)?;
                 let keys = opened

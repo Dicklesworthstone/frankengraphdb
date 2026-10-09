@@ -112,7 +112,8 @@ impl PreparedNativeRead {
     /// Bind native COUNT/SUM/AVG/MIN/MAX and admit a local asynchronous vertex
     /// or single-edge source before database opening. Computed inputs, HAVING,
     /// computed visible output, RETURN DISTINCT and exact numeric ordering use
-    /// the ordinary aggregate compiler. DISTINCT aggregate arguments, COLLECT,
+    /// the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT arguments use
+    /// bounded external support passes. COLLECT,
     /// relational input, expansion and probes refuse at preparation.
     pub fn prepare_buffered_aggregate(
         &self,

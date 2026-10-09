@@ -72,6 +72,289 @@ async fn aggregate_contents(
 }
 
 #[test]
+fn argument_distinct_external_passes_preserve_bags_typed_support_and_output_clauses() {
+    let ((), report) = run_async_under_lab(0x5ba1_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        for text in [
+            "MATCH (n:L) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.p) AS unique,SUM(n.p) AS bag_sum,SUM(DISTINCT n.p) AS total,AVG(DISTINCT n.p) AS average",
+            "MATCH (n:L) RETURN n.p%3 AS category,COUNT(DISTINCT n.q) AS present,SUM(DISTINCT n.p) AS total,AVG(DISTINCT n.p) AS average GROUP BY n.p%3 ORDER BY total DESC",
+            "MATCH (n:L) RETURN DISTINCT COUNT(DISTINCT n.p) AS unique GROUP BY n.q%3 HAVING SUM(DISTINCT n.p)>0 ORDER BY AVG(DISTINCT n.p) DESC SKIP 1 LIMIT 2",
+            "MATCH (n:L) RETURN {unique:COUNT(DISTINCT n.q),total:SUM(DISTINCT n.p)} AS result GROUP BY n.p ORDER BY SUM(DISTINCT n.q) DESC",
+            "MATCH (n:L) RETURN COUNT(DISTINCT [n.p%3,n.p]) AS lists,COUNT(DISTINCT {bucket:n.p%3}) AS maps",
+            "MATCH (n:L) RETURN COUNT(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS unique,SUM(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS total,AVG(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS average",
+            "MATCH (a)-[e:R]->(b) RETURN e.p%3 AS category,COUNT(*) AS rows,COUNT(DISTINCT a) AS sources,COUNT(DISTINCT e.q) AS values,SUM(DISTINCT e.q) AS total GROUP BY e.p%3",
+            "MATCH (a)-[e:R]-(b) RETURN COUNT(*) AS rows,COUNT(DISTINCT e.q) AS values,AVG(DISTINCT e.q) AS average GROUP BY b.p ORDER BY SUM(DISTINCT e.q) DESC",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(DISTINCT n.p) AS unique ORDER BY SUM(DISTINCT n.q) LIMIT 0",
+            "MATCH (n:L) WHERE n.p<0 RETURN COUNT(DISTINCT n.q) AS unique,SUM(DISTINCT n.q) AS total,AVG(DISTINCT n.q) AS average",
+            "MATCH (n:L) WHERE n.p<0 RETURN n.p AS category,COUNT(DISTINCT n.q) AS unique",
+        ] {
+            let prepared = plan(text);
+            let parameters = GqlParameters::new();
+            let ordinary = prepared
+                .stream_aggregate_in_view(&view, &cx, &parameters, policy())
+                .unwrap();
+            let columns = ordinary.columns().to_vec();
+            let expected = ordinary.collect::<Result<Vec<_>, _>>().unwrap();
+            for (capacity, run_rows) in [(1, 1), (3, 3)] {
+                let pool = MemoryPool::new(1_000_000, 0).unwrap();
+                let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+                let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+                let (spool, _) = prepared
+                    .spool_aggregate_in_view(
+                        &view,
+                        &cx,
+                        &parameters,
+                        GqlQueryPolicy::new(10_000, expected.len() as u64, 100_000_000, 1_000_000),
+                        &mut a,
+                        &mut b,
+                        &mut c,
+                        capacity,
+                        256,
+                        run_rows,
+                        128,
+                        257,
+                        16_384,
+                        1000,
+                        100_000_000,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(spool.columns(), columns, "{text}");
+                assert_eq!(
+                    aggregate_contents(&spool, &mut c, &cx).await,
+                    expected,
+                    "{text}"
+                );
+                assert_eq!(pool.used(), 0, "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn one_group_argument_support_larger_than_memory_uses_external_sort() {
+    let ((), report) = run_async_under_lab(0x5ba1_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 0..1024 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text(&format!(
+                        "{:04}-{}",
+                        id % 512,
+                        "x".repeat(768)
+                    ))
+                    .unwrap(),
+                )],
+            );
+        }
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(131_072, 0).unwrap();
+        assert!(
+            512 * 768 > pool.limit(),
+            "even unique payloads exceed the complete pool"
+        );
+        let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+        let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+        let (spool, _) = plan("MATCH (n:L) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.p) AS unique")
+            .spool_aggregate_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                GqlQueryPolicy::new(1024, 1, 100_000_000, 1_000_000),
+                &mut a,
+                &mut b,
+                &mut c,
+                1,
+                1,
+                16,
+                64,
+                257,
+                4096,
+                1024,
+                100_000_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            b.stats().published_runs > 64,
+            "the single group requires real merge passes"
+        );
+        let rows = aggregate_contents(&spool, &mut c, &cx).await;
+        assert_eq!(
+            rows[0].values(),
+            &[
+                GraphAggregateValue::Count(1024),
+                GraphAggregateValue::Count(512)
+            ]
+        );
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_argument_type_errors_precede_sorting_even_when_no_result_is_requested() {
+    let ((), report) = run_async_under_lab(0x5ba1_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = aggregate_seed(&contexts.commit()).await;
+        let mut extra = WriteBatch::new(RelationId(1));
+        extra.create_vertex(
+            VId(1000),
+            vec![LabelId(1)],
+            vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(100)),
+                (PropertyKeyId(2), CanonicalScalar::Bool(true)),
+            ],
+        );
+        db.write(&contexts.commit(), extra).await.unwrap();
+        let view = db.read_session().unwrap();
+        for window in ["", " LIMIT 0", " LIMIT 1", " SKIP 1000 LIMIT 1"] {
+            let text = format!(
+                "MATCH (n:L) RETURN n.p AS category,COUNT(DISTINCT n.q) AS unique,SUM(DISTINCT n.q) AS total ORDER BY category{window}"
+            );
+            let pool = MemoryPool::new(1_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            let error = plan(&text)
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    2,
+                    128,
+                    257,
+                    4096,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await
+                .unwrap_err();
+            let NativeAggregateSpoolError::Execute(error) = error else {
+                panic!("input must reach its native numeric type validation");
+            };
+            assert!(
+                matches!(
+                    *error,
+                    fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphAggregateError::NonIntegerSum {
+                        aggregate: 1
+                    })
+                ),
+                "{text}"
+            );
+            assert_eq!(
+                a.stats().published_runs,
+                0,
+                "no complete input exists after a source type failure"
+            );
+            assert_eq!(b.stats().published_runs, 0);
+            assert_eq!(c.stats().published_runs, 0);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn distinct_support_write_failure_and_dropped_append_refund_owned_group_state() {
+    let ((), report) = run_async_under_lab(0x5ba1_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = aggregate_seed(&contexts.commit()).await;
+        let view = db.read_session().unwrap();
+        let prepared = plan(
+            "MATCH (n:L) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.p) AS unique,SUM(DISTINCT n.q) AS total",
+        );
+        for pending in [false, true] {
+            let pool = MemoryPool::new(1_000_000, 0).unwrap();
+            let (mut a, _) = aggregate_scratch(&cx, &pool).await;
+            let (mut b, backing) = aggregate_scratch(&cx, &pool).await;
+            let (mut c, _) = aggregate_scratch(&cx, &pool).await;
+            {
+                let mut file = backing.0.lock().unwrap();
+                file.pending_write = pending;
+                file.write_limit = Some(0);
+            }
+            {
+                let mut future = prepared.spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &GqlParameters::new(),
+                    policy(),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    1,
+                    2,
+                    32,
+                    257,
+                    4096,
+                    64,
+                    100_000_000,
+                    None,
+                );
+                if pending {
+                    assert!(
+                        future
+                            .as_mut()
+                            .poll(&mut Context::from_waker(Waker::noop()))
+                            .is_pending()
+                    );
+                    assert!(
+                        pool.used() > 0,
+                        "the pending support sort owns the group and sort workspace"
+                    );
+                } else {
+                    assert!(matches!(
+                        future.await,
+                        Err(NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(_)))
+                    ));
+                }
+            }
+            assert_eq!(
+                a.stats().published_runs,
+                1,
+                "source validation and drainage finished before support sorting"
+            );
+            assert_eq!(b.stats().published_runs, 0);
+            assert!(
+                b.stats().reserved_runs > 0,
+                "failed attempts never refund append quota"
+            );
+            assert_eq!(c.stats().published_runs, 0);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn output_distinct_spills_visible_classes_and_preserves_the_first_ranked_representation() {
     let ((), report) = run_async_under_lab(0x5ba1_000c, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -876,7 +1159,7 @@ fn empty_global_grouped_and_all_partition_refusals_publish_no_partial_result() {
                 policy()
             };
             let text = if refusal == 5 {
-                "MATCH (n:L) RETURN n.p AS category, COUNT(DISTINCT n.q) AS rows LIMIT 0"
+                "MATCH (n:L) RETURN n.p AS category, COLLECT(n.q) AS rows LIMIT 0"
             } else {
                 AGGREGATE
             };
@@ -1033,7 +1316,7 @@ fn completed_group_sort_and_window_keep_every_cumulative_allowance() {
         let db = aggregate_seed(&contexts.commit()).await;
         let view = db.read_session().unwrap();
         let prepared = plan(
-            "MATCH (n:L) RETURN COUNT(*) AS rows GROUP BY n.p HAVING rows > 1 ORDER BY AVG(n.q) DESC SKIP 1 LIMIT 2",
+            "MATCH (n:L) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.q) AS unique GROUP BY n.p HAVING rows > 1 ORDER BY AVG(DISTINCT n.q) DESC SKIP 1 LIMIT 2",
         );
         let mut budget = policy();
         let mut spill_work = 100_000_000;

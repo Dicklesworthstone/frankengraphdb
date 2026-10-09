@@ -17,6 +17,18 @@ pub use prepared::PreparedBufferedOrder;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
+// External aggregate argument support uses typed equality on a selected tuple,
+// not complete-row equality or the result layer's numeric-equivalence domain.
+pub(super) fn equal_columns(
+    left: &[u8],
+    right: &[u8],
+    selected: &[GraphValueOrder],
+    columns: usize,
+    work: &mut Work<'_>,
+) -> Result<bool> {
+    canonical::equal_columns(left, right, selected, columns, work)
+}
+
 pub(super) struct Work<'a> {
     pub(super) cx: &'a QueryCx,
     pub(super) used: u64,
@@ -311,7 +323,7 @@ impl NativeResultSpool {
     // SAME allowance, preserving the original limit in every reported refusal.
     // Ordinary sort_into/sort_with begin at zero and keep their public contract.
     #[allow(clippy::too_many_arguments)]
-    fn sort_continuing<'a, A, B>(
+    pub(super) fn sort_continuing<'a, A, B>(
         &'a self,
         cx: &'a QueryCx,
         source: &'a mut SpillFile<A>,

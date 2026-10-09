@@ -317,6 +317,29 @@ fn column<'a>(
     Err(invalid())
 }
 
+// Equality of selected typed cells, without the sorter's whole-row tie-break.
+// Caller supplies authenticated frames already validated by the completed sort.
+pub(super) fn equal_columns(
+    a: &[u8],
+    b: &[u8],
+    selected: &[GraphValueOrder],
+    columns: usize,
+    work: &mut Work<'_>,
+) -> Result<bool> {
+    for key in selected {
+        if compare_cells(
+            column(a, columns, key.column, work)?,
+            column(b, columns, key.column, work)?,
+            0,
+            work,
+        )? != Ordering::Equal
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn compare(
     a: &[u8],
     b: &[u8],

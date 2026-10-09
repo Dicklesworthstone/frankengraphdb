@@ -33,6 +33,101 @@ fn policy() -> GqlQueryPolicy {
 }
 
 #[test]
+fn external_distinct_numeric_cells_share_typed_arguments_without_resident_support() {
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::spill_aggregate::SpillAggregatePlan;
+    use fgdb_gql::stream::VertexScanEvent;
+    use fgdb_types::CanonicalF64;
+    use std::convert::Infallible;
+    type Error = GqlQueryError<GraphAggregateError<Infallible>, Infallible>;
+
+    let plan = SpillAggregatePlan::compile(&prepare(
+        "MATCH (n) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.n) AS unique,\
+         SUM(n.n) AS bag_sum,SUM(DISTINCT n.n) AS total,AVG(DISTINCT n.n) AS average",
+    ))
+    .unwrap();
+    let definition = plan.definition();
+    assert_eq!(definition.input_width(), 1);
+    assert_eq!(
+        definition.distinct_argument_columns().collect::<Vec<_>>(),
+        vec![0]
+    );
+    let mut control = |_| Ok::<_, Error>(());
+    let mut state = definition.new_state(&mut control).unwrap();
+    let scalars = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Null,
+    ];
+    for value in &scalars {
+        let row = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(value.clone())]);
+        definition.update(&mut state, &row, &mut control).unwrap();
+    }
+    // The host supplies canonical typed support. Numerically equal integer
+    // and float values remain different DISTINCT argument members.
+    for at in [0, 1, 4, 5] {
+        let row = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(scalars[at].clone())]);
+        definition
+            .update_distinct_argument(&mut state, &row, 0, &mut control)
+            .unwrap();
+    }
+    let row = definition.finish(Vec::new(), state, &mut control).unwrap();
+    assert_eq!(row.values()[0].as_count(), Some(6));
+    assert_eq!(row.values()[1].as_count(), Some(3));
+    for (at, value) in [(2, 6.0), (3, 4.0), (4, 4.0 / 3.0)] {
+        assert_eq!(
+            row.values()[at].as_value().and_then(GraphValue::as_scalar),
+            Some(&CanonicalScalar::Float(CanonicalF64::new(value)))
+        );
+    }
+
+    let scratch_entries = std::cell::Cell::new(0);
+    let mut control = |event| {
+        scratch_entries
+            .set(scratch_entries.get() + usize::from(event == VertexScanEvent::ScratchEntry));
+        Ok::<_, Error>(())
+    };
+    let mut state = definition.new_state(&mut control).unwrap();
+    let fixed_entries = scratch_entries.get();
+    for value in 0..10_000 {
+        let row =
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(value))]);
+        definition
+            .update_distinct_argument(&mut state, &row, 0, &mut control)
+            .unwrap();
+    }
+    assert_eq!(
+        scratch_entries.get(),
+        fixed_entries,
+        "numeric support is external, not a resident set"
+    );
+    let row = definition
+        .finish(Vec::new(), state, &mut |_| Ok::<_, Error>(()))
+        .unwrap();
+    assert_eq!(row.values()[1].as_count(), Some(10_000));
+    assert_eq!(row.values()[3].as_integer(), Some(49_995_000));
+    assert_eq!(row.values()[4].as_average().unwrap().to_string(), "9999/2");
+
+    let plan = SpillAggregatePlan::compile(&prepare("MATCH (n) RETURN SUM(DISTINCT n.n) LIMIT 0"))
+        .unwrap();
+    let invalid =
+        GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Bool(true))]);
+    assert!(matches!(
+        plan.definition()
+            .validate_input(&invalid, &mut |_| Ok::<_, Error>(())),
+        Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+            aggregate: 0
+        }))
+    ));
+    assert!(
+        SpillAggregatePlan::compile(&prepare("MATCH (n) RETURN COLLECT(n.n) LIMIT 0")).is_err()
+    );
+}
+
+#[test]
 fn mixed_return_order_group_order_and_shared_arguments_match_typed_preparation() {
     let text = "MATCH (a:L)-[:R]->(b)-[:S]->(c), (c)-[:R]->(a) \
         WHERE b.n >= $minimum AND a <> c \

@@ -34,7 +34,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires COUNT/SUM/AVG/MIN/MAX without DISTINCT arguments or collection")
+                f.write_str("external aggregation requires COUNT/SUM/AVG (including DISTINCT arguments) or MIN/MAX, without collection")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -167,8 +167,11 @@ impl SpillAggregateDefinition {
                     spec.function(),
                     GraphAggregateFunction::CountRows
                         | GraphAggregateFunction::Count
+                        | GraphAggregateFunction::CountDistinct
                         | GraphAggregateFunction::SumInt
+                        | GraphAggregateFunction::SumIntDistinct
                         | GraphAggregateFunction::AverageInt
+                        | GraphAggregateFunction::AverageIntDistinct
                         | GraphAggregateFunction::Min
                         | GraphAggregateFunction::Max
                 )
@@ -366,7 +369,10 @@ impl SpillAggregateDefinition {
                     .filter(|spec| {
                         matches!(
                             spec.function(),
-                            GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt
+                            GraphAggregateFunction::SumInt
+                                | GraphAggregateFunction::SumIntDistinct
+                                | GraphAggregateFunction::AverageInt
+                                | GraphAggregateFunction::AverageIntDistinct
                         )
                     })
                     .count()
@@ -391,8 +397,10 @@ impl SpillAggregateDefinition {
         for (aggregate, spec) in self.aggregate.aggregates().iter().enumerate() {
             control(VertexScanEvent::Work)?;
             let error = match spec.function() {
-                GraphAggregateFunction::SumInt => GraphAggregateError::NonIntegerSum { aggregate },
-                GraphAggregateFunction::AverageInt => {
+                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
+                    GraphAggregateError::NonIntegerSum { aggregate }
+                }
+                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
                     GraphAggregateError::NonIntegerAverage { aggregate }
                 }
                 _ => continue,
@@ -426,7 +434,12 @@ impl SpillAggregateDefinition {
         }
         let mut cells = Vec::with_capacity(self.aggregate.aggregates().len());
         for spec in self.aggregate.aggregates() {
-            cells.push(NumericState::new_governed(spec.function(), control)?);
+            // The external host proves uniqueness. Retaining native DISTINCT
+            // support sets here would make one large group unbounded again.
+            cells.push(NumericState::new_governed(
+                plain_function(spec.function()),
+                control,
+            )?);
         }
         Ok(SpillAggregateState {
             definition: self.clone(),
@@ -434,6 +447,8 @@ impl SpillAggregateDefinition {
         })
     }
 
+    /// Add every occurrence to ordinary cells. DISTINCT cells are populated
+    /// separately by update_distinct_argument after external canonical dedup.
     pub fn update<E, C>(
         &self,
         state: &mut SpillAggregateState,
@@ -456,10 +471,71 @@ impl SpillAggregateDefinition {
             .enumerate()
         {
             control(VertexScanEvent::Work)?;
+            if distinct_argument(spec.function()) {
+                continue;
+            }
             let input = spec.argument_column().map_or(Input::Identity, |column| {
                 Input::from_value(&row.values()[column])
             });
             cell.update_governed(input, aggregate, control)?;
+        }
+        Ok(())
+    }
+
+    /// Input columns requiring one external uniqueness pass each. Functions
+    /// sharing an argument share a pass; hidden HAVING/order cells participate.
+    pub fn distinct_argument_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.aggregate
+            .aggregates()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, spec)| {
+                if !distinct_argument(spec.function()) {
+                    return None;
+                }
+                let column = spec.argument_column()?;
+                (!self.aggregate.aggregates()[..at].iter().any(|previous| {
+                    distinct_argument(previous.function())
+                        && previous.argument_column() == Some(column)
+                }))
+                .then_some(column)
+            })
+    }
+
+    /// Add one typed (group key, argument) equivalence class to every DISTINCT
+    /// cell using this column. The host must first externally sort/deduplicate
+    /// those classes. NULL is ignored by the same native plain numeric kernel.
+    /// No canonical value or resident membership set is retained here.
+    pub fn update_distinct_argument<E, C>(
+        &self,
+        state: &mut SpillAggregateState,
+        row: &GraphValueRow,
+        column: usize,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        if !Arc::ptr_eq(&self.aggregate, &state.definition.aggregate)
+            || !self
+                .distinct_argument_columns()
+                .any(|argument| argument == column)
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        self.validate_input(row, control)?;
+        for (aggregate, (spec, cell)) in self
+            .aggregate
+            .aggregates()
+            .iter()
+            .zip(&mut state.cells)
+            .enumerate()
+        {
+            control(VertexScanEvent::Work)?;
+            if distinct_argument(spec.function()) && spec.argument_column() == Some(column) {
+                cell.update_governed(Input::from_value(&row.values()[column]), aggregate, control)?;
+            }
         }
         Ok(())
     }
@@ -488,6 +564,24 @@ impl SpillAggregateDefinition {
             values.push(cell.finish_governed(control)?);
         }
         Ok(GraphAggregateRow::from_group_values(keys, values))
+    }
+}
+
+fn distinct_argument(function: GraphAggregateFunction) -> bool {
+    matches!(
+        function,
+        GraphAggregateFunction::CountDistinct
+            | GraphAggregateFunction::SumIntDistinct
+            | GraphAggregateFunction::AverageIntDistinct
+    )
+}
+
+fn plain_function(function: GraphAggregateFunction) -> GraphAggregateFunction {
+    match function {
+        GraphAggregateFunction::CountDistinct => GraphAggregateFunction::Count,
+        GraphAggregateFunction::SumIntDistinct => GraphAggregateFunction::SumInt,
+        GraphAggregateFunction::AverageIntDistinct => GraphAggregateFunction::AverageInt,
+        other => other,
     }
 }
 
