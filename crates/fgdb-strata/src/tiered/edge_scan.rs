@@ -18,6 +18,9 @@ use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, EId, QueryCx};
 use std::cmp::Reverse;
 
+mod incidence;
+pub use incidence::{BufferedEdgeDirection, BufferedEdgeJoinScan};
+
 /// Controls precede work and candidate history resolution. Identity is emitted
 /// exactly once per EId, including an identity invisible at the selected cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,6 +371,22 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         let Some(candidate) = self.advance(&mut state, cx, observe).await? else {
             return Ok(None);
         };
+        let candidate = self.resolve_endpoints(cx, candidate, relation, observe).await?;
+        if !state.heads.is_empty() {
+            self.state = Some(state);
+        }
+        Ok(Some(candidate))
+    }
+
+    // Root and independently positioned incidence reads share the SAME visible
+    // endpoint resolution and workspace ownership, after complete edge history.
+    async fn resolve_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        candidate: BufferedEdgeCandidate,
+        relation: Option<RelationId>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedEdgeCandidate<BufferedEdgeEndpoints>, BufferedScanError<C>> {
         let row = if let Some(edge) = candidate
             .row
             .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
@@ -396,13 +415,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         } else {
             None
         };
-        if !state.heads.is_empty() {
-            self.state = Some(state);
-        }
-        Ok(Some(BufferedEdgeCandidate {
+        Ok(BufferedEdgeCandidate {
             eid: candidate.eid,
             row,
-        }))
+        })
     }
 
     /// Convenience visible-edge pull. Query adapters use candidate admission.
