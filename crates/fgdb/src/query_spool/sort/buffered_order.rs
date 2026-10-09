@@ -373,15 +373,25 @@ impl PreparedBufferedOrder {
 impl<S, C> SpoolInput for AsyncEdgeJoinCursor<S, C>
 where
     S: AsyncEdgeJoinSource<Error = crate::BufferedReadError, OutputGuard = MemoryCharge>,
-    C: FnMut() -> Result<(), Cancel> + Send,
+    // `Result` here is the spool's one-parameter alias, so name the
+    // checkpoint's own result type.
+    C: FnMut() -> core::result::Result<(), Cancel> + Send,
 {
-    async fn pull(&mut self) -> Option<Result<SpoolRow>> {
-        self.next().await.map(|row| {
-            row.map(|row| SpoolRow::buffered(row.into_parts()))
-                .map_err(|error| {
-                    NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Edge)))
-                })
-        })
+    // Type-erased like the buffered vertex cursor's pull: the buffered sort's
+    // Send proof stops at `dyn Future + Send` instead of descending into the
+    // join driver.
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow>>> + Send {
+        let pulled: crate::SendFuture<'_, _> = Box::pin(async move {
+            self.next().await.map(|row| {
+                row.map(|row| SpoolRow::buffered(row.into_parts()))
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Edge),
+                        ))
+                    })
+            })
+        });
+        pulled
     }
     fn spool_state(&self) -> ScanState {
         use fgdb_gql::edge_stream::EdgeScanState;
