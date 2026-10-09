@@ -51,6 +51,7 @@ mod set_ops;
 mod set_text;
 mod shortest_walk;
 pub mod spill_aggregate;
+pub mod spill_set;
 pub mod stream;
 mod temporal_aggregate_text;
 mod temporal_set_text;
