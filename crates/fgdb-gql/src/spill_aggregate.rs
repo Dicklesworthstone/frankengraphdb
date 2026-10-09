@@ -105,7 +105,11 @@ impl AsyncSpillAggregatePlan {
         ) {
             // Select the access contract from the bound program, never by
             // retrying a rejected compiler or a failed storage operation.
-            if aggregate.input_pattern().plan().operators().iter()
+            if aggregate
+                .input_pattern()
+                .plan()
+                .operators()
+                .iter()
                 .any(|operator| matches!(operator, GlaOperator::Expand { .. }))
             {
                 AsyncEdgeJoinSpillAggregatePlan::from_definition(definition)

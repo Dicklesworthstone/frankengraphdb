@@ -171,12 +171,14 @@ fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustio
     assert!(matches!(
         AsyncSpillAggregatePlan::compile(&definition(
             "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0"
-        )), Ok(AsyncSpillAggregatePlan::Join(_))
+        )),
+        Ok(AsyncSpillAggregatePlan::Join(_))
     ));
     assert!(matches!(
         AsyncSpillAggregatePlan::compile(&definition(
             "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS rows LIMIT 0"
-        )), Ok(AsyncSpillAggregatePlan::Edge(_))
+        )),
+        Ok(AsyncSpillAggregatePlan::Edge(_))
     ));
     let query = definition("MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS rows");
     let AsyncSpillAggregatePlan::Edge(plan) = AsyncSpillAggregatePlan::compile(&query).unwrap()
