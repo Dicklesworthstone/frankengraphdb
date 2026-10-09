@@ -82,7 +82,12 @@ impl AsyncSpillSetPlan {
         ) {
             // Choose the source contract from the complete native program,
             // never by retrying a failed single-edge plan or storage operation.
-            if pattern.plan().operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
+            if pattern
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::Expand { .. }))
+            {
                 let (plan, tail) = AsyncEdgeJoinPlan::compile_sort_input(pattern.plan())
                     .map_err(SpillSetBuildError::Edge)?;
                 (AsyncSpillSetSourcePlan::Join(plan), tail)

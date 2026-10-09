@@ -102,11 +102,18 @@ impl PreparedNativeRead {
                     EdgeScanError::Plan(error),
                 )))
             };
-            if query.plan().operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
-                let (plan, tail) = AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
+            if query
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::Expand { .. }))
+            {
+                let (plan, tail) =
+                    AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
                 (Input::Join(plan), tail)
             } else {
-                let (plan, tail) = AsyncEdgeScanPlan::compile_sort_input(query.plan()).map_err(error)?;
+                let (plan, tail) =
+                    AsyncEdgeScanPlan::compile_sort_input(query.plan()).map_err(error)?;
                 (Input::Edge(plan), tail)
             }
         } else {
@@ -370,9 +377,10 @@ where
 {
     async fn pull(&mut self) -> Option<Result<SpoolRow>> {
         self.next().await.map(|row| {
-            row.map(|row| SpoolRow::buffered(row.into_parts())).map_err(|error| {
-                NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Edge)))
-            })
+            row.map(|row| SpoolRow::buffered(row.into_parts()))
+                .map_err(|error| {
+                    NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Edge)))
+                })
         })
     }
     fn spool_state(&self) -> ScanState {
@@ -385,7 +393,12 @@ where
         }
     }
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
-        (self.snapshot_seq(), ScanKind::Edge, self.row_stats(), self.evaluator_stats())
+        (
+            self.snapshot_seq(),
+            ScanKind::Edge,
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
     }
 }
 

@@ -432,12 +432,30 @@ fn fixed_hop_sources_preserve_computed_barriers_multiplicity_and_hidden_source_w
         let query = prepare(text);
         let plan = AsyncSpillSetPlan::compile(&query).unwrap();
         assert!(matches!(plan.source(), AsyncSpillSetSourcePlan::Join(_)));
-        assert_eq!(staged(&graph, &query).unwrap(), graph.native(&query).unwrap(), "{text}");
+        assert_eq!(
+            staged(&graph, &query).unwrap(),
+            graph.native(&query).unwrap(),
+            "{text}"
+        );
     }
-    let query = prepare("MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN value*2 AS result");
-    assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(20)]), row(vec![scalar(20)]), row(vec![scalar(18)])]);
-    let source = leaf("MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN c.p AS value ORDER BY s.p DESC SKIP 1 LIMIT 3");
-    let query = PreparedGraphSet::from(source).nested().unwrap().with_page(1, Some(1));
+    let query = prepare(
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN value*2 AS result",
+    );
+    assert_eq!(
+        staged(&graph, &query).unwrap(),
+        vec![
+            row(vec![scalar(20)]),
+            row(vec![scalar(20)]),
+            row(vec![scalar(18)])
+        ]
+    );
+    let source = leaf(
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN c.p AS value ORDER BY s.p DESC SKIP 1 LIMIT 3",
+    );
+    let query = PreparedGraphSet::from(source)
+        .nested()
+        .unwrap()
+        .with_page(1, Some(1));
     let plan = AsyncSpillSetPlan::compile(&query).unwrap();
     assert!(matches!(plan.source(), AsyncSpillSetSourcePlan::Join(_)));
     assert!(plan.source_tail().evaluation_width() > plan.source_tail().visible_width());
