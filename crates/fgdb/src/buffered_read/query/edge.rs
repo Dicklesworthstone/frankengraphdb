@@ -2,6 +2,8 @@
 //! owns I/O and resident reservations; the existing async edge operator owns
 //! filtering, direction, capture, projection, ordering and pagination.
 
+mod join;
+
 use super::{Cancel, Checkpoint};
 use crate::{BufferedReadError, BufferedReadView, MemoryPool};
 use asupersync::fs::Vfs;
@@ -17,7 +19,7 @@ use fgdb_gql::spill_aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAgg
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
-    BufferedEdgeEndpoints, BufferedEdgeScan, BufferedEdgeScanEvent,
+    BufferedEdgeCandidate, BufferedEdgeEndpoints, BufferedEdgeJoinScan, BufferedEdgeScanEvent,
 };
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -62,9 +64,41 @@ impl AsyncEdgeScanRecord for Record {
 }
 
 struct Source<'view, 'q, V: Vfs> {
-    scan: BufferedEdgeScan<'view, V>,
+    scan: BufferedEdgeJoinScan<'view, V>,
     cx: &'q QueryCx,
     pool: MemoryPool,
+}
+
+impl<V: Vfs> Source<'_, '_, V> {
+    // Both root and routed incidence readers already admitted the same EId and
+    // complete endpoint images. Retain their reservations; never copy a record.
+    fn admit_record<C>(
+        &self,
+        candidate: Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>,
+    ) -> CandidateResult<C> {
+        candidate
+            .map(|candidate| {
+                let record = candidate
+                    .row
+                    .map(|image| {
+                        let charge = self
+                            .pool
+                            .reserve(self.cx, 0)
+                            .map_err(BufferedReadError::Memory)
+                            .map_err(EdgeScanSourceError::Source)?;
+                        Ok::<_, EdgeScanSourceError<BufferedReadError, C>>(Record {
+                            image,
+                            scratch: RefCell::new(charge),
+                        })
+                    })
+                    .transpose()?;
+                Ok(AsyncEdgeCandidate {
+                    eid: candidate.eid,
+                    record,
+                })
+            })
+            .transpose()
+    }
 }
 
 impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
@@ -104,28 +138,7 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
                 BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),
                 BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
             })?;
-        candidate
-            .map(|candidate| {
-                let record = candidate
-                    .row
-                    .map(|image| {
-                        let charge = self
-                            .pool
-                            .reserve(self.cx, 0)
-                            .map_err(BufferedReadError::Memory)
-                            .map_err(EdgeScanSourceError::Source)?;
-                        Ok::<_, EdgeScanSourceError<Self::Error, C>>(Record {
-                            image,
-                            scratch: RefCell::new(charge),
-                        })
-                    })
-                    .transpose()?;
-                Ok(AsyncEdgeCandidate {
-                    eid: candidate.eid,
-                    record,
-                })
-            })
-            .transpose()
+        self.admit_record(candidate)
     }
 
     fn evaluation_event(
@@ -310,7 +323,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
         let source = Source {
-            scan: self.partition.edge_scan(cx, as_of).map_err(source_error)?,
+            scan: self.partition.edge_scan(cx, as_of).map_err(source_error)?.into_join_scan(),
             cx,
             pool,
         };
