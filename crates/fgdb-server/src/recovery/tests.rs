@@ -344,9 +344,9 @@ fn post_d2_recovery_invalidates_pins_and_resets_registration_ownership() {
             .await
             .unwrap_or_else(|error| panic!("{}", error.message))
             .unwrap();
-        assert!(baseline.is_snapshot());
-        assert_eq!(baseline.frontier(), CommitSeq(1));
-        assert_eq!(baseline.rows().len(), 1);
+        assert!(baseline.batch.is_snapshot());
+        assert_eq!(baseline.batch.frontier(), CommitSeq(1));
+        assert_eq!(baseline.batch.rows().len(), 1);
         replacement.consumer.close();
         server.join_database_workers(&root).await;
     });
