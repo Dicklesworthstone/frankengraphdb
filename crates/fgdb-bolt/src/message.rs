@@ -352,6 +352,69 @@ pub mod structure {
         }
     }
 
+    /// `Relationship{id, start, end, type, properties, element_id,
+    /// start_element_id, end_element_id}` (tag `R`). The element identity
+    /// array is ordered relationship, start node, end node.
+    #[must_use]
+    pub fn relationship(
+        id: i64,
+        start: i64,
+        end: i64,
+        kind: String,
+        properties: Vec<(String, Value)>,
+        element_ids: [String; 3],
+    ) -> Value {
+        let [element_id, start_element_id, end_element_id] = element_ids;
+        Value::Struct {
+            tag: 0x52,
+            fields: vec![
+                Value::Int(id),
+                Value::Int(start),
+                Value::Int(end),
+                Value::String(kind),
+                Value::Map(properties),
+                Value::String(element_id),
+                Value::String(start_element_id),
+                Value::String(end_element_id),
+            ],
+        }
+    }
+
+    /// A path's `UnboundRelationship{id, type, properties, element_id}`
+    /// (tag `r`); its endpoints are supplied by the path's traversal indices.
+    #[must_use]
+    pub fn unbound_relationship(
+        id: i64,
+        kind: String,
+        properties: Vec<(String, Value)>,
+        element_id: String,
+    ) -> Value {
+        Value::Struct {
+            tag: 0x72,
+            fields: vec![
+                Value::Int(id),
+                Value::String(kind),
+                Value::Map(properties),
+                Value::String(element_id),
+            ],
+        }
+    }
+
+    /// `Path{nodes, relationships, indices}` (tag `P`). The first node is
+    /// the start; indices alternate signed one-based relationship positions
+    /// and nonnegative zero-based node positions.
+    #[must_use]
+    pub fn path(nodes: Vec<Value>, relationships: Vec<Value>, indices: Vec<i64>) -> Value {
+        Value::Struct {
+            tag: 0x50,
+            fields: vec![
+                Value::List(nodes),
+                Value::List(relationships),
+                Value::List(indices.into_iter().map(Value::Int).collect()),
+            ],
+        }
+    }
+
     /// `DateTime{seconds, nanoseconds, tz_offset_seconds}` (tag `I`):
     /// seconds and nanoseconds since the Unix epoch in UTC.
     #[must_use]
@@ -386,6 +449,85 @@ pub mod structure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bolt_5_graph_structures_match_wire_goldens_and_decode_a_reverse_path() {
+        // Bolt 5 adds element identities to bound and unbound relationships;
+        // path indices still encode traversal direction independently of them.
+        let properties = vec![("p".into(), Value::Int(7))];
+        let relationship = structure::relationship(
+            9,
+            1,
+            2,
+            "R".into(),
+            properties.clone(),
+            ["I".into(), "A".into(), "B".into()],
+        );
+        let unbound = structure::unbound_relationship(9, "R".into(), properties, "I".into());
+        let path = structure::path(
+            vec![
+                structure::node(2, vec![], vec![], "B".into()),
+                structure::node(1, vec![], vec![], "A".into()),
+            ],
+            vec![unbound.clone()],
+            vec![-1, 1],
+        );
+        let goldens: [(&Value, &[u8]); 3] = [
+            (
+                &relationship,
+                b"\xB8\x52\x09\x01\x02\x81R\xA1\x81p\x07\x81I\x81A\x81B",
+            ),
+            (&unbound, b"\xB4\x72\x09\x81R\xA1\x81p\x07\x81I"),
+            (
+                &path,
+                b"\xB3\x50\x92\xB4\x4E\x02\x90\xA0\x81B\xB4\x4E\x01\x90\xA0\x81A\x91\xB4\x72\x09\x81R\xA1\x81p\x07\x81I\x92\xFF\x01",
+            ),
+        ];
+        for (value, golden) in goldens {
+            let mut bytes = Vec::new();
+            packstream::encode(value, &mut bytes);
+            assert_eq!(bytes, golden);
+            assert_eq!(&packstream::decode(golden).unwrap(), value);
+        }
+
+        fn fields(value: &Value, expected_tag: u8) -> &[Value] {
+            let Value::Struct { tag, fields } = value else {
+                panic!("expected graph structure");
+            };
+            assert_eq!(*tag, expected_tag);
+            fields
+        }
+
+        // A driver can reconstruct the same directed relationship from the
+        // unbound path entry even though this path walks it from B to A.
+        let decoded = packstream::decode(goldens[2].1).unwrap();
+        let [
+            Value::List(nodes),
+            Value::List(relationships),
+            Value::List(indices),
+        ] = fields(&decoded, 0x50)
+        else {
+            panic!("expected three path lists");
+        };
+        let [Value::Int(relationship_index), Value::Int(node_index)] = indices.as_slice() else {
+            panic!("expected one path step");
+        };
+        assert_eq!(*relationship_index, -1);
+        let unbound_index = usize::try_from(relationship_index.unsigned_abs() - 1).unwrap();
+        let next_index = usize::try_from(*node_index).unwrap();
+        let previous = fields(&nodes[0], 0x4E);
+        let next = fields(&nodes[next_index], 0x4E);
+        let unbound = fields(&relationships[unbound_index], 0x72);
+        let bound = fields(&relationship, 0x52);
+        let (source, target) = if *relationship_index > 0 {
+            (previous, next)
+        } else {
+            (next, previous)
+        };
+        assert_eq!((&unbound[0], &unbound[3]), (&bound[0], &bound[5]));
+        assert_eq!((&source[0], &target[0]), (&bound[1], &bound[2]));
+        assert_eq!((&source[3], &target[3]), (&bound[6], &bound[7]));
+    }
 
     #[test]
     fn negotiation_picks_5_0_from_a_range_and_skips_manifest_proposals() {
