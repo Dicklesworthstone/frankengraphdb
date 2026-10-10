@@ -209,3 +209,45 @@ fn a_trailing_set_is_its_own_clause_not_folded_into_both_branches() {
         .unwrap();
     assert!(repeated.bind_parameters(&args).is_err());
 }
+
+/// Plan identity for constant-valued MERGE (fgdb-cal4z acceptance). Computed
+/// SET values (ec3a710d) compile through the scalar expression compiler, but
+/// a literal or parameter value in any clause stays the constant action it
+/// was before (SetProperty, transcript tag 0), never an expression (tag 2).
+/// So a constant-valued MERGE keeps its pre-ec3a710d encoding. The one
+/// deliberate change, a trailing SET kept as its own clause, is pinned by
+/// a_trailing_set_is_its_own_clause_not_folded_into_both_branches. Control:
+/// a computed value in the same position becomes the expression action.
+#[test]
+fn constant_values_stay_constant_actions_and_only_computed_values_compile_to_expressions() {
+    use fgdb_gql::GraphVertexUpsertAction as Action;
+    let args = GqlParameters::new()
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("v", 1)
+        .unwrap();
+    let bound = |text: &str| {
+        PreparedGraphVertexUpsertText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&args)
+            .unwrap()
+    };
+    let constant =
+        bound("MERGE (n:Person {p:$p}) ON MATCH SET n.q=2,n:Seen ON CREATE SET n.q=$v SET n.q='x'");
+    let clauses = [constant.on_match(), constant.on_create(), constant.after()];
+    assert_eq!(clauses.map(<[Action]>::len), [2, 1, 1]);
+    for action in clauses.iter().flat_map(|clause| clause.iter()) {
+        assert!(
+            matches!(action, Action::SetProperty { .. } | Action::SetLabel { .. }),
+            "{action:?}"
+        );
+    }
+    let computed = bound("MERGE (n:Person {p:$p}) ON MATCH SET n.q=n.q+$v SET n.q=n.q*2");
+    for clause in [computed.on_match(), computed.after()] {
+        assert!(
+            matches!(clause, [Action::SetExpression { .. }]),
+            "{clause:?}"
+        );
+    }
+    assert_ne!(constant.canonical_bytes(), computed.canonical_bytes());
+}
