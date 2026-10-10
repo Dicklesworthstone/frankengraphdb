@@ -31,6 +31,9 @@ pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
 /// Largest human-readable ERROR message.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PARAMETERS: usize = 1024;
+/// Argument sets in one atomic write-batch request. The served database also
+/// bounds the number of expanded native statements across all sets.
+pub const MAX_BATCH_ARGUMENT_SETS: usize = 1024;
 pub const MAX_COLUMNS: usize = 4096;
 pub const MAX_ROWS_PER_CHUNK: usize = 1 << 20;
 /// Lists and maps nest at most this deep.
@@ -965,6 +968,50 @@ fn get_parameters(input: &mut In<'_>) -> Result<Vec<(String, WireValue)>, BodyEr
     Ok(parameters)
 }
 
+/// One atomic, stats-only native write program evaluated record-major. All
+/// argument sets bind before effects; server-owned IDs and one Chronicle
+/// completion are shared by the whole batch. Native RETURN is unsupported,
+/// never discarded. Repeating a request is a new write, not an idempotent
+/// retry, a durable transaction handle or a sequence of autocommits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteBatch {
+    pub statement: String,
+    /// Each set has the same canonical name-order contract as EXECUTE.
+    pub argument_sets: Vec<Vec<(String, WireValue)>>,
+}
+
+body!(
+    ExecuteBatch,
+    |s, out| {
+        check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
+        check_len(s.argument_sets.len(), MAX_BATCH_ARGUMENT_SETS)?;
+        if s.argument_sets.is_empty() {
+            return Err(BodyError::Noncanonical);
+        }
+        out.text(&s.statement);
+        out.len(s.argument_sets.len());
+        for parameters in &s.argument_sets {
+            put_parameters(&mut out, parameters)?;
+        }
+    },
+    |input| {
+        let statement = input.text(MAX_STATEMENT_BYTES)?;
+        // Even an empty argument map consumes its u32 parameter count.
+        let count = input.count(MAX_BATCH_ARGUMENT_SETS, 4)?;
+        if count == 0 {
+            return Err(BodyError::Noncanonical);
+        }
+        let mut argument_sets = Vec::with_capacity(count);
+        for _ in 0..count {
+            argument_sets.push(get_parameters(&mut input)?);
+        }
+        ExecuteBatch {
+            statement,
+            argument_sets,
+        }
+    }
+);
+
 body!(
     Prepare,
     |s, out| {
@@ -1525,6 +1572,84 @@ mod tests {
             BodyError::TrailingBytes,
             "a trailing byte must be refused"
         );
+    }
+
+    #[test]
+    fn write_batches_have_canonical_bounded_records_and_one_body_value_budget() {
+        let golden = ExecuteBatch {
+            statement: "x".into(),
+            argument_sets: vec![vec![], vec![("a".into(), WireValue::Null)]],
+        };
+        assert_eq!(
+            golden.encode().unwrap(),
+            [
+                0, 0, 0, 1, b'x', 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 0
+            ]
+        );
+        let batch = ExecuteBatch {
+            statement: "CREATE (:Person {name:$name})".into(),
+            argument_sets: vec![
+                vec![("name".into(), WireValue::Text("Ann".into()))],
+                vec![("name".into(), sample_value())],
+            ],
+        };
+        let bytes = batch.encode().unwrap();
+        assert_eq!(ExecuteBatch::decode(&bytes).unwrap(), batch);
+        every_prefix_refuses::<ExecuteBatch>(&bytes);
+        assert_eq!(ExecuteBatch::decode(&[0; 8]), Err(BodyError::Noncanonical));
+        assert_eq!(
+            ExecuteBatch::decode(&[0, 0, 0, 0, 0, 0, 4, 1]),
+            Err(BodyError::TooLarge)
+        );
+        assert_eq!(
+            ExecuteBatch::decode(&[0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0]),
+            Err(BodyError::Truncated)
+        );
+        for records in [0, MAX_BATCH_ARGUMENT_SETS + 1] {
+            assert!(
+                ExecuteBatch {
+                    statement: "x".into(),
+                    argument_sets: vec![vec![]; records],
+                }
+                .encode()
+                .is_err()
+            );
+        }
+        let bound = ExecuteBatch {
+            statement: "x".into(),
+            argument_sets: vec![vec![]; MAX_BATCH_ARGUMENT_SETS],
+        };
+        assert_eq!(
+            ExecuteBatch::decode(&bound.encode().unwrap()).unwrap(),
+            bound
+        );
+        let duplicate = ExecuteBatch {
+            statement: "x".into(),
+            argument_sets: vec![
+                vec![],
+                vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)],
+            ],
+        };
+        assert_eq!(duplicate.encode(), Err(BodyError::Noncanonical));
+        // Independently encoded duplicate names in the SECOND parameter set.
+        let duplicate_bytes = [
+            0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 1, b'a',
+            0,
+        ];
+        assert_eq!(
+            ExecuteBatch::decode(&duplicate_bytes),
+            Err(BodyError::Noncanonical)
+        );
+        // Two individually legal value trees exceed the shared BODY count.
+        // A fresh input/value allowance for each record would accept this.
+        let mut over = Vec::new();
+        over.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 2]);
+        for _ in 0..2 {
+            over.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, b'a', tag::LIST]);
+            over.extend_from_slice(&((MAX_VALUE_NODES / 2) as u32).to_be_bytes());
+            over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
+        }
+        assert_eq!(ExecuteBatch::decode(&over), Err(BodyError::TooLarge));
     }
 
     #[test]

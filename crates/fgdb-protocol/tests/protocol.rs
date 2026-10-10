@@ -484,6 +484,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
     let connection = ready_connection();
     for kind in [
         FrameKind::Prepare,
+        FrameKind::ExecuteBatch,
         FrameKind::ExecutePrepared,
         FrameKind::ReleasePrepared,
     ] {

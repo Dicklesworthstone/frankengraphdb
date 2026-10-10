@@ -133,6 +133,7 @@ impl Connection {
             FrameKind::AuthRefresh => matches!(self.phase, Phase::Authenticated | Phase::Ready),
             FrameKind::Prepare
             | FrameKind::Execute
+            | FrameKind::ExecuteBatch
             | FrameKind::ExecutePrepared
             | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel

@@ -40,6 +40,7 @@ pub enum FrameKind {
     PreparedReleased = 0x001f,
     Ping = 0x0020,
     Pong = 0x0021,
+    ExecuteBatch = 0x0022,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -75,6 +76,7 @@ impl TryFrom<u16> for FrameKind {
             0x001f => Self::PreparedReleased,
             0x0020 => Self::Ping,
             0x0021 => Self::Pong,
+            0x0022 => Self::ExecuteBatch,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }
