@@ -226,7 +226,7 @@ fn generation_fence_cancels_unwritten_frames_but_closes_partial_frames_and_flush
                 wakes.0.load(Ordering::Acquire) > before_wakes,
                 "fencing must wake a blocked physical send without socket readiness"
             );
-            let stop = send.await.err().expect("the original generation must stop");
+            let stop = send.await.expect_err("the original generation must stop");
             assert_eq!(matches!(stop, Stop::Recovery(_)), unwritten);
             assert_eq!(wire.bytes(), before);
             assert_eq!(wire.writes.load(Ordering::Acquire), writes);
