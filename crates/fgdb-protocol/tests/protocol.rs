@@ -478,3 +478,47 @@ fn duplicate_or_foreign_send_completion_cannot_discharge_another_obligation() {
     first.complete_drain().unwrap();
     assert_eq!(second.sends_in_flight(), 1);
 }
+
+#[test]
+fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
+    let connection = ready_connection();
+    for kind in [
+        FrameKind::Prepare,
+        FrameKind::ExecutePrepared,
+        FrameKind::ReleasePrepared,
+    ] {
+        let frame = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
+        assert_eq!(connection.validate_client_header(frame.header()), Ok(()));
+        let child = crate::frame(kind, Binding::Ready(ready()), StreamId([1; 16]), &[]);
+        assert_eq!(
+            connection.validate_client_header(child.header()),
+            Err(ProtocolError::InvalidStream)
+        );
+        let mut prior = ready();
+        prior.session.auth_generation -= 1;
+        let stale = crate::frame(kind, Binding::Ready(prior), StreamId::CONTROL, &[]);
+        assert_eq!(
+            connection.validate_client_header(stale.header()),
+            Err(ProtocolError::InvalidBinding)
+        );
+        let mut unselected = Connection::new(2, 4).unwrap();
+        unselected.negotiated().unwrap();
+        unselected.authenticated(session()).unwrap();
+        let request = crate::frame(kind, Binding::Session(session()), StreamId::CONTROL, &[]);
+        assert_eq!(
+            unselected.validate_client_header(request.header()),
+            Err(ProtocolError::InvalidState)
+        );
+    }
+    for kind in [FrameKind::Prepared, FrameKind::PreparedReleased] {
+        let response = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
+        assert_eq!(
+            connection.validate_client_header(response.header()),
+            Err(ProtocolError::InvalidState)
+        );
+    }
+    assert_eq!(FrameKind::try_from(0x001c).unwrap(), FrameKind::SubscriptionReset);
+    assert_eq!(FrameKind::try_from(0x001d).unwrap(), FrameKind::ExecutePrepared);
+    assert_eq!(FrameKind::try_from(0x001e).unwrap(), FrameKind::ReleasePrepared);
+    assert_eq!(FrameKind::try_from(0x001f).unwrap(), FrameKind::PreparedReleased);
+}

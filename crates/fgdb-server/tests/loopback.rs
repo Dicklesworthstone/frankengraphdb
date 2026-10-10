@@ -2409,3 +2409,131 @@ fn writes_that_return_answer_their_rows_with_the_commit() {
         server.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "prepared-read-lifecycle").await;
+        let original = token(&grant(Rights::ReadWrite));
+        let mut owner = Client::connect(cx, addr, original.clone()).await.unwrap();
+        owner.select(cx, "social").await.unwrap();
+        let query = "MATCH (n:Person) WHERE n.age >= $min RETURN n.name AS name ORDER BY name";
+        let handle = owner
+            .prepare_read(cx, query, vec![("min".into(), WireValue::Int(99))])
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'A',age:1}), (:Person {name:'B',age:2}), \
+                 (:Person {name:'C',age:3}), (:Person {name:'D',age:4}), \
+                 (:Person {name:'E',age:5}), (:Person {name:'F',age:6}), \
+                 (:Company {name:'Hidden',age:99})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let answer = owner
+            .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(3))])
+            .await
+            .unwrap();
+        assert_eq!(answer.columns, ["name"]);
+        assert_eq!(answer.rows, ["C", "D", "E", "F"].map(|name| vec![text(name)]));
+        assert!(matches!(answer.outcome, Outcome::Rows { seq: 1 }));
+        assert_eq!(
+            server_code(owner.execute_prepared(cx, handle, vec![]).await.unwrap_err()),
+            ErrorCode::Statement
+        );
+        let mut foreign = Client::connect(cx, addr, original).await.unwrap();
+        foreign.select(cx, "social").await.unwrap();
+        let foreign_error = foreign
+            .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(1))])
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(foreign_error), ErrorCode::Statement);
+        foreign.release_prepared(cx, handle).await.unwrap();
+        let mut delivered = 0;
+        let cancelled = owner
+            .execute_prepared_streaming(
+                cx,
+                handle,
+                vec![("min".into(), WireValue::Int(1))],
+                |_| {},
+                |_| {
+                    delivered += 1;
+                    Err(ClientError::Protocol("the consumer stopped"))
+                },
+            )
+            .await;
+        assert!(matches!(cancelled, Err(ClientError::Protocol("the consumer stopped"))));
+        assert_eq!(delivered, 1);
+        let answer = owner
+            .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(6))])
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [vec![text("F")]]);
+        // This is a structural text operand. Its spelling cannot create a
+        // second statement, substitute catalog names, or alter the template.
+        let exact_name = owner
+            .prepare_read(
+                cx,
+                "MATCH (n:Person) WHERE n.name = $name RETURN n.name AS name",
+                vec![("name".into(), text("A"))],
+            )
+            .await
+            .unwrap();
+        let injection = owner
+            .execute_prepared(
+                cx,
+                exact_name,
+                vec![("name".into(), text("A' CREATE (:Person {name:'injected'}) //"))],
+            )
+            .await
+            .unwrap();
+        assert!(injection.rows.is_empty());
+        let live = owner
+            .execute_prepared(cx, exact_name, vec![("name".into(), text("B"))])
+            .await
+            .unwrap();
+        assert_eq!(live.rows, [vec![text("B")]]);
+        owner.release_prepared(cx, exact_name).await.unwrap();
+        owner.release_prepared(cx, exact_name).await.unwrap();
+        assert_eq!(
+            server_code(
+                owner.execute_prepared(cx, exact_name, vec![("name".into(), text("B"))])
+                    .await.unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            server_code(owner.prepare_read(cx, "CREATE (:Person)", vec![]).await.unwrap_err()),
+            ErrorCode::Statement
+        );
+        let narrowed = token(&Grant {
+            labels: Scope::only([LabelId(1)]),
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Read)
+        });
+        owner.refresh_authority(cx, narrowed).await.unwrap();
+        assert_eq!(
+            server_code(
+                owner.execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(1))])
+                    .await.unwrap_err()
+            ),
+            ErrorCode::Statement,
+            "even narrowing discards every old compiled template"
+        );
+        let visible = owner
+            .prepare_read(cx, "MATCH (n) RETURN n.name AS name ORDER BY name", vec![])
+            .await
+            .unwrap();
+        let answer = owner.execute_prepared(cx, visible, vec![]).await.unwrap();
+        assert_eq!(answer.rows, ["A", "B", "C", "D", "E", "F"].map(|name| vec![text(name)]));
+        owner.release_prepared(cx, visible).await.unwrap();
+        foreign.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}

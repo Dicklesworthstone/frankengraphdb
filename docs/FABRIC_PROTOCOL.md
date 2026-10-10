@@ -52,6 +52,8 @@ these values; callers cannot authenticate merely by constructing the structs.
 | WINDOW_UPDATE | 0x001a | client |
 | SUBSCRIPTION_BATCH | 0x001b | server |
 | SUBSCRIPTION_RESET | 0x001c | server |
+| EXECUTE_PREPARED | 0x001d | client |
+| RELEASE_PREPARED / PREPARED_RELEASED | 0x001e / 0x001f | client / server |
 | PING / PONG | 0x0020 / 0x0021 | client / server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
@@ -78,8 +80,9 @@ valid only between frames. Any malformed/truncated frame poisons its decoder;
 there is no resynchronization by scanning untrusted payload bytes.
 
 `Connection::validate_client_header` enforces direction, phase, complete binding,
-nonzero request IDs and control/child-stream distinction. EXECUTE and PREPARE
-use the control stream; child stream IDs are minted by the server. Cancellation
+nonzero request IDs and control/child-stream distinction. EXECUTE, PREPARE,
+EXECUTE_PREPARED and RELEASE_PREPARED use the control stream; child stream IDs
+are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
 
@@ -159,6 +162,10 @@ redacted from `Debug`.
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
+| PREPARED | nonzero connection-owned `handle [16]` |
+| EXECUTE_PREPARED | `handle [16]`, execution `parameters [(name text, value)]` (names strictly ascending) |
+| RELEASE_PREPARED / PREPARED_RELEASED | `handle [16]` |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
 | SUBSCRIPTION_BATCH | `frontier u64`, `snapshot bool`, `last bool`, `columns: none \| [text]` (first frame only), `entries [(weight i128 ≠ 0, [value])]` |
@@ -264,6 +271,52 @@ application output is admitted.
   resolve through the
   operator's bindings for that database, the CLI's `--label/--relation/
   --property` contract, because the engine has no durable catalog yet.
+- **Prepared native reads.** PREPARE parses and admits one native read template
+  under fresh read authority, charging the statement bytes to its signed work
+  allowance before selector parsing or catalog resolution. Representative
+  parameter values establish structural operand types; their values do not
+  become defaults. Preparation executes no graph query and retains no snapshot
+  pin. PREPARED returns a random nonzero 128-bit handle owned by that connection.
+  EXECUTE_PREPARED supplies every argument again, binds it as data, and uses the
+  existing authorized native executor with fresh scope, expiry and signed
+  execution budgets at the current frontier (or the query's explicit historical
+  selector). Branch selectors remain restricted to the selected trunk. Writes
+  refuse during preparation.
+
+  A connection retains at most 64 templates and 4 MiB of original statement
+  bytes; those are template-count/source-text ceilings, not an allocator-wide
+  bound on compiled structures. RELEASE_PREPARED releases one handle and
+  returns PREPARED_RELEASED with the same handle; unknown or already-released
+  handles have the same successful release response. Executing an unknown,
+  released or foreign-connection handle produces a uniform statement refusal.
+  AUTH_REFRESH discards the entire cache. Database recovery permanently fences
+  every old template, including one already borrowed for execution; preparing
+  again after recovery creates a new owner. Disconnect releases the cache.
+
+  Prepared reads use ordinary SNAPSHOT_RESULT chunks, exact flow credit,
+  cancellation and live send guards. PREPARE, EXECUTE_PREPARED and
+  RELEASE_PREPARED refuse busy while another statement or subscription owns
+  the connection. They create no transaction owner, durable prepared
+  transaction, durable result, or reconnect/resume token.
+
+  The Rust client exposes `prepare_read`, `execute_prepared`,
+  `execute_prepared_streaming` and `release_prepared`. For example, after
+  selecting the database:
+
+  ```rust
+  let handle = client.prepare_read(
+      cx,
+      "MATCH (n:Person) WHERE n.age >= $min RETURN n.name AS name",
+      vec![("min".into(), WireValue::Int(0))],
+  ).await?;
+  let adults = client.execute_prepared(
+      cx, handle, vec![("min".into(), WireValue::Int(18))],
+  ).await?;
+  let seniors = client.execute_prepared(
+      cx, handle, vec![("min".into(), WireValue::Int(65))],
+  ).await?;
+  client.release_prepared(cx, handle).await?;
+  ```
 - **Results.** Every result is the session-owned, ephemeral
   SNAPSHOT_RESULT class on a server-minted 128-bit child stream. The first
   chunk carries the columns. Each chunk is sized to the stream's available
@@ -275,7 +328,11 @@ application output is admitted.
   QUERY_CANCEL (answered with a stream-scoped `cancelled` ERROR), PING and
   DRAIN get through, and a second EXECUTE is refused `busy`. A late
   WINDOW_UPDATE or QUERY_CANCEL for one of the last 64 finished streams is
-  accepted and ignored instead of poisoning the connection.
+  accepted and ignored instead of poisoning the connection. If a streaming
+  client callback refuses a row, the client sends QUERY_CANCEL, suppresses
+  further row callbacks, and drains the original terminal before returning
+  the callback error. Draining still validates every request, stream, binding
+  and terminal body; it never retries the query.
 - **Send guard.** Every write attempt rechecks that the frame carries the
   binding the connection holds at that moment. The only exceptions are
   HELLO_ACK and AUTH_OK on the transport header and READY on the session
@@ -405,7 +462,8 @@ application output is admitted.
   the same ephemeral class as FGP's.
 
 Not served, and refused with a typed error rather than approximated: the
-durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
+durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE,
+durable transaction preparation,
 explicit multi-statement transactions with ownership and
 reattachment, durable subscriptions with resume across reconnects, Bolt
 writes (`BoltCompatProfileV2`, post-1.0), and the
@@ -427,10 +485,20 @@ and a subscription receiving its baseline, an insert delta, a ten-row batch
 through a four-row window, a progress-only delta, an exact retraction, its
 END on cancel, and a scoped token's refusal).
 
+Prepared-read regression sources additionally cover canonical handles and
+operand bodies, client reply binding, cancellation draining, live parameter
+rebinding, cache ownership, recovery fencing and authority narrowing:
+`crates/fgdb-protocol/src/{body,client}.rs`,
+`crates/fgdb-protocol/tests/protocol.rs`,
+`crates/fgdb-server/src/connection/prepared_tests.rs` and
+`crates/fgdb-server/tests/loopback.rs`. These newly added tests have not run in
+this session because the local compiler/process service is unavailable.
+
 ## Remaining integration
 
 Authoritative frame-catalog generation, durable
-result machines with ACK/release/resume, PREPARE, explicit transactions with
+result machines with ACK/release/resume, durable transaction preparation,
+explicit transactions with
 ownership and reattachment, SnapshotQuery proofs, durable and capability-masked
 subscriptions, the surface
 adapters, multi-tenant admission/QoS, and the native Python packaging boundary

@@ -10,8 +10,9 @@
 
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
-    ErrorCode, Execute, ExecuteMode, Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd,
-    SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
+    ErrorCode, Execute, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
+    Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
+    SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -295,16 +296,132 @@ impl Client {
         })
     }
 
+    /// Prepare one native read template without executing it or pinning a
+    /// snapshot. Representative parameters declare structural operand types;
+    /// execute supplies every value again. Handles belong to this connection
+    /// and are invalidated by authority refresh, database recovery or release.
+    pub async fn prepare_read(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        mut parameters: Vec<(String, WireValue)>,
+    ) -> Result<PreparedHandle, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let request = self
+            .send(
+                cx,
+                FrameKind::Prepare,
+                StreamId::CONTROL,
+                &Prepare {
+                    statement: statement.to_owned(),
+                    parameters,
+                },
+            )
+            .await?;
+        let frame = self.reply(cx, request).await?;
+        if !frame.header().stream_id().is_control() {
+            return Err(ClientError::Protocol("PREPARED on a child stream"));
+        }
+        Ok(expect::<Prepared>(&frame, FrameKind::Prepared)?.handle)
+    }
+
+    /// Drop a connection-owned read template. Repeated/unknown releases have
+    /// the same response. This releases no transaction or durable result.
+    pub async fn release_prepared(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+    ) -> Result<(), ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        let request = self
+            .send(
+                cx,
+                FrameKind::ReleasePrepared,
+                StreamId::CONTROL,
+                &ReleasePrepared { handle },
+            )
+            .await?;
+        let frame = self.reply(cx, request).await?;
+        if !frame.header().stream_id().is_control() {
+            return Err(ClientError::Protocol("PREPARED_RELEASED on a child stream"));
+        }
+        let released: ReleasePrepared = expect(&frame, FrameKind::PreparedReleased)?;
+        if released.handle != handle {
+            return Err(ClientError::Protocol("released a different prepared handle"));
+        }
+        Ok(())
+    }
+
+    /// Execute a prepared read at the current frontier, collecting its answer.
+    pub async fn execute_prepared(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        parameters: Vec<(String, WireValue)>,
+    ) -> Result<Answer, ClientError> {
+        let mut columns = Vec::new();
+        let mut rows = Vec::new();
+        let outcome = self
+            .execute_prepared_streaming(
+                cx,
+                handle,
+                parameters,
+                |names| columns = names.to_vec(),
+                |row| {
+                    rows.push(row);
+                    Ok(())
+                },
+            )
+            .await?;
+        Ok(Answer { columns, rows, outcome })
+    }
+
+    /// Rebind real typed operands and stream a prepared read. A callback
+    /// refusal sends QUERY_CANCEL and drains its terminal before returning,
+    /// so a later execution cannot consume the cancelled result's frames.
+    pub async fn execute_prepared_streaming(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        mut parameters: Vec<(String, WireValue)>,
+        on_columns: impl FnMut(&[String]),
+        on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
+    ) -> Result<Outcome, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecutePrepared,
+                StreamId::CONTROL,
+                &ExecutePrepared { handle, parameters },
+            )
+            .await?;
+        let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
+        if !matches!(outcome, Outcome::Rows { .. }) {
+            return Err(ClientError::Protocol("prepared read returned a write outcome"));
+        }
+        Ok(outcome)
+    }
+
     /// Run one statement, handing over its columns once and then each row as
-    /// it arrives. Returning an error from `on_row` cancels the stream.
+    /// it arrives. An error from `on_row` cancels and drains the stream before
+    /// returning that error, leaving the connection ready for another request.
     pub async fn execute_streaming(
         &mut self,
         cx: &Cx,
         mode: ExecuteMode,
         statement: &str,
         mut parameters: Vec<(String, WireValue)>,
-        mut on_columns: impl FnMut(&[String]),
-        mut on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
+        on_columns: impl FnMut(&[String]),
+        on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
@@ -318,7 +435,18 @@ impl Client {
         let request = self
             .send(cx, FrameKind::Execute, StreamId::CONTROL, &body)
             .await?;
+        self.receive_result(cx, request, on_columns, on_row).await
+    }
+
+    async fn receive_result(
+        &mut self,
+        cx: &Cx,
+        request: u64,
+        mut on_columns: impl FnMut(&[String]),
+        mut on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
+    ) -> Result<Outcome, ClientError> {
         let mut stream: Option<StreamId> = None;
+        let mut callback_error = None;
         // The server sends only within its credit, so the client models that
         // credit exactly and replenishes it whenever the server might be
         // unable to fit its next frame (one maximal frame, or one row).
@@ -327,8 +455,14 @@ impl Client {
         let mut grants = 0u64;
         let mut seen_columns = false;
         loop {
-            let frame = self.reply(cx, request).await?;
+            let frame = self.receive(cx).await?.ok_or(ClientError::Closed)?;
             let header = *frame.header();
+            if header.kind() == FrameKind::Goodbye {
+                return Err(ClientError::Closed);
+            }
+            if header.request_id() != request {
+                return Err(ClientError::Protocol("result frame for a different request"));
+            }
             match stream {
                 None if !header.stream_id().is_control() => stream = Some(header.stream_id()),
                 Some(id) if id != header.stream_id() => {
@@ -338,6 +472,9 @@ impl Client {
             }
             match header.kind() {
                 FrameKind::SnapshotResultChunk => {
+                    if stream.is_none() {
+                        return Err(ClientError::Protocol("chunk on the control stream"));
+                    }
                     let chunk = ResultChunk::decode(frame.payload())?;
                     match (chunk.columns, seen_columns) {
                         (Some(names), false) => {
@@ -354,15 +491,18 @@ impl Client {
                     }
                     available = (available.0 - cost, available.1 - count);
                     for row in chunk.rows {
-                        if let Err(error) = on_row(row) {
-                            if let Some(id) = stream {
-                                let _ = self.send(cx, FrameKind::QueryCancel, id, &Empty).await;
-                            }
-                            return Err(error);
+                        if callback_error.is_none()
+                            && let Err(error) = on_row(row)
+                        {
+                            let id = stream.expect("a chunk has a child stream");
+                            self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
+                            callback_error = Some(error);
                         }
                     }
                     let frame_limit = self.send_limits.max_frame_len() as u64;
-                    if available.0 < frame_limit || available.1 == 0 {
+                    if callback_error.is_none()
+                        && (available.0 < frame_limit || available.1 == 0)
+                    {
                         let Some(id) = stream else {
                             return Err(ClientError::Protocol("chunk on the control stream"));
                         };
@@ -380,9 +520,16 @@ impl Client {
                     if !seen_columns {
                         return Err(ClientError::Protocol("END before columns"));
                     }
-                    return Ok(ResultEnd::decode(frame.payload())?.outcome);
+                    let outcome = ResultEnd::decode(frame.payload())?.outcome;
+                    return callback_error.map_or(Ok(outcome), Err);
                 }
-                FrameKind::Error => return Err(server_error(&frame)),
+                FrameKind::Error => {
+                    let refusal = ErrorBody::decode(frame.payload())?;
+                    return Err(callback_error.unwrap_or(ClientError::Server {
+                        code: refusal.code,
+                        message: refusal.message,
+                    }));
+                }
                 _ => return Err(ClientError::Protocol("unexpected frame in a result stream")),
             }
         }
@@ -663,6 +810,12 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         FrameKind::HelloAck | FrameKind::AuthOk => header.binding() == Binding::Transport,
         FrameKind::Ready => matches!(expected, Binding::Session(_)) && header.binding() == expected,
         FrameKind::Error => header.binding() == expected,
+        FrameKind::Prepared | FrameKind::PreparedReleased => {
+            if !matches!(expected, Binding::Ready(_)) || !header.stream_id().is_control() {
+                return Err(ProtocolError::InvalidState);
+            }
+            header.binding() == expected
+        }
         FrameKind::Pong
         | FrameKind::Goodbye
         | FrameKind::SnapshotResultChunk
@@ -691,6 +844,7 @@ mod tests {
     struct ScriptIo {
         input: Vec<u8>,
         offset: usize,
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
 
     impl AsyncRead for ScriptIo {
@@ -714,6 +868,7 @@ mod tests {
             _: &mut Context<'_>,
             bytes: &[u8],
         ) -> Poll<std::io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(bytes);
             Poll::Ready(Ok(bytes.len()))
         }
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -808,7 +963,238 @@ mod tests {
         {
             input.extend(frame.encode(limits).unwrap());
         }
-        ScriptIo { input, offset: 0 }
+        ScriptIo {
+            input,
+            offset: 0,
+            written: std::sync::Arc::default(),
+        }
+    }
+
+    fn rpc(kind: FrameKind, request: u64, stream: StreamId, body: &impl Body) -> Frame {
+        Frame::new(
+            kind,
+            request,
+            stream,
+            Binding::Ready(ready().binding(session())),
+            body.encode().unwrap(),
+            FrameLimits::new(4096).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn result_chunk(request: u64, values: &[i64]) -> Frame {
+        rpc(
+            FrameKind::SnapshotResultChunk,
+            request,
+            StreamId([5; 16]),
+            &ResultChunk {
+                columns: Some(vec!["value".into()]),
+                rows: values.iter().map(|v| vec![WireValue::Int(*v)]).collect(),
+            },
+        )
+    }
+
+    fn result_end(request: u64, rows: u64) -> Frame {
+        rpc(
+            FrameKind::SnapshotResultEnd,
+            request,
+            StreamId([5; 16]),
+            &ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows },
+        )
+    }
+
+    fn sent_frames(bytes: &[u8]) -> Vec<Frame> {
+        let mut decoder = crate::Decoder::new(FrameLimits::new(4096).unwrap());
+        let mut at = 0;
+        let mut frames = Vec::new();
+        while at < bytes.len() {
+            let part = decoder.decode(&bytes[at..], |_| Ok(())).unwrap();
+            assert!(part.consumed > 0);
+            at += part.consumed;
+            frames.push(part.frame.expect("complete sent frame"));
+        }
+        frames
+    }
+
+    #[test]
+    fn prepared_replies_require_the_current_ready_control_binding() {
+        let current = Binding::Ready(ready().binding(session()));
+        let limits = FrameLimits::new(4096).unwrap();
+        for kind in [FrameKind::Prepared, FrameKind::PreparedReleased] {
+            let reply = rpc(
+                kind, 4, StreamId::CONTROL,
+                &Prepared { handle: PreparedHandle([0x31; 16]) },
+            );
+            assert_eq!(server_header(reply.header(), current), Ok(()));
+            let child = rpc(
+                kind, 4, StreamId([5; 16]),
+                &Prepared { handle: PreparedHandle([0x31; 16]) },
+            );
+            assert_eq!(
+                server_header(child.header(), current),
+                Err(ProtocolError::InvalidState),
+            );
+            for unselected in [Binding::Transport, Binding::Session(session())] {
+                let frame = Frame::new(
+                    kind, 4, StreamId::CONTROL, unselected, vec![], limits,
+                ).unwrap();
+                assert_eq!(
+                    server_header(frame.header(), unselected),
+                    Err(ProtocolError::InvalidState),
+                );
+            }
+            let mut stale = ready().binding(session());
+            stale.session.auth_generation += 1;
+            let frame = Frame::new(
+                kind, 4, StreamId::CONTROL, Binding::Ready(stale), vec![], limits,
+            ).unwrap();
+            assert_eq!(
+                server_header(frame.header(), current),
+                Err(ProtocolError::InvalidBinding),
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_client_rebinds_and_reuses_the_connection_after_callback_cancellation() {
+        let ((), report) = run_async_under_lab(0x79a0_0301, |root| async move {
+            for cancelled_terminal in [false, true] {
+                let handle = PreparedHandle([0x31; 16]);
+                let terminal = if cancelled_terminal {
+                    rpc(
+                        FrameKind::Error,
+                        5,
+                        StreamId([5; 16]),
+                        &ErrorBody { code: ErrorCode::Cancelled, message: "cancelled".into() },
+                    )
+                } else {
+                    result_end(5, 2)
+                };
+                let io = script(vec![
+                    rpc(FrameKind::Prepared, 4, StreamId::CONTROL, &Prepared { handle }),
+                    result_chunk(5, &[1, 2]),
+                    terminal,
+                    result_chunk(7, &[20]),
+                    result_end(7, 1),
+                    rpc(
+                        FrameKind::PreparedReleased,
+                        8,
+                        StreamId::CONTROL,
+                        &ReleasePrepared { handle },
+                    ),
+                    rpc(
+                        FrameKind::PreparedReleased,
+                        9,
+                        StreamId::CONTROL,
+                        &ReleasePrepared { handle },
+                    ),
+                ]);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let prepared = client
+                    .prepare_read(
+                        &root,
+                        "MATCH (n) RETURN $value AS value",
+                        vec![("value".into(), WireValue::Int(99))],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(prepared, handle);
+                let mut delivered = 0;
+                let stopped = client
+                    .execute_prepared_streaming(
+                        &root,
+                        handle,
+                        vec![("value".into(), WireValue::Int(1))],
+                        |_| {},
+                        |_| {
+                            delivered += 1;
+                            Err(ClientError::Protocol("caller stopped"))
+                        },
+                    )
+                    .await;
+                assert!(matches!(stopped, Err(ClientError::Protocol("caller stopped"))));
+                assert_eq!(delivered, 1, "cancel suppresses all remaining callbacks");
+                let result = client
+                    .execute_prepared(
+                        &root,
+                        handle,
+                        vec![("value".into(), WireValue::Int(20))],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.rows, [vec![WireValue::Int(20)]]);
+                client.release_prepared(&root, handle).await.unwrap();
+                client.release_prepared(&root, handle).await.unwrap();
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames.iter().map(|frame| frame.header().kind()).collect::<Vec<_>>(),
+                    [
+                        FrameKind::Hello, FrameKind::Auth, FrameKind::SelectDatabase,
+                        FrameKind::Prepare, FrameKind::ExecutePrepared, FrameKind::QueryCancel,
+                        FrameKind::ExecutePrepared, FrameKind::ReleasePrepared,
+                        FrameKind::ReleasePrepared,
+                    ]
+                );
+                let first = ExecutePrepared::decode(frames[4].payload()).unwrap();
+                let second = ExecutePrepared::decode(frames[6].payload()).unwrap();
+                assert_eq!(first.parameters, [("value".into(), WireValue::Int(1))]);
+                assert_eq!(second.parameters, [("value".into(), WireValue::Int(20))]);
+                assert_eq!(frames[5].header().stream_id(), StreamId([5; 16]));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn callback_cancellation_never_hides_foreign_or_malformed_result_terminals() {
+        let ((), report) = run_async_under_lab(0x79a0_0302, |root| async move {
+            let handle = PreparedHandle([0x31; 16]);
+            let mut stale = ready().binding(session());
+            stale.session.auth_generation += 1;
+            let limits = FrameLimits::new(4096).unwrap();
+            let foreign = rpc(
+                FrameKind::SnapshotResultEnd,
+                5,
+                StreamId([6; 16]),
+                &ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows: 1 },
+            );
+            let wrong_request = result_end(6, 1);
+            let malformed = Frame::new(
+                FrameKind::Error, 5, StreamId([5; 16]),
+                Binding::Ready(ready().binding(session())), vec![0], limits,
+            ).unwrap();
+            let stale = Frame::new(
+                FrameKind::SnapshotResultEnd, 5, StreamId([5; 16]),
+                Binding::Ready(stale),
+                ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows: 1 }.encode().unwrap(),
+                limits,
+            ).unwrap();
+            for terminal in [foreign, wrong_request, malformed, stale] {
+                let io = script(vec![
+                    rpc(FrameKind::Prepared, 4, StreamId::CONTROL, &Prepared { handle }),
+                    result_chunk(5, &[1]),
+                    terminal,
+                ]);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                client.prepare_read(&root, "MATCH (n) RETURN n", vec![]).await.unwrap();
+                let error = client
+                    .execute_prepared_streaming(
+                        &root, handle, vec![], |_| {},
+                        |_| Err(ClientError::Protocol("caller stopped")),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(!matches!(error, ClientError::Protocol("caller stopped")));
+                assert!(matches!(
+                    error,
+                    ClientError::Protocol(_) | ClientError::Body(_) | ClientError::Transport(_)
+                ));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

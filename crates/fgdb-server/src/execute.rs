@@ -2,6 +2,9 @@
 //! path every surface (FGP and HTTP) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+mod prepared;
+pub(crate) use prepared::{PreparedRead, prepare_read, read_prepared};
+
 use crate::recovery::{Generation, Unavailable};
 use crate::{Served, TRUNK, convert, unix_millis};
 use asupersync::Cx;

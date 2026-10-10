@@ -886,6 +886,143 @@ body!(
     }
 );
 
+/// A server-minted, connection-owned native read-template selector. It is
+/// neither a transaction identity nor a durable result/resume capability.
+/// Zero is reserved. Knowledge of the bytes grants no authority on another
+/// connection, after AUTH_REFRESH, after release, or after database recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PreparedHandle(pub [u8; 16]);
+
+impl PreparedHandle {
+    fn check(self) -> Result<(), BodyError> {
+        if self.0 == [0; 16] {
+            Err(BodyError::Noncanonical)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// PREPARE is the ephemeral native read-template profile. Representative
+/// parameters declare the same structural operand types as ordinary EXECUTE;
+/// their values are never retained as execution defaults. Writes refuse.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prepare {
+    pub statement: String,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+/// PREPARED returns only a session selector, never an executed result or pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prepared {
+    pub handle: PreparedHandle,
+}
+
+/// Rebind and execute at the current visible frontier under live authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutePrepared {
+    pub handle: PreparedHandle,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+/// RELEASE_PREPARED and PREPARED_RELEASED share this exact body. Releasing an
+/// absent/already-released handle succeeds without disclosing its provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleasePrepared {
+    pub handle: PreparedHandle,
+}
+
+fn put_parameters(out: &mut Out, parameters: &[(String, WireValue)]) -> Result<(), BodyError> {
+    check_len(parameters.len(), MAX_PARAMETERS)?;
+    for pair in parameters.windows(2) {
+        if pair[0].0.as_bytes() >= pair[1].0.as_bytes() {
+            return Err(BodyError::Noncanonical);
+        }
+    }
+    out.len(parameters.len());
+    for (name, value) in parameters {
+        check_len(name.len(), MAX_NAME_BYTES)?;
+        value.check(0)?;
+        out.text(name);
+        value.put(out);
+    }
+    Ok(())
+}
+
+fn get_parameters(input: &mut In<'_>) -> Result<Vec<(String, WireValue)>, BodyError> {
+    let count = input.count(MAX_PARAMETERS, 5)?;
+    let mut parameters: Vec<(String, WireValue)> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = input.text(MAX_NAME_BYTES)?;
+        if parameters
+            .last()
+            .is_some_and(|(previous, _)| previous.as_bytes() >= name.as_bytes())
+        {
+            return Err(BodyError::Noncanonical);
+        }
+        parameters.push((name, WireValue::get(input, 0)?));
+    }
+    Ok(parameters)
+}
+
+body!(
+    Prepare,
+    |s, out| {
+        check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
+        out.text(&s.statement);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        Prepare {
+            statement: input.text(MAX_STATEMENT_BYTES)?,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
+body!(
+    Prepared,
+    |s, out| {
+        s.handle.check()?;
+        out.array(&s.handle.0);
+    },
+    |input| {
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        Prepared { handle }
+    }
+);
+
+body!(
+    ExecutePrepared,
+    |s, out| {
+        s.handle.check()?;
+        out.array(&s.handle.0);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        ExecutePrepared {
+            handle,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
+body!(
+    ReleasePrepared,
+    |s, out| {
+        s.handle.check()?;
+        out.array(&s.handle.0);
+    },
+    |input| {
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        ReleasePrepared { handle }
+    }
+);
+
 /// One chunk of a session-owned result stream. The first chunk of a stream
 /// carries the column names; later chunks carry `None`.
 #[derive(Clone, Debug, PartialEq)]
@@ -1387,6 +1524,66 @@ mod tests {
             B::decode(&longer).unwrap_err(),
             BodyError::TrailingBytes,
             "a trailing byte must be refused"
+        );
+    }
+
+    #[test]
+    fn prepared_read_bodies_have_canonical_bounded_handles_and_operands() {
+        let handle = PreparedHandle([0x31; 16]);
+        let prepare = Prepare {
+            statement: "a".into(),
+            parameters: vec![],
+        };
+        assert_eq!(prepare.encode().unwrap(), [0, 0, 0, 1, b'a', 0, 0, 0, 0]);
+        every_prefix_refuses::<Prepare>(&prepare.encode().unwrap());
+        let prepare = Prepare {
+            statement: "MATCH (n) WHERE n.age >= $min RETURN n".into(),
+            parameters: vec![("min".into(), WireValue::Int(7))],
+        };
+        let bytes = prepare.encode().unwrap();
+        assert_eq!(Prepare::decode(&bytes).unwrap(), prepare);
+        every_prefix_refuses::<Prepare>(&bytes);
+
+        let prepared = Prepared { handle };
+        assert_eq!(prepared.encode().unwrap(), [0x31; 16]);
+        every_prefix_refuses::<Prepared>(&prepared.encode().unwrap());
+        assert_eq!(Prepared::decode(&[0x31; 16]).unwrap(), prepared);
+        let release = ReleasePrepared { handle };
+        assert_eq!(release.encode().unwrap(), [0x31; 16]);
+        every_prefix_refuses::<ReleasePrepared>(&release.encode().unwrap());
+
+        let execution = ExecutePrepared {
+            handle,
+            parameters: vec![("a".into(), sample_value()), ("b".into(), WireValue::Int(9))],
+        };
+        let bytes = execution.encode().unwrap();
+        assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
+        every_prefix_refuses::<ExecutePrepared>(&bytes);
+
+        assert_eq!(Prepared::decode(&[0; 16]), Err(BodyError::Noncanonical));
+        assert_eq!(ReleasePrepared::decode(&[0; 16]), Err(BodyError::Noncanonical));
+        assert_eq!(
+            ExecutePrepared::decode(&[0; 20]),
+            Err(BodyError::Noncanonical)
+        );
+        let zero = PreparedHandle([0; 16]);
+        assert_eq!((Prepared { handle: zero }).encode(), Err(BodyError::Noncanonical));
+        assert_eq!((ReleasePrepared { handle: zero }).encode(), Err(BodyError::Noncanonical));
+        let duplicate = vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)];
+        assert_eq!(
+            Prepare { statement: "a".into(), parameters: duplicate.clone() }.encode(),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(
+            ExecutePrepared { handle, parameters: duplicate }.encode(),
+            Err(BodyError::Noncanonical)
+        );
+        // Independent malformed bytes: two null arguments named "a".
+        let mut duplicate_bytes = vec![0x31; 16];
+        duplicate_bytes.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 1, b'a', 0]);
+        assert_eq!(
+            ExecutePrepared::decode(&duplicate_bytes),
+            Err(BodyError::Noncanonical)
         );
     }
 

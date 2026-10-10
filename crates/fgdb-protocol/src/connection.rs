@@ -131,7 +131,10 @@ impl Connection {
             // ubs:ignore -- connection-phase enum state, not secret material.
             FrameKind::SelectDatabase => self.phase == Phase::Authenticated,
             FrameKind::AuthRefresh => matches!(self.phase, Phase::Authenticated | Phase::Ready),
-            FrameKind::Prepare | FrameKind::Execute => self.phase == Phase::Ready,
+            FrameKind::Prepare
+            | FrameKind::Execute
+            | FrameKind::ExecutePrepared
+            | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel
             | FrameKind::ResultAck
             | FrameKind::ResultRelease

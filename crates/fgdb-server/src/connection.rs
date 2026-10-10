@@ -7,7 +7,7 @@
 //! QUERY_CANCEL, PING and DRAIN are never starved by the data they control.
 
 use crate::commits::CommitWatcher;
-use crate::execute::{Answer, poll, read, subscribe, write};
+use crate::execute::{Answer, PreparedRead, Refusal, poll, prepare_read, read, read_prepared, subscribe, write};
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
@@ -16,8 +16,9 @@ use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteMode, Hello, HelloAck, Outcome, Ping, Ready, ResultChunk, ResultEnd,
-    SelectDatabase, WindowUpdate, WireValue,
+    Execute, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare, Prepared,
+    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
+    WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -28,7 +29,7 @@ use fgdb_protocol::{
     SessionBinding, StreamId,
 };
 use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
@@ -37,6 +38,78 @@ const RECENTLY_FINISHED: usize = 64;
 /// Bytes a chunk body spends besides its rows: the column-presence byte and
 /// the row count (the column list is measured exactly).
 const CHUNK_OVERHEAD: usize = 1 + 4;
+
+/// These cap retained templates and original source bytes, not total compiler
+/// allocations. Native parser limits and signed preparation work still apply.
+const MAX_PREPARED_READS: usize = 64;
+const MAX_PREPARED_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+struct PreparedReads {
+    entries: BTreeMap<PreparedHandle, Arc<PreparedRead>>,
+    source_bytes: usize,
+}
+
+impl PreparedReads {
+    fn prune(&mut self) {
+        self.entries.retain(|_, entry| entry.generation.check().is_ok());
+        self.source_bytes = self.entries.values().map(|entry| entry.source_bytes).sum();
+    }
+
+    fn insert(
+        &mut self,
+        cx: &Cx,
+        definition: PreparedRead,
+    ) -> Result<(PreparedHandle, Generation), Refusal> {
+        self.prune();
+        definition.generation.check().map_err(Refusal::from)?;
+        let next = self.source_bytes.checked_add(definition.source_bytes);
+        if self.entries.len() >= MAX_PREPARED_READS
+            || next.is_none_or(|bytes| bytes > MAX_PREPARED_SOURCE_BYTES)
+        {
+            return Err(Refusal::new(
+                ErrorCode::Budget,
+                "this connection's prepared read allowance is exhausted; release a template",
+            ));
+        }
+        let handle = loop {
+            let mut bytes = [0; 16];
+            cx.random_bytes(&mut bytes);
+            let handle = PreparedHandle(bytes);
+            if bytes != [0; 16] && !self.entries.contains_key(&handle) {
+                break handle;
+            }
+        };
+        let generation = definition.generation.clone();
+        self.source_bytes = next.expect("checked source byte allowance");
+        self.entries.insert(handle, Arc::new(definition));
+        Ok((handle, generation))
+    }
+
+    fn get(&mut self, handle: PreparedHandle) -> Result<Arc<PreparedRead>, Refusal> {
+        self.prune();
+        self.entries.get(&handle).cloned().ok_or_else(|| {
+            Refusal::new(
+                ErrorCode::Statement,
+                "prepared read not available on this connection; prepare it again",
+            )
+        })
+    }
+
+    fn release(&mut self, handle: PreparedHandle) {
+        if let Some(entry) = self.entries.remove(&handle) {
+            self.source_bytes -= entry.source_bytes;
+        }
+    }
+}
+
+enum Statement {
+    Native(Execute),
+    Prepared {
+        definition: Result<Arc<PreparedRead>, Refusal>,
+        parameters: Vec<(String, WireValue)>,
+    },
+}
 
 enum Inbound {
     Frame(Box<Frame>),
@@ -111,6 +184,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let mut transcript: Option<[u8; 32]> = None;
     let mut token: Option<CapabilityToken> = None;
     let mut selected: Option<Arc<Served>> = None;
+    let mut prepared_reads = PreparedReads::default();
     loop {
         let frame = match lane.receive(cx, &waiter).await {
             Inbound::Frame(frame) => frame,
@@ -314,6 +388,8 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 };
                 lane.send_authority = Some((chosen, replacement.clone()));
                 token = Some(replacement);
+                // No compiled template crosses an authorization generation.
+                prepared_reads = PreparedReads::default();
                 let binding = lane.conn.binding();
                 if !lane
                     .send(
@@ -429,6 +505,112 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 }
                 lane.send_generation = None;
             }
+            FrameKind::Prepare => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(prepare) = Prepare::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed PREPARE")
+                        .await;
+                };
+                let outcome = prepare_read(cx, db, token, &prepare)
+                    .await
+                    .and_then(|definition| prepared_reads.insert(cx, definition));
+                let binding = lane.conn.binding();
+                let delivered = match outcome {
+                    Ok((handle, generation)) => {
+                        let Ok(payload) = (Prepared { handle }).encode() else { return };
+                        let Ok(frame) = Frame::new(
+                            FrameKind::Prepared,
+                            request,
+                            StreamId::CONTROL,
+                            binding,
+                            payload,
+                            lane.send_limits,
+                        ) else {
+                            return;
+                        };
+                        match lane.write_frame(cx, &frame, Some(generation)).await {
+                            Err(Stop::Recovery(error)) => {
+                                prepared_reads.release(handle);
+                                lane.refuse(
+                                    cx,
+                                    request,
+                                    StreamId::CONTROL,
+                                    binding,
+                                    error.code(),
+                                    error.message(),
+                                )
+                                .await
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(refusal) => {
+                        lane.refuse(
+                            cx,
+                            request,
+                            StreamId::CONTROL,
+                            binding,
+                            refusal.code,
+                            &refusal.message,
+                        )
+                        .await
+                    }
+                };
+                if delivered.is_err() {
+                    return;
+                }
+            }
+            FrameKind::ReleasePrepared => {
+                let Ok(release) = ReleasePrepared::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed RELEASE_PREPARED")
+                        .await;
+                };
+                // Uniform, idempotent release reveals no existence or owner.
+                prepared_reads.release(release.handle);
+                let binding = lane.conn.binding();
+                if !lane
+                    .send(
+                        cx,
+                        FrameKind::PreparedReleased,
+                        request,
+                        StreamId::CONTROL,
+                        binding,
+                        &release,
+                    )
+                    .await
+                {
+                    return;
+                }
+            }
+            FrameKind::ExecutePrepared => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecutePrepared::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed EXECUTE_PREPARED")
+                        .await;
+                };
+                let statement = Statement::Prepared {
+                    definition: prepared_reads.get(statement.handle),
+                    parameters: statement.parameters,
+                };
+                match lane
+                    .execute_statement(cx, &waiter, db, token, request, statement)
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::Execute => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -480,10 +662,10 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
             // Only a recently finished stream can be addressed here (header
             // validation refuses any other): its credit or cancel is moot.
             FrameKind::WindowUpdate | FrameKind::QueryCancel => {}
-            FrameKind::Prepare | FrameKind::ResultAck | FrameKind::ResultRelease => {
+            FrameKind::ResultAck | FrameKind::ResultRelease => {
                 let refusal = ErrorBody {
                     code: ErrorCode::Protocol,
-                    message: "this server serves only autocommit EXECUTE with ephemeral results"
+                    message: "this server serves ephemeral results without durable ACK/release"
                         .into(),
                 };
                 let binding = lane.conn.binding();
@@ -696,6 +878,19 @@ impl Lane {
         request: u64,
         statement: Execute,
     ) -> Result<(), Stop> {
+        self.execute_statement(cx, waiter, db, token, request, Statement::Native(statement))
+            .await
+    }
+
+    async fn execute_statement(
+        &mut self,
+        cx: &Cx,
+        waiter: &Waiter,
+        db: &Served,
+        token: &CapabilityToken,
+        request: u64,
+        statement: Statement,
+    ) -> Result<(), Stop> {
         self.send_generation = None;
         let binding = self.conn.binding();
         let stream = loop {
@@ -706,7 +901,10 @@ impl Lane {
                 break candidate;
             }
         };
-        let kind = if statement.mode == ExecuteMode::Subscribe {
+        let kind = if matches!(
+            &statement,
+            Statement::Native(Execute { mode: ExecuteMode::Subscribe, .. })
+        ) {
             ChildKind::Subscription
         } else {
             ChildKind::Query
@@ -732,9 +930,11 @@ impl Lane {
                 Err(Stop::Transport)
             };
         };
-        if statement.mode == ExecuteMode::Subscribe {
+        if let Statement::Native(statement) = &statement
+            && statement.mode == ExecuteMode::Subscribe
+        {
             let delivered = self
-                .subscription(cx, waiter, db, token, request, stream, binding, &statement)
+                .subscription(cx, waiter, db, token, request, stream, binding, statement)
                 .await;
             let _ = self
                 .conn
@@ -743,9 +943,15 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
-        let answer = match statement.mode {
-            ExecuteMode::Read => read(cx, db, token, &statement).await,
-            _ => write(cx, db, token, &statement).await,
+        let answer = match statement {
+            Statement::Native(statement) => match statement.mode {
+                ExecuteMode::Read => read(cx, db, token, &statement).await,
+                _ => write(cx, db, token, &statement).await,
+            },
+            Statement::Prepared { definition, parameters } => match definition {
+                Ok(definition) => read_prepared(cx, db, token, &definition, &parameters).await,
+                Err(refusal) => Err(refusal),
+            },
         };
         let committed = matches!(
             answer,
@@ -1215,7 +1421,11 @@ impl Lane {
                     Err(Stop::Transport)
                 }
             }
-            FrameKind::Execute | FrameKind::AuthRefresh => {
+            FrameKind::Execute
+            | FrameKind::Prepare
+            | FrameKind::ExecutePrepared
+            | FrameKind::ReleasePrepared
+            | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
                     code: ErrorCode::Busy,
                     message: "a statement is already in flight on this connection".into(),
@@ -1550,7 +1760,11 @@ impl Lane {
                     .await;
                 Err(Stop::Drain)
             }
-            FrameKind::Execute | FrameKind::AuthRefresh => {
+            FrameKind::Execute
+            | FrameKind::Prepare
+            | FrameKind::ExecutePrepared
+            | FrameKind::ReleasePrepared
+            | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
                     code: ErrorCode::Busy,
                     message: "a statement is already in flight on this connection".into(),
@@ -1642,6 +1856,9 @@ struct OutputGuard<'a> {
     binding: Binding,
     authority: Option<(&'a Authority, VerifiedCapability<'a>)>,
 }
+
+#[cfg(test)]
+mod prepared_tests;
 
 #[cfg(test)]
 mod recovery_tests;
