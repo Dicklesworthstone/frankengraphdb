@@ -1059,26 +1059,9 @@ impl Lane {
                         .await;
                 }
             };
-            if let Some(batch) = batch {
-                let mut entries = Vec::with_capacity(batch.rows().len());
-                for (row, weight) in batch.rows().iter() {
-                    let Some(weight) = weight.to_i128() else {
-                        break;
-                    };
-                    entries.push((weight, row.iter().map(crate::convert::cell).collect()));
-                }
-                if entries.len() != batch.rows().len() {
-                    break self
-                        .refuse(
-                            cx,
-                            request,
-                            stream,
-                            binding,
-                            ErrorCode::Execution,
-                            "a change weight exceeds the wire range",
-                        )
-                        .await;
-                }
+            if let Some(delivery) = batch {
+                let batch = delivery.batch;
+                let entries = delivery.entries;
                 let frontier = batch.frontier().0;
                 if let Err(stop) = self
                     .send_batch(

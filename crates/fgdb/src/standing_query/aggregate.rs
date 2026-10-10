@@ -77,6 +77,36 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
         && aggregate_functions_eligible(query)
         && (eligible_flat_input(query) || edge::supports_scoped(query))
 }
+/// Bound one charged source operation by the actual admitted maintainer's
+/// vertex frame. Output columns may hide source bindings and cannot establish
+/// this bound. Keep source splitting and shape admission identical to
+/// prepare_registered_aggregate; an unknown shape supplies no tighter bound.
+pub(in crate::standing_query) fn subscription_input_width(
+    definition: &PreparedGraphAggregate,
+) -> Option<usize> {
+    let source = if definition.has_incremental_output_transform() {
+        Some(definition.incremental_source_definition()?)
+    } else {
+        None
+    };
+    let definition = source.as_ref().unwrap_or(definition);
+    if !eligible(definition) {
+        return None;
+    }
+    if let Some(state) = edge::State::for_definition(definition) {
+        Some(state.binding_width())
+    } else if eligible_flat_input(definition)
+        && matches!(
+            definition.input_pattern().plan().operators().first(),
+            Some(GlaOperator::ScanVertices)
+        )
+    {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
     query
         .aggregates()

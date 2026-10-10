@@ -41,6 +41,14 @@ enum InputPatch {
 }
 
 impl State {
+    /// The validated source frame, including a correlated child's copied root.
+    pub(super) fn binding_width(&self) -> usize {
+        match &self.input {
+            Input::OneHop(state) => state.scope.map_or(2, scoped::Shape::width),
+            Input::MultiHop(state) => state.binding_width(),
+        }
+    }
+
     pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
         let input = if let Some(state) = multi_hop::State::for_definition(query) {
             Input::MultiHop(state)

@@ -4,6 +4,19 @@
 use super::subscription::{NativeSubscription, SubscriptionError};
 use super::*;
 
+/// Separate persistent maintenance and initial delivery reservations for one
+/// atomically admitted replaying subscription.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSubscriptionSetup {
+    /// Applied to EACH circuit node and its replay sink. Partition a total
+    /// allowance with PreparedNativeRead::subscription_footprint beforehand.
+    pub maintenance: GqlQueryPolicy,
+    /// One initial compressed baseline delivery.
+    pub delivery: GqlQueryPolicy,
+    /// Retained whole ticks, changed rows, and logical payload units.
+    pub retention: [usize; 3],
+}
+
 #[derive(Debug)]
 pub enum SubscribeError {
     ExpectedKeyword(&'static str),
@@ -165,6 +178,80 @@ fn implicit_return_at(text: &str) -> Option<usize> {
 }
 
 impl PreparedNativeRead {
+    /// Prepare the same SUBSCRIBE header and implicit RETURN surface as
+    /// Database::subscribe_native without touching the source or registry.
+    /// Hosts must authenticate and reserve their preparation work before this
+    /// call; the callback path remains interruptible.
+    pub fn prepare_subscription(
+        cx: &QueryCx,
+        statement: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+    ) -> Result<Self, SubscribeError> {
+        let query = subscription_query(statement, &mut || {
+            cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+            Ok(())
+        })?;
+        let completed;
+        let query = match implicit_return_at(query) {
+            None => query,
+            Some(at) => {
+                completed = format!("{}\nRETURN *{}", &query[..at], &query[at..]);
+                completed.as_str()
+            }
+        };
+        Self::prepare(query, params, resolver)
+            .map_err(prepare_error)
+            .map_err(SubscribeError::from)
+    }
+
+    /// Atomically install a maintained circuit, its replay sink, and its first
+    /// pending baseline. Policies persist on the maintained nodes; they are
+    /// per-node reservations, not an automatically shared total allowance.
+    ///
+    /// The final admission callback runs inside the same exclusive borrow and
+    /// rollback boundary. A host can reserve/convert its first output and make
+    /// late authority checks there. Only presentation is exposed: no handle can
+    /// escape a refused private suffix and alias a later registry index.
+    /// Any error removes only this call's private
+    /// registry suffix; existing subscribers and their handles are untouched.
+    pub fn subscribe_replaying<V: Vfs + Clone, T, E>(
+        &self,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        setup: NativeSubscriptionSetup,
+        admit: impl FnOnce(&[String], &Arc<SubscriptionBatch>) -> Result<T, E>,
+    ) -> Result<(NativeSubscription, T), E>
+    where
+        E: From<SubscriptionError>,
+    {
+        let first = database.standing_queries.len();
+        let result = (|| {
+            let mut consumer = self.subscribe(database, cx, params, setup.maintenance)?;
+            consumer.enable_replay(
+                database,
+                cx,
+                setup.retention[0],
+                setup.retention[1],
+                setup.retention[2],
+                setup.maintenance,
+            )?;
+            let batch = consumer
+                .poll(database, cx, setup.delivery)?
+                .ok_or_else(|| SubscriptionError::from(StandingQueryError::Unsupported))?;
+            let columns = database
+                .standing_native_columns(cx, consumer.handle())
+                .map_err(SubscriptionError::from)?;
+            let admitted = admit(columns, &batch)?;
+            Ok((consumer, admitted))
+        })();
+        if result.is_err() {
+            database.standing_queries.truncate(first);
+        }
+        result
+    }
+
     /// Bind a reusable native template into a maintained circuit and independent
     /// acknowledged consumer. Later polls never re-run preparation or the query.
     /// The parameters are owned by the accepted definition, as for
@@ -673,4 +760,135 @@ mod tests {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+    #[test]
+    fn replaying_setup_rolls_back_each_late_phase_and_preserves_prior_handles() {
+        let ((), report) = run_async_under_lab(0x006d_de61, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.write(&commit, seed()).await.unwrap();
+            let params = GqlParameters::new();
+            let prior = db
+                .subscribe_native(
+                    &cx,
+                    "SUBSCRIBE TO MATCH (n) RETURN n",
+                    &params,
+                    resolve,
+                    policy(),
+                )
+                .unwrap();
+            let before = db.standing_queries.len();
+            let prepared = PreparedNativeRead::prepare_subscription(
+                &cx,
+                "SUBSCRIBE TO MATCH (n) RETURN n",
+                &params,
+                resolve,
+            )
+            .unwrap();
+            for phase in 0..3 {
+                let mut setup = NativeSubscriptionSetup {
+                    maintenance: policy(),
+                    delivery: policy(),
+                    retention: [2, 100, 10_000],
+                };
+                if phase == 0 {
+                    setup.retention[0] = 0;
+                }
+                if phase == 1 {
+                    setup.delivery.evaluator.max_work_units = 0;
+                }
+                let mut admitted = false;
+                let result: Result<(NativeSubscription, ()), SubscriptionError> = prepared
+                    .subscribe_replaying(
+                        &mut db,
+                        &cx,
+                        &params,
+                        setup,
+                        |_, _| {
+                            admitted = true;
+                            Err(SubscriptionError::from(StandingQueryError::Delivery(
+                                StandingQueryFailure::ResultBudget,
+                            )))
+                        },
+                    );
+                assert!(result.is_err());
+                assert_eq!(admitted, phase == 2);
+                assert_eq!(db.standing_queries.len(), before);
+                assert!(
+                    db.standing_native_bag(&cx, prior.handle(), policy()).is_ok(),
+                    "a failed private suffix must preserve a preexisting subscriber"
+                );
+            }
+            let (consumer, baseline) = prepared
+                .subscribe_replaying(
+                    &mut db,
+                    &cx,
+                    &params,
+                    NativeSubscriptionSetup {
+                        maintenance: policy(),
+                        delivery: policy(),
+                        retention: [2, 100, 10_000],
+                    },
+                    |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+                )
+                .unwrap();
+            assert_eq!(db.standing_queries.len(), before + 2);
+            assert!(baseline.is_snapshot());
+            assert_eq!(baseline.rows().len(), 3);
+            assert_eq!(consumer.acknowledged_frontier(), None);
+        });
+        assert!(report.lab_test_passed());
+    }
+
+    #[test]
+    fn subscription_footprint_bounds_the_actual_private_circuit() {
+        let ((), report) = run_async_under_lab(0x006d_de62, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let params = GqlParameters::new();
+            fn resolve_shape(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+                match (kind, name) {
+                    (GraphSymbolKind::Relation, "R" | "S") => {
+                        Some(GraphSymbol::Relation(RelationId(1)))
+                    }
+                    (GraphSymbolKind::Label, "Owner") => {
+                        Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1)))
+                    }
+                    (GraphSymbolKind::Property, "amount") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(2)))
+                    }
+                    _ => resolve(kind, name),
+                }
+            }
+            for (text, width) in [
+                ("RETURN 7 AS value", 0),
+                ("UNWIND [1,2] AS x RETURN SUM(x) AS total", 0),
+                ("MATCH (n) RETURN n", 1),
+                ("MATCH (n) RETURN COUNT(*) AS count", 1),
+                ("MATCH (a)-[:R]->(b) RETURN a, b", 2),
+                ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS paths", 3),
+                (
+                    "MATCH (a:Owner) OPTIONAL MATCH (a)-[:R]->(b) WHERE a.amount < b.amount RETURN a,COUNT(*) AS rows,COUNT(b) AS hits GROUP BY a",
+                    3,
+                ),
+                (
+                    "MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
+                    1,
+                ),
+                ("MATCH (n) RETURN n.p AS p ORDER BY p DESC LIMIT 2", 1),
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve_shape).unwrap();
+                let (bound, source_width) = prepared.subscription_footprint(&cx, &params).unwrap();
+                assert_eq!(source_width, width, "{text}");
+                let before = db.standing_queries.len();
+                prepared.register_standing(&mut db, &cx, &params, policy()).unwrap();
+                let actual = u64::try_from(db.standing_queries.len() - before).unwrap();
+                assert!(actual <= bound, "{text}: actual {actual}, bound {bound}");
+            }
+        });
+        assert!(report.lab_test_passed());
+    }
+
 }

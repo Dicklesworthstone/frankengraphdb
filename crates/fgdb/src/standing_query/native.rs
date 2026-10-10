@@ -6,9 +6,11 @@ use crate::{PreparedNativeRead, QueryError, QueryResult, QueryValue};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
+mod budget;
 mod changes;
 pub use changes::{
-    NativeSubscription, SubscribeError, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+    NativeSubscription, NativeSubscriptionSetup, SubscribeError, SubscriptionBatch,
+    SubscriptionError, SubscriptionReceipt,
 };
 mod cursor;
 mod row_handle;

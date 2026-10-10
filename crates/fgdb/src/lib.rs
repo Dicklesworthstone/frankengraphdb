@@ -140,7 +140,8 @@ mod scrub;
 mod standing_query;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 pub use standing_query::{
-    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, StandingQueryError,
+    NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
+    StandingQueryError,
     StandingQueryFailure, StandingQueryHandle, StandingQueryStats, StandingQueryView,
     StandingReplayBatch, StandingReplayWindow, SubscribeError, SubscriptionBatch,
     SubscriptionError, SubscriptionReceipt,

@@ -14,7 +14,8 @@ mod joins;
 mod kcore;
 mod native;
 pub use native::{
-    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, SubscribeError,
+    NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
+    SubscribeError,
     SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };
 mod output;

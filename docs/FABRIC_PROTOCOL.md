@@ -366,8 +366,9 @@ application output is admitted.
   terminal control inside that frame.
 
 - **Subscriptions.** EXECUTE with mode `subscribe` and `SUBSCRIBE TO <read>`
-  registers the engine's own maintained query (`Database::subscribe_native`)
-  on a server-minted subscription child stream. The first batch is a
+  prepares and atomically registers the engine's own maintained query through
+  `PreparedNativeRead::prepare_subscription` and `subscribe_replaying`, on a
+  server-minted subscription child stream. The first batch is a
   replacement baseline (weights are multiplicities); every later batch is the
   exact bag delta from the previous batch's frontier, as signed (weight, row)
   entries. After each committed write the server wakes caught-up
@@ -387,7 +388,35 @@ application output is admitted.
   `permission_denied` otherwise), and because a registration lives as long as
   the open database, each served database admits a bounded number of
   registrations per opened database generation (default 64; refused `budget`
-  beyond). A successful authoritative reopen resets this registration count.
+  beyond). Failed setup, replay activation, first-baseline admission or final
+  checks on initial output remove only the newly appended private circuit and restore
+  this count. Successful registrations remain until reopen. A successful
+  authoritative reopen resets this registration count.
+
+  Signed limits now govern the complete subscription execution. Preparation
+  reserves one work grant; its remainder is partitioned across all private
+  circuit nodes, the replay sink, the first compressed baseline and wire
+  conversion. Both native work and scratch events fit those partitions.
+  Graph-node reservations use the circuit footprint and the admitted source
+  binding width, with a conservative bound when no tighter width is available.
+  Source-free circuits reserve no graph nodes; their owned intermediate rows
+  still use the server's native row ceiling. The installed node and replay
+  policies retain these ceilings for each later maintenance tick. This is
+  conservative accounting, not exact Warden hooks on native graph reads.
+
+  Each poll rechecks live read authority after taking the database lock and
+  uses ceilings no larger than the original registration or current token.
+  Two native pulls and wire conversion share one work reservation: a replay
+  retention gap (`ReplayGap`, `DeltaGap` or `DeltaUnavailable`) can consume the
+  reserved replacement-baseline portion but cannot acquire a fresh whole
+  grant. Final row limits count the complete compressed support, not expanded
+  multiplicities or individual frames, and are rechecked even when native poll
+  returns an already pending batch. Values and columns are checked against
+  their reserved logical copy budget before conversion. Late authority,
+  cancellation or generation failures refuse before exposing a new handle or
+  batch. These ceilings apply per registration, maintenance tick and poll;
+  they are not a subscription-lifetime ledger or an allocator-wide RAM bound.
+
   Recovery terminates an old subscription with `SUBSCRIPTION_RESET`, even when
   it has no flow credit, provided the writer is at a complete frame boundary
   and the capability is still live. The optional checkpoint is the last fully
@@ -493,6 +522,15 @@ rebinding, cache ownership, recovery fencing and authority narrowing:
 `crates/fgdb-server/src/connection/prepared_tests.rs` and
 `crates/fgdb-server/tests/loopback.rs`. These newly added tests have not run in
 this session because the local compiler/process service is unavailable.
+
+Subscription regressions in
+`crates/fgdb-server/src/execute/subscription/tests.rs` and
+`crates/fgdb/src/standing_query/native/changes/statement.rs` additionally cover
+circuit footprint bounds, atomic setup refusal, zero signed grants,
+source-free grouping, complete support limits on pending redelivery,
+persistent maintenance ceilings and replacement baselines after replay
+eviction. These new tests have likewise received source review only; no
+runtime or formatting pass was available in this session.
 
 ## Remaining integration
 

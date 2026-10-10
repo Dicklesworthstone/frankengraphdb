@@ -3,7 +3,7 @@
 
 mod statement;
 mod subscription;
-pub use statement::SubscribeError;
+pub use statement::{NativeSubscriptionSetup, SubscribeError};
 pub use subscription::{
     NativeSubscription, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };

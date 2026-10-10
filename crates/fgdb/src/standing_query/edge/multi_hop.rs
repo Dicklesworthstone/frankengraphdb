@@ -478,6 +478,11 @@ impl Enumeration<'_> {
 }
 
 impl State {
+    /// This width was checked by Shape::of against every source operator.
+    pub(super) fn binding_width(&self) -> usize {
+        self.shape.width
+    }
+
     pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
         Some(Self {
             shape: Shape::of(query)?,
