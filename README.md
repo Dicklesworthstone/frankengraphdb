@@ -247,6 +247,13 @@ fgdb diff  --db mydb.fgdbdir --key-file fgdb.keys --before <seq> --after <seq> "
 # Ordered multi-statement transaction (one commit; --rollback discards everything)
 fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --write "<gql>" --query "<gql>"
 
+# Search staged documents before the transaction commits
+fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --label Doc=1 --property title=1 \
+  --write "CREATE (:Doc {title: 'graph memory'})" \
+  --query "CALL hybrid.search(text => 'graph memory', text_property => 'title',
+             label => 'Doc', k => 5) YIELD node, score
+           RETURN node.title, score ORDER BY score DESC"
+
 # Bulk CSV import, NDJSON delta load with checkpoints, compaction
 fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson

@@ -82,6 +82,88 @@ fn ordered_steps_see_the_overlay_and_publish_one_commit() {
 }
 
 #[test]
+fn hybrid_reads_compose_with_staged_writes_and_commit_only_after_output_admission() {
+    let ((), report) = run_async_under_lab(0x7478_6320, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let options = options(&[
+            "--property",
+            "bio=2",
+            "--write",
+            "CREATE (a:Person {p: 0, bio: 'graph memory'}), \
+                    (b:Person {p: 10, bio: 'unrelated'})",
+            "--query",
+            "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+               vector => [0], vector_properties => ['p'], label => 'Person', \
+               k => 1, candidates => 2) YIELD node \
+             RETURN node.bio AS bio",
+            "--write",
+            "MATCH (n:Person) SET n.bio = 'graph memory updated'",
+            "--query",
+            "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+               vector => [0], vector_properties => ['p'], label => 'Person', \
+               k => 10) YIELD node RETURN count(*) AS total",
+        ]);
+        for max_rows in [2, 1] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            let result = run_with_limits(
+                &mut db,
+                &contexts,
+                &options,
+                None,
+                true,
+                &mut bytes,
+                Limits {
+                    rows: max_rows,
+                    output_bytes: 100_000,
+                },
+                None,
+            )
+            .await;
+            if max_rows == 1 {
+                let error = result.expect_err("the final aggregate row exceeds delivery capacity");
+                assert_eq!(error.code, 3, "{}", error.message);
+                assert!(
+                    bytes.is_empty(),
+                    "failed search exposed a transaction prefix"
+                );
+                assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+                assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            } else {
+                okay(result);
+                let text = output(bytes);
+                assert!(
+                    text.contains(
+                        r#""statement":2,"cells":[{"type":"text","value":"graph memory"}]"#
+                    ),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(r#""statement":4,"cells":[{"type":"count","value":"2"}]"#),
+                    "{text}"
+                );
+                assert!(text.ends_with(
+                    "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":2,\"statements\":4}\n"
+                ));
+                assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
+                let vertices = db.vertices_at(CommitSeq(1)).unwrap();
+                assert_eq!(vertices.len(), 2);
+                let updated = CanonicalScalar::ucs_basic_text("graph memory updated").unwrap();
+                assert!(
+                    vertices
+                        .iter()
+                        .all(|vertex| vertex.props.contains(&(PropertyKeyId(2), updated.clone())))
+                );
+            }
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn rollback_discards_effects_and_rows_but_read_only_finish_creates_no_marker() {
     let ((), report) = run_async_under_lab(0x7478_6302, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

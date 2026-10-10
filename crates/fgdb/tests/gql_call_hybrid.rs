@@ -22,10 +22,12 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSetExecutionError, GraphSymbol,
     GraphSymbolKind,
 };
+use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
     CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+use std::sync::Arc;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x4b; 32]);
 const CITES: RelationId = RelationId(1);
@@ -167,6 +169,15 @@ fn run<T>(test: impl AsyncFnOnce(&fgdb_types::CommitCx, &QueryCx) -> T) -> T {
     runtime.block_on(test(&commit, &cx))
 }
 
+fn run_transaction<T>(
+    test: impl AsyncFnOnce(&fgdb_types::CommitCx, &QueryCx, &fgdb_types::TxnCx) -> T,
+) -> T {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(test(&contexts.commit(), &contexts.query(), &contexts.txn()))
+}
+
 fn rows(result: QueryResult) -> (Vec<String>, Vec<Vec<GraphValue>>) {
     let QueryResult::Rows { columns, rows } = result else {
         return (vec!["<not a row result>".to_owned()], Vec::new());
@@ -270,8 +281,9 @@ fn query<'a>(
 
 #[test]
 fn every_lane_combination_equals_the_library_search() {
-    run(async |commit, cx| {
+    run_transaction(async |commit, cx, txcx| {
         let db = open(commit, false).await;
+        let txn = db.begin(txcx).unwrap();
         let embedding = [0.5_f32, 0.5];
         let parameters = GqlParameters::new()
             .with_list(
@@ -353,6 +365,11 @@ fn every_lane_combination_equals_the_library_search() {
                 ]
             );
             assert_eq!(actual, want, "{arguments}");
+            let (_, actual) = ordered(rows(
+                txn.query(&db, cx, &text, &parameters, symbols, policy())
+                    .unwrap(),
+            ));
+            assert_eq!(actual, want, "transaction {arguments}");
             // Ordered by the fused score, the rows come best first, ties by
             // ascending vertex: the oracle's own order.
             let ranked = format!(
@@ -366,6 +383,8 @@ fn every_lane_combination_equals_the_library_search() {
             let order: Vec<GraphValue> = ranked.into_iter().map(|row| row[0].clone()).collect();
             assert_eq!(order, best, "{arguments}");
         }
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 
@@ -675,5 +694,339 @@ fn a_capability_search_equals_the_physically_restricted_corpus() {
                 .iter()
                 .all(|row| row[0] != GraphValue::Vertex(VId(90)))
         );
+    });
+}
+
+/// The native transaction host must use the same staged corpus and topology
+/// as the library search, and later MATCH/WITH stages must read its properties.
+#[test]
+fn transaction_hybrid_calls_read_staged_corpus_topology_and_properties() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let frontier = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(CITES);
+        change.delete_vertex(VId(3)); // cascades 2->3 and 3->4
+        change.set_vertex_label(VId(5), DOC, false);
+        change.set_vertex_property(VId(6), TITLE, Some(text("Updated Shannon")));
+        change.set_vertex_property(VId(6), BODY, Some(text("engine engine")));
+        change.set_vertex_property(VId(6), E0, Some(float(0.5)));
+        change.set_vertex_property(VId(6), E1, Some(float(0.5)));
+        change.set_vertex_property(VId(6), EMB, Some(packed(&[0.5, 0.5])));
+        change.create_vertex(
+            VId(7),
+            vec![DOC],
+            vec![
+                (TITLE, text("New")),
+                (BODY, text("analytical engine engine")),
+                (E0, float(0.5)),
+                (E1, float(0.5)),
+                (EMB, packed(&[0.5, 0.5])),
+            ],
+        );
+        let mut shortcut = WriteBatch::new(SHORTCUT);
+        shortcut.add_edge(EId(70), VId(1), VId(6), vec![]);
+        shortcut.add_edge(EId(71), VId(6), VId(7), vec![]);
+        txn.write_ordered(&mut db, vec![change, shortcut]).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let embedding = [0.5_f32, 0.5];
+        let parameters = GqlParameters::new()
+            .with_list(
+                "q",
+                embedding
+                    .iter()
+                    .map(|value| GraphValue::Scalar(float(f64::from(*value))))
+                    .collect(),
+            )
+            .unwrap();
+        let mut opts = options(true, true);
+        opts.vertex_label = Some(DOC);
+        let hits = txn
+            .beacon_search_graph(
+                &db,
+                cx,
+                &opts,
+                query("engine", &embedding, 10, 10, 10),
+                ExpansionSpec {
+                    seeds: &[VId(1)],
+                    relation: None,
+                    direction: ExpansionDirection::Outgoing,
+                    max_hops: 2,
+                    include_seeds: false,
+                    limits: ExpansionLimits::default(),
+                },
+            )
+            .unwrap();
+        let mut hops: Vec<_> = hits
+            .iter()
+            .filter_map(|hit| hit.graph_hops.map(|hops| (hit.id, hops)))
+            .collect();
+        hops.sort();
+        assert_eq!(hops, [(VId(2), 1), (VId(6), 1), (VId(7), 2)]);
+        let want = ordered((Vec::new(), expected(hits))).1;
+        assert_eq!(
+            want.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+            [1, 2, 4, 6, 7].map(|id| GraphValue::Vertex(VId(id))),
+        );
+        let call = |vector: &str| {
+            format!(
+                "CALL hybrid.search(text => 'engine', text_property => 'body', vector => $q, \
+                 {vector}, metric => 'cosine', label => 'Doc', seeds => [1], \
+                 max_hops => 2, candidates => 10, k => 10)"
+            )
+        };
+        let coordinates = call("vector_properties => ['e0', 'e1']");
+        let read = format!("{coordinates} {OUTPUTS}");
+        let answer = txn
+            .query(&db, cx, &read, &parameters, symbols, policy())
+            .unwrap();
+        assert_eq!(ordered(rows(answer.clone())).1, want);
+        assert_eq!(
+            ordered(rows(
+                txn.query(
+                    &db,
+                    cx,
+                    &format!("{} {OUTPUTS}", call("vector_property => 'emb'")),
+                    &parameters,
+                    symbols,
+                    policy(),
+                )
+                .unwrap(),
+            )),
+            ordered(rows(answer.clone())),
+        );
+        let composed = format!(
+            "{coordinates} YIELD node, score, graph_hops MATCH (node:Doc) \
+             WITH node, node.title AS title, score, graph_hops \
+             RETURN node, title, score, graph_hops ORDER BY node"
+        );
+        let want_properties: Vec<_> = want
+            .iter()
+            .zip(["Ada", "Babbage", "Lovelace", "Updated Shannon", "New"])
+            .map(|(row, title)| {
+                vec![
+                    row[0].clone(),
+                    GraphValue::Scalar(text(title)),
+                    row[1].clone(),
+                    row[5].clone(),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            rows(
+                txn.query(&db, cx, &composed, &parameters, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            want_properties,
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert!(matches!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. },
+        ));
+        assert_eq!(
+            db.query(cx, &read, &parameters, symbols, policy()).unwrap(),
+            answer,
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+/// Neither LIMIT 0 nor a projection failure followed by savepoint rollback
+/// may erase the table observations that ranking and traversal already made.
+#[test]
+fn transaction_hybrid_calls_retain_hidden_and_failed_read_dependencies() {
+    run_transaction(async |commit, cx, txcx| {
+        let params = GqlParameters::new();
+        let mut db = open(commit, false).await;
+        let mut txn = db.begin(txcx).unwrap();
+        let hidden = "CALL hybrid.search(text => 'quasar', text_property => 'body', \
+                      seeds => [1], max_hops => 3, k => 10) \
+                      YIELD node RETURN node LIMIT 0";
+        assert!(
+            rows(
+                txn.query(&db, cx, hidden, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1
+            .is_empty()
+        );
+        let mut winner = WriteBatch::new(SHORTCUT);
+        winner.add_edge(EId(70), VId(1), VId(6), vec![]);
+        db.write(commit, winner).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        assert!(matches!(
+            txn.finish(&mut db, commit).await,
+            Err(fgdb::WriteTxnError::Write(
+                fgdb::WriteError::FirstCommitterWins { .. }
+            )),
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+
+        let mut db = open(commit, false).await;
+        let mut txn = db.begin(txcx).unwrap();
+        txn.savepoint(&db, "before_bad_embedding").unwrap();
+        let mut bad = WriteBatch::new(CITES);
+        bad.set_vertex_property(
+            VId(6),
+            EMB,
+            Some(CanonicalScalar::bytes(vec![1, 2, 3]).unwrap()),
+        );
+        txn.write(&mut db, bad).unwrap();
+        let error = txn
+            .query(
+                &db,
+                cx,
+                "CALL hybrid.search(vector => [0.5, 0.5], vector_property => 'emb', \
+                 label => 'Doc', k => 10) YIELD node RETURN node",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            QueryError::TransactionSet(ref error) if matches!(error.as_ref(),
+                GqlQueryError::Source(GraphSetExecutionError::Source(
+                    fgdb::WriteTxnError::Gql(GqlError::Procedure(ProcedureError::Search(
+                        HybridCallError::Index(fgdb_beacon::BeaconError::InvalidQuery(
+                            "packed vector byte length is not 4 * dimensions"
+                        ))
+                    )))
+                )))
+        ));
+        txn.rollback_to_savepoint(&db, "before_bad_embedding")
+            .unwrap();
+        // No second search: only the failed CALL observed this label's
+        // absent future members. Rolling back the bad write must retain it.
+        let mut winner = WriteBatch::new(CITES);
+        winner.create_vertex(VId(99), vec![DOC], vec![(EMB, packed(&[0.5, 0.5]))]);
+        db.write(commit, winner).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        assert!(matches!(
+            txn.finish(&mut db, commit).await,
+            Err(fgdb::WriteTxnError::Write(
+                fgdb::WriteError::FirstCommitterWins { .. }
+            )),
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn transaction_hybrid_calls_share_allowances_and_preserve_interruption() {
+    run_transaction(async |commit, cx, txcx| {
+        let db = open(commit, false).await;
+        let frontier = db.frontier().unwrap();
+        let params = GqlParameters::new();
+        let txn = db.begin(txcx).unwrap();
+        // The text lane has no matches; the graph lane supplies nodes 2,3,4.
+        let call = "CALL hybrid.search(text => 'quasar', text_property => 'body', \
+                    seeds => [1], max_hops => 3, k => 10) YIELD node";
+        let text = format!("{call} RETURN node");
+        let prepare = |text: &str| {
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap()
+        };
+        let single = prepare(&text);
+        // Read witnesses allocate only on their first observation. Warm
+        // them before comparing exact per-execution work/scratch boundaries.
+        let warm = txn
+            .execute_graph_set_governed(&db, cx, &single, policy())
+            .unwrap();
+        assert_eq!(warm.rows.snapshot_records, 10); // six vertices + four edges
+        assert_eq!(warm.value.len(), 3);
+        let combined = prepare(&format!("{text} UNION ALL {text}"));
+        let result = txn
+            .execute_graph_set_governed(&db, cx, &combined, policy())
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 20);
+        assert_eq!(result.value.len(), 6);
+        let exact = GqlQueryPolicy::new(
+            result.rows.snapshot_records,
+            result.rows.result_rows,
+            result.evaluator.work_units,
+            result.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_set_governed(&db, cx, &combined, exact)
+                .unwrap(),
+            result,
+        );
+        let short_records = GqlQueryPolicy::new(19, 100, 100_000_000, 10_000_000);
+        assert!(matches!(
+            txn.execute_graph_set_governed(&db, cx, &combined, short_records),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+        ));
+        for work in [false, true] {
+            let mut short = exact;
+            if work {
+                short.evaluator.max_work_units -= 1;
+            } else {
+                short.evaluator.max_scratch_entries -= 1;
+            }
+            assert!(
+                txn.execute_graph_set_governed(&db, cx, &combined, short)
+                    .is_err(),
+                "every source, lane and conversion must spend the shared allowance",
+            );
+        }
+        // Three private CALL hit rows must fit a one-row aggregate result.
+        assert_eq!(
+            txn.query(
+                &db,
+                cx,
+                &format!("{call} RETURN COUNT(*) AS c"),
+                &params,
+                symbols,
+                GqlQueryPolicy::new(1_000_000, 1, 100_000_000, 10_000_000),
+            )
+            .unwrap(),
+            QueryResult::Rows {
+                columns: vec!["c".to_owned()],
+                rows: vec![vec![QueryValue::Count(3)]],
+            },
+        );
+        let digest = txn.staged_effect_digest().unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let expected = txn
+            .execute_graph_set_governed(
+                &db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &single,
+                policy(),
+            )
+            .unwrap();
+        let calls = probe.calls();
+        assert!(calls > 20);
+        for stop in [1, calls / 2, calls] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let result = txn.execute_graph_set_governed(
+                &db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &single,
+                policy(),
+            );
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(_))),
+                "stop={stop}: {result:?}",
+            );
+            assert_eq!(probe.calls(), stop, "continued after interruption");
+        }
+        assert_eq!(
+            txn.execute_graph_set_governed(&db, cx, &single, policy())
+                .unwrap(),
+            expected,
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }

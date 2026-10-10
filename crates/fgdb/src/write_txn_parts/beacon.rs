@@ -21,6 +21,16 @@ type Cancel = Box<asupersync::error::Error>;
 /// A vertex created in this transaction, borrowed: its labels and properties.
 type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)]);
 
+/// The native query host observes the existing engine's actual admissions.
+/// Work and source events share one allowance; a record is a surviving
+/// canonical vertex/edge, before explicit corpus or relation selection.
+#[derive(Clone, Copy)]
+enum AdmissionEvent {
+    Work(usize),
+    Source(SourceEvent),
+}
+type Observer<'a> = &'a dyn Fn(AdmissionEvent) -> Result<(), BeaconError>;
+
 /// All source metadata admissions, including new read witnesses, use the
 /// same conservative per-call scratch counter. It counts admissions, not RSS.
 struct Control<'a> {
@@ -29,10 +39,17 @@ struct Control<'a> {
     scratch: usize,
     limit: usize,
     interrupted: Option<Cancel>,
+    observer: Option<Observer<'a>>,
 }
 
 impl WorkControl for Control<'_> {
     fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.admit(units, AdmissionEvent::Work(units))
+    }
+}
+
+impl Control<'_> {
+    fn admit(&mut self, units: usize, event: AdmissionEvent) -> Result<(), BeaconError> {
         if self.interrupted.is_some() {
             return Err(BeaconError::Cancelled);
         }
@@ -40,13 +57,14 @@ impl WorkControl for Control<'_> {
             self.interrupted = Some(error);
             return Err(BeaconError::Cancelled);
         }
+        if let Some(observer) = self.observer {
+            observer(event)?;
+        }
         self.budget.charge(units)
     }
-}
 
-impl Control<'_> {
     fn source(&mut self, event: SourceEvent) -> Result<(), BeaconError> {
-        self.charge(1)?;
+        self.admit(1, AdmissionEvent::Source(event))?;
         if matches!(event, SourceEvent::ScratchEntry) {
             if self.scratch == self.limit {
                 return Err(BeaconError::ResourceLimit {
@@ -55,6 +73,15 @@ impl Control<'_> {
                 });
             }
             self.scratch += 1;
+        }
+        Ok(())
+    }
+
+    /// Standalone reads retain their existing charge trace. Native CALL
+    /// additionally admits source records to the enclosing GQL allowance.
+    fn record(&mut self) -> Result<(), BeaconError> {
+        if self.observer.is_some() {
+            self.source(SourceEvent::SnapshotRecord)?;
         }
         Ok(())
     }
@@ -165,6 +192,7 @@ impl WriteTxn {
             database,
             cx,
             options,
+            None,
             |work| {
                 let config = options.config_for(query)?;
                 query.validate(&config, &mut Shared(work))?;
@@ -172,6 +200,89 @@ impl WriteTxn {
             },
             |_, _| Ok(()),
             |index, _, work| query.execute(index, &mut Shared(work)),
+        )
+    }
+
+    /// Native `CALL hybrid.search` over this same canonical search engine.
+    /// Source admission, every retrieval lane and output conversion spend
+    /// the enclosing query's remaining allowance. Only complete rows escape;
+    /// neither a filtered result nor a failed call discards read witnesses.
+    pub(in crate::write_txn) fn execute_hybrid_procedure_governed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<WriteTxnError, Cancel>,
+    > {
+        use crate::gql_exec::AdmissionUsage;
+        use crate::query::{HybridSearch, hybrid_refusal};
+        use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution};
+
+        let search = HybridSearch::bind(call, arguments, self.basis, policy)
+            .map_err(|error| hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
+        let usage = RefCell::new(AdmissionUsage::default());
+        let failure = RefCell::new(None);
+        let result = {
+            let observe = |event| {
+                if failure.borrow().is_some() {
+                    return Err(BeaconError::Cancelled);
+                }
+                let result = match event {
+                    AdmissionEvent::Work(units) => usage
+                        .borrow_mut()
+                        .charge_work(policy, u64::try_from(units).unwrap_or(u64::MAX)),
+                    AdmissionEvent::Source(event) => usage.borrow_mut().observe(policy, event),
+                };
+                result.map_err(|error| {
+                    *failure.borrow_mut() = Some(error);
+                    BeaconError::Cancelled
+                })
+            };
+            self.beacon_search_graph_observed(
+                database,
+                cx,
+                search.options(),
+                search.query(),
+                search.expansion(),
+                Some(&observe),
+            )
+        };
+        if let Some(error) = failure.into_inner() {
+            return Err(error);
+        }
+        let hits = result.map_err(|error| match error {
+            ReadError::Interrupted(cancel) => GqlQueryError::Interrupted(cancel),
+            ReadError::Read(error) => GqlQueryError::Source(error),
+            ReadError::Index(error) => hybrid_refusal(crate::query::HybridCallError::Index(error))
+                .map_source(WriteTxnError::Gql),
+        })?;
+        let mut usage = usage.into_inner();
+        // Reserve every output row and cell before allocating the conversion.
+        // These private source rows spend scratch, not the final result page.
+        for _ in &hits {
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe(policy, SourceEvent::ScratchEntry)?;
+            for _ in call.outputs() {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe(policy, SourceEvent::ScratchEntry)?;
+            }
+        }
+        let value = search.rows(hits);
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        usage.finish(
+            policy,
+            Ok(GqlQueryExecution {
+                rows: GqlExecutionStats {
+                    snapshot_records: usage.snapshot_records(),
+                    result_rows: value.len() as u64,
+                },
+                evaluator: GlaExecutionStats::default(),
+                value,
+            }),
         )
     }
 
@@ -185,6 +296,7 @@ impl WriteTxn {
         database: &Database<V>,
         cx: &QueryCx,
         options: &Options,
+        observer: Option<Observer<'_>>,
         configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<IndexConfig, BeaconError>,
         mut selected: impl FnMut(VId, &RefCell<Control<'_>>) -> Result<(), BeaconError>,
         finish: impl FnOnce(&IndexSnapshot, &Snapshot, &RefCell<Control<'_>>) -> Result<T, BeaconError>,
@@ -209,6 +321,7 @@ impl WriteTxn {
                 scratch: 0,
                 limit: options.policy.max_source_scratch,
                 interrupted: None,
+                observer,
             });
             let result = (|| {
                 work.borrow_mut().charge(1)?;
@@ -281,6 +394,7 @@ impl WriteTxn {
                         let Some((labels, props)) = overlay.contents() else {
                             return Ok(None);
                         };
+                        work.borrow_mut().record()?;
                         work.borrow_mut().charge(labels.len())?;
                         if options.vertex_label.is_some_and(|label| {
                             !overlay

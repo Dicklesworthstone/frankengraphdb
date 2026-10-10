@@ -44,6 +44,10 @@ mod procedures {
                 .query_snapshot(database)
                 .map_err(GqlQueryError::Source)?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            if crate::query::is_hybrid(call) {
+                return self
+                    .execute_hybrid_procedure_governed(database, cx, call, arguments, policy);
+            }
             let spec = crate::query::bind_procedure(call, arguments)
                 .map_err(|error| error.map_source(WriteTxnError::Gql))?;
             // This source admits snapshot records and work independently.

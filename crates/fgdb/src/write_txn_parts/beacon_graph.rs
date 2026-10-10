@@ -2,7 +2,7 @@
 //! The graph is query scratch, not storage. Only endpoint identities are
 //! copied; edge properties are irrelevant to unit-hop traversal.
 
-use super::{Cancel, Control, Options, Shared, WriteTxn, WriteTxnError};
+use super::{Cancel, Control, Observer, Options, Shared, WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, PendingRow, Snapshot};
 use asupersync::fs::Vfs;
@@ -104,11 +104,26 @@ impl WriteTxn {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_observed(database, cx, options, query, expansion, None)
+    }
+
+    /// Same engine and witnesses, with an optional enclosing query meter.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn beacon_search_graph_observed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        observer: Option<Observer<'_>>,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
         let graph = RefCell::new(None);
         self.beacon_read(
             database,
             cx,
             options,
+            observer,
             |work| {
                 let config = options.config_for_graph(query)?;
                 Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
@@ -247,6 +262,7 @@ impl WriteTxn {
         }
         let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
             edge_work.source(SourceEvent::Work)?;
+            work.borrow_mut().record()?;
             let (src, relation, dst) = incidence;
             if expansion
                 .relation
