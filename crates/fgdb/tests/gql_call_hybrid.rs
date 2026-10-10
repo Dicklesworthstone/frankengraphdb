@@ -282,7 +282,7 @@ fn query<'a>(
 #[test]
 fn every_lane_combination_equals_the_library_search() {
     run_transaction(async |commit, cx, txcx| {
-        let db = open(commit, false).await;
+        let mut db = open(commit, false).await;
         let txn = db.begin(txcx).unwrap();
         let embedding = [0.5_f32, 0.5];
         let parameters = GqlParameters::new()
@@ -919,7 +919,7 @@ fn transaction_hybrid_calls_retain_hidden_and_failed_read_dependencies() {
 #[test]
 fn transaction_hybrid_calls_share_allowances_and_preserve_interruption() {
     run_transaction(async |commit, cx, txcx| {
-        let db = open(commit, false).await;
+        let mut db = open(commit, false).await;
         let frontier = db.frontier().unwrap();
         let params = GqlParameters::new();
         let txn = db.begin(txcx).unwrap();
