@@ -205,8 +205,9 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
         .map(|(name, ..)| format!("fnx.{name}"))
         .collect();
     assert_eq!(listed, registered);
-    run(async |commit, cx| {
+    run_transaction(async |commit, cx, txcx| {
         let db = open(commit).await;
+        let txn = db.begin(txcx).unwrap();
         for (name, arguments, field, undirected) in CALLS {
             let standalone = db
                 .call_fnx(
@@ -241,7 +242,16 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
             );
             assert_eq!(columns, ["vertex", "value"], "{name}");
             assert_eq!(actual, expected, "{name}");
+            let (columns, actual) = rows(
+                txn.query(&db, cx, &text, &GqlParameters::new(), symbols, policy())
+                    .map_err(|error| format!("transaction {name}: {error}"))
+                    .unwrap(),
+            );
+            assert_eq!(columns, ["vertex", "value"], "transaction {name}");
+            assert_eq!(actual, expected, "transaction {name}");
         }
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 
@@ -747,5 +757,309 @@ fn a_procedure_score_filters_against_a_decimal_literal() {
             .unwrap(),
         );
         assert_eq!(actual, expected);
+    });
+}
+
+fn run_transaction<T>(
+    test: impl AsyncFnOnce(&fgdb_types::CommitCx, &QueryCx, &fgdb_types::TxnCx) -> T,
+) -> T {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(test(&contexts.commit(), &contexts.query(), &contexts.txn()))
+}
+
+/// fgdb-7qznp: the CALL and every later MATCH see the same canonical staged
+/// graph, including deletions, their cascades and a dependent relation group.
+#[test]
+fn transaction_calls_compose_over_staged_topology_properties_and_isolates() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let before = db.frontier().unwrap();
+        let params = GqlParameters::new();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.delete_vertex(VId(3)); // retires edges 2, 3 and 4
+        changes.delete_edge(EId(5));
+        changes.create_vertex(VId(7), vec![PERSON], vec![(P, CanonicalScalar::Int(70))]);
+        changes.set_vertex_property(VId(6), P, Some(CanonicalScalar::Int(600)));
+        let mut second_relation = WriteBatch::new(RelationId(2));
+        second_relation.add_edge(EId(6), VId(2), VId(6), vec![]);
+        let mut third_relation = WriteBatch::new(RelationId(3));
+        third_relation.add_edge(EId(7), VId(6), VId(7), vec![]);
+        txn.write_ordered(&mut db, vec![changes, second_relation, third_relation])
+            .unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let reach = "CALL fnx.single_source_shortest_path_length(1) YIELD vertex AS n, distance \
+                     MATCH (n) RETURN n.p AS p, distance ORDER BY distance";
+        let (_, actual) = rows(
+            txn.query(&db, cx, reach, &params, symbols, policy())
+                .unwrap(),
+        );
+        let int = |v| GraphValue::Scalar(CanonicalScalar::Int(v));
+        assert_eq!(
+            actual,
+            vec![
+                vec![int(10), int(0)],
+                vec![int(20), int(1)],
+                vec![int(600), int(2)],
+                vec![int(70), int(3)]
+            ],
+        );
+        // {1,2,6,7}, {4}, {5}. A source built only from edge endpoints loses
+        // two isolated components; a source reading the basis yields two.
+        let components = "CALL fnx.weakly_connected_components() YIELD component \
+                          RETURN COUNT(DISTINCT component) AS c";
+        assert_eq!(
+            only_row(
+                txn.query(&db, cx, components, &params, symbols, policy())
+                    .unwrap()
+            ),
+            [QueryValue::Count(3)],
+        );
+        assert_eq!(
+            only_row(
+                db.query(cx, components, &params, symbols, policy())
+                    .unwrap()
+            ),
+            [QueryValue::Count(2)],
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert!(matches!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. },
+        ));
+        assert_eq!(
+            rows(db.query(cx, reach, &params, symbols, policy()).unwrap()).1,
+            actual
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+/// Source mutations after the pinned basis do not change CALL results. The
+/// same observations must instead reject transaction completion, even when
+/// the query delivered no rows or the changed relation did not exist before.
+#[test]
+fn transaction_calls_retain_empty_table_phantoms_and_hidden_output_dependencies() {
+    run_transaction(async |commit, cx, txcx| {
+        let params = GqlParameters::new();
+        for (change, hidden) in
+            (0..4).flat_map(|change| [false, true].map(|hidden| (change, hidden)))
+        {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            if change != 0 {
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(1), vec![PERSON], vec![(P, CanonicalScalar::Int(10))]);
+                seed.create_vertex(VId(2), vec![PERSON], vec![]);
+                db.write(commit, seed).await.unwrap();
+            }
+            let mut txn = db.begin(txcx).unwrap();
+            let text = if hidden {
+                "CALL fnx.weakly_connected_components() YIELD vertex, component \
+                 RETURN vertex, component LIMIT 0"
+            } else {
+                "CALL fnx.weakly_connected_components() YIELD vertex AS n, component \
+                 MATCH (n) RETURN n, component, n.p ORDER BY n"
+            };
+            let answer = txn
+                .query(&db, cx, text, &params, symbols, policy())
+                .unwrap();
+            if hidden {
+                assert!(rows(answer.clone()).1.is_empty());
+            }
+            let mut winner = WriteBatch::new(RelationId(99));
+            match change {
+                0 => {
+                    winner.create_vertex(VId(9), vec![], vec![]);
+                }
+                1 => {
+                    winner.add_edge(EId(99), VId(1), VId(2), vec![]);
+                }
+                2 => {
+                    winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(20)));
+                }
+                _ => {
+                    winner.delete_vertex(VId(2));
+                }
+            }
+            db.write(commit, winner).await.unwrap();
+            if !hidden {
+                assert_ne!(
+                    db.query(cx, text, &params, symbols, policy()).unwrap(),
+                    answer,
+                    "the fixture must distinguish the live head for change {change}",
+                );
+            }
+            // Re-executing never reacquires the live head.
+            assert_eq!(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap(),
+                answer,
+            );
+            let frontier = db.frontier().unwrap();
+            assert!(
+                matches!(
+                    txn.finish(&mut db, commit).await,
+                    Err(fgdb::WriteTxnError::Write(
+                        fgdb::WriteError::FirstCommitterWins { .. }
+                    )),
+                ),
+                "missing dependency for change {change}"
+            );
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn transaction_call_refusal_and_savepoint_rollback_preserve_graph_dependencies() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let mut txn = db.begin(txcx).unwrap();
+        txn.savepoint(&db, "before_parallel").unwrap();
+        let mut parallel = WriteBatch::new(R);
+        parallel.add_edge(EId(7), VId(1), VId(2), vec![]);
+        txn.write(&mut db, parallel).unwrap();
+        let text = "CALL fnx.pagerank() YIELD vertex RETURN vertex";
+        let error = txn
+            .query(&db, cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            QueryError::TransactionSet(ref error) if matches!(error.as_ref(),
+                GqlQueryError::Source(GraphSetExecutionError::Source(
+                    fgdb::WriteTxnError::Gql(GqlError::Procedure(ProcedureError::Read(_)))
+                )))
+        ));
+        txn.rollback_to_savepoint(&db, "before_parallel").unwrap();
+        assert!(txn.edge(&db, EId(7)).unwrap().is_none());
+        // Do not execute another graph query after rollback: completion
+        // must retain the failed CALL's table witness, not a later read's.
+        let mut winner = WriteBatch::new(RelationId(88));
+        winner.add_edge(EId(88), VId(5), VId(6), vec![]);
+        db.write(commit, winner).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        assert!(matches!(
+            txn.finish(&mut db, commit).await,
+            Err(fgdb::WriteTxnError::Write(
+                fgdb::WriteError::FirstCommitterWins { .. }
+            )),
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert!(db.edge(EId(7)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn transaction_call_sources_share_one_allowance_across_union_and_aggregate() {
+    run_transaction(async |commit, cx, txcx| {
+        let db = open(commit).await;
+        let params = GqlParameters::new();
+        let txn = db.begin(txcx).unwrap();
+        let text = "CALL fnx.weakly_connected_components() YIELD component RETURN component";
+        let prepare = |text: &str| {
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap()
+        };
+        let single = txn
+            .execute_graph_set_governed(&db, cx, &prepare(text), policy())
+            .unwrap();
+        assert_eq!(single.rows.snapshot_records, 11);
+        let combined = prepare(&format!("{text} UNION ALL {text}"));
+        let tight = GqlQueryPolicy::new(
+            2 * single.rows.snapshot_records - 1,
+            100,
+            policy().evaluator.max_work_units,
+            policy().evaluator.max_scratch_entries,
+        );
+        assert!(matches!(
+            txn.execute_graph_set_governed(&db, cx, &combined, tight),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+        ));
+        let result = txn
+            .execute_graph_set_governed(&db, cx, &combined, policy())
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 22);
+        assert_eq!(result.value.len(), 12);
+        assert!(result.evaluator.work_units >= 2 * single.evaluator.work_units);
+        let exact = GqlQueryPolicy::new(
+            result.rows.snapshot_records,
+            result.rows.result_rows,
+            result.evaluator.work_units,
+            result.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_set_governed(&db, cx, &combined, exact)
+                .unwrap(),
+            result,
+        );
+        for work in [false, true] {
+            let mut short = exact;
+            if work {
+                short.evaluator.max_work_units -= 1;
+            } else {
+                short.evaluator.max_scratch_entries -= 1;
+            }
+            assert!(
+                txn.execute_graph_set_governed(&db, cx, &combined, short)
+                    .is_err(),
+                "the complete query must account for every work/scratch unit",
+            );
+        }
+        // The kernel alone fits this allowance. Its source and projection
+        // already spent some, so preflight must refuse before running it.
+        let pagerank = "CALL fnx.pagerank() YIELD vertex";
+        let kernel_work = db
+            .call_fnx(cx, pagerank, &FnxParameters::new(), explicit(false))
+            .unwrap()
+            .analytics
+            .certificate
+            .estimated_work;
+        let kernel_only = GqlQueryPolicy::new(
+            1_000_000,
+            100,
+            kernel_work as u64,
+            policy().evaluator.max_scratch_entries,
+        );
+        let error = txn
+            .execute_graph_set_governed(
+                &db,
+                cx,
+                &prepare(&format!("{pagerank} RETURN vertex")),
+                kernel_only,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error,
+                GqlQueryError::Source(GraphSetExecutionError::Source(
+                    fgdb::WriteTxnError::Gql(GqlError::Procedure(ProcedureError::Read(cause)))
+                )) if matches!(cause.as_ref(),
+                    FnxReadError::Execution(FnxExecutionError::LimitExceeded {
+                        resource: "estimated work", limit, requested,
+                    }) if *requested == kernel_work && limit < requested
+                )
+            ),
+            "{error:?}",
+        );
+        let count = "CALL fnx.weakly_connected_components() YIELD component \
+                     RETURN COUNT(DISTINCT component) AS c";
+        // Procedure input rows spend scratch, not the one final result row.
+        let one_row = GqlQueryPolicy::new(1_000_000, 1, 100_000_000, 10_000_000);
+        assert_eq!(
+            only_row(
+                txn.query(&db, cx, count, &params, symbols, one_row)
+                    .unwrap()
+            ),
+            [QueryValue::Count(2)],
+        );
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }

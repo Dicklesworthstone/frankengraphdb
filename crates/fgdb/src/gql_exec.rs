@@ -574,6 +574,28 @@ pub(crate) struct AdmissionUsage {
     records: u64,
 }
 impl AdmissionUsage {
+    /// Charge a registered kernel's admitted work estimate to the SAME
+    /// allowance as its source, projection and later result conversion.
+    /// The kernel must first cap its own execution at `remaining(policy)`.
+    pub(crate) fn charge_work<E, C>(
+        &mut self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        units: u64,
+    ) -> Result<(), fgdb_gql::GqlQueryError<E, C>> {
+        let observed = u128::from(self.work_units) + u128::from(units);
+        if observed > u128::from(policy.evaluator.max_work_units) {
+            return Err(fgdb_gql::GqlQueryError::Evaluator(
+                fgdb_gql::GlaLimitExceeded {
+                    dimension: fgdb_gql::GlaLimitDimension::WorkUnits,
+                    limit: policy.evaluator.max_work_units,
+                    observed,
+                },
+            ));
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
     pub(crate) fn observe<E, C>(
         &mut self,
         policy: fgdb_gql::GqlQueryPolicy,

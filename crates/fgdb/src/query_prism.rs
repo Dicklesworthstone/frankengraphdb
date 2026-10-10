@@ -806,7 +806,7 @@ pub(super) fn source_admit<C>(
 /// Geometric growth with count admission BEFORE allocation; never reserve the
 /// caller's entire maximum for a tiny projection. Charge the conservative
 /// old+new backing-store peak while a growth might relocate the allocation.
-pub(super) fn push_staged<T, C>(
+pub(crate) fn push_staged<T, C>(
     output: &mut Vec<T>,
     value: T,
     resource: &'static str,

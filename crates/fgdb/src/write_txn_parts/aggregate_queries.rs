@@ -88,10 +88,13 @@ impl WriteTxn {
             let _ = self
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
-            query.execute_governed(
+            query.execute_governed_with_procedures(
                 policy,
                 |pattern, allowance| {
                     self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                },
+                |call, arguments, allowance| {
+                    self.execute_procedure_governed(database, cx, call, arguments, allowance)
                 },
                 || cx.checkpoint(),
             )

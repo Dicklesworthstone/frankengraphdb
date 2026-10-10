@@ -5,12 +5,13 @@ mod query_source {
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::algebra::{
-        GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
+        GlaIdentityOutput, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
     };
     use fgdb_types::{CanonicalScalar, EId, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
     include!("aggregate_queries.rs");
+    include!("procedure_queries.rs");
 
     type EdgeTriple = (VId, RelationId, VId);
     type IdentifiedEdge = (EId, VId, RelationId, VId);
@@ -109,11 +110,24 @@ mod query_source {
     /// The borrowed source is the same for scalar and tuple query projections.
     pub(super) struct OverlayQuerySource<'a, Row = VId> {
         pub(super) logical: GlaPlan<Row>,
+        tables: OverlayGraphTables<'a>,
+    }
+    /// Shared canonical overlay admission. A graph procedure consumes both
+    /// complete tables, including isolated vertices, without inventing a
+    /// pattern or rebuilding the transaction's staged effects independently.
+    pub(super) struct OverlayGraphTables<'a> {
         vertices: Vec<(VId, VertexView<'a>)>,
         edges: Vec<(IdentifiedEdge, EdgeView<'a>)>,
         pub(super) snapshot_records: usize,
         // Incomplete until THIS execution and its final allowance check pass.
         scan_observation: Option<(&'a WriteTxn, usize)>,
+    }
+    impl<'a, Row> core::ops::Deref for OverlayQuerySource<'a, Row> {
+        type Target = OverlayGraphTables<'a>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.tables
+        }
     }
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
         fn accept_observations(&self) {
@@ -402,9 +416,31 @@ mod query_source {
             precise: bool,
             control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
         ) -> Result<OverlayQuerySource<'a, Row>, E> {
-            let predicates = precise
-                .then(|| super::VertexScanRead::predicates(&logical))
-                .flatten();
+            let tables = self.query_source_tables(
+                snapshot,
+                Some(&logical),
+                required_vertex_label,
+                precise,
+                control,
+            )?;
+            Ok(OverlayQuerySource { logical, tables })
+        }
+
+        /// None selects a complete graph projection for a registered
+        /// procedure. It requires both table phantom witnesses even when the
+        /// current graph is empty; existing query plans keep their narrower
+        /// source requirements and precise acceptance protocol.
+        fn query_source_tables<'a, E, Row: GlaOutput>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: Option<&GlaPlan<Row>>,
+            required_vertex_label: Option<LabelId>,
+            precise: bool,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<OverlayGraphTables<'a>, E> {
+            let predicates = logical
+                .filter(|_| precise)
+                .and_then(super::VertexScanRead::predicates);
             let scan_observation = if let Some(predicates) = predicates {
                 // Charge the bounded definition copy before allocation or graph
                 // reads. A failure here has learned nothing from the database.
@@ -414,12 +450,12 @@ mod query_source {
             } else {
                 None
             };
-            let edge_scan = logical.scans_edges();
-            let reads_edges = logical.reads_edges();
+            let edge_scan = logical.is_some_and(GlaPlan::scans_edges);
+            let reads_edges = logical.is_none_or(GlaPlan::reads_edges);
             // Typed edges retain per-relation witnesses. An untyped atom can
             // see a relation created after this read, so it needs the complete
             // edge-table phantom witness, including an initially empty table.
-            let edge_relations = logical.edge_relations();
+            let edge_relations = logical.and_then(GlaPlan::edge_relations);
             control(SourceEvent::Work)?;
             if reads_edges {
                 match &edge_relations {
@@ -447,8 +483,10 @@ mod query_source {
             let witness_label = required_vertex_label.filter(|label| {
                 !edge_scan
                     && scan_observation.is_none()
-                    && logical.vertex_scan_domain()
-                        == fgdb_gql::algebra::VertexScanDomain::Label(*label)
+                    && logical.is_some_and(|plan| {
+                        plan.vertex_scan_domain()
+                            == fgdb_gql::algebra::VertexScanDomain::Label(*label)
+                    })
             });
             let mut observed = BTreeSet::new();
             // Raw intentions contribute only negative-read identities. The
@@ -613,22 +651,13 @@ mod query_source {
                     }
                 }
             }
-            if edge_scan && logical.needs_vertex_values() {
+            if edge_scan && logical.is_some_and(GlaPlan::needs_vertex_values) {
                 let mut candidates = BTreeSet::new();
                 for &(src, relation, dst, _) in edges.values() {
                     control(SourceEvent::Work)?;
-                    let requested = logical.operators().iter().any(|op| match op {
-                        GlaOperator::ScanEdges {
-                            relation: required, ..
-                        }
-                        | GlaOperator::Expand {
-                            relation: required, ..
-                        }
-                        | GlaOperator::VarLengthExpand {
-                            relation: required, ..
-                        } => required.matches(relation),
-                        _ => false,
-                    });
+                    let requested = edge_relations
+                        .as_ref()
+                        .is_none_or(|relations| relations.contains(&relation));
                     if requested {
                         for vid in [src, dst] {
                             if !candidates.contains(&vid) {
@@ -667,8 +696,7 @@ mod query_source {
                 edge_rows.push(((eid, src, relation, dst), props));
             }
             let snapshot_records = edge_rows.len() + if edge_scan { 0 } else { vertex_rows.len() };
-            Ok(OverlayQuerySource {
-                logical,
+            Ok(OverlayGraphTables {
                 vertices: vertex_rows,
                 edges: edge_rows,
                 snapshot_records,

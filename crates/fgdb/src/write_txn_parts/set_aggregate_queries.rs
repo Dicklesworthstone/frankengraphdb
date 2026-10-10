@@ -170,10 +170,13 @@ mod set_aggregate_queries {
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
             cx.with_restriction(|| {
-                query.execute_governed(
+                query.execute_governed_with_procedures(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed(database, cx, pattern, remaining)
+                    },
+                    |call, arguments, remaining| {
+                        self.execute_procedure_governed(database, cx, call, arguments, remaining)
                     },
                     || cx.checkpoint(),
                 )
