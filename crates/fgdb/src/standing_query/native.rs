@@ -144,6 +144,22 @@ impl PreparedNativeRead {
                     )
                 }
                 Self::PipelineAggregate(prepared) => {
+                    if prepared.requires_relational_input() {
+                        // Zero or several graph sources bind through the
+                        // set-aggregate lane, as reads do (query_view.rs). The
+                        // single-source binder refuses them.
+                        let definition = prepared
+                            .bind_relation_parameters(params)
+                            .map_err(|e| prepare_error(QueryError::PipelineText(e)))?;
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PipelineText(e)))?;

@@ -163,15 +163,25 @@ impl PreparedNativeRead {
                 }
             }
             Self::PipelineAggregate(prepared) => {
-                let bound = prepared
-                    .bind_parameters(params)
-                    .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
-                match bound.input_relation() {
-                    Some(input) => circuit(cx, input)?.append(1)?,
-                    None => Footprint {
-                        nodes: 1,
-                        source_width: aggregate_width(&bound),
-                    },
+                if prepared.requires_relational_input() {
+                    // Zero or several graph sources bind through the
+                    // set-aggregate lane, as reads do (query_view.rs). The
+                    // single-source binder refuses them RequiresSingleGraphSource.
+                    let definition = prepared
+                        .bind_relation_parameters(params)
+                        .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
+                    circuit(cx, definition.input())?.append(1)?
+                } else {
+                    let bound = prepared
+                        .bind_parameters(params)
+                        .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
+                    match bound.input_relation() {
+                        Some(input) => circuit(cx, input)?.append(1)?,
+                        None => Footprint {
+                            nodes: 1,
+                            source_width: aggregate_width(&bound),
+                        },
+                    }
                 }
             }
             _ => {
