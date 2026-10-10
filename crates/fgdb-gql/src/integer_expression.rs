@@ -1219,9 +1219,23 @@ fn convert<E>(
                     make_text(text, instruction, control)
                 } else {
                     charge_payload(text.len(), false, control)?;
-                    Ok(text
-                        .parse::<i64>()
-                        .map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                    // openCypher parses the text as a number and truncates a
+                    // fraction toward zero: toInteger('2.9') is 2 (TCK
+                    // TypeConversion2 [4], [5]). Text that is not a finite
+                    // number, or does not fit an i64, is NULL.
+                    Ok(match text.parse::<i64>() {
+                        Ok(integer) => CanonicalScalar::Int(integer),
+                        Err(_) => text
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite())
+                            .and_then(|value| {
+                                fgdb_types::CanonicalF64::new(value)
+                                    .checked_to_i64_truncated()
+                                    .ok()
+                            })
+                            .map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                    })
                 };
             }
             CanonicalScalar::Float(value) => {

@@ -483,9 +483,11 @@ fn opencypher_plus_over_text_is_concatenation() {
 }
 
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
-/// stays NULL; toInteger of text that is not an i64 literal is NULL, as
-/// openCypher defines it; a float or other domain is a typed failure, never a
-/// guessed rendering. toString is static text, so `+` concatenates it, and an
+/// stays NULL. toInteger parses text as a number and truncates a fraction
+/// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,
+/// [5] '2.9' is 2). Text that is not a finite number, or does not fit an i64,
+/// is NULL. A non-scalar domain is a typed failure, never a guessed
+/// rendering. toString is static text, so `+` concatenates it, and an
 /// aggregate count converts through the result projection.
 #[test]
 fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
@@ -498,7 +500,13 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
         ("toString(TRUE)", text("true")),
         ("toInteger(FALSE)", CanonicalScalar::Int(0)),
         ("toInteger('x')", CanonicalScalar::Null),
-        ("toInteger('3.9')", CanonicalScalar::Null),
+        ("toInteger('3.9')", CanonicalScalar::Int(3)),
+        ("toInteger('1.7')", CanonicalScalar::Int(1)),
+        ("toInteger('-2.9')", CanonicalScalar::Int(-2)),
+        ("toInteger('1e3')", CanonicalScalar::Int(1000)),
+        ("toInteger('NaN')", CanonicalScalar::Null),
+        ("toInteger('inf')", CanonicalScalar::Null),
+        ("toInteger('')", CanonicalScalar::Null),
         ("toInteger('9223372036854775808')", CanonicalScalar::Null),
         ("'n=' + toString(toInteger(n.text) * 2)", text("n=84")),
         // Only toString makes these text: `+` must still concatenate.
