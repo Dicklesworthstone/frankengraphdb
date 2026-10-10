@@ -15,8 +15,7 @@ mod kcore;
 mod native;
 pub use native::{
     NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
-    SubscribeError,
-    SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+    SubscribeError, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };
 mod output;
 mod projection;

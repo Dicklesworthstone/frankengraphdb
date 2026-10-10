@@ -44,21 +44,21 @@ fn aggregate_width(definition: &fgdb_gql::PreparedGraphAggregate) -> u64 {
 fn pattern_width(
     pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
 ) -> u64 {
-    pattern
-        .incremental_row_source_definition()
-        .as_ref()
-        .map_or(fgdb_gql::algebra::MAX_PATTERN_BINDINGS as u64, aggregate_width)
+    pattern.incremental_row_source_definition().as_ref().map_or(
+        fgdb_gql::algebra::MAX_PATTERN_BINDINGS as u64,
+        aggregate_width,
+    )
 }
 
-fn circuit(
-    cx: &QueryCx,
-    query: &PreparedGraphSet,
-) -> Result<Footprint, StandingQueryError> {
+fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, StandingQueryError> {
     cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
     // Match Staging::compile's dispatch order. A complete source-free subtree
     // is folded into one immutable node, even if its syntax contains joins.
     if query.operand_count() == 0 {
-        return Ok(Footprint { nodes: 1, source_width: 0 });
+        return Ok(Footprint {
+            nodes: 1,
+            source_width: 0,
+        });
     }
     if let Some((input, _, _, _)) = query.incremental_ordered_window() {
         return circuit(cx, &input)?.append(1);
@@ -70,7 +70,10 @@ fn circuit(
         return circuit(cx, &input)?.append(1);
     }
     if let Some(pattern) = query.incremental_pattern() {
-        return Ok(Footprint { nodes: 1, source_width: pattern_width(pattern) });
+        return Ok(Footprint {
+            nodes: 1,
+            source_width: pattern_width(pattern),
+        });
     }
     if let Some(input) = query.incremental_scope() {
         return circuit(cx, input);
@@ -78,9 +81,9 @@ fn circuit(
     if let Some((input, _, _)) = query.incremental_projection() {
         return circuit(cx, input)?.append(1);
     }
-    if let Some((left, right, _, _)) = query.incremental_selected_join_with_control(
-        &mut |_| cx.checkpoint().map_err(StandingQueryError::Interrupted),
-    )? {
+    if let Some((left, right, _, _)) = query.incremental_selected_join_with_control(&mut |_| {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)
+    })? {
         // A selected join restores its public schema with a second node.
         return circuit(cx, left)?.combine(circuit(cx, right)?, 2);
     }
@@ -132,13 +135,20 @@ impl PreparedNativeRead {
                 // compile_root may append a final window after the recursive
                 // compiler. Reserving it even when unnecessary cannot exceed
                 // the caller's total grant.
-                if footprint.source_width != 0 { footprint.append(1)? } else { footprint }
+                if footprint.source_width != 0 {
+                    footprint.append(1)?
+                } else {
+                    footprint
+                }
             }
             Self::Pattern(prepared) => {
                 let bound = prepared
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
-                Footprint { nodes: 1, source_width: pattern_width(&bound) }
+                Footprint {
+                    nodes: 1,
+                    source_width: pattern_width(&bound),
+                }
             }
             Self::Aggregate(prepared) => {
                 let bound = prepared
@@ -146,7 +156,10 @@ impl PreparedNativeRead {
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
                 match bound.input_relation() {
                     Some(input) => circuit(cx, input)?.append(1)?,
-                    None => Footprint { nodes: 1, source_width: aggregate_width(&bound) },
+                    None => Footprint {
+                        nodes: 1,
+                        source_width: aggregate_width(&bound),
+                    },
                 }
             }
             Self::PipelineAggregate(prepared) => {
@@ -155,7 +168,10 @@ impl PreparedNativeRead {
                     .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
                 match bound.input_relation() {
                     Some(input) => circuit(cx, input)?.append(1)?,
-                    None => Footprint { nodes: 1, source_width: aggregate_width(&bound) },
+                    None => Footprint {
+                        nodes: 1,
+                        source_width: aggregate_width(&bound),
+                    },
                 }
             }
             _ => {

@@ -800,23 +800,18 @@ mod tests {
                 }
                 let mut admitted = false;
                 let result: Result<(NativeSubscription, ()), SubscriptionError> = prepared
-                    .subscribe_replaying(
-                        &mut db,
-                        &cx,
-                        &params,
-                        setup,
-                        |_, _| {
-                            admitted = true;
-                            Err(SubscriptionError::from(StandingQueryError::Delivery(
-                                StandingQueryFailure::ResultBudget,
-                            )))
-                        },
-                    );
+                    .subscribe_replaying(&mut db, &cx, &params, setup, |_, _| {
+                        admitted = true;
+                        Err(SubscriptionError::from(StandingQueryError::Delivery(
+                            StandingQueryFailure::ResultBudget,
+                        )))
+                    });
                 assert!(result.is_err());
                 assert_eq!(admitted, phase == 2);
                 assert_eq!(db.standing_queries.len(), before);
                 assert!(
-                    db.standing_native_bag(&cx, prior.handle(), policy()).is_ok(),
+                    db.standing_native_bag(&cx, prior.handle(), policy())
+                        .is_ok(),
                     "a failed private suffix must preserve a preexisting subscriber"
                 );
             }
@@ -846,7 +841,9 @@ mod tests {
         let ((), report) = run_async_under_lab(0x006d_de62, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             let params = GqlParameters::new();
             fn resolve_shape(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
                 match (kind, name) {
@@ -883,12 +880,13 @@ mod tests {
                 let (bound, source_width) = prepared.subscription_footprint(&cx, &params).unwrap();
                 assert_eq!(source_width, width, "{text}");
                 let before = db.standing_queries.len();
-                prepared.register_standing(&mut db, &cx, &params, policy()).unwrap();
+                prepared
+                    .register_standing(&mut db, &cx, &params, policy())
+                    .unwrap();
                 let actual = u64::try_from(db.standing_queries.len() - before).unwrap();
                 assert!(actual <= bound, "{text}: actual {actual}, bound {bound}");
             }
         });
         assert!(report.lab_test_passed());
     }
-
 }

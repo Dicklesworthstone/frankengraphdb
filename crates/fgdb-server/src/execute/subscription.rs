@@ -20,11 +20,10 @@
 use super::*;
 use fgdb::{
     NativeSubscription, NativeSubscriptionSetup, PreparedNativeRead, QueryValue,
-    StandingQueryError, StandingQueryFailure, SubscribeError, SubscriptionBatch,
-    SubscriptionError,
+    StandingQueryError, StandingQueryFailure, SubscribeError, SubscriptionBatch, SubscriptionError,
 };
-use fgdb_gql::{GqlExecutionBudget, GqlQueryPolicy};
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::{GqlExecutionBudget, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, QueryCx};
 use fgdb_warden::QueryLimits;
 use std::sync::Arc;
@@ -204,9 +203,7 @@ impl Work<'_> {
         self.charge(1)?;
         match value {
             GraphValue::Scalar(CanonicalScalar::Text(value)) => self.bytes(value.as_str().len()),
-            GraphValue::Scalar(CanonicalScalar::Bytes(value)) => {
-                self.bytes(value.as_slice().len())
-            }
+            GraphValue::Scalar(CanonicalScalar::Bytes(value)) => self.bytes(value.as_slice().len()),
             // STRICT_PORTABLE decimals have at most 34 coefficient digits,
             // one sign and one decimal point. Reserve before formatting.
             GraphValue::Scalar(CanonicalScalar::Decimal(_)) => self.charge(36),
@@ -251,7 +248,10 @@ fn wire_entries(
     for (row, weight) in batch.rows().iter() {
         work.charge(1)?;
         let weight = weight.to_i128().ok_or_else(|| {
-            Refusal::new(ErrorCode::Execution, "a change weight exceeds the wire range")
+            Refusal::new(
+                ErrorCode::Execution,
+                "a change weight exceeds the wire range",
+            )
         })?;
         work.bytes(row.len())?;
         let mut cells = Vec::with_capacity(row.len());
@@ -270,7 +270,11 @@ fn wire_entries(
 }
 
 fn row_limit(policy: GqlQueryPolicy, limits: QueryLimits) -> u64 {
-    policy.rows.max_result_rows().unwrap_or(u64::MAX).min(limits.max_rows)
+    policy
+        .rows
+        .max_result_rows()
+        .unwrap_or(u64::MAX)
+        .min(limits.max_rows)
 }
 
 fn check_rows(batch: &SubscriptionBatch, maximum: u64) -> Result<u64, Refusal> {
@@ -320,7 +324,11 @@ fn reserve(
     maintenance.evaluator.max_work_units = node_work;
     maintenance.evaluator.max_scratch_entries = scratch;
     let snapshot_records = if source_width != 0 {
-        policy.rows.max_snapshot_records().unwrap_or(u64::MAX).min(limits.max_nodes / nodes)
+        policy
+            .rows
+            .max_snapshot_records()
+            .unwrap_or(u64::MAX)
+            .min(limits.max_nodes / nodes)
     } else {
         // A source-free relational group still admits owned input rows under
         // this policy. They are not graph-vertex admissions; the proven zero
@@ -363,15 +371,26 @@ pub(crate) async fn subscribe(
 ) -> Result<Subscription, Refusal> {
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let now = unix_millis();
-    let capability = db.authority.verify_at(token, TRUNK, now).map_err(authorization)?;
-    let mut permit = capability.begin_read_at(TRUNK, now).map_err(authorization)?;
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(authorization)?;
+    let mut permit = capability
+        .begin_read_at(TRUNK, now)
+        .map_err(authorization)?;
     refuse_element_identity(&statement.statement)?;
     unrestricted(&capability)?;
     let limits = capability.predicates().limits();
-    let registration_work = db.query_policy.evaluator.max_work_units.min(limits.max_work);
+    let registration_work = db
+        .query_policy
+        .evaluator
+        .max_work_units
+        .min(limits.max_work);
     // Reserve the complete host ceiling first. All following local counters
     // are disjoint slices of this reservation, including syntax and binding.
-    permit.charge_work_at(now, registration_work).map_err(authorization)?;
+    permit
+        .charge_work_at(now, registration_work)
+        .map_err(authorization)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = contexts.query();
     let mut preparation = Work {
@@ -414,15 +433,22 @@ pub(crate) async fn subscribe(
     permit
         .charge_nodes_at(unix_millis(), reservation.nodes)
         .map_err(authorization)?;
-    if db.subscriptions.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-        (count < db.max_subscriptions).then_some(count + 1)
-    }).is_err() {
+    if db
+        .subscriptions
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < db.max_subscriptions).then_some(count + 1)
+        })
+        .is_err()
+    {
         return Err(Refusal::new(
             ErrorCode::Budget,
             "this database's subscription registrations are exhausted until reopen",
         ));
     }
-    let mut registration = Registration { count: &db.subscriptions, accepted: false };
+    let mut registration = Registration {
+        count: &db.subscriptions,
+        accepted: false,
+    };
     let (consumer, (columns, initial)) = prepared.subscribe_replaying(
         &mut guard,
         &query,
@@ -430,7 +456,9 @@ pub(crate) async fn subscribe(
         reservation.setup,
         |names, batch| {
             let rows = check_rows(batch, row_limit(db.query_policy, limits))?;
-            permit.charge_rows_at(unix_millis(), rows).map_err(authorization)?;
+            permit
+                .charge_rows_at(unix_millis(), rows)
+                .map_err(authorization)?;
             let mut work = Work {
                 cx: &query,
                 remaining: reservation.wire_work,
@@ -446,7 +474,13 @@ pub(crate) async fn subscribe(
             permit.checkpoint_at(unix_millis()).map_err(authorization)?;
             checkpoint(&query)?;
             generation.check().map_err(Refusal::from)?;
-            Ok::<_, Refusal>((columns, Delivery { batch: Arc::clone(batch), entries }))
+            Ok::<_, Refusal>((
+                columns,
+                Delivery {
+                    batch: Arc::clone(batch),
+                    entries,
+                },
+            ))
         },
     )?;
     registration.accepted = true;
@@ -469,8 +503,13 @@ pub(crate) async fn poll(
 ) -> Result<Option<Delivery>, Refusal> {
     let _operation = subscription.generation.enter().map_err(Refusal::from)?;
     let now = unix_millis();
-    let capability = db.authority.verify_at(token, TRUNK, now).map_err(authorization)?;
-    let mut permit = capability.begin_read_at(TRUNK, now).map_err(authorization)?;
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(authorization)?;
+    let mut permit = capability
+        .begin_read_at(TRUNK, now)
+        .map_err(authorization)?;
     unrestricted(&capability)?;
     let current = capability.predicates().limits();
     let limits = QueryLimits {
@@ -489,8 +528,12 @@ pub(crate) async fn poll(
         {
             return Err(budget());
         }
-        permit.charge_work_at(now, subscription.registration_work).map_err(authorization)?;
-        permit.charge_nodes_at(now, subscription.registration_nodes).map_err(authorization)?;
+        permit
+            .charge_work_at(now, subscription.registration_work)
+            .map_err(authorization)?;
+        permit
+            .charge_nodes_at(now, subscription.registration_nodes)
+            .map_err(authorization)?;
         let rows = check_rows(&initial.batch, row_limit(db.query_policy, limits))?;
         permit.charge_rows_at(now, rows).map_err(authorization)?;
         checkpoint(&query)?;
@@ -498,7 +541,11 @@ pub(crate) async fn poll(
         permit.checkpoint_at(unix_millis()).map_err(authorization)?;
         return Ok(subscription.initial.take());
     }
-    let maximum = db.query_policy.evaluator.max_work_units.min(limits.max_work);
+    let maximum = db
+        .query_policy
+        .evaluator
+        .max_work_units
+        .min(limits.max_work);
     let share = maximum / 3;
     let native_work = share / 2;
     let scratch = (db.query_policy.evaluator.max_scratch_entries / 3).min(share - native_work);
@@ -507,7 +554,9 @@ pub(crate) async fn poll(
     }
     // Two independent pulls have disjoint prepaid portions of ONE execution.
     // A gap restart can never retry with a fresh whole signed allowance.
-    permit.charge_work_at(now, share * 3).map_err(authorization)?;
+    permit
+        .charge_work_at(now, share * 3)
+        .map_err(authorization)?;
     let mut policy = db.query_policy;
     policy.evaluator.max_work_units = native_work;
     policy.evaluator.max_scratch_entries = scratch;
@@ -534,10 +583,17 @@ pub(crate) async fn poll(
     // Native poll intentionally reuses a pending Arc without reapplying its
     // policy. This explicit check also governs that redelivery path.
     let rows = check_rows(&batch, policy.rows.max_result_rows().unwrap_or(u64::MAX))?;
-    permit.charge_rows_at(unix_millis(), rows).map_err(authorization)?;
+    permit
+        .charge_rows_at(unix_millis(), rows)
+        .map_err(authorization)?;
     let entries = wire_entries(
         &batch,
-        &mut Work { cx: &query, remaining: share, scratch, scale: 1 },
+        &mut Work {
+            cx: &query,
+            remaining: share,
+            scratch,
+            scale: 1,
+        },
     )?;
     permit.checkpoint_at(unix_millis()).map_err(authorization)?;
     checkpoint(&query)?;

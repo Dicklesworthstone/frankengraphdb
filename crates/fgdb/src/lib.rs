@@ -141,10 +141,9 @@ mod standing_query;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 pub use standing_query::{
     NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
-    StandingQueryError,
-    StandingQueryFailure, StandingQueryHandle, StandingQueryStats, StandingQueryView,
-    StandingReplayBatch, StandingReplayWindow, SubscribeError, SubscriptionBatch,
-    SubscriptionError, SubscriptionReceipt,
+    StandingQueryError, StandingQueryFailure, StandingQueryHandle, StandingQueryStats,
+    StandingQueryView, StandingReplayBatch, StandingReplayWindow, SubscribeError,
+    SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
