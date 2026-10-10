@@ -90,7 +90,7 @@ fn compare_rows(left: &dyn RankedKey, right: &dyn RankedKey) -> Ordering {
         };
         // NULL placement does not reverse when direction reverses.
         let order = null_order.unwrap_or_else(|| {
-            let order = a.cmp(&b);
+            let order = a.cmp_orderability(b);
             if column.descending {
                 order.reverse()
             } else {

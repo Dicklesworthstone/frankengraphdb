@@ -311,11 +311,27 @@ impl PreparedGraphSet {
                 input: Box::new(self),
                 projection,
                 quantifier,
+                preserve_order: false,
             },
             order: Vec::new(),
             offset: 0,
             count: None,
         })
+    }
+
+    /// Remove compiler-private ranking cells while keeping the selected
+    /// sequence. Ordinary RETURN projections retain their canonical-order
+    /// contract; this method is only the output half of one ordering stage.
+    pub(crate) fn project_ordered_output(
+        self,
+        projection: Vec<GraphSetProjection>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        let mut result = self.project(projection, GraphSetQuantifier::All)?;
+        let SetNode::Project { preserve_order, .. } = &mut result.node else {
+            unreachable!("project constructs the checked projection node");
+        };
+        *preserve_order = true;
+        Ok(result)
     }
 }
 

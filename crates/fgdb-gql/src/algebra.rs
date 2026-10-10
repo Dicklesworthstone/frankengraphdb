@@ -6,6 +6,7 @@
 
 mod boolean;
 mod existence;
+mod orderability;
 mod ordering;
 mod output;
 mod pattern;
@@ -16,6 +17,7 @@ pub use boolean::{
     GraphBooleanOperand, MAX_BOOLEAN_INSTRUCTIONS,
 };
 pub use existence::{GraphExistence, GraphMatchClause};
+pub(crate) use orderability::OrderableNumber;
 pub use ordering::{GraphOrderError, GraphValueOrder};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub(crate) use pattern::valid_column_name;
@@ -963,7 +965,9 @@ impl<Row> GlaPlan<Row> {
                 }
                 GlaOperator::OrderByValues => bytes.push(13),
                 GlaOperator::OrderByValueColumns { columns } => {
-                    bytes.push(20);
+                    // Tag 20 used storage type order. Keep implicit canonical
+                    // row order unchanged; explicit keys use orderability v1.
+                    bytes.push(29);
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for column in columns.iter() {
                         bytes.extend_from_slice(&(column.column as u64).to_be_bytes());

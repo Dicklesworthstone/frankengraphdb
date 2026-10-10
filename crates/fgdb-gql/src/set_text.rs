@@ -422,7 +422,7 @@ impl ReadStageTemplate {
     /// Count the physical relational nodes produced by native binding.
     pub(crate) fn depth(&self) -> usize {
         match self {
-            Self::Page { .. } => 0,
+            Self::Page { computed, .. } => usize::from(computed.is_some()) * 2,
             Self::Aggregate { .. } => 3,
             _ => 1,
         }
@@ -499,9 +499,18 @@ impl ReadStageTemplate {
                 order,
                 offset,
                 count,
+                computed,
                 ..
             } => {
-                bytes.push(3);
+                // Existing column-only pages keep their exact identity.
+                bytes.push(if computed.is_some() { 7 } else { 3 });
+                if let Some(computed) = computed {
+                    bytes.extend_from_slice(&(computed.visible as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(computed.values.len() as u64).to_be_bytes());
+                    for value in &computed.values {
+                        value.append_template_transcript(bytes);
+                    }
+                }
                 bytes.extend_from_slice(&(order.len() as u64).to_be_bytes());
                 for column in order {
                     bytes.push(u8::from(column.descending));
@@ -682,7 +691,17 @@ pub(crate) enum ReadStageTemplate {
         order: Vec<GraphValueOrder>,
         offset: ReadPageNumber,
         count: Option<ReadPageNumber>,
+        computed: Option<ReadOrderProjection>,
     },
+}
+
+/// Scalar keys are evaluated over the frozen input row, then ranked and
+/// removed. `visible` also removes graph/input cells retained solely for this
+/// page. The complete projection remains private through successful paging.
+#[derive(Clone)]
+pub(crate) struct ReadOrderProjection {
+    pub(crate) values: Vec<ReadValueTemplate>,
+    pub(crate) visible: usize,
 }
 #[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
@@ -1062,8 +1081,82 @@ impl<'a> Composition<'a> {
                 height,
             )?;
         }
-        self.tail(&mut node)?;
+        if let NodeKind::Leaf(leaf) = node.kind
+            && self.has_expression_order()
+        {
+            // A single read owns its complete ORDER BY expression scope. The
+            // shared graph/row parser compiles the untouched source once;
+            // compound set tails retain their output-column-only contract.
+            let mut depth = 0_usize;
+            loop {
+                let token = self.current();
+                if matches!(token.kind, TextKind::End)
+                    || (depth == 0 && (token.punct(b')') || token.punct(b';')))
+                {
+                    break;
+                }
+                match token.kind {
+                    TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    TextKind::Punct(b')' | b']' | b'}') => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                self.advance();
+            }
+            self.spans[leaf].end = self.current().at;
+            self.spans[leaf].last_token = self.at;
+        } else {
+            self.tail(&mut node)?;
+        }
         Ok(node)
+    }
+
+    /// Routing over admitted tokens only. The ordinary scalar compiler owns
+    /// every expression; this recognizes the old column-only tail so its
+    /// template and bound-plan bytes remain unchanged.
+    fn has_expression_order(&self) -> bool {
+        let token = |at| self.tokens.get(at).copied();
+        if !self.current().word("ORDER")
+            || !token(self.at + 1).is_some_and(|token| token.word("BY"))
+        {
+            return false;
+        }
+        let mut at = self.at + 2;
+        loop {
+            if !token(at).is_some_and(|token| matches!(token.kind, TextKind::Word(_))) {
+                return true;
+            }
+            at += 1;
+            if token(at).is_some_and(|token| token.punct(b'.')) {
+                at += 1;
+                if !token(at).is_some_and(|token| matches!(token.kind, TextKind::Word(_))) {
+                    return true;
+                }
+                at += 1;
+            }
+            if token(at).is_some_and(|token| token.word("ASC") || token.word("DESC")) {
+                at += 1;
+            }
+            if token(at).is_some_and(|token| token.word("NULLS")) {
+                at += 1;
+                if !token(at).is_some_and(|token| token.word("FIRST") || token.word("LAST")) {
+                    return true;
+                }
+                at += 1;
+            }
+            if token(at).is_some_and(|token| token.punct(b',')) {
+                at += 1;
+                continue;
+            }
+            return !token(at).is_some_and(|token| {
+                matches!(token.kind, TextKind::End)
+                    || token.punct(b')')
+                    || token.punct(b';')
+                    || token.word("SKIP")
+                    || token.word("LIMIT")
+            });
+        }
     }
     fn intersection(&mut self, depth: usize) -> Result<Node, GraphSetTextError> {
         let mut node = self.term(depth)?;

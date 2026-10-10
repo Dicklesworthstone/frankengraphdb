@@ -42,6 +42,90 @@ fn run(plan: &PreparedGraphSetAggregate) -> GqlQueryExecution<GraphAggregateRow>
 }
 
 #[test]
+fn heterogeneous_extrema_use_language_order_and_keep_typed_numeric_ties() {
+    let scalar = |value| GraphValue::Scalar(value);
+    for (values, low, high) in [
+        (
+            "[1,2.0,5,3.2,NULL]",
+            scalar(CanonicalScalar::Int(1)),
+            scalar(CanonicalScalar::Int(5)),
+        ),
+        (
+            "[1,'a',[1,2],0.2,'b']",
+            GraphValue::List(
+                vec![
+                    scalar(CanonicalScalar::Int(1)),
+                    scalar(CanonicalScalar::Int(2)),
+                ]
+                .into_boxed_slice(),
+            ),
+            scalar(CanonicalScalar::Int(1)),
+        ),
+        (
+            "[1.0,1]",
+            scalar(CanonicalScalar::Int(1)),
+            scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0))),
+        ),
+        (
+            "[1,1.0]",
+            scalar(CanonicalScalar::Int(1)),
+            scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0))),
+        ),
+    ] {
+        let result = run(&prepare(&format!(
+            "UNWIND {values} AS x RETURN min(x) AS low,max(x) AS high"
+        )));
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(result.value[0].values()[0].as_value(), Some(&low));
+        assert_eq!(result.value[0].values()[1].as_value(), Some(&high));
+    }
+}
+
+#[test]
+fn return_and_with_sort_heterogeneous_lists_before_pagination() {
+    use fgdb_gql::PreparedGraphSetText;
+    let text = |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let expected: Vec<_> = [
+        vec![],
+        vec![text("a")],
+        vec![text("a"), int(1)],
+        vec![int(1)],
+        vec![int(1), text("a")],
+        vec![int(1), null.clone()],
+        vec![null.clone(), int(1)],
+        vec![null, int(2)],
+    ]
+    .into_iter()
+    .map(|value| GraphValue::List(value.into_boxed_slice()))
+    .collect();
+    for tail in [
+        "RETURN x ORDER BY x SKIP 1 LIMIT 6",
+        "WITH x ORDER BY x SKIP 1 LIMIT 6 RETURN x ORDER BY x",
+    ] {
+        let query = PreparedGraphSetText::prepare(
+            &format!(
+                "UNWIND [[1],[1,NULL],['a',1],[NULL,2],[],[1,'a'],['a'],[NULL,1]] AS x {tail}"
+            ),
+            |_, _| None,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let result = query
+            .execute_governed(policy(), no_source, || Ok(()))
+            .unwrap();
+        let actual: Vec<_> = result
+            .value
+            .iter()
+            .map(|row| row.values()[0].clone())
+            .collect();
+        assert_eq!(actual, expected[1..7]);
+    }
+}
+
+#[test]
 fn standalone_aggregate_return_starts_with_one_real_empty_row() {
     let row = run(&prepare(
         "RETURN COUNT(*) AS rows,SUM(7) AS total,AVG(7) AS mean,COUNT(NULL) AS present",

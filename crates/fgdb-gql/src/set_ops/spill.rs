@@ -300,11 +300,13 @@ fn compile_stages<'a>(
             input,
             projection,
             quantifier,
+            preserve_order,
         } => (
             compile_stages(input, depth + 1, stages)?,
             input.types.clone(),
             Operation::Project(projection.clone()),
-            !input.preserves_row_order() || *quantifier == GraphSetQuantifier::Distinct,
+            (!*preserve_order && !input.preserves_row_order())
+                || *quantifier == GraphSetQuantifier::Distinct,
             *quantifier == GraphSetQuantifier::Distinct,
         ),
         SetNode::Aggregate(_)

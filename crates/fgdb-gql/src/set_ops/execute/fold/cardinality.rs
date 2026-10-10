@@ -110,6 +110,7 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
+                ..
             } => total_projection(projection) && input.has_factorized_cardinality(),
             SetNode::Scope(input) => input.has_factorized_cardinality(),
             _ => false,
@@ -212,6 +213,7 @@ where
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
+                ..
             } if total_projection(projection) => {
                 // Checked aliases and already-admitted literal values cannot fail
                 // semantically. Their unused copies and sort may be eliminated.

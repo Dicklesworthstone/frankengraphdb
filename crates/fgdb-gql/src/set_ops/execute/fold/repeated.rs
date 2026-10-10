@@ -39,6 +39,7 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
+                ..
             } if input.preserves_row_order() && cardinality::total_projection(projection) => {
                 input.has_repeated_factor(&projection_inputs(projection, columns))
             }

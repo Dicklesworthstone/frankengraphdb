@@ -1,4 +1,4 @@
-//! Computed Any values retain the ordinary canonical MIN/MAX laws.
+//! Computed Any values share the language MIN/MAX orderability contract.
 use super::*;
 use crate::algebra::{GraphColumn, GraphPath, GraphPatternBuilder};
 use crate::{GraphAggregate, GraphSetProjection, GraphSetValue};
@@ -9,20 +9,14 @@ fn policy() -> GqlQueryPolicy {
 }
 fn values() -> Vec<GraphValue> {
     use fgdb_types::EId;
+    // Frozen language order, independent of the production comparator.
     vec![
-        GraphValue::Scalar(CanonicalScalar::Null),
-        GraphValue::Scalar(CanonicalScalar::Int(-9)),
-        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("text").unwrap()),
         GraphValue::Vertex(VId(0)),
         GraphValue::Vertex(VId(u128::MAX)),
-        GraphValue::Path(GraphPath::new(
-            VId(0),
-            vec![(EId(u128::MAX), VId(1))].into_boxed_slice(),
-        )),
-        GraphValue::Vertices(vec![VId(0), VId(u128::MAX)].into_boxed_slice()),
-        GraphValue::Edges(vec![EId(u128::MAX)].into_boxed_slice()),
         GraphValue::Edge(EId(0)),
         GraphValue::List(Box::new([])),
+        GraphValue::Vertices(vec![VId(0), VId(u128::MAX)].into_boxed_slice()),
+        GraphValue::Edges(vec![EId(u128::MAX)].into_boxed_slice()),
         GraphValue::List(
             vec![
                 GraphValue::Scalar(CanonicalScalar::Null),
@@ -30,6 +24,13 @@ fn values() -> Vec<GraphValue> {
             ]
             .into_boxed_slice(),
         ),
+        GraphValue::Path(GraphPath::new(
+            VId(0),
+            vec![(EId(u128::MAX), VId(1))].into_boxed_slice(),
+        )),
+        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("text").unwrap()),
+        GraphValue::Scalar(CanonicalScalar::Int(-9)),
+        GraphValue::Scalar(CanonicalScalar::Null),
     ]
 }
 fn reduce(values: &[&GraphValue], maximum: bool) -> GraphAggregateValue {
@@ -49,7 +50,7 @@ fn reduce(values: &[&GraphValue], maximum: bool) -> GraphAggregateValue {
 }
 
 #[test]
-fn mixed_native_domain_triples_agree_with_graph_value_order_in_both_directions() {
+fn mixed_native_domain_triples_agree_with_frozen_language_order_in_both_directions() {
     let domain = values();
     for first in &domain {
         for second in &domain {
@@ -57,10 +58,12 @@ fn mixed_native_domain_triples_agree_with_graph_value_order_in_both_directions()
                 let inputs = [first, second, third];
                 for maximum in [false, true] {
                     let ordered = inputs.into_iter().filter(|value| !value.is_null());
+                    let rank =
+                        |value: &&GraphValue| domain.iter().position(|v| v == *value).unwrap();
                     let expected = if maximum {
-                        ordered.max()
+                        ordered.max_by_key(rank)
                     } else {
-                        ordered.min()
+                        ordered.min_by_key(rank)
                     };
                     let expected = expected
                         .cloned()
@@ -214,8 +217,8 @@ fn checked_any_list_index_inputs_work_in_global_and_grouped_physical_aggregates(
         assert_eq!(
             got[0].values(),
             &[
+                GraphAggregateValue::Value(GraphValue::Vertex(VId(1))),
                 GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(7))),
-                GraphAggregateValue::Value(GraphValue::List(Box::new([]))),
             ]
         );
         assert_eq!(cursor.state(), VertexScanState::Exhausted);

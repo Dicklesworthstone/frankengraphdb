@@ -72,7 +72,7 @@ pub(super) fn contributions<'a>(
                 meter.units(ZSetEvent::ScratchEntry, 2 + support::value_units(value)?)?;
                 output.push((
                     (
-                        (Arc::clone(&key), index, Some(Arc::new(value.clone()))),
+                        AggregateKey(Arc::clone(&key), index, Some(Arc::new(value.clone()))),
                         Some(0),
                     ),
                     ZWeight::from_i128(sign),

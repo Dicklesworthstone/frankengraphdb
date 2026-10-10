@@ -128,6 +128,8 @@ impl<'a> GraphAggregate<'a> {
             column: Some(column),
         }
     }
+    /// Least nonnull argument in language order. Equal numeric values retain
+    /// the least canonical representation, independently of occurrence order.
     #[must_use]
     pub const fn min(name: &'a str, column: usize) -> Self {
         Self {
@@ -136,6 +138,8 @@ impl<'a> GraphAggregate<'a> {
             column: Some(column),
         }
     }
+    /// Greatest nonnull argument in language order. Equal numeric values retain
+    /// the greatest canonical representation, independently of occurrence order.
     #[must_use]
     pub const fn max(name: &'a str, column: usize) -> Self {
         Self {
@@ -907,8 +911,9 @@ impl PreparedGraphAggregate {
                 GraphAggregateFunction::Count => 1,
                 GraphAggregateFunction::CountDistinct => 2,
                 GraphAggregateFunction::SumInt => 3,
-                GraphAggregateFunction::Min => 4,
-                GraphAggregateFunction::Max => 5,
+                // Tags 4/5 denoted canonical storage-order extrema.
+                GraphAggregateFunction::Min => 11,
+                GraphAggregateFunction::Max => 12,
                 GraphAggregateFunction::SumIntDistinct => 6,
                 GraphAggregateFunction::AverageInt => 7,
                 GraphAggregateFunction::AverageIntDistinct => 8,
@@ -1103,7 +1108,21 @@ enum ValueRef<'a> {
         values: &'a [GraphValue],
     },
 }
-impl ValueRef<'_> {
+impl<'a> ValueRef<'a> {
+    fn orderability_value(self) -> crate::algebra::ValueRef<'a> {
+        use crate::algebra::ValueRef as Value;
+        match self {
+            Self::Scalar(value) => Value::Scalar(value),
+            Self::Vertex(value) => Value::Vertex(value),
+            Self::Edge(value) => Value::Edge(value),
+            Self::Path(value) => Value::Path(value),
+            Self::Vertices(value) => Value::Vertices(value),
+            Self::Edges(value) => Value::Edges(value),
+            Self::List(value) => Value::List(value),
+            Self::Map { keys, values } => Value::Map { keys, values },
+        }
+    }
+
     fn is_null(self) -> bool {
         matches!(self, Self::Scalar(CanonicalScalar::Null))
     }
@@ -1365,13 +1384,21 @@ fn update<'a, E, C>(
         }
         Accumulator::Extreme(current) => {
             let value = value.expect("non-count argument was checked");
-            if current.is_none_or(|old| {
-                if function == GraphAggregateFunction::Min {
-                    value < old
-                } else {
-                    value > old
+            let replace = match *current {
+                None => true,
+                Some(old) => {
+                    let order = value
+                        .orderability_value()
+                        .cmp_orderability_with_control(old.orderability_value(), control)?
+                        .then_with(|| value.cmp(&old));
+                    if function == GraphAggregateFunction::Min {
+                        order.is_lt()
+                    } else {
+                        order.is_gt()
+                    }
                 }
-            }) {
+            };
+            if replace {
                 *current = Some(value);
             }
         }

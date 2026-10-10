@@ -68,6 +68,7 @@ impl GraphAggregateRow {
                 cell(other, order.column).expect("ordering columns checked above"),
                 order.descending,
                 order.nulls,
+                true,
                 control,
             )?;
             if result != Ordering::Equal {

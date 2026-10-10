@@ -426,6 +426,7 @@ impl PreparedGraphSet {
                     input: child,
                     projection,
                     quantifier,
+                    ..
                 } if selected.is_none()
                     && *quantifier == super::GraphSetQuantifier::All
                     && projection.iter().all(|column| {

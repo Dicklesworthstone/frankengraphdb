@@ -146,7 +146,9 @@ impl<'a> Parser<'a> {
         let pipeline = if head.with {
             self.row_pipeline(head.schema(&self.syntax.parameters))?
         } else {
-            Vec::new()
+            self.graph_expression_page(&mut head, &[], false)?
+                .into_iter()
+                .collect()
         };
         self.end()?;
         self.finish_graph_projection(statement, head, pipeline)
@@ -1442,7 +1444,39 @@ fn bind_stages(
                 order,
                 offset,
                 count,
+                computed,
             } => {
+                let visible = computed.as_ref().map(|projection| projection.visible);
+                if let Some(computed) = computed {
+                    let mut projection: Vec<_> = input
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        .map(|(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    for value in &computed.values {
+                        let mut ordinal = projection.len();
+                        let name = loop {
+                            let name = format!("__fg_order_{ordinal}");
+                            if projection.iter().all(|column| column.name() != name) {
+                                break name;
+                            }
+                            ordinal += 1;
+                        };
+                        projection.push(GraphSetProjection::new(
+                            name,
+                            bind_read_value(value, values)?,
+                        ));
+                    }
+                    input = input
+                        .project(projection, crate::GraphSetQuantifier::All)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: *at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
+                }
                 if !order.is_empty() {
                     input = input
                         .with_order_by(order)
@@ -1451,12 +1485,28 @@ fn bind_stages(
                             kind: GraphSetTextErrorKind::OrderBuild(kind),
                         })?;
                 }
-                input.with_page(
+                input = input.with_page(
                     pipeline::page_value(offset, values),
                     count
                         .as_ref()
                         .map(|count| pipeline::page_value(count, values)),
-                )
+                );
+                if let Some(visible) = visible {
+                    let projection = input.columns()[..visible]
+                        .iter()
+                        .enumerate()
+                        .map(|(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    input = input.project_ordered_output(projection).map_err(|kind| {
+                        GraphSetTextError {
+                            offset: *at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        }
+                    })?;
+                }
+                input
             }
         };
     }

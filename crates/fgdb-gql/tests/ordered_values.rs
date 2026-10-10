@@ -60,6 +60,78 @@ fn compare(a: &[GraphValue], b: &[GraphValue], order: &[GraphValueOrder]) -> Ord
 }
 
 #[test]
+fn mixed_numeric_keys_use_secondary_keys_before_canonical_row_ties() {
+    use fgdb_types::CanonicalF64;
+    let scores = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Float(CanonicalF64::new(3.2)),
+        CanonicalScalar::ucs_basic_text("z").unwrap(),
+        CanonicalScalar::Bool(false),
+        CanonicalScalar::Null,
+    ];
+    let ties = [2, 1, 0, 0, 0, 0, 0].map(CanonicalScalar::Int);
+    for (descending, expected) in [
+        (false, [4, 5, 1, 0, 3, 2, 6]),
+        (true, [2, 3, 1, 0, 5, 4, 6]),
+    ] {
+        for offset in 0..=7 {
+            for count in [None, Some(0), Some(1), Some(3)] {
+                let query = pattern(
+                    true,
+                    offset,
+                    count,
+                    &[
+                        GraphValueOrder {
+                            column: 1,
+                            descending,
+                            nulls_first: false,
+                        },
+                        GraphValueOrder::ascending(2),
+                    ],
+                );
+                for reversed in [false, true] {
+                    let mut input: Vec<_> = (0..7).map(VId).collect();
+                    if reversed {
+                        input.reverse();
+                    }
+                    let result = query
+                        .plan()
+                        .execute_governed_with_properties(
+                            7,
+                            input,
+                            [],
+                            |_, _| Ok::<_, ()>(true),
+                            |id, key| {
+                                Ok(Some(if key == PropertyKeyId(1) {
+                                    &scores[id.0 as usize]
+                                } else {
+                                    &ties[id.0 as usize]
+                                }))
+                            },
+                            wide(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    let actual: Vec<_> = result
+                        .value
+                        .iter()
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap().0)
+                        .collect();
+                    let wanted: Vec<_> = expected
+                        .into_iter()
+                        .skip(offset as usize)
+                        .take(count.unwrap_or(u64::MAX) as usize)
+                        .collect();
+                    assert_eq!(actual, wanted);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn every_small_ordered_page_matches_full_sort_and_whole_row_distinctness() {
     let ids = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
     let choices = [

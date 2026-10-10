@@ -19,7 +19,25 @@ use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
 // support for COUNT DISTINCT and extrema. Integer DISTINCT uses the core's
 // existing per-value counts directly. No digest stands in for value equality.
 type GroupKey = Arc<[GraphValue]>;
-pub(super) type AggregateKey = (GroupKey, usize, Option<Arc<GraphValue>>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AggregateKey(GroupKey, usize, Option<Arc<GraphValue>>);
+
+impl Ord for AggregateKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0
+            .cmp(&other.0)
+            .then(self.1.cmp(&other.1))
+            .then_with(|| match (&self.2, &other.2) {
+                (Some(a), Some(b)) => a.compare_orderability(b).then_with(|| a.cmp(b)),
+                _ => self.2.cmp(&other.2),
+            })
+    }
+}
+impl PartialOrd for AggregateKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 pub(super) type Contribution = ((AggregateKey, Option<i128>), ZWeight);
 
 fn copied_key(
@@ -231,7 +249,7 @@ pub(super) fn project_contributions<'a>(
                 let value = Arc::new(value);
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 output.push((
-                    ((Arc::clone(&key), index, Some(value)), Some(0)),
+                    (AggregateKey(Arc::clone(&key), index, Some(value)), Some(0)),
                     ZWeight::from_i128(sign),
                 ));
             }
@@ -391,7 +409,7 @@ impl StandingQuery {
             .map_err(zset_error)?;
         support::augment(&self.aggregate, &mut delta, meter)?;
         let mut groups = BTreeSet::new();
-        for (((key, _, _), _), _) in delta.iter() {
+        for ((AggregateKey(key, _, _), _), _) in delta.iter() {
             meter.charge(ZSetEvent::Work)?;
             if !groups.contains(key) {
                 meter.charge(ZSetEvent::ScratchEntry)?;

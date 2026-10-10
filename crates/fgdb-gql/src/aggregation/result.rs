@@ -193,6 +193,38 @@ impl<'a> Cell<'a> {
             _ => 0,
         }
     }
+
+    fn orderable_number(self) -> Option<crate::algebra::OrderableNumber> {
+        use crate::algebra::OrderableNumber as Number;
+        match self {
+            Self::Value(ValueRef::Scalar(value)) => Number::scalar(value),
+            Self::Float(value) => Some(Number::Float(value)),
+            _ => self.numeric().map(|(value, denominator)| {
+                Number::Rational(
+                    value,
+                    core::num::NonZeroU64::new(denominator).expect("nonnull exact average"),
+                )
+            }),
+        }
+    }
+
+    fn compare_orderability(self, other: Self) -> Ordering {
+        match (self.orderable_number(), other.orderable_number()) {
+            (Some(a), Some(b)) => a.cmp(b),
+            _ => match (self, other) {
+                (Self::Value(a), Self::Value(b)) => a
+                    .orderability_value()
+                    .cmp_orderability(b.orderability_value()),
+                (Self::Value(a), _) => a
+                    .orderability_value()
+                    .cmp_orderability(crate::algebra::ValueRef::Scalar(&CanonicalScalar::Int(0))),
+                (_, Self::Value(b)) => crate::algebra::ValueRef::Scalar(&CanonicalScalar::Int(0))
+                    .cmp_orderability(b.orderability_value()),
+                _ => unreachable!("exact numeric cells are compared above"),
+            },
+        }
+    }
+
     fn compare(self, other: Self) -> Ordering {
         if let Self::Float(value) = self {
             let scalar = CanonicalScalar::Float(value);
@@ -416,7 +448,12 @@ impl PreparedGraphAggregate {
         }
         // Preserve the original no-clause transcript exactly. The old prefix is
         // self-delimiting; this versioned suffix has an unambiguous structure.
-        bytes.extend_from_slice(b"fgdb:aggregate-result-clauses:v1\0");
+        bytes.extend_from_slice(if self.ordering.is_empty() {
+            b"fgdb:aggregate-result-clauses:v1\0"
+        } else {
+            // Explicit result ordering uses the shared language comparator.
+            b"fgdb:aggregate-result-clauses:v2\0"
+        });
         let column = |bytes: &mut Vec<u8>, column| {
             let (tag, at) = match column {
                 GraphAggregateColumn::GroupKey(at) => (0, at),
@@ -522,7 +559,7 @@ impl PreparedGraphAggregate {
                     for _ in 0..a.payload_units().max(b.payload_units()) {
                         control(GlaExecutionEvent::Work)?;
                     }
-                    let result = a.compare(b);
+                    let result = a.compare_orderability(b);
                     if order.descending {
                         result.reverse()
                     } else {

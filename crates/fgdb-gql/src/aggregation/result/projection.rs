@@ -519,6 +519,7 @@ impl PreparedGraphAggregate {
                     b.cell(),
                     false,
                     GraphNullPlacement::First,
+                    false,
                     control,
                 )?;
                 if result != Ordering::Equal {
@@ -532,6 +533,7 @@ impl PreparedGraphAggregate {
                 right.group.cell(order.column),
                 order.descending,
                 order.nulls,
+                true,
                 control,
             )?;
             if result != Ordering::Equal {
@@ -565,6 +567,7 @@ impl PreparedGraphAggregate {
                 b.cell(),
                 false,
                 GraphNullPlacement::First,
+                false,
                 control,
             )? != Ordering::Equal
             {
@@ -694,6 +697,7 @@ fn compare_cell<E>(
     b: Cell<'_>,
     descending: bool,
     nulls: GraphNullPlacement,
+    orderability: bool,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Ordering, E> {
     control(GlaExecutionEvent::Work)?;
@@ -717,7 +721,11 @@ fn compare_cell<E>(
             for _ in 0..a.payload_units().max(b.payload_units()) {
                 control(GlaExecutionEvent::Work)?;
             }
-            let result = a.compare(b);
+            let result = if orderability {
+                a.compare_orderability(b)
+            } else {
+                a.compare(b)
+            };
             if descending { result.reverse() } else { result }
         }
     };

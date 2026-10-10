@@ -481,8 +481,9 @@ where
             input,
             projection,
             quantifier,
+            preserve_order,
         } => {
-            let preserve_order = input.preserves_row_order();
+            let preserve_order = *preserve_order || input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
             project_rows(input, projection, *quantifier, preserve_order, meter)?
         }
@@ -699,7 +700,7 @@ fn compare_rows<E>(
                 }
             }
             (false, false) => {
-                let result = compare_value(a, b, control)?;
+                let result = a.compare_orderability_with_control(b, control)?;
                 if key.descending {
                     result.reverse()
                 } else {

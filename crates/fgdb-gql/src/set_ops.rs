@@ -254,6 +254,9 @@ enum SetNode {
         input: Box<PreparedGraphSet>,
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
+        /// A compiler-owned output projection after ranking removes private
+        /// sort cells without canonicalizing the selected occurrence sequence.
+        preserve_order: bool,
     },
     Binary {
         operation: GraphSetOperation,
@@ -724,12 +727,20 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier,
+                preserve_order,
             } => {
-                bytes
-                    .extend_from_slice(&[3, u8::from(*quantifier == GraphSetQuantifier::Distinct)]);
+                bytes.extend_from_slice(&[
+                    if *preserve_order { 11 } else { 3 },
+                    u8::from(*quantifier == GraphSetQuantifier::Distinct),
+                ]);
                 input.append_transcript(bytes);
                 projection::append_transcript(projection, bytes);
             }
+        }
+        if !self.order.is_empty() {
+            // Sorting semantics are part of the logical definition. Empty
+            // order keys still mean the unchanged canonical row contract.
+            bytes.extend_from_slice(b"fgdb:set-orderability:v1\0");
         }
         bytes.extend_from_slice(&(self.order.len() as u64).to_be_bytes());
         for key in &self.order {

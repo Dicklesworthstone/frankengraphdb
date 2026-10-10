@@ -3,6 +3,7 @@
 //! are no graph-slot aliases, synthetic MATCH text, or source calls here.
 
 mod multipart;
+mod ordering;
 mod selection;
 
 use super::*;
@@ -91,7 +92,7 @@ fn append_stage(
         | ReadStageTemplate::Filter { at, .. }
         | ReadStageTemplate::Unwind { at, .. }
         | ReadStageTemplate::Call { at, .. } => (*at, 1),
-        ReadStageTemplate::Page { at, .. } => (*at, 0),
+        ReadStageTemplate::Page { at, computed, .. } => (*at, usize::from(computed.is_some()) * 2),
     };
     *depth += growth;
     if *depth > crate::MAX_GRAPH_SET_DEPTH {
@@ -343,7 +344,8 @@ impl<'a> Parser<'a> {
         } else {
             GraphSetQuantifier::All
         };
-        let (projection, _) = self.row_projection(&schema, true)?;
+        let (mut projection, _) = self.row_projection(&schema, true)?;
+        let page = self.return_expression_page(&schema, &mut projection, distinct)?;
         // The terminal RETURN is the last reader of any hidden boundary read.
         self.boundary_reads = None;
         append_stage(
@@ -355,6 +357,9 @@ impl<'a> Parser<'a> {
             },
             &mut depth,
         )?;
+        if let Some(page) = page {
+            append_stage(&mut stages, page, &mut depth)?;
+        }
         Ok(stages)
     }
 
@@ -369,7 +374,7 @@ impl<'a> Parser<'a> {
         // The MATCH input and first WITH projection each own one relational node.
         let mut depth = 2;
         loop {
-            if let Some(page) = self.row_page(&schema)? {
+            if let Some(page) = self.row_expression_page(&schema)? {
                 append_stage(&mut stages, page, &mut depth)?;
             }
             let at = self.current.at;
@@ -385,7 +390,7 @@ impl<'a> Parser<'a> {
                 // A page written after WHERE applies to the filtered rows.
                 // Keep any earlier page on its input: moving either page across
                 // this filter changes which occurrences survive.
-                if let Some(page) = self.row_page(&schema)? {
+                if let Some(page) = self.row_expression_page(&schema)? {
                     append_stage(&mut stages, page, &mut depth)?;
                 }
                 // UNWIND starts a new row stage, just as WITH does. Let the
@@ -797,6 +802,7 @@ impl<'a> Parser<'a> {
             order,
             offset,
             count,
+            computed: None,
         }))
     }
 

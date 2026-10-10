@@ -110,8 +110,13 @@ impl PreparedGraphSet {
                 input.incremental_result_order()
             }
             SetNode::Project {
-                input, quantifier, ..
-            } if *quantifier == GraphSetQuantifier::Distinct || !input.preserves_row_order() => {
+                input,
+                quantifier,
+                preserve_order,
+                ..
+            } if *quantifier == GraphSetQuantifier::Distinct
+                || (!*preserve_order && !input.preserves_row_order()) =>
+            {
                 let bound = input
                     .incremental_result_order()
                     .and_then(|(_, bound)| bound);

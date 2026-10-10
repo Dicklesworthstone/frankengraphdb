@@ -78,6 +78,13 @@ impl PreparedGraphSet {
                 // derivative yet. A window cannot make it transparent.
                 // Neither has a procedure call's relation.
                 SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => (true, true),
+                // Hidden-key output preserves a sequence no longer expressible
+                // by its visible cells. An inherited canonical window would
+                // select different occurrences; the ranked proof refuses it.
+                SetNode::Project {
+                    preserve_order: true,
+                    ..
+                } => (true, true),
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
                 | SetNode::Project { input, .. } => shape(input),
@@ -172,6 +179,7 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier,
+                ..
             } => Some((input, projection, *quantifier)),
             _ => None,
         }
@@ -401,6 +409,7 @@ mod tests {
             input: child,
             projection: vec![],
             quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
         };
         unavailable(&projected);
     }

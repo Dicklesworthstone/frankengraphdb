@@ -20,7 +20,25 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 type Group = Arc<[GraphValue]>;
-type Key = (Group, usize, Option<Arc<GraphValue>>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Key(Group, usize, Option<Arc<GraphValue>>);
+
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0
+            .cmp(&other.0)
+            .then(self.1.cmp(&other.1))
+            .then_with(|| match (&self.2, &other.2) {
+                (Some(a), Some(b)) => a.compare_orderability(b).then_with(|| a.cmp(b)),
+                _ => self.2.cmp(&other.2),
+            })
+    }
+}
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 type Contributions = ZSet<(Key, Option<i128>)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +109,7 @@ fn reserve<E>(
     Ok(())
 }
 fn primary(group: &Group, index: usize) -> Key {
-    (Arc::clone(group), index, None)
+    Key(Arc::clone(group), index, None)
 }
 fn support(function: Function) -> bool {
     matches!(
@@ -157,7 +175,8 @@ fn pending_extremum<E>(
             for _ in 0..=a.payload_units().max(b.payload_units()) {
                 charge(control, ZSetEvent::Work)?;
             }
-            Some(if maximum { a.max(b) } else { a.min(b) })
+            let order = a.compare_orderability(&b).then_with(|| a.cmp(&b));
+            Some(if order.is_gt() == maximum { a } else { b })
         }
         (a, b) => a.or(b),
     })
@@ -276,7 +295,8 @@ fn render<'a, D: GroupDefinition, E>(
 /// Logical payload/event quotas are not allocator-byte or spill bounds.
 /// Unsupported output transforms refuse.
 /// Completed relational rows may contain any bounded native value: keys,
-/// COUNT/DISTINCT and extrema retain canonical typed equality/order. Numeric
+/// COUNT/DISTINCT retain canonical typed equality. Extrema use language
+/// orderability with a canonical representation tie-break. Numeric
 /// reducers admit Scalar or Any and check every changed operand for Int64/NULL.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalGroupAggregate<D: GroupDefinition> {
@@ -418,7 +438,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                         charge(control, ZSetEvent::ScratchEntry)?;
                         contributions.push((
                             (
-                                (Arc::clone(&group), index, Some(Arc::new(value.clone()))),
+                                Key(Arc::clone(&group), index, Some(Arc::new(value.clone()))),
                                 Some(0),
                             ),
                             weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?,
@@ -497,7 +517,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 groups.insert(Arc::clone(group));
             }
         }
-        for (((group, _, _), _), _) in delta.iter() {
+        for ((Key(group, _, _), _), _) in delta.iter() {
             charge(control, ZSetEvent::Work)?;
             if !groups.contains(group) {
                 charge(control, ZSetEvent::ScratchEntry)?;

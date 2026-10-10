@@ -820,48 +820,30 @@ impl NumericState {
         }
         let units = input.payload_units();
         // Keep the established global MIN/MAX kernel's admission before both
-        // canonical comparison and replacement ownership, now per group.
+        // language comparison and replacement ownership, now per group.
         for _ in 0..units.saturating_add(*payload_units) {
             control(VertexScanEvent::Work)?;
         }
-        let replace = match (value.as_ref(), &input) {
-            (None, _) => true,
-            (Some(old), Input::Vertex(next)) => {
-                // Indexing a native list can produce Any: one group may see
-                // scalars, vertices and collections from the SAME checked
-                // expression. A VId carrier is fixed-size; comparing it uses
-                // GraphValue's total order without copying a candidate payload.
-                let next = GraphValue::Vertex(*next);
-                if *maximum { &next > old } else { &next < old }
-            }
-            (Some(GraphValue::Scalar(old)), Input::Scalar(Some(next))) => {
+        let replace = match value.as_ref() {
+            None => true,
+            Some(old) => {
+                use crate::algebra::ValueRef;
+                let next = match input {
+                    Input::Vertex(value) => ValueRef::Vertex(value),
+                    Input::Scalar(Some(value)) => ValueRef::Scalar(value),
+                    Input::Value(value) => ValueRef::from(value),
+                    _ => unreachable!("MIN/MAX requires a nonnull argument, not COUNT(*)"),
+                };
+                let old = ValueRef::from(old);
+                // Keep exact typed support distinct, with a canonical tie
+                // representative independent of scan or update order.
+                let order = next.cmp_orderability(old).then_with(|| next.cmp(&old));
                 if *maximum {
-                    *next > old
+                    order.is_gt()
                 } else {
-                    *next < old
+                    order.is_lt()
                 }
             }
-            (Some(old), Input::Value(next)) => {
-                if *maximum {
-                    *next > old
-                } else {
-                    *next < old
-                }
-            }
-            (Some(old), Input::Scalar(Some(_))) => {
-                // The scalar/scalar arm above already compares real values.
-                // Here old is a DIFFERENT GraphValue variant, so only the
-                // native variant order participates. A payload-free scalar
-                // representative preserves that order without cloning text,
-                // bytes or timestamps merely to compare a losing candidate.
-                let scalar = GraphValue::Scalar(CanonicalScalar::Null);
-                if *maximum {
-                    &scalar > old
-                } else {
-                    &scalar < old
-                }
-            }
-            _ => unreachable!("MIN/MAX requires a nonnull argument, not COUNT(*)"),
         };
         if replace {
             control(VertexScanEvent::ScratchEntry)?;

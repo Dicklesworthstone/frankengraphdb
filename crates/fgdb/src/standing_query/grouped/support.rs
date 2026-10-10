@@ -21,7 +21,7 @@ pub(super) fn uses_support(function: GraphAggregateFunction) -> bool {
 }
 
 pub(super) fn primary(key: &GroupKey, index: usize) -> AggregateKey {
-    (Arc::clone(key), index, None)
+    AggregateKey(Arc::clone(key), index, None)
 }
 
 pub(super) fn value_units(value: &GraphValue) -> Result<usize, StandingQueryFailure> {
@@ -44,7 +44,7 @@ pub(super) fn augment(
     let mut crossings = Vec::new();
     for ((key, value), change) in delta.iter() {
         meter.charge(ZSetEvent::Work)?;
-        let (group, index, Some(argument)) = key else {
+        let AggregateKey(group, index, Some(argument)) = key else {
             continue;
         };
         if *value != Some(0) || argument.is_null() {
@@ -156,10 +156,13 @@ pub(super) fn pending_extremum(
                 ZSetEvent::Work,
                 value_units(&left)?.max(value_units(&right)?),
             )?;
-            Some(if maximum {
-                left.max(right)
+            let order = left
+                .compare_orderability(&right)
+                .then_with(|| left.cmp(&right));
+            Some(if order.is_gt() == maximum {
+                left
             } else {
-                left.min(right)
+                right
             })
         }
         (left, right) => left.or(right),
@@ -243,6 +246,43 @@ mod tests {
         VertexState {
             labels: BTreeSet::new(),
             props,
+        }
+    }
+
+    #[test]
+    fn mixed_numeric_extrema_match_snapshot_through_last_witness_removal() {
+        let float = |value| CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value));
+        let values = [
+            CanonicalScalar::Int(1),
+            float(1.0),
+            CanonicalScalar::Int(5),
+            float(3.2),
+        ];
+        let mut query = empty(definition(false, false));
+        let mut before = BTreeMap::new();
+        for (ids, low, high) in [
+            (
+                vec![0, 1, 2, 3],
+                CanonicalScalar::Int(1),
+                CanonicalScalar::Int(5),
+            ),
+            (vec![0, 1, 3], CanonicalScalar::Int(1), float(3.2)),
+            (vec![0, 1], CanonicalScalar::Int(1), float(1.0)),
+            (vec![1], float(1.0), float(1.0)),
+            (vec![0, 1], CanonicalScalar::Int(1), float(1.0)),
+            (vec![0], CanonicalScalar::Int(1), CanonicalScalar::Int(1)),
+        ] {
+            let after: BTreeMap<_, _> = ids
+                .iter()
+                .map(|&id| (VId(id as u128), state(0, Some(values[id].clone()))))
+                .collect();
+            transition(&mut query, &before, &after, &mut || Ok(())).unwrap();
+            assert_eq!(query.rows, oracle(&query, &after));
+            let result = query.rows.iter().next().unwrap().0.values();
+            assert_eq!(result[2].as_count(), Some(ids.len() as u64));
+            assert_eq!(result[3].as_value(), Some(&GraphValue::Scalar(low)));
+            assert_eq!(result[4].as_value(), Some(&GraphValue::Scalar(high)));
+            before = after;
         }
     }
 

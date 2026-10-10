@@ -187,6 +187,7 @@ impl GraphAggregateRow {
                 result_cell(right),
                 false,
                 GraphNullPlacement::First,
+                false,
                 control,
             )?;
             if order != Ordering::Equal {
@@ -404,6 +405,7 @@ mod tests {
                     result_cell(b),
                     false,
                     GraphNullPlacement::First,
+                    false,
                     &mut |_| Ok::<_, ()>(()),
                 )
                 .unwrap()

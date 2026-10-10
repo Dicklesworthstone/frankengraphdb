@@ -430,6 +430,11 @@ impl<'a> Parser<'a> {
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
         self.hoist_boundary_reads(&mut head, offset)?;
+        let graph_page = if head.with {
+            None
+        } else {
+            self.graph_expression_page(&mut head, incoming, optional)?
+        };
         if head.inputs.is_empty() {
             // A constant projection still emits once per graph occurrence.
             self.mutation_projection(&mut head.inputs, self.syntax.variables[0], None)?;
@@ -454,7 +459,7 @@ impl<'a> Parser<'a> {
             let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
             (pipeline, schema)
         } else {
-            (Vec::new(), schema)
+            (graph_page.into_iter().collect(), schema)
         };
         if !terminal && self.is_word("RETURN") && !aggregate {
             let at = self.current.at;
@@ -463,7 +468,8 @@ impl<'a> Parser<'a> {
             if !distinct {
                 self.take_all_quantifier()?;
             }
-            let (projection, schema) = self.row_projection(&next, true)?;
+            let (mut projection, schema) = self.row_projection(&next, true)?;
+            let page = self.return_expression_page(&next, &mut projection, distinct)?;
             // The terminal RETURN is the last reader of any hidden boundary read.
             self.boundary_reads = None;
             pipeline.push(ReadStageTemplate::Project {
@@ -475,6 +481,9 @@ impl<'a> Parser<'a> {
                     GraphSetQuantifier::All
                 },
             });
+            if let Some(page) = page {
+                pipeline.push(page);
+            }
             next = schema;
             terminal = true;
         }

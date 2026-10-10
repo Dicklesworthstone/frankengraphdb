@@ -78,6 +78,282 @@ fn ints(rows: &[GraphValueRow]) -> Vec<Vec<Option<i64>>> {
 }
 
 #[test]
+fn computed_order_keys_rank_before_paging_and_do_not_escape_the_return_schema() {
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(2)),
+        ((VId(1), Q), CanonicalScalar::Int(0)),
+        ((VId(2), P), CanonicalScalar::Int(1)),
+        ((VId(2), Q), CanonicalScalar::Int(2)),
+        ((VId(3), P), CanonicalScalar::Int(3)),
+        ((VId(3), Q), CanonicalScalar::Int(1)),
+    ]);
+    let text = "MATCH (n) RETURN n.p AS p \
+                ORDER BY n.p + n.q * $weight DESC, p ASC SKIP $skip LIMIT $count";
+    let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+    assert_eq!(template.columns(), &["p"]);
+    for (weight, skip, expected) in [(2, 0, 1), (2, 1, 3), (-2, 0, 2)] {
+        let args = GqlParameters::new()
+            .with_int64("weight", weight)
+            .unwrap()
+            .with_uint64("skip", skip)
+            .unwrap()
+            .with_uint64("count", 1)
+            .unwrap();
+        let query = template.bind_parameters(&args).unwrap();
+        assert_eq!(query.columns(), &["p"]);
+        for vertices in [[VId(3), VId(1), VId(2)], [VId(2), VId(1), VId(3)]] {
+            let execution = run(&query, &vertices, &[], &props).unwrap();
+            assert_eq!(ints(&execution.value), vec![vec![Some(expected)]]);
+            assert_eq!(execution.rows.snapshot_records, 3);
+            assert_eq!(execution.rows.result_rows, 1);
+        }
+    }
+    let ids = prepare("MATCH (n) RETURN n.p AS p ORDER BY id(n) DESC");
+    assert_eq!(
+        ints(
+            &run(&ids, &[VId(1), VId(2), VId(3)], &[], &props)
+                .unwrap()
+                .value
+        ),
+        vec![vec![Some(3)], vec![Some(1)], vec![Some(2)]]
+    );
+}
+
+#[test]
+fn computed_order_uses_return_aliases_and_preserves_all_rows_under_distinct() {
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(1)),
+        ((VId(2), P), CanonicalScalar::Int(1)),
+        ((VId(3), P), CanonicalScalar::Int(3)),
+    ]);
+    let query = prepare("MATCH (n) RETURN DISTINCT n.p + 10 AS score ORDER BY -score");
+    assert_eq!(
+        ints(
+            &run(&query, &[VId(3), VId(1), VId(2)], &[], &props)
+                .unwrap()
+                .value
+        ),
+        vec![vec![Some(13)], vec![Some(11)]]
+    );
+    // A function of the projected element cannot split its DISTINCT class.
+    for text in [
+        "MATCH (n) RETURN DISTINCT n ORDER BY n.p + 0 DESC",
+        "MATCH (n) WITH n MATCH (n) RETURN DISTINCT n ORDER BY n.p + 0 DESC",
+        "MATCH (original) WITH original AS n MATCH (n) \
+         RETURN DISTINCT n ORDER BY n.p + 0 DESC",
+    ] {
+        let query = prepare(text);
+        let rows = run(&query, &[VId(1), VId(3), VId(2), VId(1)], &[], &props)
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                .collect::<Vec<_>>(),
+            vec![VId(3), VId(1), VId(2)],
+            "{text}"
+        );
+    }
+    for text in [
+        "MATCH (n) RETURN DISTINCT n.p AS p ORDER BY n.q + 1",
+        "UNWIND [1,2] AS x RETURN DISTINCT 0 AS zero ORDER BY x + 1",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "semantic refusal precedes graph resolution");
+    }
+}
+
+#[test]
+fn computed_with_and_multipart_return_keep_their_scope_and_selected_occurrences() {
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(1)),
+        ((VId(2), P), CanonicalScalar::Int(3)),
+        ((VId(3), P), CanonicalScalar::Int(2)),
+    ]);
+    let vertices = [VId(3), VId(2), VId(1)];
+    let query = prepare(
+        "MATCH (n) WITH n ORDER BY -n.p LIMIT 2 \
+                         RETURN n.p AS p ORDER BY -p",
+    );
+    assert_eq!(
+        ints(&run(&query, &vertices, &[], &props).unwrap().value),
+        vec![vec![Some(3)], vec![Some(2)]]
+    );
+    let query = prepare(
+        "MATCH (n) WITH n ORDER BY -n.p LIMIT 2 \
+                         MATCH (n) RETURN n.p AS p ORDER BY -p",
+    );
+    assert_eq!(
+        ints(&run(&query, &vertices, &[], &props).unwrap().value),
+        vec![vec![Some(3)], vec![Some(2)]]
+    );
+    let query = prepare(
+        "MATCH (n) WITH n MATCH (n) WITH n.p AS p \
+                         RETURN p ORDER BY -p SKIP 1 LIMIT 1",
+    );
+    assert_eq!(
+        ints(&run(&query, &vertices, &[], &props).unwrap().value),
+        vec![vec![Some(2)]]
+    );
+    let query = prepare(
+        "UNWIND [3,1,2] AS x WITH x ORDER BY -x LIMIT 2 \
+                         RETURN x % 2 AS parity ORDER BY x + 0",
+    );
+    assert_eq!(
+        ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+        vec![vec![Some(0)], vec![Some(1)]]
+    );
+}
+
+#[test]
+fn computed_sort_errors_and_work_limits_cannot_hide_behind_a_page() {
+    let props = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(1)),
+        ((VId(2), P), CanonicalScalar::Int(2)),
+    ]);
+    for limit in [0, 1] {
+        let query = prepare(&format!(
+            "MATCH (n) RETURN n ORDER BY 1 / (n.p - 2) LIMIT {limit}"
+        ));
+        assert!(matches!(
+            run(&query, &[VId(1), VId(2)], &[], &props),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            ))
+        ));
+    }
+    let query = prepare("UNWIND [3,1,2] AS x RETURN x ORDER BY x * -1 LIMIT 1");
+    let execute = |budget| {
+        query.execute_governed(
+            budget,
+            |_, _| -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+                panic!("source-free sorting must not open a graph source")
+            },
+            || Ok::<_, ()>(()),
+        )
+    };
+    let complete = execute(policy()).unwrap();
+    assert_eq!(ints(&complete.value), vec![vec![Some(3)]]);
+    assert_eq!(complete.rows.snapshot_records, 0);
+    assert_eq!(complete.rows.result_rows, 1);
+    assert!(matches!(
+        execute(GqlQueryPolicy::new(
+            0,
+            1,
+            complete.evaluator.work_units - 1,
+            u64::MAX
+        )),
+        Err(GqlQueryError::Evaluator(_))
+    ));
+    assert!(matches!(
+        execute(GqlQueryPolicy::new(
+            0,
+            1,
+            u64::MAX,
+            complete.evaluator.scratch_entries - 1
+        )),
+        Err(GqlQueryError::Evaluator(_))
+    ));
+    assert!(matches!(
+        execute(GqlQueryPolicy::new(0, 0, u64::MAX, u64::MAX)),
+        Err(GqlQueryError::Rows(_))
+    ));
+}
+
+#[test]
+fn computed_order_identity_pins_each_expression_and_parameter_without_changing_plain_pages() {
+    let template = |text| PreparedGraphSetText::prepare(text, symbols).unwrap();
+    let first = template("MATCH (n) RETURN n.p AS p ORDER BY n.q + $step");
+    let second = template("MATCH (n) RETURN n.p AS p ORDER BY n.q - $step");
+    assert_ne!(
+        first.canonical_template_bytes(),
+        second.canonical_template_bytes()
+    );
+    let one = GqlParameters::new().with_int64("step", 1).unwrap();
+    let two = GqlParameters::new().with_int64("step", 2).unwrap();
+    assert_ne!(
+        first.bind_parameters(&one).unwrap().canonical_bytes(),
+        first.bind_parameters(&two).unwrap().canonical_bytes()
+    );
+    let plain = template("MATCH (n) RETURN n.p AS p ORDER BY p DESC LIMIT 2");
+    let leaf: PreparedGraphSet = PreparedGraphText::prepare("MATCH (n) RETURN n.p AS p", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .into();
+    let typed = leaf
+        .with_order_by(&[fgdb_gql::algebra::GraphValueOrder::descending(0)])
+        .unwrap()
+        .with_page(0, Some(2));
+    assert_eq!(
+        plain
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes(),
+        typed.canonical_bytes()
+    );
+}
+
+#[test]
+fn computed_text_list_and_null_keys_share_the_native_expression_language() {
+    let query = prepare(
+        "UNWIND ['beta','Alpha','alpha',null] AS x \
+                         RETURN x ORDER BY toUpper(x) ASC NULLS LAST",
+    );
+    let rows = run(&query, &[], &[], &Props::new()).unwrap().value;
+    let expected =
+        ["Alpha", "alpha", "beta"].map(|value| CanonicalScalar::ucs_basic_text(value).unwrap());
+    assert_eq!(rows.len(), 4);
+    for (row, expected) in rows[..3].iter().zip(&expected) {
+        assert_eq!(row.len(), 1);
+        assert_eq!(row.get(0).unwrap().as_scalar(), Some(expected));
+    }
+    assert_eq!(
+        rows[3].get(0).unwrap().as_scalar(),
+        Some(&CanonicalScalar::Null)
+    );
+    let query = prepare("UNWIND [1,2,3,4] AS x RETURN x ORDER BY [x % 2, -x]");
+    assert_eq!(
+        ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+        vec![vec![Some(4)], vec![Some(2)], vec![Some(3)], vec![Some(1)]]
+    );
+}
+
+#[test]
+fn computed_order_cancellation_never_returns_a_selected_prefix() {
+    let query = prepare("UNWIND [3,1,2] AS x RETURN x ORDER BY x * -1 LIMIT 1");
+    let calls = Cell::new(0_usize);
+    let execute = |stop| {
+        query.execute_governed(
+            policy(),
+            |_, _| -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), usize>> {
+                panic!("source-free sorting must not open a graph source")
+            },
+            || {
+                let at = calls.get();
+                calls.set(at + 1);
+                if at == stop { Err(at) } else { Ok(()) }
+            },
+        )
+    };
+    execute(usize::MAX).unwrap();
+    let complete = calls.get();
+    assert!(complete > 0);
+    for stop in 0..complete {
+        calls.set(0);
+        assert!(matches!(execute(stop), Err(GqlQueryError::Interrupted(at)) if at == stop));
+    }
+}
+
+#[test]
 fn precedence_nullable_functions_and_public_column_order_match_scalar_semantics() {
     let props = Props::from([
         ((VId(1), P), CanonicalScalar::Int(-7)),

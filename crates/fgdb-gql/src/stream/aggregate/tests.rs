@@ -975,7 +975,7 @@ fn averages_retain_exact_fractions_and_identity_extrema_retain_all_128_bits() {
 }
 
 #[test]
-fn extrema_preserve_canonical_scalar_order_without_retaining_an_input_bag() {
+fn extrema_preserve_language_scalar_order_without_retaining_an_input_bag() {
     let definition = PreparedGraphAggregate::prepare(
         input(),
         &[],
