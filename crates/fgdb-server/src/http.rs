@@ -54,7 +54,8 @@ enum OutputDecision<'s> {
     Public,
     Protected {
         issuer: &'s Authority,
-        verified: VerifiedCapability<'s>,
+        // Boxed: the capability is most of the variant, and Public is empty.
+        verified: Box<VerifiedCapability<'s>>,
         generation: Option<(Generation, CommitWatcher)>,
     },
 }
@@ -120,7 +121,7 @@ impl<'s> OutputAuthority<'s> {
         };
         *decision = OutputDecision::Protected {
             issuer,
-            verified,
+            verified: Box::new(verified),
             generation: None,
         };
         true

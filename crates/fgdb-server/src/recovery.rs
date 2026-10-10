@@ -348,9 +348,13 @@ impl DatabaseSlot {
 
     pub(crate) async fn stop_and_join(&self, cx: &Cx) {
         self.stop();
-        if let Ok(mut worker) = self.worker.lock(cx).await
-            && let Some(mut handle) = worker.take()
-        {
+        // Take the handle in its own statement: the guard is not Send, so it
+        // must be dropped before the join's await.
+        let handle = match self.worker.lock(cx).await {
+            Ok(mut worker) => worker.take(),
+            Err(_) => None,
+        };
+        if let Some(mut handle) = handle {
             let _ = handle.join(cx).await;
         }
     }
