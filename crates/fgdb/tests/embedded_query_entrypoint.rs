@@ -1290,3 +1290,77 @@ fn identity_functions_return_engine_identities_on_the_embedded_surface() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A catalog-backed resolver, like the CLI's bindings: it names every id it
+/// binds, including ids the statement text never mentions.
+struct Catalog;
+
+impl GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Zenith") => Some(GraphSymbol::Label(LabelId(9))),
+            (GraphSymbolKind::Relation, "LOOPS_TO") => Some(GraphSymbol::Relation(RelationId(7))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(9), "Zenith");
+        catalog.insert_relation(RelationId(7), "LOOPS_TO");
+        Some(catalog)
+    }
+}
+
+/// labels(n) and type(r) read the caller's reverse catalog on the set facade,
+/// which answers every WITH pipeline and every projection with id() beside
+/// them. The facade used to wrap the resolver in a closure. That dropped the
+/// catalog, so names fell back to words in the statement text plus a fixed
+/// list of common names. "Zenith" and "LOOPS_TO" are in neither, and the read
+/// refused with UnmappedLabel or UnmappedRelation.
+#[test]
+fn set_facade_labels_and_type_name_every_id_the_callers_catalog_binds() {
+    let ((), report) = run_async_under_lab(0x7d14_0092, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(7));
+        batch.create_vertex(VId(1), vec![LabelId(9)], vec![(P, CanonicalScalar::Int(1))]);
+        batch.create_vertex(VId(2), vec![LabelId(9)], vec![(P, CanonicalScalar::Int(2))]);
+        batch.add_edge(EId(5), VId(1), VId(2), vec![]);
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let value = |value: GraphValue| GraphAggregateValue::Value(value);
+        let int = |id: i64| value(GraphValue::Scalar(CanonicalScalar::Int(id)));
+        let name = |text: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).unwrap());
+        let zenith = value(GraphValue::List(vec![name("Zenith")].into_boxed_slice()));
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, Catalog, policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows("MATCH (n) RETURN id(n) AS i, labels(n) AS l ORDER BY i"),
+            [[int(1), zenith.clone()], [int(2), zenith.clone()]]
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) RETURN id(r) AS e, type(r) AS t"),
+            [[int(5), value(name("LOOPS_TO"))]]
+        );
+        // A WITH stage without id(): the same facade.
+        assert_eq!(
+            rows("MATCH (n) WITH labels(n) AS l, n.p AS p WHERE p = 2 RETURN l, p"),
+            [[zenith, int(2)]]
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) WITH type(r) AS t, id(r) AS e RETURN t, e"),
+            [[value(name("LOOPS_TO")), int(5)]]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

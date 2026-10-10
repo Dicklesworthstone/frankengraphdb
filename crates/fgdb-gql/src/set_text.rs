@@ -1304,6 +1304,41 @@ impl<'a> Composition<'a> {
     }
 }
 
+/// Each unique (domain, name) resolves once across every arm. The reverse
+/// catalog is the caller's, so `labels(n)` and `type(r)` name every id the
+/// caller's catalog names, not only the ones the statement text mentions.
+struct CachedSymbols<'r, R: ?Sized> {
+    resolve: &'r mut R,
+    cache: BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+
+impl<R> crate::graph_text::GraphSymbolResolver for CachedSymbols<'_, R>
+where
+    R: crate::graph_text::GraphSymbolResolver + ?Sized,
+{
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(value) = self.cache.get(&key) {
+            return Some(*value);
+        }
+        let value = self.resolve.resolve_symbol(kind, name)?;
+        self.cache.insert(key, value);
+        Some(value)
+    }
+
+    fn reverse_catalog(&self) -> Option<crate::graph_text::ReverseSymbolCatalog> {
+        self.resolve.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolve.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        self.resolve.reverse_relation(id)
+    }
+}
+
 /// One immutable compound text definition. MATCH operands retain their own
 /// variables and scopes; positional set output names come from the left side.
 /// Binding never reparses, calls the catalog, reads a database or substitutes
@@ -1383,6 +1418,21 @@ impl PreparedGraphSetText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphSetTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, &mut resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a resolver whose reverse
+    /// catalog names every label and relation id. `labels(n)` and `type(r)`
+    /// columns read names from that catalog. A bare closure has none, so its
+    /// arms fall back to the names their own text mentions.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphSetTextError>
+    where
+        R: crate::graph_text::GraphSymbolResolver + ?Sized,
+    {
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)
             .map_err(|error| pattern_error(0, error))?;
         let mut parser = Composition {
@@ -1484,15 +1534,9 @@ impl PreparedGraphSetText {
         }
         // No catalog calls occurred above. Keep one domain-aware cache around
         // the existing per-pattern resolver; errors retain original offsets.
-        let mut cache = BTreeMap::new();
-        let mut symbols = |kind, name: &str| {
-            let key = (kind, name.to_owned());
-            if let Some(value) = cache.get(&key) {
-                return Some(*value);
-            }
-            let value = resolve(kind, name)?;
-            cache.insert(key, value);
-            Some(value)
+        let mut symbols = CachedSymbols {
+            resolve,
+            cache: BTreeMap::new(),
         };
         let mut inputs = Vec::new();
         for (input, span) in pending.into_iter().zip(&parser.spans) {

@@ -337,8 +337,21 @@ impl PreparedTemporalGraphSetText {
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphTemporalSetTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, &mut resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], keeping the resolver's
+    /// reverse catalog for `labels(n)` and `type(r)` columns.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphTemporalSetTextError>
+    where
+        R: crate::graph_text::GraphSymbolResolver + ?Sized,
+    {
         let (start, end, selector) = locate(statement)?;
         let selector_offset = match &selector {
             Selector::Parameter { offset, .. } => *offset,
@@ -377,10 +390,10 @@ impl PreparedTemporalGraphSetText {
             .copied()
             .filter(|(name, _)| names.contains(*name))
             .collect::<Vec<_>>();
-        let inner = PreparedGraphSetText::prepare_with_parameter_types(&blanked, &local, resolve)
-            .map_err(|error| {
-            fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind))
-        })?;
+        let inner = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            &blanked, &local, resolve,
+        )
+        .map_err(|error| fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind)))?;
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {

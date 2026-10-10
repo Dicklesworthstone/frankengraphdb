@@ -59,15 +59,21 @@ impl UnresolvedReadInput<'_> {
         self.first.parameter_offsets()
     }
 
-    pub(crate) fn resolve(
+    /// Every part reads the lender's reverse catalog for `labels(n)` and
+    /// `type(r)`, not only the names its own text mentions.
+    pub(crate) fn resolve<R: crate::graph_text::GraphSymbolResolver + ?Sized>(
         self,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: &mut R,
     ) -> Result<BoundReadInput, GraphPatternTextError> {
-        let first = self.first.resolve(&mut resolve)?;
+        let first = self
+            .first
+            .resolve(crate::graph_text::LentResolver(resolve))?;
         let mut continuations = Vec::new();
         for part in self.continuations {
             continuations.push(BoundContinuation {
-                input: part.input.resolve(&mut resolve)?,
+                input: part
+                    .input
+                    .resolve(crate::graph_text::LentResolver(resolve))?,
                 join: part.join,
             });
         }

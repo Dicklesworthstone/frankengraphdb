@@ -164,10 +164,10 @@ impl PreparedNativeRead {
                 }
             }
         }
-        match PreparedTemporalGraphSetText::prepare_with_parameter_types(
+        match PreparedTemporalGraphSetText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
-            |kind, name| resolve.resolve_symbol(kind, name),
+            &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalSet(prepared)),
             Err(error) => {
@@ -227,10 +227,10 @@ impl PreparedNativeRead {
                 QueryError::PatternText(error),
             ),
         }
-        match PreparedGraphSetText::prepare_with_parameter_types(
+        match PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
-            |kind, name| resolve.resolve_symbol(kind, name),
+            &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::Set(prepared)),
             Err(error) => consider(

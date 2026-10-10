@@ -168,6 +168,29 @@ where
     }
 }
 
+/// Lends a resolver to a callee that takes one by value. Every method
+/// forwards, so the callee keeps the lender's reverse catalog; wrapping the
+/// lender in a closure would drop it.
+pub(crate) struct LentResolver<'r, R: ?Sized>(pub(crate) &'r mut R);
+
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for LentResolver<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.0.resolve_symbol(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.0.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        self.0.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.0.reverse_relation(id)
+    }
+}
+
 /// Diagnostics contain byte positions and structural classes, not query text,
 /// identifiers, catalog IDs, or supplied argument values.
 #[derive(Clone, Debug, PartialEq, Eq)]
