@@ -136,6 +136,45 @@ fn duplicate_input_keys_upsert_sequentially_in_one_program() {
     assert!(!output(&result).contains("Original"));
 }
 
+/// The same batch through UNWIND text and through `write --rows`, which binds
+/// one statement instance per object, leaves the same graph (fgdb-bapr6
+/// acceptance). The repeated key upserts in row order on both paths.
+/// Compared by property values, never by identities, which each path issues
+/// for itself.
+#[test]
+fn unwind_upsert_and_write_rows_leave_the_same_graph() {
+    let rows = r#"[{"id":1,"name":"Original"},{"id":2,"name":"Bob"},{"id":1,"name":"Updated"},{"id":3,"name":"Cy"}]"#;
+    let unwind = Fixture::new(true);
+    success(&unwind.write(rows, UPSERT));
+    let per_row = Fixture::new(true);
+    let per_row_rows = format!("json:{rows}");
+    success(&per_row.run(
+        "write",
+        &[
+            "--rows",
+            &per_row_rows,
+            "MERGE (n:Entity {id:$id}) SET n.name=$name",
+        ],
+    ));
+    let graph = |fixture: &Fixture| -> Vec<String> {
+        String::from_utf8_lossy(
+            &fixture
+                .query("MATCH (n:Entity) RETURN n.id AS id, n.name AS name ORDER BY id")
+                .stdout,
+        )
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .map(str::to_owned)
+        .collect()
+    };
+    let expected = graph(&unwind);
+    assert_eq!(expected.len(), 3, "{expected:?}");
+    for (row, name) in expected.iter().zip(["Updated", "Bob", "Cy"]) {
+        assert!(row.contains(name), "{row}");
+    }
+    assert_eq!(graph(&per_row), expected);
+}
+
 #[test]
 fn row_values_are_not_query_text_and_missing_fields_remain_null() {
     let fixture = Fixture::new(true);
