@@ -110,8 +110,11 @@ Keywords are ASCII case-insensitive, while names are case-sensitive ASCII
 identifiers or backtick-delimited identifiers (`` `first name` ``). Unicode
 whitespace, `//` line comments and non-nesting `/* */` block comments are
 trivia, and errors carry byte offsets. Text literals take single or double
-quotes; a doubled delimiter is the only escape and a backslash is an ordinary
-byte. A delimited identifier that spells a keyword refuses (fgdb-285i2).
+quotes. A doubled delimiter is one delimiter, and the openCypher/GQL backslash
+escapes decode: `\\`, `\'`, `\"`, `` \` ``, `\b`, `\f`, `\n`, `\r`, `\t` and
+`\uXXXX` (four hex digits; a surrogate pair is one character). Any other
+escape refuses, including `\U`, whose digit count GQL and openCypher define
+differently. A delimited identifier that spells a keyword refuses (fgdb-285i2).
 The native read facade (`PreparedNativeRead`) strips one trailing semicolon,
 and multiple statements are `PreparedGraphWriteScript`'s. Anything outside
 the executed surface refuses with a typed error rather than being silently

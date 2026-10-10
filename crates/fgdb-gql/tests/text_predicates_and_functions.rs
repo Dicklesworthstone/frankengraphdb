@@ -580,7 +580,10 @@ fn opencypher_regex_match_is_a_bounded_whole_string_match() {
         ("[a-z]+@[a-z]+\\.com", "ada@lab.com", 1),
         ("\\d{3}", "12", 0),
     ] {
-        let statement = format!("MATCH (n) WHERE n.text =~ '{pattern}' RETURN n.text AS value");
+        // The regex is a text literal: its backslashes are escaped in the
+        // statement, as in openCypher (fgdb-ibczc).
+        let literal = pattern.replace('\\', "\\\\");
+        let statement = format!("MATCH (n) WHERE n.text =~ '{literal}' RETURN n.text AS value");
         assert_eq!(rows(&statement, &text(text_value)), expected, "{statement}");
     }
     assert_eq!(
@@ -605,7 +608,9 @@ fn opencypher_regex_match_is_a_bounded_whole_string_match() {
     );
     for statement in [
         "MATCH (n) WHERE n.text =~ '(ab' RETURN n.text AS value",
-        "MATCH (n) WHERE n.text =~ '\\bword' RETURN n.text AS value",
+        // The regex `\bword` (a word boundary profile 1 lacks) is written with
+        // an escaped backslash; `'\bword'` would be a backspace character.
+        "MATCH (n) WHERE n.text =~ '\\\\bword' RETURN n.text AS value",
         "MATCH (n) WHERE n.text =~ n.text RETURN n.text AS value",
         "MATCH (n) WHERE n.text =~ 1 RETURN n.text AS value",
     ] {

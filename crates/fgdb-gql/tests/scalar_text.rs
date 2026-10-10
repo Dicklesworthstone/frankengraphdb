@@ -91,7 +91,7 @@ fn quoted_boolean_and_null_operands_follow_independent_value_expectations() {
 }
 
 #[test]
-fn quoted_payloads_are_not_query_tokens_and_doubled_quotes_are_the_only_escape() {
+fn quoted_payloads_are_not_query_tokens_and_round_trip_through_their_escapes() {
     for value in [
         "O'Reilly",
         "é猫🦀",
@@ -102,13 +102,15 @@ fn quoted_payloads_are_not_query_tokens_and_doubled_quotes_are_the_only_escape()
         "\0",
         "'",
     ] {
-        let encoded = value.replace('\'', "''");
+        // A backslash starts an escape (fgdb-ibczc), so it is escaped first;
+        // the delimiter is then doubled.
+        let encoded = value.replace('\\', "\\\\").replace('\'', "''");
         let statement = format!("MATCH (n) WHERE n.p = '{encoded}' RETURN n");
-        // The same payload double-quoted, where only a doubled " escapes
-        // (fgdb-285i2): the same rows and the same plan bytes.
+        // The same payload double-quoted (fgdb-285i2): the same rows and the
+        // same plan bytes.
         let double = format!(
             "MATCH (n) WHERE n.p = \"{}\" RETURN n",
-            value.replace('"', "\"\"")
+            value.replace('\\', "\\\\").replace('"', "\"\"")
         );
         for statement in [&statement, &double] {
             assert_eq!(
@@ -176,9 +178,63 @@ fn comments_double_quotes_and_delimited_identifiers_prepare_the_plain_plan() {
     assert_eq!(quoted("'say \"hi\"'"), vec![VId(1)]);
     assert_eq!(quoted("\"say \"\"hi\"\"\""), vec![VId(1)]);
     assert_eq!(quoted("\"/* x */\""), vec![VId(2)]);
-    // A backslash is an ordinary byte in both quote styles.
-    assert_eq!(quoted("\"a\\b\""), vec![VId(3)]);
-    assert_eq!(quoted("'a\\b'"), vec![VId(3)]);
+    // A backslash starts an escape in both quote styles, so the text `a\b` is
+    // written with an escaped backslash, and an escaped delimiter does not
+    // close the literal.
+    assert_eq!(quoted("\"a\\\\b\""), vec![VId(3)]);
+    assert_eq!(quoted("'a\\\\b'"), vec![VId(3)]);
+    assert_eq!(quoted("'it\\'s'"), vec![VId(0)]);
+    assert_eq!(quoted("\"say \\\"hi\\\"\""), vec![VId(1)]);
+}
+
+/// The openCypher and ISO GQL backslash escapes decode in text literals.
+/// Expectations come from the openCypher grammar's EscapedChar and the TCK
+/// (Literals6 [10] `'\u01FF'`, String8/9/10 [5] `'\n'`). An unknown escape,
+/// a malformed `\u`, a lone or unpaired surrogate and `\U` refuse; Literals6
+/// [13] expects `'\uH'` to fail.
+#[test]
+fn backslash_escapes_decode_and_unknown_escapes_refuse() {
+    let values = [
+        Some(text("line\nbreak")),
+        Some(text("tab\there")),
+        Some(text("\u{1FF}")),
+        Some(text("back\\slash")),
+        Some(text("\u{1F600}")),
+        Some(text("\u{8}\u{c}\r")),
+    ];
+    let matching = |literal: &str| {
+        ids(
+            &format!("MATCH (n) WHERE n.p = {literal} RETURN n"),
+            &values,
+        )
+    };
+    assert_eq!(matching("'line\\nbreak'"), vec![VId(0)]);
+    assert_eq!(matching("\"line\\Nbreak\""), vec![VId(0)]);
+    assert_eq!(matching("'tab\\there'"), vec![VId(1)]);
+    assert_eq!(matching("'\\u01FF'"), vec![VId(2)]);
+    assert_eq!(matching("'\\u01ff'"), vec![VId(2)]);
+    assert_eq!(matching("'back\\\\slash'"), vec![VId(3)]);
+    assert_eq!(matching("'\\uD83D\\uDE00'"), vec![VId(4)]);
+    assert_eq!(matching("'\\b\\f\\r'"), vec![VId(5)]);
+    for refused in [
+        "'\\d'",
+        "'\\uH'",
+        "'\\u12'",
+        "'\\uDE00'",
+        "'\\uD83Dx'",
+        "'\\uD83D\\u0041'",
+        "'\\U0001F600'",
+        "'\\'",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(
+                &format!("MATCH (n) WHERE n.p = {refused} RETURN n"),
+                symbols
+            )
+            .is_err(),
+            "{refused}"
+        );
+    }
 }
 
 /// The temporal root scanner, UNION composition, aggregate text and the

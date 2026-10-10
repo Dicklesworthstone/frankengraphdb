@@ -4,8 +4,11 @@
 //! Whitespace, `//` line comments and `/* ... */` block comments are trivia.
 //! A block comment does not nest: its first `*/` closes it. `'...'` and
 //! `"..."` are text literals and `` `...` `` is a delimited identifier. Each
-//! escapes its own delimiter only by doubling it; a backslash is an ordinary
-//! byte. Decoding affects the operand only, never the surrounding statement.
+//! escapes its own delimiter by doubling it. A text literal also takes the
+//! openCypher and GQL backslash escapes (text_scalar lists them), and its span
+//! ends only at an unescaped delimiter. A delimited identifier has no
+//! backslash escapes. Decoding affects the operand only, never the surrounding
+//! statement.
 
 use super::*;
 use crate::algebra::ScalarPredicate;
@@ -144,7 +147,10 @@ pub(crate) fn comment_end(text: &str, at: usize) -> Result<Option<usize>, usize>
 
 /// If a quoted span (`'`, `"` or a backtick) starts at `at`, the offset just
 /// past its closing delimiter. `Err(at)`: the span never closes. The ASCII
-/// delimiters are UTF-8 boundaries even though scanning uses bytes.
+/// delimiters are UTF-8 boundaries even though scanning uses bytes. Inside a
+/// text literal a backslash escapes the next byte, so `'it\'s'` is one span;
+/// text_scalar decides whether the escape is valid. A delimited identifier
+/// has no backslash escapes.
 pub(crate) fn quoted_end(text: &str, at: usize) -> Result<Option<usize>, usize> {
     let bytes = text.as_bytes();
     let Some(&delimiter) = bytes.get(at).filter(|byte| b"'\"`".contains(byte)) else {
@@ -153,6 +159,13 @@ pub(crate) fn quoted_end(text: &str, at: usize) -> Result<Option<usize>, usize> 
     let mut end = at + 1;
     while let Some(&byte) = bytes.get(end) {
         end += 1;
+        if byte == b'\\' && delimiter != b'`' {
+            if end == bytes.len() {
+                break;
+            }
+            end += 1;
+            continue;
+        }
         if byte == delimiter {
             if bytes.get(end) != Some(&delimiter) {
                 return Ok(Some(end));
@@ -254,37 +267,84 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Decode one text literal token, delimiters included: a doubled delimiter
-/// is one delimiter character, and nothing else is an escape.
+/// Decode one text literal token, delimiters included. A doubled delimiter
+/// is one delimiter character. A backslash starts an escape, as in openCypher
+/// and ISO GQL: `\\`, `\'`, `\"`, `` \` ``, `\b`, `\f`, `\n`, `\r` and `\t`
+/// (the letters in either case), and `\uXXXX` with exactly four hex digits,
+/// where a surrogate pair names one character. Any other escape refuses, and
+/// so does `\U`: GQL gives it six hex digits and openCypher eight, so either
+/// reading would misread the other's text.
 pub(in crate::graph_text) fn text_scalar(
     raw: &str,
     at: usize,
 ) -> Result<CanonicalScalar, GraphPatternTextError> {
     let refusal = || error(at, GraphPatternTextErrorKind::ScalarLiteral);
-    let (doubled, single) = if raw.starts_with('"') {
-        ("\"\"", '"')
-    } else {
-        ("''", '\'')
-    };
+    let delimiter = if raw.starts_with('"') { '"' } else { '\'' };
     let body = raw
         .len()
         .checked_sub(1)
         .and_then(|end| raw.get(1..end))
         .ok_or_else(refusal)?;
-    if !body.contains(doubled) {
+    if !body.contains(['\\', delimiter]) {
         return CanonicalScalar::ucs_basic_text(body).map_err(|_| refusal());
     }
     let mut decoded = String::new();
     decoded
         .try_reserve_exact(body.len())
         .map_err(|_| refusal())?;
-    let mut parts = body.split(doubled);
-    decoded.push_str(parts.next().unwrap_or_default());
-    for part in parts {
-        decoded.push(single);
-        decoded.push_str(part);
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch == delimiter {
+            // quoted_end closes the span at an undoubled delimiter.
+            if chars.next() != Some(delimiter) {
+                return Err(refusal());
+            }
+            decoded.push(delimiter);
+            continue;
+        }
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let value = match chars.next().ok_or_else(refusal)? {
+            escaped @ ('\\' | '\'' | '"' | '`') => escaped,
+            'b' | 'B' => '\u{8}',
+            'f' | 'F' => '\u{c}',
+            'n' | 'N' => '\n',
+            'r' | 'R' => '\r',
+            't' | 'T' => '\t',
+            'u' => {
+                let unit = hex_unit(&mut chars).ok_or_else(refusal)?;
+                let code = match unit {
+                    0xD800..=0xDBFF => {
+                        if chars.next() != Some('\\') || chars.next() != Some('u') {
+                            return Err(refusal());
+                        }
+                        let low = hex_unit(&mut chars).ok_or_else(refusal)?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return Err(refusal());
+                        }
+                        0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+                    }
+                    0xDC00..=0xDFFF => return Err(refusal()),
+                    _ => unit,
+                };
+                char::from_u32(code).ok_or_else(refusal)?
+            }
+            _ => return Err(refusal()),
+        };
+        decoded.push(value);
     }
     CanonicalScalar::ucs_basic_text(&decoded).map_err(|_| refusal())
+}
+
+/// Exactly four hex digits of a `\u` escape.
+fn hex_unit(chars: &mut core::str::Chars<'_>) -> Option<u32> {
+    let mut unit = 0;
+    for _ in 0..4 {
+        unit = unit * 16 + chars.next()?.to_digit(16)?;
+    }
+    Some(unit)
 }
 
 impl<'a> Parser<'a> {
