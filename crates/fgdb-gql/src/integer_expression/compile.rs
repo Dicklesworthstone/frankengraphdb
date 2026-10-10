@@ -107,6 +107,7 @@ fn prepare_root(
             | Op::Compare(_)
             | Op::And
             | Op::Or
+            | Op::Xor
             | Op::Concat
             | Op::StartsWith
             | Op::EndsWith
@@ -151,7 +152,7 @@ fn prepare_root(
             }
             let expected = match op {
                 Op::Unary(_) | Op::Binary(_) => Some(Kind::Integer),
-                Op::Not | Op::And | Op::Or => Some(Kind::Boolean),
+                Op::Not | Op::And | Op::Or | Op::Xor => Some(Kind::Boolean),
                 Op::Case if position == 0 => Some(Kind::Boolean),
                 Op::Upper
                 | Op::Lower
@@ -257,6 +258,7 @@ fn prepare_root(
             | Op::Not
             | Op::And
             | Op::Or
+            | Op::Xor
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains
@@ -422,6 +424,7 @@ fn prepare_root(
                     Op::Compare(op) => Some(Instruction::Compare(*op)),
                     Op::And => Some(Instruction::And),
                     Op::Or => Some(Instruction::Or),
+                    Op::Xor => Some(Instruction::Xor),
                     Op::Concat => Some(Instruction::Concat),
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
@@ -478,6 +481,7 @@ fn prepare_root(
                     | Op::Compare(_)
                     | Op::And
                     | Op::Or
+                    | Op::Xor
                     | Op::Upper
                     | Op::Lower
                     | Op::Trim

@@ -410,11 +410,27 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
-        self.scalar_conjunction(columns, depth, program)?;
+        self.scalar_exclusive(columns, depth, program)?;
         while self.take_word("OR")? {
             let at = self.current.at;
-            self.scalar_conjunction(columns, depth, program)?;
+            self.scalar_exclusive(columns, depth, program)?;
             emit(program, ParsedOp::Bound(GraphIntegerOp::Or), at)?;
+        }
+        Ok(())
+    }
+
+    /// `XOR` binds tighter than `OR` and looser than `AND`, as in openCypher.
+    fn scalar_exclusive(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
+        self.scalar_conjunction(columns, depth, program)?;
+        while self.take_word("XOR")? {
+            let at = self.current.at;
+            self.scalar_conjunction(columns, depth, program)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::Xor), at)?;
         }
         Ok(())
     }

@@ -117,6 +117,8 @@ pub enum GraphIntegerOp {
     Not,
     And,
     Or,
+    /// openCypher `a XOR b`: NULL when either side is NULL, else `a != b`.
+    Xor,
     Case,
     SimpleCase {
         alternatives: usize,
@@ -181,6 +183,7 @@ impl GraphIntegerOp {
             Self::Not => bytes.push(8),
             Self::And => bytes.push(9),
             Self::Or => bytes.push(10),
+            Self::Xor => bytes.push(36),
             Self::Scalar(value) => {
                 bytes.push(15);
                 let value = value.canonical_value_bytes();
@@ -266,6 +269,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Not => f.write_str("Not"),
             Self::And => f.write_str("And"),
             Self::Or => f.write_str("Or"),
+            Self::Xor => f.write_str("Xor"),
             Self::Case => f.write_str("Case"),
             Self::SimpleCase { alternatives } => f
                 .debug_struct("SimpleCase")
@@ -473,6 +477,7 @@ enum Instruction {
     Not,
     And,
     Or,
+    Xor,
     JumpUnlessTrue(usize),
     JumpUnlessEqual(usize),
     Jump(usize),
@@ -775,12 +780,16 @@ impl GraphIntegerExpression {
                     *value = boolean_scalar(value.boolean().map_err(failure)?.map(|value| !value))
                         .into();
                 }
-                Instruction::And | Instruction::Or => {
+                Instruction::And | Instruction::Or | Instruction::Xor => {
                     let right = stack.pop().expect("validated Boolean right operand");
                     let left = stack.last_mut().expect("validated Boolean left operand");
                     let a = left.boolean().map_err(failure)?;
                     let b = right.boolean().map_err(failure)?;
-                    let result = if matches!(op, Instruction::And) {
+                    let result = if matches!(op, Instruction::Xor) {
+                        // Three-valued XOR has no short circuit: either
+                        // unknown side makes the result unknown.
+                        a.zip(b).map(|(a, b)| a != b)
+                    } else if matches!(op, Instruction::And) {
                         if a == Some(false) || b == Some(false) {
                             Some(false)
                         } else if a.is_none() || b.is_none() {
@@ -1068,6 +1077,7 @@ impl GraphIntegerExpression {
                 Instruction::Not => bytes.push(8),
                 Instruction::And => bytes.push(9),
                 Instruction::Or => bytes.push(10),
+                Instruction::Xor => bytes.push(36),
                 Instruction::JumpUnlessTrue(target) => {
                     bytes.push(11);
                     bytes.extend_from_slice(&(*target as u64).to_be_bytes());

@@ -126,6 +126,7 @@ const KEYWORDS: &[&str] = &[
     "WHEN",
     "WHERE",
     "WITH",
+    "XOR",
     "YIELD",
 ];
 

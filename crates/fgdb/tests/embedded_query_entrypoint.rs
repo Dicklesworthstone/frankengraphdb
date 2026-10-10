@@ -1513,6 +1513,49 @@ fn null_and_list_predicates_bind_tighter_than_comparison() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn xor_is_three_valued_and_binds_between_and_and_or() {
+    let ((), report) = run_async_under_lab(0x7d14_0094, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let truth = |value: bool| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)))
+        };
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .map_err(|error| format!("{statement}: {error}"))
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(
+                "RETURN true XOR false AS a, false XOR true AS b, \
+                 true XOR true AS c, false XOR false AS d"
+            ),
+            [[truth(true), truth(true), truth(false), truth(false)]]
+        );
+        // Unlike AND and OR, neither operand decides XOR alone.
+        assert_eq!(
+            rows(
+                "RETURN (null XOR true) IS NULL AS a, (false XOR null) IS NULL AS b, \
+                 (null XOR null) IS NULL AS c"
+            ),
+            [[truth(true), truth(true), truth(true)]]
+        );
+        // OR(true, XOR(true, true)) and XOR(true, AND(true, false)); the
+        // other groupings give false for both.
+        assert_eq!(
+            rows("RETURN true OR true XOR true AS a, true XOR true AND false AS b"),
+            [[truth(true), truth(true)]]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A catalog-backed resolver, like the CLI's bindings: it names every id it
 /// binds, including ids the statement text never mentions.
 struct Catalog;
