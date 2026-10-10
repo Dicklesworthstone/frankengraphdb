@@ -1183,9 +1183,10 @@ fn identity_functions_return_engine_identities_on_the_embedded_surface() {
                 rows: vec![vec![int(3)]],
             }
         );
-        // An edge's identity filters through a WITH stage, where the edge is a
-        // row column. A pattern WHERE has no Boolean operand for an edge yet,
-        // so it refuses rather than guess.
+        // An edge's identity filters in the pattern WHERE through the captured
+        // relationship (fgdb-cdbie), and through a WITH stage, where the edge
+        // is a row column. An OPTIONAL MATCH miss is NULL, so its comparison is
+        // UNKNOWN and the optional part stays NULL.
         assert_eq!(
             rows(
                 &db,
@@ -1193,15 +1194,35 @@ fn identity_functions_return_engine_identities_on_the_embedded_surface() {
             ),
             [[int(2)]]
         );
-        assert!(
-            db.query(
-                &cx,
-                "MATCH (a)-[r:R]->(b) WHERE id(r) = 11 RETURN a.p AS p",
-                &args,
-                symbols,
-                policy()
-            )
-            .is_err()
+        assert_eq!(
+            rows(&db, "MATCH (a)-[r:R]->(b) WHERE id(r) = 11 RETURN a.p AS p"),
+            [[int(2)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WHERE elementId(r) = '10' AND id(b) = 2 RETURN a.p AS p, id(r) AS e"
+            ),
+            [[int(1), int(10)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WHERE id(r) % 2 = 0 OR id(r) > 100 RETURN id(r) AS e"
+            ),
+            [[int(10)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WHERE id(r) = 10 RETURN id(n) AS src, id(m) AS dst ORDER BY src"
+            ),
+            [
+                [int(1), int(2)],
+                [int(2), null.clone()],
+                [int(3), null.clone()],
+                [int(4), null.clone()]
+            ]
         );
         assert_eq!(
             rows(

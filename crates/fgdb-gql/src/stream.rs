@@ -120,7 +120,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     // Audit every bound operand while taking the owned copy.
                     // A captured edge or another slot must never become a
                     // missing property on the one vertex this cursor owns.
-                    let mut local = !expression.contains_edge_property();
+                    let mut local = !expression.contains_captured_edge();
                     let expression = expression.remap(|slot| {
                         local &= slot.ordinal() == 0;
                         slot

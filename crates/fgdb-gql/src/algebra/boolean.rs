@@ -21,6 +21,9 @@ pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
 #[derive(Clone, Copy)]
 pub enum GraphBooleanOperand<'a> {
     Vertex(&'a str),
+    /// A captured single-step relationship as an element: a scalar
+    /// expression input (id(r)), a NULL test, or an edge equality.
+    Edge(&'a str),
     Property {
         variable: &'a str,
         key: PropertyKeyId,
@@ -76,7 +79,7 @@ pub enum GraphBooleanError {
     TooManyPredicates { limit: usize, observed: usize },
     InvalidStack { instruction: usize },
     InvalidVariableName,
-    InvalidVertexComparison,
+    InvalidElementComparison,
     InvalidExpressionColumn,
     Scalar(ScalarPredicateError),
 }
@@ -96,8 +99,8 @@ impl core::fmt::Display for GraphBooleanError {
                 write!(f, "invalid Boolean stack at instruction {instruction}")
             }
             Self::InvalidVariableName => f.write_str("invalid Boolean variable name"),
-            Self::InvalidVertexComparison => {
-                f.write_str("vertex operands require vertex equality or inequality")
+            Self::InvalidElementComparison => {
+                f.write_str("vertex and edge operands require equality or inequality of one kind")
             }
             Self::InvalidExpressionColumn => {
                 f.write_str("Boolean expression references an unknown value column")
@@ -118,6 +121,7 @@ impl core::error::Error for GraphBooleanError {
 #[derive(Clone, PartialEq, Eq)]
 enum Operand<S> {
     Vertex(S),
+    Edge(S),
     Property { variable: S, key: PropertyKeyId },
     EdgeProperty { variable: S, key: PropertyKeyId },
     Literal(ScalarPredicate),
@@ -150,6 +154,7 @@ impl<S> Operand<S> {
     ) -> Result<Operand<T>, E> {
         Ok(match self {
             Self::Vertex(slot) => Operand::Vertex(map(slot, false)?),
+            Self::Edge(slot) => Operand::Edge(map(slot, true)?),
             Self::Property { variable, key } => Operand::Property {
                 variable: map(variable, false)?,
                 key: *key,
@@ -235,6 +240,7 @@ fn name(value: &str) -> Result<String, GraphBooleanError> {
 fn own(operand: GraphBooleanOperand<'_>) -> Result<Operand<String>, GraphBooleanError> {
     Ok(match operand {
         GraphBooleanOperand::Vertex(variable) => Operand::Vertex(name(variable)?),
+        GraphBooleanOperand::Edge(variable) => Operand::Edge(name(variable)?),
         GraphBooleanOperand::Property { variable, key } => Operand::Property {
             variable: name(variable)?,
             key,
@@ -324,17 +330,22 @@ impl GraphBooleanExpression {
                     comparison,
                     right,
                 } => {
-                    let left_vertex = matches!(left, GraphBooleanOperand::Vertex(_));
-                    let right_vertex = matches!(right, GraphBooleanOperand::Vertex(_));
-                    if (left_vertex || right_vertex)
-                        && !(left_vertex
-                            && right_vertex
+                    // An element compares only for (in)equality with an
+                    // element of the same kind (false = vertex, true = edge).
+                    let element = |operand: &GraphBooleanOperand<'_>| match operand {
+                        GraphBooleanOperand::Vertex(_) => Some(false),
+                        GraphBooleanOperand::Edge(_) => Some(true),
+                        _ => None,
+                    };
+                    let (left_element, right_element) = (element(&left), element(&right));
+                    if (left_element.is_some() || right_element.is_some())
+                        && !(left_element == right_element
                             && matches!(
                                 comparison,
                                 IntegerComparison::Equal | IntegerComparison::NotEqual
                             ))
                     {
-                        return Err(GraphBooleanError::InvalidVertexComparison);
+                        return Err(GraphBooleanError::InvalidElementComparison);
                     }
                     Instruction::Compare {
                         left: own(left)?,
@@ -401,13 +412,14 @@ impl GraphBooleanExpression {
         })
     }
 
-    /// Whether any operand reads a captured relationship property. Such a
-    /// program needs the element-property executor, never a vertex-only one.
+    /// Whether any operand reads a captured relationship, its identity or a
+    /// property. Such a program needs the element executor, which supplies
+    /// the captured paths, never a vertex-only one.
     #[must_use]
     #[allow(dead_code)]
-    pub(crate) fn contains_edge_property(&self) -> bool {
+    pub(crate) fn contains_captured_edge(&self) -> bool {
         fn operand<S>(operand: &Operand<S>) -> bool {
-            matches!(operand, Operand::EdgeProperty { .. })
+            matches!(operand, Operand::Edge(_) | Operand::EdgeProperty { .. })
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
@@ -446,7 +458,7 @@ impl BoundBooleanExpression {
                 variable.ordinal() == 0
             }
             Operand::Literal(_) => true,
-            Operand::EdgeProperty { .. } => false,
+            Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         };
         let mut selected = None;
         for instruction in self.program.iter() {
@@ -481,11 +493,12 @@ impl BoundBooleanExpression {
         }
         selected
     }
-    /// Whether any already-bound operand reads a captured relationship property.
+    /// Whether any already-bound operand reads a captured relationship, its
+    /// identity or a property.
     #[must_use]
-    pub(crate) fn contains_edge_property(&self) -> bool {
+    pub(crate) fn contains_captured_edge(&self) -> bool {
         fn operand<S>(operand: &Operand<S>) -> bool {
-            matches!(operand, Operand::EdgeProperty { .. })
+            matches!(operand, Operand::Edge(_) | Operand::EdgeProperty { .. })
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
@@ -541,11 +554,13 @@ impl Truth {
 enum Value<'a> {
     Scalar(Option<&'a CanonicalScalar>),
     Vertex(Option<VId>),
+    Edge(Option<EId>),
 }
 impl Value<'_> {
     fn is_null(&self) -> bool {
         match self {
             Self::Vertex(value) => value.is_none(),
+            Self::Edge(value) => value.is_none(),
             Self::Scalar(value) => value.is_none_or(|v| matches!(v, CanonicalScalar::Null)),
         }
     }
@@ -569,35 +584,39 @@ fn resolve<'source: 'borrow, 'borrow, E>(
                 None => None,
             },
         ),
-        Operand::EdgeProperty { variable, key } => Value::Scalar(
-            match paths
-                .get(variable.ordinal() as usize)
-                .and_then(Option::as_ref)
-            {
-                Some(path) => {
-                    let [(edge, _)] = path.steps() else {
-                        unreachable!("edge property captures contain exactly one relationship")
-                    };
-                    edge_property(*edge, *key)?
-                }
+        Operand::Edge(slot) => Value::Edge(captured_edge(paths, *slot)),
+        Operand::EdgeProperty { variable, key } => {
+            Value::Scalar(match captured_edge(paths, *variable) {
+                Some(edge) => edge_property(edge, *key)?,
                 None => None,
-            },
-        ),
+            })
+        }
         Operand::Literal(value) => Value::Scalar(Some(value.value())),
     })
+}
+/// The one relationship of a captured single-step path, or None for a NULL
+/// capture (an OPTIONAL MATCH miss).
+fn captured_edge(paths: &[Option<super::GraphPath>], slot: BindingSlot) -> Option<EId> {
+    let path = paths.get(slot.ordinal() as usize)?.as_ref()?;
+    let [(edge, _)] = path.steps() else {
+        unreachable!("edge captures contain exactly one relationship")
+    };
+    Some(*edge)
 }
 fn compare(left: &Value<'_>, right: &Value<'_>, comparison: IntegerComparison) -> Truth {
     if left.is_null() || right.is_null() {
         return Truth::Unknown;
     }
+    let element = |equal: bool| {
+        Truth::from(Some(if comparison == IntegerComparison::Equal {
+            equal
+        } else {
+            !equal
+        }))
+    };
     match (left, right) {
-        (Value::Vertex(Some(left)), Value::Vertex(Some(right))) => {
-            Truth::from(Some(if comparison == IntegerComparison::Equal {
-                left == right
-            } else {
-                left != right
-            }))
-        }
+        (Value::Vertex(Some(left)), Value::Vertex(Some(right))) => element(left == right),
+        (Value::Edge(Some(left)), Value::Edge(Some(right))) => element(left == right),
         (Value::Scalar(Some(left)), Value::Scalar(Some(right))) => {
             Truth::from(comparison.evaluate_scalar_pair(Some(*left), Some(*right)))
         }
@@ -714,6 +733,7 @@ impl BoundBooleanExpression {
                             control,
                         )? {
                             Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
+                            Value::Edge(Some(edge)) => GraphValue::Edge(edge),
                             Value::Scalar(Some(value)) => {
                                 // This operand is owned by the scalar VM, so
                                 // every payload quantum must be admitted for
@@ -725,7 +745,7 @@ impl BoundBooleanExpression {
                                 })?;
                                 GraphValue::Scalar(value.clone())
                             }
-                            Value::Vertex(None) | Value::Scalar(None) => {
+                            Value::Vertex(None) | Value::Edge(None) | Value::Scalar(None) => {
                                 GraphValue::Scalar(CanonicalScalar::Null)
                             }
                         };
@@ -822,6 +842,10 @@ fn append_operand(operand: &Operand<BindingSlot>, bytes: &mut Vec<u8>) {
             bytes.push(0);
             bytes.extend_from_slice(&slot.ordinal().to_be_bytes());
         }
+        Operand::Edge(slot) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&slot.ordinal().to_be_bytes());
+        }
         Operand::Property { variable, key } => {
             bytes.push(1);
             bytes.extend_from_slice(&variable.ordinal().to_be_bytes());
@@ -867,7 +891,7 @@ impl BoundBooleanExpression {
                 (slot.ordinal() as usize) < width
             }
             Operand::Literal(_) => true,
-            Operand::EdgeProperty { .. } => false,
+            Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         })
     }
 
@@ -908,7 +932,7 @@ impl BoundBooleanExpression {
                     (slot.ordinal() as usize) < bindings.len()
                 }
                 Operand::Literal(_) => true,
-                Operand::EdgeProperty { .. } => false,
+                Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
             };
             if !supported {
                 return Ok(None);
@@ -1208,8 +1232,35 @@ mod tests {
                 comparison: IntegerComparison::Equal,
                 right: Arg::Literal(&literal)
             }]),
-            Err(GraphBooleanError::InvalidVertexComparison)
+            Err(GraphBooleanError::InvalidElementComparison)
         ));
+        // An edge equals only an edge, and only for (in)equality.
+        for (left, comparison, right) in [
+            (Arg::Edge("r"), IntegerComparison::Equal, Arg::Vertex("a")),
+            (Arg::Edge("r"), IntegerComparison::Less, Arg::Edge("s")),
+            (
+                Arg::Literal(&literal),
+                IntegerComparison::Equal,
+                Arg::Edge("r"),
+            ),
+        ] {
+            assert!(matches!(
+                GraphBooleanExpression::prepare(&[Op::Compare {
+                    left,
+                    comparison,
+                    right
+                }]),
+                Err(GraphBooleanError::InvalidElementComparison)
+            ));
+        }
+        assert!(
+            GraphBooleanExpression::prepare(&[Op::Compare {
+                left: Arg::Edge("r"),
+                comparison: IntegerComparison::NotEqual,
+                right: Arg::Edge("s"),
+            }])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -153,9 +153,9 @@ impl<'a> Parser<'a> {
     }
 
     /// A pattern WHERE scalar predicate: its program and its columns, each a
-    /// variable with a property key or, for id()/elementId() of a vertex
-    /// (fgdb-j687q), the vertex itself (no key). An edge or path column has no
-    /// Boolean operand and refuses.
+    /// variable with a property key or, for id()/elementId() (fgdb-j687q,
+    /// fgdb-cdbie), the vertex or captured relationship itself (no key). A
+    /// path column has no Boolean operand and refuses.
     #[allow(clippy::type_complexity)]
     pub(in crate::graph_text) fn boolean_scalar_expression(
         &mut self,
@@ -193,7 +193,11 @@ impl<'a> Parser<'a> {
             .into_iter()
             .map(|column| match (column.property, column.path) {
                 (Some(key), _) => Ok((column.variable, Some(key))),
-                (None, None) => Ok((column.variable, None)),
+                // The element itself: a vertex, or a pattern relationship
+                // (bound later as the captured edge).
+                (None, None | Some(crate::graph_text::GraphPathFunction::Edge)) => {
+                    Ok((column.variable, None))
+                }
                 (None, Some(_)) => Err(error(at, GraphPatternTextErrorKind::BooleanExpression)),
             })
             .collect::<Result<Vec<_>, _>>()?;

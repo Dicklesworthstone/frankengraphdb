@@ -716,13 +716,15 @@ impl<Row> GlaPlan<Row> {
     }
 
     /// Captured relationship payloads need the explicit edge property source.
+    /// A WHERE that reads a captured relationship's identity needs the same
+    /// element executor, the only one that hands it the captured paths.
     #[must_use]
     pub fn projects_edge_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
             GlaOperator::ProjectValues { columns } => columns
                 .iter()
                 .any(|column| matches!(column, ValueProjection::EdgeProperty { .. })),
-            GlaOperator::SelectBoolean { expression } => expression.contains_edge_property(),
+            GlaOperator::SelectBoolean { expression } => expression.contains_captured_edge(),
             _ => false,
         })
     }

@@ -920,6 +920,16 @@ impl BoundBooleanTemplate {
         }
     }
 
+    /// A key-less scalar column (id()/elementId()) reads the element itself:
+    /// the captured relationship for an edge variable, else the vertex.
+    fn element_operand<'a>(&self, variable: &'a str) -> Operand<'a> {
+        if self.edge_variables.iter().any(|name| name == variable) {
+            Operand::Edge(variable)
+        } else {
+            Operand::Vertex(variable)
+        }
+    }
+
     pub(super) fn bind(
         &self,
         values: &[GqlParameterValue],
@@ -969,7 +979,7 @@ impl BoundBooleanTemplate {
                     .iter()
                     .map(|(variable, key)| match key {
                         Some(key) => property(variable, *key),
-                        None => Operand::Vertex(variable),
+                        None => self.element_operand(variable),
                     })
                     .collect(),
                 _ => Vec::new(),
