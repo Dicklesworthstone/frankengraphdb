@@ -373,11 +373,23 @@ fn admit(
         })?,
         GraphSetValue::Literal(_) => GraphSetColumnType::Scalar,
         GraphSetValue::Integer(expression) => {
-            for input in expression.referenced_columns() {
+            for input in expression.scalar_columns() {
                 let kind = types
                     .get(input)
                     .ok_or(Error::UnknownInput { column, input })?;
                 if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                    return Err(Error::IntegerInput { column, input });
+                }
+            }
+            // id()/elementId() read an element column's identity (fgdb-j687q).
+            for input in expression.element_columns() {
+                let kind = types
+                    .get(input)
+                    .ok_or(Error::UnknownInput { column, input })?;
+                if !matches!(
+                    kind,
+                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge | GraphSetColumnType::Any
+                ) {
                     return Err(Error::IntegerInput { column, input });
                 }
             }

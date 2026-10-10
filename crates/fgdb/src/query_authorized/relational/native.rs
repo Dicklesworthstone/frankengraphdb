@@ -34,6 +34,16 @@ fn rows_of(
     }
 }
 
+// Engine identities are not masked, so a capability cannot observe them
+// through id()/elementId() (fgdb-j687q, owner ruling 2026-09-30). Checked on
+// the selected statement text before preparation calls the catalog.
+fn refuse_element_identity(statement: &str) -> Result<(), QueryError> {
+    if fgdb_gql::reads_element_identity(statement) {
+        return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
+    }
+    Ok(())
+}
+
 // EXPLAIN on an authorized surface (fgdb-ooiik). The listing derives from the
 // statement text, its parameters and the caller's catalog, never from records,
 // so nothing hidden from the capability can change it. The certificate form
@@ -237,6 +247,7 @@ impl<V: Vfs + Clone> Database<V> {
                 if selected.branch().is_some_and(|name| name != branch) {
                     return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
                 }
+                refuse_element_identity(selected.statement())?;
                 execution.borrow_mut().checkpoint()?;
                 if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
                     return rows_of(

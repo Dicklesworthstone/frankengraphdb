@@ -204,6 +204,7 @@ mod tests {
             .evaluate_loaded_with_control(
                 1,
                 |_| Ok(ExpressionCell::Integer(i128::from(i64::MAX))),
+                |_| Err(GraphIntegerErrorKind::NonScalar),
                 &mut |_| Ok::<_, ()>(()),
             )
             .unwrap();
@@ -219,6 +220,7 @@ mod tests {
         let refused = expression.evaluate_loaded_with_control(
             1,
             |_| Ok(ExpressionCell::Integer(i128::MAX)),
+            |_| Err(GraphIntegerErrorKind::NonScalar),
             &mut |_| Ok::<_, ()>(()),
         );
         assert!(

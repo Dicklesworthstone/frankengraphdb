@@ -1103,3 +1103,169 @@ fn late_script_budget_refusal_matches_native_error_and_preserves_outer_prefix() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// openCypher id()/elementId() on the embedded surface (fgdb-j687q; owner
+/// ruling 2026-09-30: allowed where the owner sees everything). Independent
+/// expectation: the seeded fixture's explicit identities, vertices 1..=4 and
+/// edges 10 (1->2) and 11 (2->3), with p equal to each vertex identity.
+#[test]
+fn identity_functions_return_engine_identities_on_the_embedded_surface() {
+    let ((), report) = run_async_under_lab(0x7d14_0091, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let int = |value: i64| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
+        };
+        let text = |value: &str| {
+            GraphAggregateValue::Value(GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text(value).unwrap(),
+            ))
+        };
+        let null = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let rows = |db: &Database<MemVfs>, statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(&db, "MATCH (n) RETURN id(n) AS i ORDER BY i"),
+            [[int(1)], [int(2)], [int(3)], [int(4)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) AS i, n.p AS p ORDER BY i DESC LIMIT 2"
+            ),
+            [[int(4), int(4)], [int(3), int(3)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) RETURN id(r) AS e, elementId(a) AS src, ID(b) AS dst ORDER BY e"
+            ),
+            [[int(10), text("1"), int(2)], [int(11), text("2"), int(3)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) RETURN id(n) AS src, id(m) AS dst ORDER BY src"
+            ),
+            [
+                [int(1), int(2)],
+                [int(2), int(3)],
+                [int(3), null.clone()],
+                [int(4), null.clone()]
+            ]
+        );
+        // id() is an integer operand wherever one is admitted: a vertex's in a
+        // pattern WHERE (also against a parameter), arithmetic, toString and
+        // text concatenation, an aggregate grouping key.
+        assert_eq!(
+            rows(&db, "MATCH (n) WHERE id(n) = 2 RETURN n.p AS p"),
+            [[int(2)]]
+        );
+        let at_three = GqlParameters::new().with_int64("id", 3).unwrap();
+        assert_eq!(
+            db.query(
+                &cx,
+                "MATCH (n) WHERE id(n) = $id RETURN n.p AS p",
+                &at_three,
+                symbols,
+                policy()
+            )
+            .unwrap(),
+            QueryResult::Rows {
+                columns: vec!["p".to_owned()],
+                rows: vec![vec![int(3)]],
+            }
+        );
+        // An edge's identity filters through a WITH stage, where the edge is a
+        // row column. A pattern WHERE has no Boolean operand for an edge yet,
+        // so it refuses rather than guess.
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WITH a, r WHERE id(r) = 11 RETURN a.p AS p"
+            ),
+            [[int(2)]]
+        );
+        assert!(
+            db.query(
+                &cx,
+                "MATCH (a)-[r:R]->(b) WHERE id(r) = 11 RETURN a.p AS p",
+                &args,
+                symbols,
+                policy()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) % 2 AS parity, id(n) * 10 AS scaled ORDER BY scaled"
+            ),
+            [
+                [int(1), int(10)],
+                [int(0), int(20)],
+                [int(1), int(30)],
+                [int(0), int(40)]
+            ]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) WHERE id(n) = 4 RETURN toString(id(n)) AS s, elementId(n) + '!' AS bang"
+            ),
+            [[text("4"), text("4!")]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) % 2 AS parity, count(*) AS c ORDER BY parity"
+            ),
+            [
+                [int(0), GraphAggregateValue::Count(2)],
+                [int(1), GraphAggregateValue::Count(2)]
+            ]
+        );
+        // A property is not an element, refused at preparation.
+        assert!(
+            db.query(
+                &cx,
+                "MATCH (n) RETURN id(n.p) AS i",
+                &args,
+                symbols,
+                policy()
+            )
+            .is_err()
+        );
+        // An identity above i64::MAX keeps its decimal elementId but has no
+        // Int: id() fails typed instead of wrapping.
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(
+            VId(1 << 64),
+            vec![PERSON],
+            vec![(P, CanonicalScalar::Int(5))],
+        );
+        db.write(&contexts.commit(), batch).await.unwrap();
+        assert_eq!(
+            rows(&db, "MATCH (n:Person) RETURN elementId(n) AS e ORDER BY e"),
+            [
+                [text("1")],
+                [text("18446744073709551616")],
+                [text("2")],
+                [text("3")],
+                [text("4")]
+            ]
+        );
+        assert!(
+            db.query(&cx, "MATCH (n) RETURN id(n) AS i", &args, symbols, policy())
+                .is_err()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

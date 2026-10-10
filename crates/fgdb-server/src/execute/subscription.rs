@@ -365,6 +365,7 @@ pub(crate) async fn subscribe(
     let now = unix_millis();
     let capability = db.authority.verify_at(token, TRUNK, now).map_err(authorization)?;
     let mut permit = capability.begin_read_at(TRUNK, now).map_err(authorization)?;
+    refuse_element_identity(&statement.statement)?;
     unrestricted(&capability)?;
     let limits = capability.predicates().limits();
     let registration_work = db.query_policy.evaluator.max_work_units.min(limits.max_work);

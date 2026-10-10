@@ -54,6 +54,7 @@ fn static_text(root: Option<&ParsedOp>) -> bool {
                 | GraphIntegerOp::Substring
                 | GraphIntegerOp::Concat
                 | GraphIntegerOp::ToText
+                | GraphIntegerOp::IdentityColumn { text: true, .. }
         ),
         _ => false,
     }
@@ -151,11 +152,20 @@ impl<'a> Parser<'a> {
             .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))
     }
 
+    /// A pattern WHERE scalar predicate: its program and its columns, each a
+    /// variable with a property key or, for id()/elementId() of a vertex
+    /// (fgdb-j687q), the vertex itself (no key). An edge or path column has no
+    /// Boolean operand and refuses.
     #[allow(clippy::type_complexity)]
     pub(in crate::graph_text) fn boolean_scalar_expression(
         &mut self,
-    ) -> Result<(Vec<(Name<'a>, Name<'a>)>, Vec<MutationIntegerTemplateOp>), GraphPatternTextError>
-    {
+    ) -> Result<
+        (
+            Vec<(Name<'a>, Option<Name<'a>>)>,
+            Vec<MutationIntegerTemplateOp>,
+        ),
+        GraphPatternTextError,
+    > {
         let at = self.current.at;
         let mut columns = Vec::new();
         let operand = self
@@ -181,11 +191,10 @@ impl<'a> Parser<'a> {
         };
         let columns = columns
             .into_iter()
-            .map(|column| {
-                column
-                    .property
-                    .map(|key| (column.variable, key))
-                    .ok_or_else(|| error(at, GraphPatternTextErrorKind::BooleanExpression))
+            .map(|column| match (column.property, column.path) {
+                (Some(key), _) => Ok((column.variable, Some(key))),
+                (None, None) => Ok((column.variable, None)),
+                (None, Some(_)) => Err(error(at, GraphPatternTextErrorKind::BooleanExpression)),
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok((columns, program))
@@ -828,6 +837,53 @@ impl<'a> Parser<'a> {
                     return emit(program, ParsedOp::Bound(GraphIntegerOp::Local(offset)), at);
                 }
             }
+        }
+        // openCypher id(x)/elementId(x) (fgdb-j687q): the column naming the
+        // vertex or edge x holds the element itself, and IdentityColumn reads
+        // its identity, so no element value ever enters the scalar stack.
+        if (self.is_word("ID") || self.is_word("ELEMENTID"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let text = self.is_word("ELEMENTID");
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let element = self.current.at;
+            let not_element = || {
+                failure(
+                    element,
+                    GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                        "a vertex or edge for id()/elementId()",
+                    )),
+                )
+            };
+            let column = match columns {
+                ExpressionColumns::Graph(columns) => {
+                    let variable = self.any_variable()?;
+                    self.mutation_projection(columns, variable, None)?
+                }
+                ExpressionColumns::Row(schema) => {
+                    let name = self.name()?;
+                    schema
+                        .iter()
+                        .position(|(column, kind)| {
+                            column.text == name.text
+                                && matches!(
+                                    kind,
+                                    crate::GraphSetColumnType::Vertex
+                                        | crate::GraphSetColumnType::Edge
+                                        | crate::GraphSetColumnType::Any
+                                )
+                        })
+                        .ok_or_else(not_element)?
+                }
+                ExpressionColumns::Resolved(resolve) => resolve(self)?.ok_or_else(not_element)?,
+            };
+            self.punct(b')', ")")?;
+            return emit(
+                program,
+                ParsedOp::Bound(GraphIntegerOp::IdentityColumn { column, text }),
+                at,
+            );
         }
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,

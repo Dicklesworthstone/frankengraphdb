@@ -138,7 +138,7 @@ pub use evidence_page::{
 pub use graph_text::{
     GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog,
+    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
 };
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,

@@ -872,6 +872,29 @@ fn writes_and_reads_round_trip_with_flow_control_refusals_and_drain() {
             .await
             .unwrap_err();
         assert_eq!(server_code(certificate), ErrorCode::Statement);
+        // id()/elementId() refuse under any capability (fgdb-j687q), on the
+        // read session and on the server's own RETURNING write parser, which
+        // runs before any session sees the text. Nothing is created.
+        for (mode, text) in [
+            (ExecuteMode::Read, "MATCH (p:Person) RETURN id(p) AS i"),
+            (
+                ExecuteMode::Write,
+                "CREATE (p:Person {name:'Id'}) RETURN elementId(p) AS e",
+            ),
+        ] {
+            let refused = client.execute(cx, mode, text, vec![]).await.unwrap_err();
+            assert_eq!(server_code(refused), ErrorCode::PermissionDenied, "{text}");
+        }
+        let unchanged = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (p:Person) RETURN count(p) AS n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.rows, [[WireValue::Count(22)]]);
         client.close(cx).await.unwrap();
 
         // A read-only capability cannot write, and its refusal is typed.

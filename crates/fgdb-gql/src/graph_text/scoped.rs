@@ -1297,7 +1297,11 @@ mod capture_tests {
         let key = Name { text: "n", at: 0 };
         let filter = Filter::Boolean {
             program: vec![boolean::SyntaxItem::Expression {
-                columns: vec![(variables[0], key), (last, key), (last, key)],
+                columns: vec![
+                    (variables[0], Some(key)),
+                    (last, Some(key)),
+                    (last, Some(key)),
+                ],
                 program: Vec::new(),
             }],
             at: 0,
@@ -1313,7 +1317,7 @@ mod capture_tests {
                         text: "overflow",
                         at: 29,
                     },
-                    key,
+                    Some(key),
                 )],
                 program: Vec::new(),
             }],

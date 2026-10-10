@@ -981,7 +981,8 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             for op in program {
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
                     crate::GraphIntegerOp::Column(index)
-                    | crate::GraphIntegerOp::ScalarColumn(index),
+                    | crate::GraphIntegerOp::ScalarColumn(index)
+                    | crate::GraphIntegerOp::IdentityColumn { column: index, .. },
                 ) = op
                 {
                     *index = columns[*index];

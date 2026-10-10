@@ -73,6 +73,13 @@ pub enum GraphIntegerOp {
     Literal(Option<i64>),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    /// openCypher id(x) (an Int) or elementId(x) (`text`) of the vertex or
+    /// edge a column holds (fgdb-j687q); NULL for NULL. An identity above
+    /// i64::MAX has no Int and fails typed (Overflow).
+    IdentityColumn {
+        column: usize,
+        text: bool,
+    },
     /// A list-comprehension element (fgdb-20foe): the scalar `k` positions
     /// before the END of the input row. An element scope evaluates over its
     /// row followed by one value per enclosing element binding, innermost
@@ -216,6 +223,10 @@ impl GraphIntegerOp {
                 bytes.push(33);
                 bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
             }
+            Self::IdentityColumn { column, text } => {
+                bytes.extend_from_slice(&[35, u8::from(*text)]);
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
         }
     }
 }
@@ -226,6 +237,11 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Literal(_) => f.write_str("Literal([REDACTED])"),
             Self::Scalar(_) => f.write_str("Scalar([REDACTED])"),
             Self::ScalarColumn(_) => f.write_str("ScalarColumn([REDACTED])"),
+            Self::IdentityColumn { text, .. } => f
+                .debug_struct("IdentityColumn")
+                .field("column", &"[REDACTED]")
+                .field("text", text)
+                .finish(),
             Self::Local(_) => f.write_str("Local([REDACTED])"),
             Self::Upper => f.write_str("Upper"),
             Self::Lower => f.write_str("Lower"),
@@ -428,6 +444,7 @@ enum Instruction {
     NumericUnary(GraphIntegerUnary),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    IdentityColumn { column: usize, text: bool },
     Local(usize),
     Upper,
     Lower,
@@ -512,9 +529,29 @@ impl GraphIntegerExpression {
         })
     }
 
+    /// Every input column this program reads, scalar or element.
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
+            Instruction::Column(column)
+            | Instruction::ScalarColumn(column)
+            | Instruction::IdentityColumn { column, .. } => Some(*column),
+            _ => None,
+        })
+    }
+
+    /// The input columns read as scalars; each must admit a scalar.
+    pub fn scalar_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.code.iter().filter_map(|op| match op {
             Instruction::Column(column) | Instruction::ScalarColumn(column) => Some(*column),
+            _ => None,
+        })
+    }
+
+    /// The input columns read for id()/elementId(); each must admit a vertex
+    /// or an edge (fgdb-j687q).
+    pub fn element_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.code.iter().filter_map(|op| match op {
+            Instruction::IdentityColumn { column, .. } => Some(*column),
             _ => None,
         })
     }
@@ -551,6 +588,7 @@ impl GraphIntegerExpression {
                 Some(_) => Err(GraphIntegerErrorKind::NonScalar),
                 None => Err(GraphIntegerErrorKind::MissingColumn),
             },
+            |column| element_identity(values.get(column)),
             control,
         )?;
         let ExpressionCell::Scalar(value) = value else {
@@ -566,11 +604,15 @@ impl GraphIntegerExpression {
     /// operands widen arithmetic to checked i128; scalar-only arithmetic still
     /// checks i64 bounds. Returned payloads remain borrowed until their caller
     /// reserves storage for an owned output. `width` is the loaded row's
-    /// width: a Local(k) element loads column `width - 1 - k`.
+    /// width: a Local(k) element loads column `width - 1 - k`. `load_element`
+    /// answers only IdentityColumn: the identity of the vertex or edge a column
+    /// holds, None for NULL. Every other instruction reads scalars through
+    /// `load`, so no element ever reaches the stack (fgdb-j687q).
     pub(crate) fn evaluate_loaded_with_control<'a, E>(
         &'a self,
         width: usize,
         mut load: impl FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
+        mut load_element: impl FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
         for _ in 0..self.stack_entries {
@@ -610,6 +652,21 @@ impl GraphIntegerExpression {
                         .checked_sub(offset + 1)
                         .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
                     stack.push(load(column).map_err(failure)?);
+                }
+                Instruction::IdentityColumn { column, text } => {
+                    let value = match load_element(*column).map_err(failure)? {
+                        None => CanonicalScalar::Null,
+                        Some(identity) if *text => {
+                            control(GlaExecutionEvent::ScratchEntry)
+                                .map_err(GraphIntegerEvaluationError::Control)?;
+                            make_text(&identity.to_string(), at, control)?
+                        }
+                        Some(identity) => CanonicalScalar::Int(
+                            i64::try_from(identity)
+                                .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                        ),
+                    };
+                    stack.push(value.into());
                 }
                 Instruction::Scalar(value) => {
                     stack.push(ExpressionCell::Scalar(Cow::Borrowed(value.value())));
@@ -1056,6 +1113,10 @@ impl GraphIntegerExpression {
                     bytes.push(30);
                     bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
                 }
+                Instruction::IdentityColumn { column, text } => {
+                    bytes.extend_from_slice(&[35, u8::from(*text)]);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                }
             }
         }
         bytes
@@ -1267,6 +1328,20 @@ fn numeric<E>(
         },
     };
     Ok(CanonicalScalar::Float(result))
+}
+
+/// The identity an IdentityColumn reads from one loaded row value: a vertex
+/// or an edge has one, NULL has none, anything else is not an element.
+pub(crate) fn element_identity(
+    value: Option<&GraphValue>,
+) -> Result<Option<u128>, GraphIntegerErrorKind> {
+    match value {
+        Some(GraphValue::Vertex(vertex)) => Ok(Some(vertex.0)),
+        Some(GraphValue::Edge(edge)) => Ok(Some(edge.0)),
+        Some(GraphValue::Scalar(CanonicalScalar::Null)) => Ok(None),
+        Some(_) => Err(GraphIntegerErrorKind::IncompatibleOperands),
+        None => Err(GraphIntegerErrorKind::MissingColumn),
+    }
 }
 
 fn make_text<E>(

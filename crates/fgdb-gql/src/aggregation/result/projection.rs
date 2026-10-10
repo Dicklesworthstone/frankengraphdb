@@ -87,6 +87,16 @@ fn load_cell(cell: Cell<'_>) -> Result<ExpressionCell<'_>, GraphIntegerErrorKind
     })
 }
 
+/// The identity of a grouped vertex or edge for id()/elementId() (fgdb-j687q).
+fn load_element(cell: Cell<'_>) -> Result<Option<u128>, GraphIntegerErrorKind> {
+    match cell {
+        Cell::Value(ValueRef::Vertex(vertex)) => Ok(Some(vertex.0)),
+        Cell::Value(ValueRef::Edge(edge)) => Ok(Some(edge.0)),
+        cell if cell.is_null() => Ok(None),
+        _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+    }
+}
+
 fn input_cell<'g, 'a: 'g>(
     group: Group<'g, 'a>,
     input: usize,
@@ -123,7 +133,12 @@ fn expression<'g, E, C>(
             let value = expression
                 // Aggregate outputs bind no element scope (fgdb-20foe), so a
                 // width of 0 makes any Local a MissingColumn, never a cell.
-                .evaluate_loaded_with_control(0, |at| input(at).and_then(load_cell), control)
+                .evaluate_loaded_with_control(
+                    0,
+                    |at| input(at).and_then(load_cell),
+                    |at| input(at).and_then(load_element),
+                    control,
+                )
                 .map_err(|error| match error {
                     GraphIntegerEvaluationError::Control(error) => error,
                     GraphIntegerEvaluationError::Value(error) => {

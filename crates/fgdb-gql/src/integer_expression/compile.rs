@@ -89,6 +89,7 @@ fn prepare_root(
             | Op::Truth(_)
             | Op::Scalar(_)
             | Op::ScalarColumn(_)
+            | Op::IdentityColumn { .. }
             | Op::Local(_) => 0,
             Op::Unary(_)
             | Op::IsNull(_)
@@ -218,6 +219,9 @@ fn prepare_root(
                 _ => return Err(wrong()),
             },
             Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
+            // id() is an Int, elementId() its decimal text (fgdb-j687q).
+            Op::IdentityColumn { text: true, .. } => Kind::Text,
+            Op::IdentityColumn { text: false, .. } => Kind::Integer,
             Op::Unary(_) | Op::Binary(_) if !integer_root => {
                 if matches!(op, Op::Binary(GraphIntegerBinary::NullIf)) {
                     child_kind(0)
@@ -433,6 +437,10 @@ fn prepare_root(
                 match &node.op {
                     Op::Column(column) => code.push(Instruction::Column(*column)),
                     Op::ScalarColumn(column) => code.push(Instruction::ScalarColumn(*column)),
+                    Op::IdentityColumn { column, text } => code.push(Instruction::IdentityColumn {
+                        column: *column,
+                        text: *text,
+                    }),
                     Op::Local(offset) => code.push(Instruction::Local(*offset)),
                     Op::Scalar(value) => code.push(Instruction::Scalar(value.clone())),
                     Op::Literal(value) => code.push(Instruction::Literal(*value)),

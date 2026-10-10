@@ -258,6 +258,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
             let selected = selector.bind_parameters(params).map_err(selector_error)?;
             check_branch(&selected, branch)?;
+            refuse_element_identity(selected.statement())?;
             execution.borrow_mut().checkpoint()?;
             let native = PreparedNativeRead::prepare(
                 selected.statement(),
@@ -310,6 +311,7 @@ fn text_at<R: GraphSymbolResolver>(
     let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
     let selected = selector.bind_parameters(params).map_err(selector_error)?;
     check_branch(&selected, branch)?;
+    refuse_element_identity(selected.statement())?;
     execution.borrow_mut().checkpoint()?;
     if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
         return result_rows(explain_authorized(

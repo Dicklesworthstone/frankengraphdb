@@ -18,8 +18,9 @@ const MAX_BOOLEAN_NESTING: usize = 64;
 
 pub(super) enum SyntaxItem<'a> {
     Atom(Filter<'a>),
+    /// A column with no key is a vertex read by id()/elementId() (fgdb-j687q).
     Expression {
-        columns: Vec<(Name<'a>, Name<'a>)>,
+        columns: Vec<(Name<'a>, Option<Name<'a>>)>,
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
     },
     Truth(Option<bool>),
@@ -378,10 +379,15 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::Word(word) => {
+                    // id(x)/elementId(x) (fgdb-j687q) are scalar operands too;
+                    // their argument is an element column, not a scalar, so
+                    // they are not SCALAR_FUNCTIONS.
                     if !after_dot
-                        && super::SCALAR_FUNCTIONS
+                        && (super::SCALAR_FUNCTIONS
                             .iter()
                             .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                            || word.eq_ignore_ascii_case("ID")
+                            || word.eq_ignore_ascii_case("ELEMENTID"))
                         && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                     {
                         return Ok(true);
@@ -588,8 +594,9 @@ enum Atom {
 #[derive(Clone)]
 enum Item {
     Atom(Atom),
+    /// A column with no key is the vertex itself (id()/elementId()).
     Expression {
-        columns: Vec<(String, PropertyKeyId)>,
+        columns: Vec<(String, Option<PropertyKeyId>)>,
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
     },
     Truth(Option<bool>),
@@ -681,11 +688,23 @@ impl BoundBooleanTemplate {
                     encode_atom(bytes, atom);
                 }
                 Item::Expression { columns, program } => {
-                    bytes.push(1);
+                    // Property-only expressions keep their bytes; a vertex
+                    // column (id()/elementId(), fgdb-j687q) selects tag 6,
+                    // which tags each column.
+                    let vertices = columns.iter().any(|(_, key)| key.is_none());
+                    bytes.push(if vertices { 6 } else { 1 });
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for (variable, key) in columns {
                         append_name(bytes, variable);
-                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        match key {
+                            Some(key) => {
+                                if vertices {
+                                    bytes.push(1);
+                                }
+                                bytes.extend_from_slice(&key.0.to_be_bytes());
+                            }
+                            None => bytes.push(0),
+                        }
                     }
                     bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
                     for op in program {
@@ -786,7 +805,9 @@ impl BoundBooleanTemplate {
                     columns: columns
                         .into_iter()
                         .map(|(variable, key)| {
-                            property(key).map(|key| (variable.text.to_owned(), key))
+                            key.map(&mut property)
+                                .transpose()
+                                .map(|key| (variable.text.to_owned(), key))
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     program,
@@ -946,7 +967,10 @@ impl BoundBooleanTemplate {
             .map(|item| match item {
                 Item::Expression { columns, .. } => columns
                     .iter()
-                    .map(|(variable, key)| property(variable, *key))
+                    .map(|(variable, key)| match key {
+                        Some(key) => property(variable, *key),
+                        None => Operand::Vertex(variable),
+                    })
                     .collect(),
                 _ => Vec::new(),
             })

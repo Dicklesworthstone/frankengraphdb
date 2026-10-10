@@ -179,12 +179,27 @@ async fn read_inner(
     }
 }
 
+/// Engine identities are not masked, so no capability may observe them through
+/// id()/elementId() (fgdb-j687q, owner ruling 2026-09-30). The authorized
+/// sessions refuse too; this covers the server's own RETURNING and
+/// subscription parsers, which run before any session sees the text.
+fn refuse_element_identity(text: &str) -> Result<(), Refusal> {
+    if fgdb_gql::reads_element_identity(text) {
+        return Err(Refusal::new(
+            ErrorCode::PermissionDenied,
+            "id() and elementId() are not available under a capability",
+        ));
+    }
+    Ok(())
+}
+
 async fn write_inner(
     cx: &Cx,
     db: &Served,
     token: &CapabilityToken,
     statement: &Execute,
 ) -> Result<Answer, Refusal> {
+    refuse_element_identity(&statement.statement)?;
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());

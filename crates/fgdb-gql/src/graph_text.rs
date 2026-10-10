@@ -275,6 +275,55 @@ struct Token<'a> {
     at: usize,
 }
 
+/// Whether `statement` calls openCypher `id()` or `elementId()` (fgdb-j687q).
+/// Capability-scoped sessions refuse such statements before preparation,
+/// because engine identities are not masked (owner ruling 2026-09-30).
+///
+/// The scan reads the same tokens the parser does, so comments cannot split
+/// the call and quoted text cannot fake it. Surfaces strip their own framing
+/// (`SUBSCRIBE TO`, a trailing `;`, `AT BRANCH`) before the graph parser runs,
+/// so a byte this lexer rejects is skipped and the scan resumes after it: no
+/// text past an error goes unread. It over-approximates, never under: any other
+/// `id`/`elementId` word directly followed by `(` (a procedure of that name)
+/// refuses too, and so does a text beyond the parser's size or token caps.
+#[must_use]
+pub fn reads_element_identity(statement: &str) -> bool {
+    if statement.len() > MAX_GRAPH_TEXT_BYTES {
+        return true;
+    }
+    let mut lexer = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    let mut identity_word = false;
+    loop {
+        let token = match lexer.next() {
+            Ok(token) => token,
+            Err(error) if error.kind == GraphPatternTextErrorKind::TooManyTokens => return true,
+            Err(error) => {
+                // Resume after the rejected character.
+                let at = error.offset.max(lexer.at);
+                let Some(width) = statement.get(at..).and_then(|rest| rest.chars().next()) else {
+                    return false;
+                };
+                lexer.at = at + width.len_utf8();
+                identity_word = false;
+                continue;
+            }
+        };
+        match token.kind {
+            TokenKind::End => return false,
+            TokenKind::Punct(b'(') if identity_word => return true,
+            TokenKind::Word(word) => {
+                identity_word =
+                    word.eq_ignore_ascii_case("id") || word.eq_ignore_ascii_case("elementId");
+            }
+            _ => identity_word = false,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Lexer<'a> {
     text: &'a str,
@@ -1867,6 +1916,36 @@ mod tests {
     }
     fn policy() -> GqlQueryPolicy {
         GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000)
+    }
+
+    #[test]
+    fn element_identity_scan_reads_parser_tokens_and_fails_closed() {
+        for text in [
+            "MATCH (n) RETURN id(n) AS i",
+            "MATCH (n) RETURN ElementId(n) AS e",
+            "MATCH (n) RETURN ID // a line comment\n(n) AS i",
+            "MATCH (n) RETURN id /* split */ (n) AS i",
+            // Over-approximation: a procedure of that name refuses too.
+            "CALL fnx.id(GRAPH g)",
+            // A rejected byte is skipped, never a reason to stop reading.
+            "SUBSCRIBE TO MATCH (n) RETURN id(n);",
+            "MATCH (n) RETURN ; id(n) AS i",
+            "MATCH (n) RETURN 'unterminated id(n)",
+        ] {
+            assert!(reads_element_identity(text), "{text}");
+        }
+        for text in [
+            "SUBSCRIBE TO MATCH (p:Person) WHERE p.name = 'Bob';",
+            "MATCH (n) RETURN 'unterminated",
+            "MATCH (n) RETURN n AS id",
+            "MATCH (n) RETURN n.id AS value",
+            "MATCH (n {id: 1}) RETURN n AS identity",
+            "MATCH (n) RETURN 'id(n)' AS quoted",
+            "MATCH (n) RETURN `id` AS name",
+            "MATCH (n) RETURN ids(n) AS plural",
+        ] {
+            assert!(!reads_element_identity(text), "{text}");
+        }
     }
     fn vertex_rows(rows: &[GraphValueRow]) -> Vec<Vec<VId>> {
         rows.iter()

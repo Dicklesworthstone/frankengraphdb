@@ -904,3 +904,67 @@ fn authorized_explain_lists_the_text_plan_and_cannot_see_hidden_records() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// Capability-scoped reads refuse openCypher id()/elementId() (fgdb-j687q,
+/// owner ruling 2026-09-30): engine identities are not masked, so they would
+/// reveal allocation order across scopes. Every authorized text entry point
+/// refuses typed before preparation; the same word as an alias, a property
+/// key or inside quoted text is not the function and still runs.
+#[test]
+fn authorized_reads_refuse_identity_functions_at_every_text_entry_point() {
+    let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = stream_database(&c.commit(), false).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        let session = || {
+            db.authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+                .unwrap()
+        };
+        let denied = |result: Result<(), QueryError>| {
+            matches!(result, Err(QueryError::Authorization(Error::ScopeDenied)))
+        };
+        for text in [
+            "MATCH (n) RETURN id(n) AS i",
+            "MATCH (n) RETURN elementId(n) AS e",
+            "MATCH (n) RETURN ID /* split */ (n) AS i",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY id(n)",
+            "EXPLAIN MATCH (n) RETURN id(n) AS i",
+        ] {
+            assert!(
+                denied(session().query(&cx, text, &args).map(drop)),
+                "query: {text}"
+            );
+            assert!(
+                denied(session().prepare(&cx, text, &args).map(drop)),
+                "prepare: {text}"
+            );
+            assert!(
+                denied(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        text,
+                        &args,
+                        symbols,
+                        policy(),
+                        || 100
+                    )
+                    .map(drop)
+                ),
+                "query_authorized: {text}"
+            );
+        }
+        for text in [
+            "MATCH (n) RETURN n AS id",
+            "MATCH (n) RETURN 'id(n)' AS quoted",
+        ] {
+            assert!(session().query(&cx, text, &args).is_ok(), "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

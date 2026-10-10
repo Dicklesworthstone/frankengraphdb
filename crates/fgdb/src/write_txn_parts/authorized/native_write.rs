@@ -48,7 +48,13 @@ fn reserve_text<Clock: FnMut() -> u64>(
         .map_err(|_| admission(WriteTxnError::Authorization(Error::TooLarge)))?;
     // Reserve original UTF-8 bytes BEFORE lexical classification, parsing or
     // declaration allocation. This is an ingress price, not compiler telemetry.
-    execution.work(bytes).map_err(admission)
+    execution.work(bytes).map_err(admission)?;
+    // Engine identities are not masked, so a capability cannot observe them
+    // through id()/elementId() (fgdb-j687q, owner ruling 2026-09-30).
+    if fgdb_gql::reads_element_identity(text) {
+        return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
+    }
+    Ok(())
 }
 
 // The trusted host still owns catalog semantics. This wrapper controls when
