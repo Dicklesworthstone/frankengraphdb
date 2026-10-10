@@ -312,11 +312,11 @@ fn reserve(
     // combined worst case must fit this one signed work reservation.
     let native_work = share / 2;
     let scratch = (remaining_scratch / phases).min(share - native_work);
-    let node_work = if source_width != 0 {
-        native_work.min(limits.max_nodes / source_width / nodes)
-    } else {
-        native_work
-    };
+    // A zero source width admits no graph node, so it imposes no node ceiling.
+    let node_work = limits
+        .max_nodes
+        .checked_div(source_width)
+        .map_or(native_work, |per_width| native_work.min(per_width / nodes));
     if share == 0 || node_work == 0 || scratch == 0 {
         return Err(budget());
     }
