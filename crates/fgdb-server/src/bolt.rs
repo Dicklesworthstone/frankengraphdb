@@ -15,12 +15,12 @@
 //!   so all of its statements read one pinned generation; autocommit RUNs
 //!   each pin their own. No lock is held across network round trips.
 //! - The database is RUN/BEGIN's `db`, or the only served database.
-//! - Vertices come back as Bolt nodes with their labels and properties,
-//!   read through the same session (so capability masking applies): each
-//!   label and property binding the server was given is looked up for the
-//!   returned vertices. Relationships and paths have no Bolt encoding here
-//!   and refuse with `Neo.ClientError.Statement.FeatureNotSupported`;
-//!   return `type(r)`, `r.prop` or the endpoints instead.
+//! - Graph values come back as Bolt nodes, relationships and paths. Labels,
+//!   types, endpoints and properties are read through the same authorized
+//!   session at the statement's effective snapshot. The server's catalog
+//!   bindings determine the property names, with capability masking applied
+//!   by the engine before every lookup. Nested lists and maps preserve these
+//!   graph structures; paths retain traversal direction and repeated elements.
 //! - `CALL db.labels()`, `db.relationshipTypes()` and `db.propertyKeys()`
 //!   answer the schema names the token may see (the server's bindings,
 //!   scope-filtered), the same answer as HTTP's schema route.
@@ -38,16 +38,16 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::Poll;
-use fgdb::{QueryError, QueryResult};
+use fgdb::{PreparedNativeRead, QueryError, QueryResult};
 use fgdb_bolt::message::{
     Dechunker, MAGIC, Map, Request, Response, decode_request, negotiate, structure,
 };
 use fgdb_bolt::packstream::{Value, get};
-use fgdb_gql::GqlParameters;
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
-use fgdb_types::{CommitSeq, PurposeContexts, VId};
+use fgdb_types::{CommitSeq, EId, PurposeContexts, VId};
 use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -226,6 +226,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
 }
 
 /// A Bolt-visible refusal: a Neo4j status code and a message.
+#[derive(Debug)]
 struct Failure {
     code: &'static str,
     message: String,
@@ -599,12 +600,12 @@ impl<'s> Connection<'s> {
                 });
             }
         };
-        let nodes = hydrate(&query_cx, session, db, &rows)?;
+        let entities = hydrate(&query_cx, session, db, &rows, query, &parameters, seq)?;
         let rows = rows
             .into_iter()
             .map(|row| {
                 row.into_iter()
-                    .map(|cell| value(cell, &nodes))
+                    .map(|cell| value(cell, &entities))
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<VecDeque<_>, _>>()?;
@@ -891,44 +892,143 @@ fn argument(value: &Value) -> Result<WireValue, Failure> {
 /// A hydrated vertex: its visible labels and properties.
 type Nodes = BTreeMap<u128, (Vec<String>, Vec<(String, Value)>)>;
 
-/// Every vertex a result row carries, directly or inside a list or map.
-fn collect_vertices(value: &WireValue, out: &mut BTreeSet<u128>) {
+/// A relationship's stored orientation, visible type and masked properties.
+struct Relationship {
+    source: u128,
+    target: u128,
+    kind: String,
+    properties: Vec<(String, Value)>,
+}
+
+#[derive(Default)]
+struct Entities {
+    nodes: Nodes,
+    relationships: BTreeMap<u128, Relationship>,
+}
+
+/// Every graph identity a result carries, including paths inside collections.
+fn collect_entities(value: &WireValue, vertices: &mut BTreeSet<u128>, edges: &mut BTreeSet<u128>) {
     match value {
         WireValue::Vertex(id) => {
-            out.insert(*id);
+            vertices.insert(*id);
         }
-        WireValue::Vertices(ids) => out.extend(ids.iter().copied()),
-        WireValue::List(items) => items.iter().for_each(|item| collect_vertices(item, out)),
+        WireValue::Vertices(ids) => vertices.extend(ids.iter().copied()),
+        WireValue::Edge(id) => {
+            edges.insert(*id);
+        }
+        WireValue::Edges(ids) => edges.extend(ids.iter().copied()),
+        WireValue::Path { start, steps } => {
+            vertices.insert(*start);
+            for &(edge, vertex) in steps {
+                edges.insert(edge);
+                vertices.insert(vertex);
+            }
+        }
+        WireValue::List(items) => items
+            .iter()
+            .for_each(|item| collect_entities(item, vertices, edges)),
         WireValue::Map(entries) => entries
             .iter()
-            .for_each(|(_, value)| collect_vertices(value, out)),
+            .for_each(|(_, value)| collect_entities(value, vertices, edges)),
         _ => {}
     }
 }
 
-/// Look up the labels and properties of every returned vertex, through the
-/// statement's own session: one membership query per bound label and one
-/// projection per bound property, each over all returned vertices. A
-/// binding the capability cannot see is skipped, exactly as if absent.
+/// Resolve the already-successful statement's effective cut with the same
+/// native templates as execution. Branch-only arguments are removed by the
+/// existing selector, never by string substitution. A temporal result must
+/// not be hydrated with newer labels, endpoints or properties.
+fn hydration_snapshot(
+    db: &Served,
+    text: &str,
+    parameters: &GqlParameters,
+    default: CommitSeq,
+) -> Result<CommitSeq, Failure> {
+    let selector = PreparedGraphBranchText::prepare(text)
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    let selected = selector
+        .bind_parameters(parameters)
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    let parameters = selected.parameters();
+    let prepared =
+        PreparedNativeRead::prepare(selected.statement(), parameters, db.symbols.clone())
+            .map_err(|error| Failure::from_refusal(query_refusal(error)))?;
+    match prepared {
+        PreparedNativeRead::TemporalPattern(prepared) => prepared
+            .bind_parameters(parameters)
+            .map(|bound| bound.as_of())
+            .map_err(|error| Failure::invalid(error.to_string())),
+        PreparedNativeRead::TemporalSet(prepared) => prepared
+            .bind_parameters(parameters)
+            .map(|bound| bound.as_of())
+            .map_err(|error| Failure::invalid(error.to_string())),
+        PreparedNativeRead::TemporalAggregate(prepared) => prepared
+            .bind_parameters(parameters)
+            .map(|bound| bound.as_of())
+            .map_err(|error| Failure::invalid(error.to_string())),
+        _ => Ok(default),
+    }
+}
+
+/// Execute a metadata lookup through the original authorized session. Only a
+/// hidden catalog binding reads as absent; expiry, cancellation and exhausted
+/// signed budgets abort the whole RUN instead of emitting incomplete values.
+fn lookup(
+    query_cx: &fgdb_types::QueryCx,
+    session: &mut ReadSession<'_>,
+    text: &str,
+    parameters: &GqlParameters,
+) -> Result<Vec<Vec<WireValue>>, Failure> {
+    match session.query(query_cx, text, parameters) {
+        Ok(QueryResult::Rows { rows, .. }) => Ok(rows
+            .iter()
+            .map(|row| row.iter().map(convert::cell).collect())
+            .collect()),
+        Ok(QueryResult::Write { .. }) => Err(read_only()),
+        Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied)) => Ok(Vec::new()),
+        Err(error) => Err(Failure::from_refusal(query_refusal(error))),
+    }
+}
+
+fn unavailable_graph_value() -> Failure {
+    Failure::new(
+        "Neo.DatabaseError.Statement.ExecutionFailed",
+        "graph value is unavailable in the selected snapshot",
+    )
+}
+
+/// Hydrate only graph identities present in authorized output. Every lookup
+/// uses this statement's session and effective cut; no database lock or raw
+/// storage accessor is reacquired. Catalog-sized lookup batches retain the
+/// existing native and signed per-execution limits.
 fn hydrate(
     query_cx: &fgdb_types::QueryCx,
     session: &mut ReadSession<'_>,
     db: &Served,
     rows: &[Vec<WireValue>],
-) -> Result<Nodes, Failure> {
+    text: &str,
+    parameters: &GqlParameters,
+    default: CommitSeq,
+) -> Result<Entities, Failure> {
     let mut vertices = BTreeSet::new();
+    let mut edges = BTreeSet::new();
     for row in rows {
         for cell in row {
-            collect_vertices(cell, &mut vertices);
+            collect_entities(cell, &mut vertices, &mut edges);
         }
     }
-    let mut nodes: Nodes = vertices
-        .iter()
-        .map(|&id| (id, (Vec::new(), Vec::new())))
-        .collect();
-    if vertices.is_empty() {
-        return Ok(nodes);
+    if vertices.is_empty() && edges.is_empty() {
+        return Ok(Entities::default());
     }
+    let at = hydration_snapshot(db, text, parameters, default)?;
+    let temporal = format!("FOR SYSTEM_TIME AS OF SEQ {}", at.0);
+    let mut entities = Entities {
+        nodes: vertices
+            .iter()
+            .map(|&id| (id, (Vec::new(), Vec::new())))
+            .collect(),
+        relationships: BTreeMap::new(),
+    };
     let ids: Vec<u128> = vertices.into_iter().collect();
     for batch in ids.chunks(HYDRATION_BATCH) {
         let list: Vec<GraphValue> = batch
@@ -938,27 +1038,14 @@ fn hydrate(
         let parameters = GqlParameters::new()
             .with_list("__fgdb_vertices", list)
             .map_err(|error| Failure::invalid(error.to_string()))?;
-        let mut lookup = |text: String| -> Result<Option<Vec<Vec<WireValue>>>, Failure> {
-            match session.query(query_cx, &text, &parameters) {
-                Ok(QueryResult::Rows { rows, .. }) => Ok(Some(
-                    rows.iter()
-                        .map(|row| row.iter().map(convert::cell).collect())
-                        .collect(),
-                )),
-                Ok(QueryResult::Write { .. }) => Err(read_only()),
-                // A binding outside the capability's scope reads as absent.
-                Err(QueryError::Authorization(_)) => Ok(None),
-                Err(error) => Err(Failure::from_refusal(query_refusal(error))),
-            }
-        };
         for (label, _) in db.symbols.labels() {
             let text = format!(
-                "UNWIND $__fgdb_vertices AS n MATCH (n:{}) RETURN n",
+                "UNWIND $__fgdb_vertices AS n MATCH (n:{}) {temporal} RETURN n",
                 quoted(label)
             );
-            for row in lookup(text)?.unwrap_or_default() {
+            for row in lookup(query_cx, session, &text, &parameters)? {
                 if let Some(WireValue::Vertex(id)) = row.first()
-                    && let Some((labels, _)) = nodes.get_mut(id)
+                    && let Some((labels, _)) = entities.nodes.get_mut(id)
                 {
                     labels.push(label.to_owned());
                 }
@@ -966,24 +1053,95 @@ fn hydrate(
         }
         for (property, _) in db.symbols.properties() {
             let text = format!(
-                "UNWIND $__fgdb_vertices AS n MATCH (n) RETURN n, n.{} AS v",
+                "UNWIND $__fgdb_vertices AS n MATCH (n) {temporal} RETURN n, n.{} AS v",
                 quoted(property)
             );
-            for row in lookup(text)?.unwrap_or_default() {
+            for row in lookup(query_cx, session, &text, &parameters)? {
                 let [WireValue::Vertex(id), cell] = row.as_slice() else {
                     continue;
                 };
                 if matches!(cell, WireValue::Null) {
                     continue;
                 }
-                let value = value(cell.clone(), &Nodes::new())?;
-                if let Some((_, properties)) = nodes.get_mut(id) {
+                let value = value(cell.clone(), &Entities::default())?;
+                if let Some((_, properties)) = entities.nodes.get_mut(id) {
                     properties.push((property.to_owned(), value));
                 }
             }
         }
     }
-    Ok(nodes)
+    let ids: Vec<u128> = edges.into_iter().collect();
+    for batch in ids.chunks(HYDRATION_BATCH) {
+        let parameters = GqlParameters::new()
+            .with_list(
+                "__fgdb_edges",
+                batch.iter().map(|&id| GraphValue::Edge(EId(id))).collect(),
+            )
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        // Identity-list membership belongs to the relational WITH filter;
+        // the graph WHERE scalar compiler accepts property operands only.
+        // This uses the existing native row algebra for full-width EIds.
+        // Names come from exactly the declared catalog, as node labels do.
+        // A typed source is rejected before expansion when its relation is
+        // outside the capability, and no reverse catalog is guessed from IDs.
+        for (kind, _) in db.symbols.relations() {
+            let source = format!("MATCH (s)-[r:{}]->(t) {temporal}", quoted(kind));
+            let text = format!("{source} WITH r, s, t WHERE r IN $__fgdb_edges RETURN r, s, t");
+            let metadata = lookup(query_cx, session, &text, &parameters)?;
+            if metadata.is_empty() {
+                continue;
+            }
+            for row in metadata {
+                let [
+                    WireValue::Edge(id),
+                    WireValue::Vertex(source),
+                    WireValue::Vertex(target),
+                ] = row.as_slice()
+                else {
+                    return Err(unavailable_graph_value());
+                };
+                if batch.binary_search(id).is_err() {
+                    return Err(unavailable_graph_value());
+                }
+                entities.relationships.insert(
+                    *id,
+                    Relationship {
+                        source: *source,
+                        target: *target,
+                        kind: kind.to_owned(),
+                        properties: Vec::new(),
+                    },
+                );
+            }
+            for (property, _) in db.symbols.properties() {
+                let text = format!(
+                    "{source} WITH r, r.{} AS v WHERE r IN $__fgdb_edges RETURN r, v",
+                    quoted(property)
+                );
+                for row in lookup(query_cx, session, &text, &parameters)? {
+                    let [WireValue::Edge(id), cell] = row.as_slice() else {
+                        return Err(unavailable_graph_value());
+                    };
+                    if matches!(cell, WireValue::Null) {
+                        continue;
+                    }
+                    let value = value(cell.clone(), &Entities::default())?;
+                    let relationship = entities
+                        .relationships
+                        .get_mut(id)
+                        .ok_or_else(unavailable_graph_value)?;
+                    relationship.properties.push((property.to_owned(), value));
+                }
+            }
+        }
+        if batch
+            .iter()
+            .any(|id| !entities.relationships.contains_key(id))
+        {
+            return Err(unavailable_graph_value());
+        }
+    }
+    Ok(entities)
 }
 
 /// A schema name as a delimited identifier.
@@ -994,23 +1152,94 @@ fn quoted(name: &str) -> String {
 fn feature_not_supported(what: &str) -> Failure {
     Failure::new(
         "Neo.ClientError.Statement.FeatureNotSupported",
-        format!(
-            "{what} values have no encoding in fgdbd's Bolt profile; return type(r), r.prop or the endpoints instead"
-        ),
+        format!("{what} values have no encoding in fgdbd's Bolt profile"),
     )
 }
 
-/// One result cell as a Bolt value.
-fn value(cell: WireValue, nodes: &Nodes) -> Result<Value, Failure> {
-    let node = |id: u128| {
-        let (labels, properties) = nodes.get(&id).cloned().unwrap_or_default();
-        structure::node(
+impl Entities {
+    fn node(&self, id: u128) -> Result<Value, Failure> {
+        let (labels, properties) = self.nodes.get(&id).ok_or_else(unavailable_graph_value)?;
+        Ok(structure::node(
             i64::try_from(id).unwrap_or(-1),
-            labels,
-            properties,
+            labels.clone(),
+            properties.clone(),
             id.to_string(),
-        )
-    };
+        ))
+    }
+
+    fn relationship(&self, id: u128) -> Result<Value, Failure> {
+        let relationship = self
+            .relationships
+            .get(&id)
+            .ok_or_else(unavailable_graph_value)?;
+        Ok(structure::relationship(
+            i64::try_from(id).unwrap_or(-1),
+            i64::try_from(relationship.source).unwrap_or(-1),
+            i64::try_from(relationship.target).unwrap_or(-1),
+            relationship.kind.clone(),
+            relationship.properties.clone(),
+            [
+                id.to_string(),
+                relationship.source.to_string(),
+                relationship.target.to_string(),
+            ],
+        ))
+    }
+
+    fn path(&self, start: u128, steps: &[(u128, u128)]) -> Result<Value, Failure> {
+        let mut nodes = vec![self.node(start)?];
+        let mut relationships = Vec::new();
+        let mut node_indices = BTreeMap::from([(start, 0_i64)]);
+        let mut relationship_indices = BTreeMap::new();
+        let mut indices = Vec::with_capacity(steps.len().saturating_mul(2));
+        let mut current = start;
+        for &(edge, next) in steps {
+            let relationship = self
+                .relationships
+                .get(&edge)
+                .ok_or_else(unavailable_graph_value)?;
+            let forward = if (relationship.source, relationship.target) == (current, next) {
+                true
+            } else if (relationship.source, relationship.target) == (next, current) {
+                false
+            } else {
+                return Err(unavailable_graph_value());
+            };
+            let edge_index = if let Some(&index) = relationship_indices.get(&edge) {
+                index
+            } else {
+                let index = i64::try_from(relationships.len())
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or_else(unavailable_graph_value)?;
+                relationships.push(structure::unbound_relationship(
+                    i64::try_from(edge).unwrap_or(-1),
+                    relationship.kind.clone(),
+                    relationship.properties.clone(),
+                    edge.to_string(),
+                ));
+                relationship_indices.insert(edge, index);
+                index
+            };
+            let node_index = if let Some(&index) = node_indices.get(&next) {
+                index
+            } else {
+                let index = i64::try_from(nodes.len()).map_err(|_| unavailable_graph_value())?;
+                nodes.push(self.node(next)?);
+                node_indices.insert(next, index);
+                index
+            };
+            indices.push(if forward { edge_index } else { -edge_index });
+            indices.push(node_index);
+            current = next;
+        }
+        Ok(structure::path(nodes, relationships, indices))
+    }
+}
+
+/// One result cell as a Bolt value; graph identities cannot be emitted
+/// without their authorized metadata, even inside nested collections.
+fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
     Ok(match cell {
         WireValue::Null => Value::Null,
         WireValue::Bool(value) => Value::Bool(value),
@@ -1033,22 +1262,29 @@ fn value(cell: WireValue, nodes: &Nodes) -> Result<Value, Failure> {
                 ),
             }
         }
-        WireValue::Vertex(id) => node(id),
-        WireValue::Vertices(ids) => Value::List(ids.into_iter().map(node).collect()),
-        WireValue::Edge(_) | WireValue::Edges(_) => {
-            return Err(feature_not_supported("Relationship"));
-        }
-        WireValue::Path { .. } => return Err(feature_not_supported("Path")),
+        WireValue::Vertex(id) => entities.node(id)?,
+        WireValue::Vertices(ids) => Value::List(
+            ids.into_iter()
+                .map(|id| entities.node(id))
+                .collect::<Result<_, _>>()?,
+        ),
+        WireValue::Edge(id) => entities.relationship(id)?,
+        WireValue::Edges(ids) => Value::List(
+            ids.into_iter()
+                .map(|id| entities.relationship(id))
+                .collect::<Result<_, _>>()?,
+        ),
+        WireValue::Path { start, steps } => entities.path(start, &steps)?,
         WireValue::List(items) => Value::List(
             items
                 .into_iter()
-                .map(|item| value(item, nodes))
+                .map(|item| value(item, entities))
                 .collect::<Result<_, _>>()?,
         ),
         WireValue::Map(entries) => Value::Map(
             entries
                 .into_iter()
-                .map(|(key, item)| Ok((key, value(item, nodes)?)))
+                .map(|(key, item)| Ok((key, value(item, entities)?)))
                 .collect::<Result<_, Failure>>()?,
         ),
         WireValue::Count(count) => {
@@ -1068,6 +1304,226 @@ fn value(cell: WireValue, nodes: &Nodes) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn graph_entities() -> Entities {
+        Entities {
+            nodes: [42, 69, 1]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        (
+                            vec!["Person".to_owned()],
+                            vec![("name".to_owned(), Value::string(id.to_string()))],
+                        ),
+                    )
+                })
+                .collect(),
+            relationships: [
+                (1000, 42, 69, "KNOWS"),
+                (1001, 1, 42, "WORKS_AT"),
+                (1002, 42, 42, "KNOWS"),
+                (u128::MAX, 42, 69, "KNOWS"),
+            ]
+            .into_iter()
+            .map(|(id, source, target, kind)| {
+                (
+                    id,
+                    Relationship {
+                        source,
+                        target,
+                        kind: kind.to_owned(),
+                        properties: vec![("age".to_owned(), Value::Int(7))],
+                    },
+                )
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn relationship_structures_keep_orientation_properties_and_full_element_ids() {
+        let entities = graph_entities();
+        for id in [1000, u128::MAX] {
+            let encoded = value(WireValue::Edge(id), &entities).unwrap();
+            let Value::Struct { tag, fields } = &encoded else {
+                panic!("relationship structure");
+            };
+            assert_eq!(*tag, 0x52);
+            assert_eq!(fields.len(), 8);
+            assert_eq!(fields[0], Value::Int(i64::try_from(id).unwrap_or(-1)));
+            assert_eq!(fields[1], Value::Int(42));
+            assert_eq!(fields[2], Value::Int(69));
+            assert_eq!(fields[3], Value::string("KNOWS"));
+            assert_eq!(
+                fields[4],
+                Value::Map(vec![("age".to_owned(), Value::Int(7))])
+            );
+            assert_eq!(fields[5], Value::string(id.to_string()));
+            assert_eq!(fields[6], Value::string("42"));
+            assert_eq!(fields[7], Value::string("69"));
+            let mut bytes = Vec::new();
+            fgdb_bolt::packstream::encode(&encoded, &mut bytes);
+            assert_eq!(&bytes[..2], &[0xB8, 0x52]);
+            assert_eq!(fgdb_bolt::packstream::decode(&bytes).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn paths_encode_reverse_traversal_repeated_elements_and_zero_hops() {
+        let entities = graph_entities();
+        let path = WireValue::Path {
+            start: 42,
+            steps: vec![(1000, 69), (1000, 42), (1001, 1)],
+        };
+        let encoded = value(path, &entities).unwrap();
+        let Value::Struct { tag, fields } = &encoded else {
+            panic!("path structure");
+        };
+        assert_eq!(*tag, 0x50);
+        assert_eq!(fields.len(), 3);
+        let Value::List(nodes) = &fields[0] else {
+            panic!("path nodes");
+        };
+        assert_eq!(
+            nodes,
+            &[
+                entities.node(42).unwrap(),
+                entities.node(69).unwrap(),
+                entities.node(1).unwrap()
+            ]
+        );
+        let Value::List(relationships) = &fields[1] else {
+            panic!("path relationships");
+        };
+        assert_eq!(relationships.len(), 2);
+        for (relationship, expected) in relationships.iter().zip([1000, 1001]) {
+            let Value::Struct { tag, fields } = relationship else {
+                panic!("unbound relationship");
+            };
+            assert_eq!(*tag, 0x72);
+            assert_eq!(fields.len(), 4);
+            assert_eq!(fields[0], Value::Int(expected));
+            assert_eq!(fields[3], Value::string(expected.to_string()));
+        }
+        assert_eq!(
+            fields[2],
+            Value::List([1, 1, -1, 0, -2, 2].into_iter().map(Value::Int).collect())
+        );
+        let mut bytes = Vec::new();
+        fgdb_bolt::packstream::encode(&encoded, &mut bytes);
+        assert_eq!(&bytes[..2], &[0xB3, 0x50]);
+        assert_eq!(fgdb_bolt::packstream::decode(&bytes).unwrap(), encoded);
+
+        assert_eq!(
+            entities.path(42, &[]).unwrap(),
+            Value::Struct {
+                tag: 0x50,
+                fields: vec![
+                    Value::List(vec![entities.node(42).unwrap()]),
+                    Value::List(Vec::new()),
+                    Value::List(Vec::new()),
+                ],
+            }
+        );
+        let Value::Struct { fields, .. } = entities.path(42, &[(1002, 42)]).unwrap() else {
+            panic!("self-loop path");
+        };
+        assert_eq!(fields[2], Value::List(vec![Value::Int(1), Value::Int(0)]));
+        for steps in [vec![(9999, 69)], vec![(1000, 1)]] {
+            assert!(entities.path(42, &steps).is_err());
+        }
+        assert!(entities.node(9999).is_err());
+        assert!(entities.relationship(9999).is_err());
+    }
+
+    #[test]
+    fn nested_graph_values_collect_and_encode_every_path_member() {
+        let path = WireValue::Path {
+            start: 42,
+            steps: vec![(1000, 69)],
+        };
+        let nested = WireValue::Map(vec![
+            ("edges".to_owned(), WireValue::Edges(vec![1000, 1000])),
+            ("paths".to_owned(), WireValue::List(vec![path])),
+            ("vertices".to_owned(), WireValue::Vertices(vec![1, 42])),
+        ]);
+        let mut vertices = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        collect_entities(&nested, &mut vertices, &mut edges);
+        assert_eq!(vertices, BTreeSet::from([1, 42, 69]));
+        assert_eq!(edges, BTreeSet::from([1000]));
+        let entities = graph_entities();
+        let Value::Map(entries) = value(nested, &entities).unwrap() else {
+            panic!("nested graph values");
+        };
+        assert_eq!(
+            get(&entries, "edges"),
+            Some(&Value::List(vec![
+                entities.relationship(1000).unwrap(),
+                entities.relationship(1000).unwrap(),
+            ]))
+        );
+        assert_eq!(
+            get(&entries, "paths"),
+            Some(&Value::List(vec![
+                entities.path(42, &[(1000, 69)]).unwrap()
+            ]))
+        );
+    }
+
+    #[test]
+    fn graph_metadata_lookup_shapes_bind_through_the_native_temporal_compiler() {
+        let mut symbols = crate::Symbols::new();
+        symbols
+            .bind(fgdb_gql::GraphSymbolKind::Label, "Person", 1)
+            .unwrap();
+        symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "KNOWS", 1)
+            .unwrap();
+        symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "name", 1)
+            .unwrap();
+        let vertices = GqlParameters::new()
+            .with_list("__fgdb_vertices", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        let edges = GqlParameters::new()
+            .with_list("__fgdb_edges", vec![GraphValue::Edge(EId(1))])
+            .unwrap();
+        for (text, parameters) in [
+            (
+                "UNWIND $__fgdb_vertices AS n MATCH (n:`Person`) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n",
+                &vertices,
+            ),
+            (
+                "UNWIND $__fgdb_vertices AS n MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n, n.`name` AS v",
+                &vertices,
+            ),
+            (
+                "MATCH (s)-[r:`KNOWS`]->(t) FOR SYSTEM_TIME AS OF SEQ 1 WITH r, s, t WHERE r IN $__fgdb_edges RETURN r, s, t",
+                &edges,
+            ),
+            (
+                "MATCH (s)-[r:`KNOWS`]->(t) FOR SYSTEM_TIME AS OF SEQ 1 WITH r, r.`name` AS v WHERE r IN $__fgdb_edges RETURN r, v",
+                &edges,
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, parameters, symbols.clone())
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            let as_of = match prepared {
+                PreparedNativeRead::TemporalPattern(prepared) => prepared
+                    .bind_parameters(parameters)
+                    .unwrap_or_else(|error| panic!("{text}: {error}"))
+                    .as_of(),
+                PreparedNativeRead::TemporalSet(prepared) => prepared
+                    .bind_parameters(parameters)
+                    .unwrap_or_else(|error| panic!("{text}: {error}"))
+                    .as_of(),
+                _ => panic!("metadata query must retain its exact snapshot: {text}"),
+            };
+            assert_eq!(as_of, CommitSeq(1));
+        }
+    }
 
     #[test]
     fn schema_procedures_match_their_plain_forms_only() {

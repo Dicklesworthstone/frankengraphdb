@@ -347,10 +347,15 @@ application output is admitted.
   write: a mutating statement refuses before graph access with
   `Neo.ClientError.Statement.AccessMode`. An explicit transaction holds one
   read session, so all its statements read one generation; no lock is held
-  across round trips. Vertices are returned as Bolt nodes whose labels and
-  properties are read through the same session (capability masking applies);
-  relationship and path values refuse with
-  `Neo.ClientError.Statement.FeatureNotSupported`. `CALL db.labels()`,
+  across round trips. Vertices, relationships and paths are returned as Bolt
+  graph values, including inside lists and maps. Their labels, relationship
+  types, endpoints and properties are read through the same authorized
+  session at the statement's selected sequence, including historical reads.
+  Paths preserve traversal direction and reuse node/relationship identities;
+  missing relationship metadata or exhausted hydration allowances refuse the
+  whole RUN before records are delivered. Metadata lookup batches each use
+  the ordinary native and signed per-execution limits; these lookups do not
+  yet share one cumulative RUN allowance. `CALL db.labels()`,
   `db.relationshipTypes()` and `db.propertyKeys()` answer the same
   scope-filtered schema names as HTTP's schema route. The FGP error classes map
   onto Neo4j status codes, and only Busy/Draining use a retryable
@@ -361,7 +366,7 @@ Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,
 explicit multi-statement transactions with ownership and
 reattachment, durable subscriptions with resume across reconnects, Bolt
-writes (`BoltCompatProfileV2`, post-1.0) and relationship/path values, and the
+writes (`BoltCompatProfileV2`, post-1.0), and the
 HTTP/2, gRPC and WebSocket adapters. Because results are ephemeral, a disconnect can lose undelivered
 rows but never a commit: a write's outcome is decided before its first frame.
 

@@ -2107,28 +2107,137 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
             .await;
         assert_eq!(client.pull_all().await.0, [[Value::Int(3)]]);
 
-        // A relationship value has no encoding in the profile.
-        writer
+        // A returned relationship carries its real endpoints, type and
+        // properties using the negotiated Bolt 5.0 structure.
+        let edge_write = writer
             .execute(
                 cx,
                 ExecuteMode::Write,
-                "MATCH (a:Person {name: 'Ann'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)",
+                "MATCH (a:Person {name: 'Ann'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS {name:'friends', age:7}]->(b)",
                 vec![],
             )
             .await
             .unwrap();
-        let failure = client
+        let Outcome::WriteCommitted { seq: edge_seq, .. } = edge_write.outcome else {
+            panic!("relationship create commits");
+        };
+        let expected = writer
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a)-[r:KNOWS]->(b) RETURN r, a, b",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let [
+            WireValue::Edge(edge),
+            WireValue::Vertex(source),
+            WireValue::Vertex(target),
+        ] = expected.rows[0].as_slice()
+        else {
+            panic!("native relationship identities");
+        };
+        client
             .expect(
                 0x10,
                 run_message("MATCH (a)-[r:KNOWS]->(b) RETURN r", vec![]),
-                FAILURE,
+                SUCCESS,
             )
             .await;
+        let (records, _) = client.pull_all().await;
+        let expected_relationship = Value::Struct {
+            tag: 0x52,
+            fields: vec![
+                Value::Int(i64::try_from(*edge).unwrap()),
+                Value::Int(i64::try_from(*source).unwrap()),
+                Value::Int(i64::try_from(*target).unwrap()),
+                Value::string("KNOWS"),
+                Value::Map(vec![
+                    ("age".to_owned(), Value::Int(7)),
+                    ("name".to_owned(), Value::string("friends")),
+                ]),
+                Value::string(edge.to_string()),
+                Value::string(source.to_string()),
+                Value::string(target.to_string()),
+            ],
+        };
+        assert_eq!(records, [[expected_relationship.clone()]]);
+
+        let forward = "MATCH p=(a:Person {name:'Ann'})-[:KNOWS]->(b:Person) RETURN p";
+        client
+            .expect(0x10, run_message(forward, vec![]), SUCCESS)
+            .await;
+        let historical_path = client.pull_all().await.0;
+        let Value::Struct { tag, fields } = &historical_path[0][0] else {
+            panic!("a path");
+        };
+        assert_eq!(*tag, 0x50);
+        assert_eq!(fields[2], Value::List(vec![Value::Int(1), Value::Int(1)]));
+        let Value::List(path_relationships) = &fields[1] else {
+            panic!("unbound path relationships");
+        };
         assert_eq!(
-            code(&failure),
-            "Neo.ClientError.Statement.FeatureNotSupported"
+            path_relationships,
+            &[Value::Struct {
+                tag: 0x72,
+                fields: vec![
+                    Value::Int(i64::try_from(*edge).unwrap()),
+                    Value::string("KNOWS"),
+                    Value::Map(vec![
+                        ("age".to_owned(), Value::Int(7)),
+                        ("name".to_owned(), Value::string("friends")),
+                    ]),
+                    Value::string(edge.to_string()),
+                ],
+            }]
         );
-        client.expect(0x0F, vec![], SUCCESS).await;
+        client
+            .expect(
+                0x10,
+                run_message(
+                    "MATCH p=(b:Person {name:'Bob'})<-[:KNOWS]-(a:Person) RETURN p",
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let reverse = client.pull_all().await.0;
+        let Value::Struct { fields, .. } = &reverse[0][0] else {
+            panic!("reverse path");
+        };
+        assert_eq!(fields[2], Value::List(vec![Value::Int(-1), Value::Int(1)]));
+
+        // Hydration shares the explicit transaction's old generation, then
+        // honors an explicit historical selector after newer data is visible.
+        client
+            .expect(0x11, vec![Value::Map(Vec::new())], SUCCESS)
+            .await;
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a:Person {name:'Ann'})-[r:KNOWS]->(b:Person) SET a.age=31, r.age=8, r.name='current'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        client
+            .expect(0x10, run_message(forward, vec![]), SUCCESS)
+            .await;
+        assert_eq!(client.pull_all().await.0, historical_path);
+        client.expect(0x12, vec![], SUCCESS).await;
+        client
+            .expect(0x10, run_message(forward, vec![]), SUCCESS)
+            .await;
+        assert_ne!(client.pull_all().await.0, historical_path);
+        let historical = format!(
+            "MATCH p=(a:Person {{name:'Ann'}})-[:KNOWS]->(b:Person) FOR SYSTEM_TIME AS OF SEQ {edge_seq} RETURN p"
+        );
+        client
+            .expect(0x10, run_message(&historical, vec![]), SUCCESS)
+            .await;
+        assert_eq!(client.pull_all().await.0, historical_path);
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
 
@@ -2154,6 +2263,22 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
             fields[2],
             Value::Map(vec![("name".into(), Value::string("Ann"))])
         );
+        scoped
+            .expect(
+                0x10,
+                run_message("MATCH (a)-[r:KNOWS]->(b) RETURN r", vec![]),
+                SUCCESS,
+            )
+            .await;
+        let (records, _) = scoped.pull_all().await;
+        let Value::Struct { tag, fields } = &records[0][0] else {
+            panic!("a masked relationship");
+        };
+        assert_eq!(*tag, 0x52);
+        assert_eq!(
+            fields[4],
+            Value::Map(vec![("name".into(), Value::string("current"))])
+        );
         // Neo4j's schema procedures answer the names this token may see.
         let keys = scoped
             .expect(0x10, run_message("CALL db.propertyKeys()", vec![]), SUCCESS)
@@ -2174,6 +2299,38 @@ fn bolt_drivers_read_hydrated_nodes_in_pinned_transactions_and_writes_refuse() {
             scoped.pull_all().await.0,
             [[Value::string("Company")], [Value::string("Person")]]
         );
+
+        // Deleting the current edge must not erase historical path metadata.
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a)-[r:KNOWS]->(b) DELETE r",
+                vec![],
+            )
+            .await
+            .unwrap();
+        scoped
+            .expect(0x10, run_message(&historical, vec![]), SUCCESS)
+            .await;
+        let old_masked = scoped.pull_all().await.0;
+        let Value::Struct { fields, .. } = &old_masked[0][0] else {
+            panic!("historical path after delete");
+        };
+        let Value::List(edges) = &fields[1] else {
+            panic!("historical relationships");
+        };
+        let Value::Struct { fields, .. } = &edges[0] else {
+            panic!("historical relationship metadata");
+        };
+        assert_eq!(
+            fields[2],
+            Value::Map(vec![("name".into(), Value::string("friends"))])
+        );
+        scoped
+            .expect(0x10, run_message(forward, vec![]), SUCCESS)
+            .await;
+        assert!(scoped.pull_all().await.0.is_empty());
 
         writer.close(cx).await.unwrap();
         shutdown.trigger();
