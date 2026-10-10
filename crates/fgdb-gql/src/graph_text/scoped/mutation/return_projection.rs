@@ -68,6 +68,47 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     }
 }
 
+/// A scalar body over its composite operands (fgdb-o5o9t). A body that only
+/// reads its one slot is that composite, so `(any(...))` stays a quantifier.
+fn let_value(mut slots: Vec<ReadValueTemplate>, body: ReadValueTemplate) -> ReadValueTemplate {
+    let lone_slot = match &body {
+        ReadValueTemplate::Integer { program, .. } => matches!(
+            program.as_slice(),
+            [MutationIntegerTemplateOp::Bound(
+                crate::GraphIntegerOp::Local(0)
+            )]
+        ),
+        _ => false,
+    };
+    match slots.len() {
+        0 => body,
+        1 if lone_slot => slots.pop().expect("one slot"),
+        _ => ReadValueTemplate::Let {
+            values: slots,
+            body: Box::new(body),
+        },
+    }
+}
+
+/// Advance past the bracketed group whose opening token was just read. An
+/// unbalanced group stops at the end; the parser itself reports it.
+fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextError> {
+    let mut depth = 1_usize;
+    loop {
+        match lexer.next()?.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            TokenKind::End => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
 /// The column domain of one graph input: a property is a scalar, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
@@ -1069,13 +1110,135 @@ impl<'a> Parser<'a> {
         self.read_recursive_value(None, &[], &mut Some(ValueResolver::Write(leaves)), depth)
     }
 
-    #[allow(clippy::type_complexity)]
     fn read_recursive_value(
+        &mut self,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_value_inner(inputs, schema, resolve, depth, true)
+    }
+
+    /// The composite value a scalar expression reads through a let slot
+    /// (fgdb-o5o9t). It never hands its own head back to the scalar compiler.
+    pub(super) fn read_composite_operand(
+        &mut self,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_value_inner(inputs, schema, &mut None, depth, false)
+    }
+
+    /// A whole scalar expression in a graph or row scope. Its composite
+    /// operands wrap it as a Let.
+    fn read_scalar_value(
+        &mut self,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        at: usize,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let base = core::mem::replace(&mut self.let_base, depth);
+        let parsed = match inputs {
+            Some(columns) => self.mutation_expression_with_lets(columns),
+            None => self.row_expression_with_lets(schema),
+        };
+        self.let_base = base;
+        let (operand, slots) = parsed.map_err(expression_error)?;
+        let body = self.read_value_template(operand, at)?;
+        Ok(let_value(slots, body))
+    }
+
+    /// Whether a composite value starts here that a scalar expression reads
+    /// through a let slot (fgdb-o5o9t): a list comprehension or quantifier,
+    /// head/last/tail/range/reduce, keys(), or size() of a list literal, a
+    /// parameter or a name. The scalar SIZE keeps a property read and every
+    /// literal.
+    pub(super) fn starts_let_operand(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if self.is_punct(b'[') {
+            return Ok(matches!(lexer.next()?.kind, TokenKind::Word(_))
+                && matches!(lexer.next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")));
+        }
+        if self.list_quantifier()?.is_some() || self.list_function()?.is_some() {
+            return Ok(true);
+        }
+        let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
+        if !call || !(self.is_word("KEYS") || self.is_word("SIZE")) {
+            return Ok(false);
+        }
+        if self.is_word("KEYS") {
+            return Ok(true);
+        }
+        // A literal keeps the scalar SIZE too, with its preparation-time
+        // refusal of a non-text literal.
+        let argument = lexer.next()?;
+        Ok(match argument.kind {
+            TokenKind::Word(word) => {
+                !["TRUE", "FALSE", "NULL"]
+                    .iter()
+                    .any(|literal| word.eq_ignore_ascii_case(literal))
+                    && !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
+            }
+            TokenKind::Punct(b'[') | TokenKind::Parameter(_) => true,
+            _ => false,
+        })
+    }
+
+    /// Whether the value here is a let operand, or size(), followed by a
+    /// scalar operator, as in `none(...) = all(...)` or `size(l) > 0`
+    /// (fgdb-o5o9t). The lookahead skips the value and its postfix reads on
+    /// a cloned lexer, so nothing is consumed or registered.
+    fn composite_operand_continues(&self) -> Result<bool, GraphPatternTextError> {
+        let size = self.is_word("SIZE")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        if !size && !self.starts_let_operand()? {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        if !self.is_punct(b'[') {
+            lexer.next()?;
+        }
+        skip_group(&mut lexer)?;
+        let mut next = lexer.next()?;
+        loop {
+            match next.kind {
+                TokenKind::Punct(b'[') => {
+                    skip_group(&mut lexer)?;
+                    next = lexer.next()?;
+                }
+                TokenKind::Punct(b'.')
+                    if matches!(
+                        lexer.clone().next()?.kind,
+                        TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+                    ) =>
+                {
+                    lexer.next()?;
+                    next = lexer.next()?;
+                }
+                _ => break,
+            }
+        }
+        Ok(match next.kind {
+            TokenKind::Punct(byte) => b"=<>!+-*/%^".contains(&byte),
+            TokenKind::Word(word) => ["AND", "OR", "XOR", "IS", "IN", "STARTS", "ENDS", "CONTAINS"]
+                .iter()
+                .any(|operator| word.eq_ignore_ascii_case(operator)),
+            _ => false,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn read_value_inner(
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
         resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
+        operators: bool,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
         if depth > 64 {
@@ -1085,13 +1248,19 @@ impl<'a> Parser<'a> {
             });
         }
         let mut graph_map = false;
+        // A composite that is an operator's left operand is one operand of
+        // the scalar expression, not the whole value. The aggregate scope
+        // keeps its operand-only grammar.
+        let scalar = operators && resolve.is_none() && self.composite_operand_continues()?;
         let comprehension = self.is_punct(b'[') && {
             let mut lexer = self.lexer.clone();
             matches!(lexer.next()?.kind, TokenKind::Word(_))
                 && matches!(lexer.next()?.kind,
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
         };
-        let mut value = if comprehension {
+        let mut value = if scalar {
+            self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth)?
+        } else if comprehension {
             // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
             self.advance()?;
             let (list, filter, map) =
@@ -1306,14 +1475,10 @@ impl<'a> Parser<'a> {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
             } else {
-                let operand = self
-                    .mutation_expression(columns)
-                    .map_err(expression_error)?;
-                self.read_value_template(operand, at)?
+                self.read_scalar_value(Some(columns), schema, at, depth)?
             }
         } else {
-            let operand = self.row_expression(schema).map_err(expression_error)?;
-            self.read_value_template(operand, at)?
+            self.read_scalar_value(None, schema, at, depth)?
         };
         // A lone element is the element's whole value, not a scalar program,
         // so a list, vertex or path element passes through intact.
@@ -1543,15 +1708,14 @@ impl<'a> Parser<'a> {
             // A predicate parses the whole Boolean expression in every scope,
             // including the operand-only aggregate-resolution scope.
             let at = self.current.at;
-            let operand = if let Some(resolve) = resolve.as_mut() {
-                self.resolved_predicate(&mut |parser| resolve.leaf(parser))
-            } else if let Some(columns) = inputs.as_deref_mut() {
-                self.mutation_expression(columns)
+            Some(if let Some(resolve) = resolve.as_mut() {
+                let operand = self
+                    .resolved_predicate(&mut |parser| resolve.leaf(parser))
+                    .map_err(expression_error)?;
+                self.read_value_template(operand, at)?
             } else {
-                self.row_expression(schema)
-            }
-            .map_err(expression_error)?;
-            Some(self.read_value_template(operand, at)?)
+                self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth + 1)?
+            })
         } else {
             None
         };
@@ -1957,6 +2121,16 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Keys(map) => {
             GraphSetValue::Keys(Box::new(bind_read_value(map, values)?))
         }
+        ReadValueTemplate::Let {
+            values: slots,
+            body,
+        } => GraphSetValue::Let {
+            values: slots
+                .iter()
+                .map(|value| bind_read_value(value, values))
+                .collect::<Result<_, _>>()?,
+            body: Box::new(bind_read_value(body, values)?),
+        },
     })
 }
 

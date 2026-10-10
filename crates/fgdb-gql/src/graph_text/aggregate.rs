@@ -1036,6 +1036,12 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
                 remap_output_columns(value, columns);
             }
         }
+        ReadValueTemplate::Let { values, body } => {
+            for value in values {
+                remap_output_columns(value, columns);
+            }
+            remap_output_columns(body, columns);
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
         | ReadValueTemplate::Local(_) => {}

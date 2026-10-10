@@ -548,7 +548,8 @@ fn bind_fields(
             | ReadValueTemplate::In { .. }
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
-            | ReadValueTemplate::MapGet { .. } => GraphMutationValue::Composite(
+            | ReadValueTemplate::MapGet { .. }
+            | ReadValueTemplate::Let { .. } => GraphMutationValue::Composite(
                 return_projection::bind_read_value(value, values.unwrap_or(shape))?,
             ),
             ReadValueTemplate::List(_)

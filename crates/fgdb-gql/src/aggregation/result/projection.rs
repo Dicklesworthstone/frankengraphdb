@@ -238,7 +238,8 @@ fn expression<'g, E, C>(
         GraphSetValue::Local(_)
         | GraphSetValue::Comprehension { .. }
         | GraphSetValue::Quantifier { .. }
-        | GraphSetValue::Reduce { .. } => {
+        | GraphSetValue::Reduce { .. }
+        | GraphSetValue::Let { .. } => {
             return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
         }
         // Map values over aggregate cells (fgdb-2jw3z), with the row

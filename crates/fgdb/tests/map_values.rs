@@ -409,6 +409,18 @@ fn map_literals_entries_and_keys_follow_opencypher() {
                 int(7),
             ),
             ("WITH {l: [5, 6]} AS m RETURN m.l[1] AS v", int(6)),
+            // Entries are operands of scalar operators (fgdb-o5o9t).
+            ("WITH {a: 1, b: true} AS m RETURN m.a + 1 AS v", int(2)),
+            (
+                "WITH {a: 3, b: true} AS m RETURN CASE WHEN m.b = true THEN m.a * 10 ELSE 0 END AS v",
+                int(30),
+            ),
+            ("WITH {a: 1} AS m RETURN m.missing + 1 AS v", null()),
+            // A list element shadows a same-named row column.
+            (
+                "WITH {a: 1} AS m RETURN [m IN [{a: 5}] | m.a + 1] AS v",
+                list([int(6)]),
+            ),
             // keys() lists the keys ascending.
             (
                 "RETURN keys({zeta: 1, alpha: 2}) AS k",

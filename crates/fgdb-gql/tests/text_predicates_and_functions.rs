@@ -504,6 +504,85 @@ fn radix_integers_and_dot_floats_compute_in_projections() {
     }
 }
 
+/// fgdb-o5o9t: a list quantifier, comprehension, list function or size() is
+/// an operand of the scalar operators around it, read through a let slot.
+/// A let's values read the enclosing row, so an enclosing list element keeps
+/// its meaning inside them and in the body.
+#[test]
+fn composite_values_are_operands_of_scalar_operators() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    for (expression, expected) in [
+        // The TCK's quantifier equivalences (Quantifier5-8).
+        (
+            "none(x IN [1, 2, 3] WHERE x = 2) = (NOT any(x IN [1, 2, 3] WHERE x = 2))",
+            truth(true),
+        ),
+        (
+            "all(x IN [1, 2, 3] WHERE x > 0) AND any(x IN [1, 2, 3] WHERE x = 3)",
+            truth(true),
+        ),
+        (
+            "all(x IN [1, 2, 3] WHERE x > 0) AND any(x IN [1] WHERE x = 3)",
+            truth(false),
+        ),
+        (
+            "single(x IN [1, 2, 3] WHERE x = 2) = (size([x IN [1, 2, 3] WHERE x = 2]) = 1)",
+            truth(true),
+        ),
+        (
+            "size([x IN [1, 2, 3, 4] WHERE x % 2 = 0]) + 1",
+            CanonicalScalar::Int(3),
+        ),
+        ("10 - size(range(1, 4))", CanonicalScalar::Int(6)),
+        ("head([7, 8]) * 2", CanonicalScalar::Int(14)),
+        // Quantifiers inside a quantifier's predicate (Quantifier5 [1]).
+        (
+            "none(x IN [['abc'], ['abc', 'def']] WHERE any(y IN x WHERE y = 'ghi'))",
+            truth(true),
+        ),
+        // size() of a list element (Quantifier1 [6]).
+        (
+            "none(x IN [[1, 2, 3], ['a']] WHERE size(x) = 3)",
+            truth(false),
+        ),
+        // The body reads the element `x` one slot further out; the slot's
+        // own comprehension reads it in place. Postfix `[2]` then `=`.
+        (
+            "[x IN [1, 2, 3] | x + size([y IN [1, 2] WHERE y < x])][2] = 5",
+            truth(true),
+        ),
+        // Two slots: x is two slots further out in the body, and the slots
+        // keep their order: 1 - 3 + 5.
+        (
+            "[x IN [1, 5] | size([y IN [x] WHERE y = x]) - size([z IN [x, x, x] WHERE z = x]) + x][1]",
+            CanonicalScalar::Int(3),
+        ),
+        // A map element's entries (Quantifier1-4 [7]). A missing key is NULL,
+        // so its predicate is UNKNOWN and no element decides none().
+        (
+            "single(x IN [{a: 2, b: 5}, {a: 4}] WHERE x.a = 2)",
+            truth(true),
+        ),
+        ("none(x IN [{b: 5}] WHERE x.a = 2)", CanonicalScalar::Null),
+        ("all(x IN [] WHERE x.a = 2)", truth(true)),
+        // A lone parenthesized composite is that composite.
+        ("(any(x IN [1] WHERE x = 1))", truth(true)),
+        // A NULL list stays NULL through the operator.
+        ("any(x IN null WHERE x = 1) OR false", CanonicalScalar::Null),
+    ] {
+        assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
+    }
+    // A write's SET carries no let slots: the composite still refuses there.
+    assert!(
+        fgdb_gql::PreparedGraphMutationText::prepare(
+            "MATCH (n) SET n.text = size([x IN [1, 2] WHERE x > 1]) + 1",
+            fgdb_delta_types::RelationId(1),
+            symbols,
+        )
+        .is_err()
+    );
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

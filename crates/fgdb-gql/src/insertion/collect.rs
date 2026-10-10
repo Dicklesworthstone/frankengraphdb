@@ -174,7 +174,8 @@ fn fields<E, A, C>(
             | GraphSetValue::MapLiteral { .. }
             | GraphSetValue::MapOverlay { .. }
             | GraphSetValue::MapGet { .. }
-            | GraphSetValue::Keys(_)) => {
+            | GraphSetValue::Keys(_)
+            | GraphSetValue::Let { .. }) => {
                 let value = crate::set_ops::evaluate_value(composite, row, property, control)
                     .map_err(|failure| match failure {
                         crate::set_ops::ProjectionFailure::Control(error) => error,

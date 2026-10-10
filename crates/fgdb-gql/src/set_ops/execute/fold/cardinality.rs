@@ -51,6 +51,7 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::MapOverlay { base, values, .. } => {
             constant(base) && values.iter().all(constant)
         }
+        GraphSetValue::Let { values, body } => values.iter().all(constant) && constant(body),
     }
 }
 

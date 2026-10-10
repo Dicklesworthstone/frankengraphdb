@@ -121,6 +121,16 @@ fn comprehensions_filter_and_project_under_three_valued_where() {
             ("RETURN [x IN [] | x] AS l", ints(&[])),
             ("RETURN size([x IN [5, 6, 7] WHERE x >= 6]) AS n", int(2)),
             ("RETURN [x IN [1, 2, 3] | x][1] AS second", int(2)),
+            // fgdb-o5o9t: size() of a list element in a predicate, and a map
+            // element's entries.
+            (
+                "RETURN [x IN [[1, 2], [3]] WHERE size(x) > 1] AS l",
+                list([ints(&[1, 2])]),
+            ),
+            (
+                "RETURN [x IN [{p: 1}, {p: 2, q: 3}] WHERE x.p > 1 | x.q] AS l",
+                ints(&[3]),
+            ),
         ] {
             assert_eq!(one(text), Some(expected), "{text}");
         }
@@ -208,8 +218,6 @@ fn out_of_profile_comprehensions_refuse_typed() {
         db.write(commit, graph()).await.unwrap();
         let params = GqlParameters::new();
         for text in [
-            // A property read on an element needs storage access in the scope.
-            "MATCH (n:Person) RETURN [x IN [1] | x.p] AS l",
             // The aggregate-output evaluator binds no element scope.
             "MATCH (n:Person) RETURN [x IN collect(n.p) WHERE x > 10] AS l",
             // A quantifier needs its WHERE predicate.
@@ -223,11 +231,12 @@ fn out_of_profile_comprehensions_refuse_typed() {
                 "{text}: {result:?}"
             );
         }
-        // Predicates run on the scalar expression VM: size() there is text
-        // CHAR_LENGTH, so a list element in a predicate is a typed error.
+        // Only a map element has entries (fgdb-o5o9t): `x.p` over an Int is a
+        // typed evaluation error, never a read of a same-named pattern
+        // variable or of storage.
         let result = db.query(
             cx,
-            "RETURN [x IN [[1, 2], [3]] WHERE size(x) > 1] AS l",
+            "MATCH (n:Person) RETURN [x IN [1] | x.p] AS l",
             &params,
             symbols,
             policy(),
@@ -291,11 +300,15 @@ fn list_functions_slices_ranges_and_reduce_follow_opencypher() {
             ("RETURN reduce(s = 7, x IN [] | s + x) AS v", int(7)),
             ("RETURN reduce(s = 0, x IN null | s + x) AS v", null()),
             // A list element is whole at value level: the last step is
-            // size([3]). (Inside arithmetic, size() is the scalar VM's text
-            // length, so `s + size(x)` over lists is a typed error.)
+            // size([3]). Inside arithmetic, size() of a list element is a let
+            // slot (fgdb-o5o9t), and the accumulator stays in reach: 2 + 1.
             (
                 "RETURN reduce(s = 0, x IN [[1, 2], [3]] | size(x)) AS v",
                 int(1),
+            ),
+            (
+                "RETURN reduce(s = 0, x IN [[1, 2], [3]] | s + size(x)) AS v",
+                int(3),
             ),
             // Order matters: 10*(10*0+1)+2 = 12, not 21.
             (

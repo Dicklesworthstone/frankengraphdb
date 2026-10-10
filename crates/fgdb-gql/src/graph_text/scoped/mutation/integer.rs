@@ -5,6 +5,7 @@
 mod conditional;
 
 use super::*;
+use crate::set_text::ReadValueTemplate;
 use crate::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression, GraphIntegerOp,
     GraphIntegerUnary, GraphNumericFunction, MAX_GRAPH_INTEGER_INSTRUCTIONS,
@@ -37,6 +38,9 @@ enum ParsedOp {
     Binary(GraphIntegerBinary),
     Coalesce,
     Bound(GraphIntegerOp),
+    /// Let slot `i` of the expression being parsed (fgdb-o5o9t). It becomes
+    /// a `Local` once the expression's slot count is known.
+    LetRef(usize),
 }
 
 /// Whether a postfix operand's root is text before binding: a text literal
@@ -219,11 +223,76 @@ impl<'a> Parser<'a> {
         self.checked_expression(&mut ExpressionColumns::Graph(columns), false)
     }
 
-    pub(super) fn row_expression(
+    /// A whole expression over graph columns whose composite operands
+    /// (list quantifiers, comprehensions, list functions, keys(), size())
+    /// return beside it as let slots (fgdb-o5o9t).
+    pub(super) fn mutation_expression_with_lets(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Graph(columns),
+            ExpressionBoundary::Whole,
+            true,
+        )
+    }
+
+    /// Add `value` as the next let slot of the expression being parsed and
+    /// read it as an operand.
+    fn let_slot(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        value: ReadValueTemplate,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let slots = self.lets.as_mut().expect("callers check the let sink");
+        slots.push(value);
+        let slot = slots.len() - 1;
+        emit(program, ParsedOp::LetRef(slot), at)
+    }
+
+    /// `.key` reads after `value`, each one a map entry.
+    fn map_entries(
+        &mut self,
+        mut value: ReadValueTemplate,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        while self.is_punct(b'.')
+            && matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            )
+        {
+            self.advance()?;
+            let key = self.map_key()?;
+            value = ReadValueTemplate::MapGet {
+                map: Box::new(value),
+                key: key.text.into(),
+            };
+        }
+        Ok(value)
+    }
+
+    /// The row-scope entry the compiler laws drive: the production path,
+    /// with no composite operands to return.
+    #[cfg(test)]
+    fn row_expression(
         &mut self,
         columns: &[(Name<'a>, crate::GraphSetColumnType)],
     ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression(&mut ExpressionColumns::Row(columns), true)
+        self.row_expression_with_lets(columns)
+            .map(|(operand, _)| operand)
+    }
+
+    /// [`Self::mutation_expression_with_lets`] over a row scope.
+    pub(super) fn row_expression_with_lets(
+        &mut self,
+        columns: &[(Name<'a>, crate::GraphSetColumnType)],
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Row(columns),
+            ExpressionBoundary::Whole,
+            true,
+        )
     }
 
     /// A whole Boolean predicate over resolved leaves: a list-comprehension
@@ -262,6 +331,30 @@ impl<'a> Parser<'a> {
         columns: &mut ExpressionColumns<'_, 'a>,
         boundary: ExpressionBoundary,
     ) -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression_scoped(columns, boundary, false)
+            .map(|(operand, _)| operand)
+    }
+
+    /// One expression with its own let sink: `lets` admits composite
+    /// operands, and a nested expression never sees or fills the enclosing
+    /// expression's slots.
+    fn checked_expression_scoped(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        boundary: ExpressionBoundary,
+        lets: bool,
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        let outer = core::mem::replace(&mut self.lets, lets.then(Vec::new));
+        let operand = self.checked_expression_body(columns, boundary);
+        let slots = core::mem::replace(&mut self.lets, outer).unwrap_or_default();
+        operand.map(|operand| (operand, slots))
+    }
+
+    fn checked_expression_body(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        boundary: ExpressionBoundary,
+    ) -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
         match boundary {
@@ -282,9 +375,18 @@ impl<'a> Parser<'a> {
             // An arithmetic operator/function, not parentheses, selects i64.
             return Ok(value);
         }
+        // The body of a Let reads the enclosing row extended by its slots, so
+        // an enclosing element sits `slots` further from the end.
+        let slots = self.lets.as_ref().map_or(0, Vec::len);
         let mut program = Vec::with_capacity(parsed.len());
         for op in parsed {
             program.push(match op {
+                ParsedOp::Bound(GraphIntegerOp::Local(offset)) => {
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(offset + slots))
+                }
+                ParsedOp::LetRef(slot) => {
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(slots - 1 - slot))
+                }
                 ParsedOp::Bound(op) => MutationIntegerTemplateOp::Bound(op),
                 ParsedOp::ParameterField { index, keys, at } => {
                     MutationIntegerTemplateOp::ParameterField { index, keys, at }
@@ -733,6 +835,42 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
+        // A composite operand evaluates as a let slot of this expression
+        // (fgdb-o5o9t), read like a list element.
+        if self.lets.is_some() && self.starts_let_operand()? {
+            let nesting = self.let_base + depth + 1;
+            let value = match columns {
+                ExpressionColumns::Graph(columns) => {
+                    self.read_composite_operand(Some(&mut **columns), &[], nesting)?
+                }
+                ExpressionColumns::Row(schema) => {
+                    self.read_composite_operand(None, schema, nesting)?
+                }
+                ExpressionColumns::Resolved(_) => {
+                    return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
+                }
+            };
+            return self.let_slot(program, value, at);
+        }
+        // `m.key` of a dynamically typed row column, such as a map from WITH
+        // or UNWIND, reads the entry through a let slot (fgdb-o5o9t). A
+        // carried vertex's `n.p` is a Vertex column read at the boundary.
+        if self.lets.is_some()
+            && let ExpressionColumns::Row(schema) = columns
+            && let TokenKind::Word(word) = self.current.kind
+            && !self.elements.contains(&word)
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            && let Some(column) =
+                schema[..self.visible_width(schema)]
+                    .iter()
+                    .position(|(name, kind)| {
+                        name.text == word && *kind == crate::GraphSetColumnType::Any
+                    })
+        {
+            self.advance()?;
+            let value = self.map_entries(ReadValueTemplate::Column(column))?;
+            return self.let_slot(program, value, at);
+        }
         let function = if crate::graph_text::SCALAR_FUNCTIONS
             .iter()
             .any(|name| self.is_word(name))
@@ -852,13 +990,21 @@ impl<'a> Parser<'a> {
             );
         }
         // A list-comprehension element (fgdb-20foe) shadows every row and graph
-        // name. Reading a property of one would need storage access inside
-        // the element scope, so `x.p` refuses rather than falling through to
-        // a same-named pattern variable.
+        // name. Reading a vertex element's property would need storage access
+        // inside the element scope, so `x.p` never falls through to a
+        // same-named pattern variable. With a let sink, `x.key` reads a map
+        // element's entry as a let slot (fgdb-o5o9t); any other element is
+        // the evaluator's typed non-map failure. Without one it refuses.
         if let TokenKind::Word(word) = self.current.kind
             && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
         {
             match self.lexer.clone().next()?.kind {
+                TokenKind::Punct(b'.') if self.lets.is_some() => {
+                    let element = ReadValueTemplate::Local(self.elements.len() - 1 - binding);
+                    self.advance()?;
+                    let value = self.map_entries(element)?;
+                    return self.let_slot(program, value, at);
+                }
                 TokenKind::Punct(b'.') => {
                     return Err(failure(
                         at,

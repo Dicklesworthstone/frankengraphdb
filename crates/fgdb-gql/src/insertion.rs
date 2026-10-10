@@ -722,6 +722,7 @@ impl Properties {
                 | GraphSetValue::MapOverlay { .. }
                 | GraphSetValue::MapGet { .. }
                 | GraphSetValue::Keys(_)
+                | GraphSetValue::Let { .. }
                 | GraphSetValue::Value(_) => {
                     bytes.push(3);
                     let mut encoded = Vec::new();

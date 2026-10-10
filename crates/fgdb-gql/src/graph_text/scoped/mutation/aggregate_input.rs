@@ -320,6 +320,16 @@ impl PreparedGraphAggregateText {
             ReadValueTemplate::Keys(map) => Ok(GraphSetValue::Keys(Box::new(
                 Self::bind_input_value(map, values)?,
             ))),
+            ReadValueTemplate::Let {
+                values: slots,
+                body,
+            } => Ok(GraphSetValue::Let {
+                values: slots
+                    .iter()
+                    .map(|value| Self::bind_input_value(value, values))
+                    .collect::<Result<_, _>>()?,
+                body: Box::new(Self::bind_input_value(body, values)?),
+            }),
         }
     }
 }

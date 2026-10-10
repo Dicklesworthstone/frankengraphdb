@@ -111,6 +111,15 @@ pub enum GraphSetValue {
     },
     /// `keys(m)`: the map's keys as text, ascending; NULL for a NULL map.
     Keys(Box<GraphSetValue>),
+    /// A scalar expression over composite operands (fgdb-o5o9t), such as
+    /// `none(x IN l WHERE p) = (NOT any(x IN l WHERE p))`. Each of `values`
+    /// evaluates once over the enclosing row; `body` then evaluates over that
+    /// row extended by one slot per value, value `i` at
+    /// `Local(values.len() - 1 - i)`.
+    Let {
+        values: Vec<GraphSetValue>,
+        body: Box<GraphSetValue>,
+    },
 }
 
 /// The openCypher list predicate functions.
@@ -609,6 +618,15 @@ fn admit(
             }
             GraphSetColumnType::Any
         }
+        GraphSetValue::Let { values, body } => {
+            if values.is_empty() {
+                return Err(Error::InvalidValue { column });
+            }
+            for value in values {
+                admit(value, types, column, depth + 1, nodes, locals)?;
+            }
+            admit(body, types, column, depth + 1, nodes, locals + values.len())?
+        }
     })
 }
 
@@ -778,6 +796,14 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
                 bytes.extend_from_slice(key.as_bytes());
                 append_value_transcript(value, bytes);
             }
+        }
+        GraphSetValue::Let { values, body } => {
+            bytes.push(19);
+            bytes.extend_from_slice(&(values.len() as u64).to_be_bytes());
+            for value in values {
+                append_value_transcript(value, bytes);
+            }
+            append_value_transcript(body, bytes);
         }
     }
 }
@@ -1325,6 +1351,25 @@ fn evaluate_value_at<E>(
                 )?);
             }
             overlay_map(&base, keys, entries, column, control)?
+        }
+        GraphSetValue::Let { values, body } => {
+            // Every value reads the enclosing row, never another slot.
+            let mut computed = Vec::with_capacity(values.len());
+            for value in values {
+                computed.push(evaluate_value_at(
+                    value,
+                    row,
+                    column,
+                    control,
+                    depth + 1,
+                    nodes,
+                )?);
+            }
+            let mut scope = element_scope(row, computed.len(), control)?;
+            for (slot, value) in computed.into_iter().rev().enumerate() {
+                scope.set_from_end(slot, value);
+            }
+            evaluate_value_at(body, &scope, column, control, depth + 1, nodes)?
         }
     };
     Ok(result)

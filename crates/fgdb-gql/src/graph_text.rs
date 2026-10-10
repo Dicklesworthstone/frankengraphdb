@@ -598,6 +598,14 @@ struct Parser<'a> {
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
+    /// The composite operands of the scalar expression being parsed, when
+    /// its caller can carry them as a `ReadValueTemplate::Let` (fgdb-o5o9t).
+    /// `None` keeps a composite operand refused.
+    lets: Option<Vec<crate::set_text::ReadValueTemplate>>,
+    /// The value nesting depth at which the current let-carrying expression
+    /// began. A composite operand continues from it plus the scalar depth,
+    /// so alternating values and expressions stay within one nesting bound.
+    let_base: usize,
 }
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
@@ -647,6 +655,8 @@ impl<'a> Parser<'a> {
             read_correlations: Vec::new(),
             boundary_reads: None,
             elements: Vec::new(),
+            lets: None,
+            let_base: 0,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

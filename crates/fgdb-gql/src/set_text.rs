@@ -146,6 +146,13 @@ pub(crate) enum ReadValueTemplate {
         key: Box<str>,
     },
     Keys(Box<ReadValueTemplate>),
+    /// A scalar expression over composite operands (fgdb-o5o9t): `values`
+    /// evaluate over the enclosing row, then `body` over that row extended
+    /// by one slot per value, value `i` at `Local(values.len() - 1 - i)`.
+    Let {
+        values: Vec<ReadValueTemplate>,
+        body: Box<ReadValueTemplate>,
+    },
 }
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
@@ -162,7 +169,8 @@ impl ReadValueTemplate {
             Self::Local(_)
             | Self::Comprehension { .. }
             | Self::Quantifier { .. }
-            | Self::Reduce { .. } => true,
+            | Self::Reduce { .. }
+            | Self::Let { .. } => true,
             Self::Slice { list, from, to } => {
                 list.binds_elements()
                     || [from, to]
@@ -209,6 +217,7 @@ impl ReadValueTemplate {
             | Self::MapOverlay { .. }
             | Self::MapGet { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
+            Self::Let { body, .. } => body.column_type(input, parameters),
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. } => {
@@ -371,6 +380,14 @@ impl ReadValueTemplate {
                     bytes.extend_from_slice(key.as_bytes());
                     value.append_template_transcript(bytes);
                 }
+            }
+            Self::Let { values, body } => {
+                bytes.push(19);
+                ordinal(bytes, values.len());
+                for value in values {
+                    value.append_template_transcript(bytes);
+                }
+                body.append_template_transcript(bytes);
             }
         }
     }
