@@ -74,6 +74,8 @@ impl WriteTxn {
     /// clause, recorded as read witnesses like the clauses' own reads and
     /// charged to the same evaluator allowance. A RETURN failure restores
     /// the workspace prefix, so a refused statement stages nothing.
+    /// Only final projected rows consume the result-row allowance; LIMIT 0
+    /// still selects, creates or updates the vertex under the source limits.
     pub fn execute_graph_vertex_upsert_query_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -87,7 +89,7 @@ impl WriteTxn {
             database,
             cx,
             query.upsert(),
-            policy,
+            vertex_upsert_query_selection_policy(policy),
             allocate,
         )?;
         let rows = cx.with_restriction(|| {
@@ -129,6 +131,19 @@ impl WriteTxn {
         let allocate = database.engine_allocator(cx).map_err(source)?;
         self.execute_graph_vertex_upsert_query_governed(database, cx, query, policy, allocate)
     }
+}
+
+/// MATCH occurrences and the creation arm's unit row are private inputs.
+/// Native and authorized RETURN wrappers preserve every source, evaluator
+/// and effect limit, then use the original policy for the final projection.
+fn vertex_upsert_query_selection_policy(
+    mut policy: fgdb_gql::GraphVertexUpsertPolicy,
+) -> fgdb_gql::GraphVertexUpsertPolicy {
+    policy.merge.query.rows = policy.merge.query.rows.max_snapshot_records().map_or(
+        fgdb_gql::GqlExecutionBudget::UNLIMITED,
+        fgdb_gql::GqlExecutionBudget::snapshot_records,
+    );
+    policy
 }
 
 type VertexUpsertActionResult<T, E, A, C> =

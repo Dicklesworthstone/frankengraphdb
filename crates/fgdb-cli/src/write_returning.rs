@@ -1,19 +1,22 @@
-//! Pre-open preparation for CREATE RETURN and SET/REMOVE/DETACH DELETE RETURN
-//! writes. A RETURN-less write, including a bounded native UNWIND, is bound by
-//! `main`'s native write path.
+//! Shared preparation and staged execution for native CREATE, mutation and
+//! vertex MERGE RETURN writes, used by ordinary writes and ordered transactions.
+//! A RETURN-less write, including a bounded native UNWIND, uses the native
+//! write program path.
 
 use super::{
     Failure, Options, emit, execution_failure, human_value, policy, render_row_body, value_cell,
 };
 use asupersync::fs::Vfs;
-use fgdb::Database;
+use fgdb::{Database, WriteTxn};
+use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GraphMutationPolicy, GraphVertexMergePolicy, GraphVertexUpsertPolicy, PreparedGraphInsertQuery,
-    PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
-    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText,
+    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphMutationPolicy, GraphVertexMergePolicy,
+    GraphVertexUpsertPolicy, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
+    PreparedGraphVertexUpsertQueryText,
 };
-use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts};
+use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::{self, Write};
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -28,55 +31,109 @@ pub(super) enum Returning {
     Merge(Box<PreparedGraphVertexUpsertQuery>),
 }
 impl Returning {
-    fn columns(&self) -> &[String] {
+    pub(super) fn columns(&self) -> &[String] {
         match self {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
             Self::Merge(query) => query.columns(),
         }
     }
+
+    /// Freeze the native statement's rows while staging its complete effects.
+    /// The caller owns output admission and the sole completion boundary.
+    pub(super) fn execute_in_transaction<V: Vfs + Clone>(
+        &self,
+        transaction: &mut WriteTxn,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        allowance: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, Failure> {
+        Ok(match self {
+            Self::Insert(query) => {
+                transaction
+                    .execute_graph_insert_query_engine_governed(
+                        database,
+                        cx,
+                        query,
+                        GraphInsertPolicy::new(allowance, 100_000, 100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
+            }
+            Self::Mutation(query) => {
+                transaction
+                    .execute_graph_mutation_query_governed(
+                        database,
+                        cx,
+                        query,
+                        GraphMutationPolicy::new(allowance, 100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
+            }
+            Self::Merge(query) => {
+                transaction
+                    .execute_graph_vertex_upsert_query_engine_governed(
+                        database,
+                        cx,
+                        query,
+                        GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(allowance), 1_000),
+                    )
+                    .map_err(execution_failure)?
+                    .2
+            }
+        })
+    }
 }
 
 pub(super) fn prepare(options: &Options) -> Result<Option<Returning>, Failure> {
-    let declarations: Vec<_> = options.params.parameter_types().collect();
-    if PreparedGraphInsertQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
+    prepare_statement(&options.text, &options.params, options)
+}
+
+/// Native token classifiers choose the write family before binding. Ordered
+/// transaction steps supply their own text and parameters, with one catalog.
+pub(super) fn prepare_statement(
+    statement: &str,
+    params: &GqlParameters,
+    options: &Options,
+) -> Result<Option<Returning>, Failure> {
+    let declarations: Vec<_> = params.parameter_types().collect();
+    if PreparedGraphInsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
         let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
-            &options.text,
+            statement,
             options.coordinate,
             &declarations,
             |kind, name| options.resolve(kind, name),
         )
         .map_err(Failure::query)?;
         return template
-            .bind_parameters(&options.params)
+            .bind_parameters(params)
             .map(|query| Some(Returning::Insert(Box::new(query))))
             .map_err(Failure::query);
     }
-    if PreparedGraphMutationQueryText::has_return_clause(&options.text).map_err(Failure::query)? {
+    if PreparedGraphMutationQueryText::has_return_clause(statement).map_err(Failure::query)? {
         let template = PreparedGraphMutationQueryText::prepare_with_parameter_types(
-            &options.text,
+            statement,
             options.coordinate,
             &declarations,
             |kind, name| options.resolve(kind, name),
         )
         .map_err(Failure::query)?;
         return template
-            .bind_parameters(&options.params)
+            .bind_parameters(params)
             .map(|query| Some(Returning::Mutation(Box::new(query))))
             .map_err(Failure::query);
     }
-    if PreparedGraphVertexUpsertQueryText::has_return_clause(&options.text)
-        .map_err(Failure::query)?
-    {
+    if PreparedGraphVertexUpsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
         let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
-            &options.text,
+            statement,
             options.coordinate,
             &declarations,
             |kind, name| options.resolve(kind, name),
         )
         .map_err(Failure::query)?;
         return template
-            .bind_parameters(&options.params)
+            .bind_parameters(params)
             .map(|query| Some(Returning::Merge(Box::new(query))))
             .map_err(Failure::query);
     }
@@ -115,41 +172,7 @@ pub(super) async fn run<V: Vfs + Clone>(
     let cx = contexts.query();
     let mut transaction = database.begin(&contexts.txn()).map_err(execution_failure)?;
     let prepared = (|| {
-        let result = match &query {
-            Returning::Insert(query) => {
-                transaction
-                    .execute_graph_insert_query_engine_governed(
-                        database,
-                        &cx,
-                        query,
-                        GraphInsertPolicy::new(policy(), 100_000, 100_000),
-                    )
-                    .map_err(execution_failure)?
-                    .1
-            }
-            Returning::Mutation(query) => {
-                transaction
-                    .execute_graph_mutation_query_governed(
-                        database,
-                        &cx,
-                        query,
-                        GraphMutationPolicy::new(policy(), 100_000),
-                    )
-                    .map_err(execution_failure)?
-                    .1
-            }
-            Returning::Merge(query) => {
-                transaction
-                    .execute_graph_vertex_upsert_query_engine_governed(
-                        database,
-                        &cx,
-                        query,
-                        GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(policy()), 1_000),
-                    )
-                    .map_err(execution_failure)?
-                    .2
-            }
-        };
+        let result = query.execute_in_transaction(&mut transaction, database, &cx, policy())?;
         let mut rendered = Vec::with_capacity(result.value.len());
         let mut encoded_cells = 0usize;
         for row in result.value {

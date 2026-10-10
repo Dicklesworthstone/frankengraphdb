@@ -247,6 +247,12 @@ fgdb diff  --db mydb.fgdbdir --key-file fgdb.keys --before <seq> --after <seq> "
 # Ordered multi-statement transaction (one commit; --rollback discards everything)
 fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --write "<gql>" --query "<gql>"
 
+# Return each write's staged values, then commit the whole transaction once
+fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys \
+  --label Person=1 --property name=1 --property visits=2 \
+  --write "MERGE (n:Person {name:'Ada'}) ON CREATE SET n.visits=0 RETURN n.visits" \
+  --write "MATCH (n:Person) WHERE n.name='Ada' SET n.visits=n.visits+1 RETURN n.visits"
+
 # Search staged documents before the transaction commits
 fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --label Doc=1 --property title=1 \
   --write "CREATE (:Doc {title: 'graph memory'})" \

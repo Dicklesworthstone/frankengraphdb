@@ -7,12 +7,12 @@
 //! precommit errors discard both effects and buffered output. Issued identities
 //! are never reclaimed, and ambiguous completion is never reported as abort.
 //!
-//! A --write step may contain one native CREATE/INSERT ... RETURN query,
-//! including MATCH-selected or UNWIND-driven creation. Its rows are frozen at
-//! that step, carry kind=write and statements=1, and share the transaction-wide
-//! row/output allowances with --query results. All RETURN expressions and
-//! output admission precede the sole completion boundary; LIMIT affects rows,
-//! never creations. Other write steps retain their multi-statement programs.
+//! A --write step may contain one native CREATE/INSERT, matched mutation, or
+//! vertex MERGE query with RETURN. Its rows are frozen at that step, carry
+//! kind=write and statements=1, and share the transaction-wide row/output
+//! allowances with --query results. All RETURN expressions and output admission
+//! precede the sole completion boundary; LIMIT affects rows, never effects.
+//! Other write steps retain their multi-statement programs.
 //!
 //! --savepoint, --rollback-to and --release steps drive WriteTxn's savepoints.
 //! Names follow its rules: case-sensitive, a reused name shadows the older one
@@ -21,17 +21,14 @@
 //! --rollback, the rows and records they buffered; their reads remain conflict
 //! witnesses and identities they issued are not reclaimed.
 
+use super::write_returning::{self, Returning};
 use super::{
     Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted, value_cell,
 };
 use asupersync::fs::Vfs;
 use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{
-    BoundNativeGraphWrite, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
-    PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-};
+use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
 
@@ -147,7 +144,7 @@ impl Default for Limits {
 enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
     Write(Box<BoundNativeGraphWrite>),
-    Returning(Box<PreparedGraphInsertQuery>),
+    Returning(Returning),
     /// A --savepoint, --rollback-to or --release step and its name.
     Savepoint(SavepointOp, String),
 }
@@ -198,23 +195,13 @@ fn prepare(
             if step.kind == StepKind::Write {
                 // Native token framing, never substring matching or a failed
                 // read retried as a write. Each step keeps its own argument map.
-                if PreparedGraphInsertQueryText::has_return_clause(&step.text)
-                    .map_err(Failure::query)?
+                if let Some(query) =
+                    write_returning::prepare_statement(&step.text, &params, options)?
                 {
-                    let declarations: Vec<_> = params.parameter_types().collect();
-                    let query = PreparedGraphInsertQueryText::prepare_with_parameter_types(
-                        &step.text,
-                        options.coordinate,
-                        &declarations,
-                        |kind, name| options.resolve(kind, name),
-                    )
-                    .map_err(Failure::query)?
-                    .bind_parameters(&params)
-                    .map_err(Failure::query)?;
                     statements = statements
                         .checked_add(1)
                         .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
-                    return Ok(PreparedStep::Returning(Box::new(query)));
+                    return Ok(PreparedStep::Returning(query));
                 }
                 let bound = BoundNativeGraphWrite::bind(
                     &step.text,
@@ -321,7 +308,7 @@ fn buffer_rows(
 }
 
 // The two row-producing step types share framing and scalar encoding, not
-// storage execution. Insertion rows are borrowed during encoding: they are
+// storage execution. Returning rows are borrowed during encoding: they are
 // never cloned into another complete QueryResult just to drive transport.
 fn buffer_row_header(
     output: &mut BufferedOutput,
@@ -377,7 +364,7 @@ fn buffer_row(
     }
 }
 
-fn buffer_insert_rows(
+fn buffer_returning_rows(
     output: &mut BufferedOutput,
     columns: &[String],
     rows: Vec<GraphValueRow>,
@@ -482,20 +469,13 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .checked_sub(count)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
                         // Only final RETURN rows consume this allowance; source
-                        // occurrences/creations retain native insertion limits.
+                        // occurrences and effects retain the native write limits.
                         let allowance = GqlQueryPolicy {
                             rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
                             ..policy()
                         };
-                        let (_, rows) = txn
-                            .execute_graph_insert_query_engine_governed(
-                                db,
-                                &cx,
-                                query,
-                                GraphInsertPolicy::new(allowance, 100_000, 100_000),
-                            )
-                            .map_err(execution_failure)?;
-                        let added = buffer_insert_rows(
+                        let rows = query.execute_in_transaction(&mut txn, db, &cx, allowance)?;
+                        let added = buffer_returning_rows(
                             &mut output,
                             query.columns(),
                             rows.value,

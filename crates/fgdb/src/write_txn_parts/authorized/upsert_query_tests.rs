@@ -238,11 +238,20 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
         let mut scope = grant();
         scope.limits.max_rows = 0;
         let token = authority.issue_at(&scope, NOW).unwrap();
-        let statement =
-            prepared("MERGE (n:Visible {p:99}) ON CREATE SET n.q = 5 RETURN n.q LIMIT 0");
+        let statement = prepared(
+            "MERGE (n:Visible {p:99}) ON CREATE SET n.q=5 ON MATCH SET n.q=n.q+1 \
+             RETURN n.q LIMIT 0",
+        );
+        // The signed output limit AND the caller's local output allowance are
+        // zero. Neither limits the private MATCH or creation unit input.
+        let mut zero_rows = upsert_policy();
+        zero_rows.merge.query.rows = fgdb_gql::GqlExecutionBudget::new(
+            zero_rows.merge.query.rows.max_snapshot_records().unwrap(),
+            0,
+        );
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut count = 0;
-        let (_, _, rows, completion) = db
+        let (_, created, rows, completion) = db
             .execute_graph_vertex_upsert_query_authorized(
                 &txn,
                 &query,
@@ -251,7 +260,7 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
                 &token,
                 "main",
                 &statement,
-                upsert_policy(),
+                zero_rows,
                 || {
                     count += 1;
                     NOW
@@ -260,11 +269,39 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
             .await
             .unwrap();
         assert!(rows.value.is_empty());
+        assert!(created.created());
         assert!(matches!(
             completion,
             EmbeddedTxnCompletion::WriteCommitted { .. }
         ));
         assert_eq!(db.vertices().unwrap().len(), 1);
+        let (_, matched, rows, completion) = db
+            .execute_graph_vertex_upsert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &statement,
+                zero_rows,
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(matched, GraphVertexMergeOutcome::Matched(created.vertex()));
+        assert!(rows.value.is_empty());
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert!(
+            db.vertex(created.vertex())
+                .unwrap()
+                .unwrap()
+                .props
+                .contains(&(Q, CanonicalScalar::Int(6)))
+        );
         assert!(count > 10);
         for cutoff in [1, count / 2, count - 1] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
@@ -279,7 +316,7 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
                     &token,
                     "main",
                     &statement,
-                    upsert_policy(),
+                    zero_rows,
                     || {
                         calls += 1;
                         if calls <= cutoff { NOW } else { 10_000 }

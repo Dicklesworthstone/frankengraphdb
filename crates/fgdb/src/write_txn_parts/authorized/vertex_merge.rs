@@ -6,7 +6,8 @@ use crate::write_txn::authorized::{
     WriteTxnError, selection, stage,
 };
 use crate::write_txn::{
-    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property, vertex_upsert_returning,
+    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property,
+    vertex_upsert_query_selection_policy, vertex_upsert_returning,
 };
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
@@ -91,7 +92,7 @@ impl<V: Vfs + Clone> Database<V> {
                     self,
                     query_cx,
                     query.upsert(),
-                    policy,
+                    vertex_upsert_query_selection_policy(policy),
                     verified.predicates(),
                     &mut execution,
                     false,

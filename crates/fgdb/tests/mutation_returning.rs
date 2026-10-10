@@ -390,3 +390,77 @@ fn a_failing_merge_return_rolls_the_upsert_back() {
         }
     });
 }
+
+/// The MATCH row and creation arm's unit input are private. A zero final
+/// row allowance must permit LIMIT 0 on either branch, while a visible
+/// RETURN row must refuse and undo the statement's complete staged effect.
+#[test]
+fn merge_return_row_allowance_applies_after_projection_on_both_branches() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut zero_rows = upsert_policy();
+        zero_rows.merge.query.rows = fgdb_gql::GqlExecutionBudget::new(1_000_000, 0);
+        let (_, matched, rows) = txn
+            .execute_graph_vertex_upsert_query_engine_governed(
+                &mut db,
+                cx,
+                &merge("MERGE (n:Item {p:4}) ON MATCH SET n.q=n.q+1 RETURN n.q AS q LIMIT 0"),
+                zero_rows,
+            )
+            .unwrap();
+        assert_eq!(matched, GraphVertexMergeOutcome::Matched(VId(4)));
+        assert!(rows.value.is_empty());
+        let (_, created, rows) = txn
+            .execute_graph_vertex_upsert_query_engine_governed(
+                &mut db,
+                cx,
+                &merge("MERGE (n:Item {p:9}) ON CREATE SET n.q=3 RETURN n.q AS q LIMIT 0"),
+                zero_rows,
+            )
+            .unwrap();
+        assert!(created.created());
+        assert!(rows.value.is_empty());
+        assert_eq!(
+            txn.vertex_property(&db, VId(4), Q).unwrap(),
+            Some(CanonicalScalar::Int(11)),
+        );
+        assert_eq!(
+            txn.vertex_property(&db, created.vertex(), Q).unwrap(),
+            Some(CanonicalScalar::Int(3)),
+        );
+        let digest = txn.staged_effect_digest().unwrap();
+        for statement in [
+            "MERGE (n:Item {p:4}) ON MATCH SET n.q=99 RETURN n.q AS q",
+            "MERGE (n:Item {p:10}) ON CREATE SET n.q=99 RETURN n.q AS q",
+        ] {
+            let error = txn
+                .execute_graph_vertex_upsert_query_engine_governed(
+                    &mut db,
+                    cx,
+                    &merge(statement),
+                    zero_rows,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Rows(error)
+                    if error.dimension == fgdb_gql::GqlBudgetDimension::ResultRows),
+                "{statement}",
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.frontier().unwrap(), basis);
+        }
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) WHERE n.p>=4 RETURN n.p AS p,n.q AS q ORDER BY p",
+            ),
+            vec![vec![int(4), int(11)], vec![int(9), int(3)]],
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
