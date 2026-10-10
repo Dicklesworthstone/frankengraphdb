@@ -468,7 +468,37 @@ impl<'a> Parser<'a> {
         self.scalar_comparison(columns, depth, program)
     }
 
+    /// openCypher's comparison level: `=`, `<>`, `<`, `>`, `<=`, `>=` between
+    /// predicate-level operands, folded left. The string, list and null
+    /// predicates bind tighter, so `a = b IS NULL` is `a = (b IS NULL)` and
+    /// `a = b IN [..]` is `a = (b IN [..])` (TCK Precedence1 [8], [11]).
     fn scalar_comparison(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
+        self.scalar_predicate(columns, depth, program)?;
+        while matches!(
+            self.current.kind,
+            TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
+        ) {
+            let at = self.current.at;
+            let comparison = self.comparison()?;
+            self.scalar_predicate(columns, depth, program)?;
+            emit(
+                program,
+                ParsedOp::Bound(GraphIntegerOp::Compare(comparison)),
+                at,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// openCypher's string, list and null predicate level: STARTS WITH,
+    /// ENDS WITH, CONTAINS, `=~`, [NOT] IN and IS [NOT] NULL, applied left to
+    /// right to one concatenation-level operand.
+    fn scalar_predicate(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
         depth: usize,
@@ -562,19 +592,6 @@ impl<'a> Parser<'a> {
                 emit(
                     program,
                     ParsedOp::Bound(GraphIntegerOp::Matches(Box::new(regex))),
-                    at,
-                )?;
-                continue;
-            }
-            if matches!(
-                self.current.kind,
-                TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
-            ) {
-                let comparison = self.comparison()?;
-                self.scalar_concat(columns, depth, program)?;
-                emit(
-                    program,
-                    ParsedOp::Bound(GraphIntegerOp::Compare(comparison)),
                     at,
                 )?;
                 continue;

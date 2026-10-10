@@ -1291,6 +1291,63 @@ fn identity_functions_return_engine_identities_on_the_embedded_surface() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// openCypher binds the string, list and null predicates (IS [NOT] NULL,
+/// [NOT] IN, STARTS WITH, ENDS WITH, CONTAINS) tighter than comparisons.
+/// Expected values are the openCypher TCK's: Precedence1 [8] and [11],
+/// Precedence4 [1] and Boolean1 [5]. The scalar compiler used to apply them
+/// left to right on one level, so `false = true IS NULL` was
+/// `(false = true) IS NULL`.
+#[test]
+fn null_and_list_predicates_bind_tighter_than_comparison() {
+    let ((), report) = run_async_under_lab(0x7d14_0093, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let truth = |value: bool| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)))
+        };
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(
+                "RETURN false = true IS NULL AS a, false = (true IS NULL) AS b, \
+                 (false = true) IS NULL AS c"
+            ),
+            [[truth(true), truth(true), truth(false)]]
+        );
+        assert_eq!(
+            rows(
+                "RETURN false = true IN [true, false] AS a, \
+                 false = (true IN [true, false]) AS b, (false = true) IN [true, false] AS c"
+            ),
+            [[truth(false), truth(false), truth(true)]]
+        );
+        assert_eq!(
+            rows(
+                "RETURN null IS NOT NULL = null IS NULL AS a, \
+                 (null IS NOT NULL) = (null IS NULL) AS b, (null IS NOT NULL = null) IS NULL AS c"
+            ),
+            [[truth(false), truth(false), truth(true)]]
+        );
+        assert_eq!(
+            rows("RETURN (false AND null) IS NULL = (null AND false) IS NULL AS r"),
+            [[truth(true)]]
+        );
+        // Comparisons among themselves still fold left; NOT stays below them.
+        assert_eq!(
+            rows("RETURN 1 < 2 = true AS a, NOT true = false AS b"),
+            [[truth(true), truth(true)]]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A catalog-backed resolver, like the CLI's bindings: it names every id it
 /// binds, including ids the statement text never mentions.
 struct Catalog;
