@@ -174,6 +174,10 @@ pub(super) async fn run<V: Vfs + Clone>(
         // Reconstruct maps from authenticated creation effects, including the
         // commit -> checkpoint crash window. No checkpoint guesses an identity.
         let mut replay = rows.clone();
+        let order = IssueOrder {
+            vertices: db.vertex_identity_permutation(),
+            edges: db.edge_identity_permutation(),
+        };
         for batch in db.delta_since(base).map_err(invalid)? {
             cx.checkpoint().map_err(Failure::io)?;
             reconcile(
@@ -182,6 +186,7 @@ pub(super) async fn run<V: Vfs + Clone>(
                 source.records(),
                 rows_per_chunk,
                 &mut checkpoint,
+                &order,
             )?;
             if checkpoint.frontier == saved.checkpoint.frontier {
                 same_checkpoint(&saved.checkpoint, &checkpoint)?;
@@ -415,12 +420,39 @@ fn same_checkpoint(a: &BulkLoadCheckpoint, b: &BulkLoadCheckpoint) -> Result<(),
     }
     Ok(())
 }
+/// The engine's identity permutations, for ordering a chunk's creations by
+/// issue (fgdb-hxgm1 channel 2).
+struct IssueOrder {
+    vertices: fgdb::IdentityPermutation,
+    edges: fgdb::IdentityPermutation,
+}
+
+/// Each creation keyed by its allocation counter, ascending: the order the
+/// engine issued the identities, which is source order within a kind.
+fn by_issue<I: Copy, R>(
+    created: BTreeMap<I, R>,
+    counter: impl Fn(I) -> Option<u64>,
+) -> Result<Vec<(I, R)>, Failure> {
+    let mut issued = created
+        .into_iter()
+        .map(|(id, row)| {
+            counter(id)
+                .map(|issue| (issue, id, row))
+                .ok_or_else(|| invalid("creation identity was not engine-issued"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // A permutation is a bijection, so no two creations share a counter.
+    issued.sort_unstable_by_key(|(issue, _, _)| *issue);
+    Ok(issued.into_iter().map(|(_, id, row)| (id, row)).collect())
+}
+
 fn reconcile(
     batch: &fgdb_delta_types::LogicalDeltaBatch,
     rows: &mut Rows<'_>,
     source_rows: usize,
     size: usize,
     cp: &mut BulkLoadCheckpoint,
+    order: &IssueOrder,
 ) -> Result<(), Failure> {
     let count = source_rows
         .checked_sub(cp.next_row)
@@ -474,9 +506,17 @@ fn reconcile(
     if vs.len() + es.len() != count {
         return Err(invalid("history chunk row count changed"));
     }
-    // Native identities are allocated monotonically per kind, in source order.
-    let mut vs = vs.into_iter();
-    let mut es = es.into_iter();
+    // The engine issues each kind's identities in source order, from a
+    // counter it permutes, so creations pair with source rows in counter
+    // order. Identity order would scramble them.
+    let mut vs = by_issue(vs, |vid: VId| {
+        order.vertices.invert(u64::try_from(vid.0).ok()?)
+    })?
+    .into_iter();
+    let mut es = by_issue(es, |eid: EId| {
+        order.edges.invert(u64::try_from(eid.0).ok()?)
+    })?
+    .into_iter();
     for _ in 0..count {
         let row = rows
             .next()

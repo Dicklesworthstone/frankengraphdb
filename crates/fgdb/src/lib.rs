@@ -4477,6 +4477,22 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(self.snapshot.frontier)
     }
 
+    /// The keyed permutation this database issues vertex identities from
+    /// (fgdb-hxgm1 channel 2). An engine identity carries no issue order of
+    /// its own; `invert` recovers its allocation counter, which the engine
+    /// advances in issue order. A replay that pairs creations with the source
+    /// rows that caused them sorts by that counter. The keys stay private.
+    #[must_use]
+    pub fn vertex_identity_permutation(&self) -> IdentityPermutation {
+        IdentityPermutation::vertices(&self.keys)
+    }
+
+    /// As [`Self::vertex_identity_permutation`], for edge identities.
+    #[must_use]
+    pub fn edge_identity_permutation(&self) -> IdentityPermutation {
+        IdentityPermutation::edges(&self.keys)
+    }
+
     /// The derived window over committed delta batches.
     ///
     /// Reads check `Healthy` like every other graph read: a fenced handle

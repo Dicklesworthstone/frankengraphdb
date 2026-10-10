@@ -134,6 +134,26 @@ fn seq(out: &str, kind: &str) -> u64 {
         .unwrap()
 }
 
+/// The fixture's key file as keys: engine identities are the keyed
+/// permutation of each kind's counter under them (fgdb-hxgm1 channel 2).
+fn keys() -> fgdb::DatabaseKeys {
+    fgdb::DatabaseKeys::new(
+        [0x31; 32],
+        fgdb_types::DatabaseSecurityNamespaceId([0x32; 32]),
+        [0x33; 32],
+    )
+}
+fn vertex(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::vertices(&keys())
+        .permute(counter)
+        .unwrap()
+}
+fn edge(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::edges(&keys())
+        .permute(counter)
+        .unwrap()
+}
+
 #[test]
 fn typed_writes_and_csv_imports_survive_separate_process_reopens() {
     let fixture = Fixture::new();
@@ -211,7 +231,11 @@ fn unwind_write_preserves_duplicate_occurrences_and_staged_updates_across_reopen
     };
     let expected = rows(&before);
     assert_eq!(expected.len(), 3, "{before}");
-    for (row, (vertex, value)) in expected.iter().zip([(1, 3), (2, 1), (3, 3)]) {
+    // ORDER BY vertex is identity order: the occurrences took counters 1..=3
+    // in source order, wherever their identities fall.
+    let mut issued = [(vertex(1), 3), (vertex(2), 1), (vertex(3), 3)];
+    issued.sort_unstable();
+    for (row, (vertex, value)) in expected.iter().zip(issued) {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
              {{\"type\":\"int\",\"value\":\"{value}\"}},\
@@ -247,7 +271,9 @@ fn empty_and_failed_unwind_writes_publish_nothing_and_late_script_failure_is_ato
     let written = success(fixture.run("write", &["UNWIND [11,12] AS x CREATE (:Person {id:x})"]));
     assert_eq!(seq(&written, "written"), fixture.created + 1);
     let before = success(fixture.run("query", &[query]));
-    for (vertex, value) in [(1, 11), (2, 12)] {
+    // The refused write committed nothing, so its reservations were never
+    // recorded: this write takes the first two counters.
+    for (vertex, value) in [(vertex(1), 11), (vertex(2), 12)] {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
              {{\"type\":\"int\",\"value\":\"{value}\"}}]"
@@ -296,9 +322,15 @@ fn create_return_reports_exact_occurrence_identities_at_one_durable_frontier() {
     );
     let rows = row_frames(&written);
     assert_eq!(rows.len(), 3, "{written}");
-    for (row, (source, edge, destination, value)) in
-        rows.iter().zip([(1, 1, 2, 3), (3, 2, 4, 1), (5, 3, 6, 3)])
-    {
+    // Occurrence k takes vertex counters 2k-1 (source) and 2k (destination)
+    // and edge counter k; ORDER BY source is identity order.
+    let mut issued = [
+        (vertex(1), edge(1), vertex(2), 3),
+        (vertex(3), edge(2), vertex(4), 1),
+        (vertex(5), edge(3), vertex(6), 3),
+    ];
+    issued.sort_unstable();
+    for (row, (source, edge, destination, value)) in rows.iter().zip(issued) {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{source}\"}},\
              {{\"type\":\"edge\",\"value\":\"{edge}\"}},\
@@ -579,7 +611,11 @@ fn engine_identities_remain_spent_after_delete_and_reopen() {
     fixture.count(0);
     success(fixture.run("write", &["CREATE (n:Person)"]));
     let out = success(fixture.run("query", &["MATCH (n:Person) RETURN n"]));
-    assert!(out.contains("\"type\":\"vertex\",\"value\":\"3\""), "{out}");
+    // The deleted vertices spent counters 1 and 2.
+    assert!(
+        out.contains(&format!("\"type\":\"vertex\",\"value\":\"{}\"", vertex(3))),
+        "{out}"
+    );
     fixture.count(1);
 }
 
