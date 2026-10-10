@@ -464,11 +464,13 @@ fn public_return_cancellation_and_bad_tail_never_publish_a_successful_prefix() {
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
+        // A returning write with a bad tail publishes nothing. An aggregate
+        // RETURN on a write is no longer refused here: 834e922b implemented it,
+        // and its laws (write_return_aggregates.rs, mutation_returning.rs)
+        // state the accepted results.
         for text in [
             "MATCH (n:L) SET n.p=11 RETURN n; CREATE (m)",
             "MERGE (n:L {id:3}) RETURN n; CREATE (m)",
-            "MATCH (n:L) SET n.p=11 RETURN COUNT(*) AS c",
-            "MERGE (n:L {id:3}) RETURN COUNT(*) AS c",
         ] {
             assert!(
                 db.query_write(
