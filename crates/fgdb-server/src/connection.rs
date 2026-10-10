@@ -7,7 +7,9 @@
 //! QUERY_CANCEL, PING and DRAIN are never starved by the data they control.
 
 use crate::commits::CommitWatcher;
-use crate::execute::{Answer, PreparedRead, Refusal, poll, prepare_read, read, read_prepared, subscribe, write};
+use crate::execute::{
+    Answer, PreparedRead, Refusal, poll, prepare_read, read, read_prepared, subscribe, write,
+};
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
@@ -52,7 +54,8 @@ struct PreparedReads {
 
 impl PreparedReads {
     fn prune(&mut self) {
-        self.entries.retain(|_, entry| entry.generation.check().is_ok());
+        self.entries
+            .retain(|_, entry| entry.generation.check().is_ok());
         self.source_bytes = self.entries.values().map(|entry| entry.source_bytes).sum();
     }
 
@@ -520,7 +523,9 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 let binding = lane.conn.binding();
                 let delivered = match outcome {
                     Ok((handle, generation)) => {
-                        let Ok(payload) = (Prepared { handle }).encode() else { return };
+                        let Ok(payload) = (Prepared { handle }).encode() else {
+                            return;
+                        };
                         let Ok(frame) = Frame::new(
                             FrameKind::Prepared,
                             request,
@@ -566,7 +571,12 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
             FrameKind::ReleasePrepared => {
                 let Ok(release) = ReleasePrepared::decode(frame.payload()) else {
                     return lane
-                        .fatal(cx, request, ErrorCode::Protocol, "malformed RELEASE_PREPARED")
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed RELEASE_PREPARED",
+                        )
                         .await;
                 };
                 // Uniform, idempotent release reveals no existence or owner.
@@ -592,7 +602,12 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 };
                 let Ok(statement) = ExecutePrepared::decode(frame.payload()) else {
                     return lane
-                        .fatal(cx, request, ErrorCode::Protocol, "malformed EXECUTE_PREPARED")
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed EXECUTE_PREPARED",
+                        )
                         .await;
                 };
                 let statement = Statement::Prepared {
@@ -903,7 +918,10 @@ impl Lane {
         };
         let kind = if matches!(
             &statement,
-            Statement::Native(Execute { mode: ExecuteMode::Subscribe, .. })
+            Statement::Native(Execute {
+                mode: ExecuteMode::Subscribe,
+                ..
+            })
         ) {
             ChildKind::Subscription
         } else {
@@ -948,7 +966,10 @@ impl Lane {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
                 _ => write(cx, db, token, &statement).await,
             },
-            Statement::Prepared { definition, parameters } => match definition {
+            Statement::Prepared {
+                definition,
+                parameters,
+            } => match definition {
                 Ok(definition) => read_prepared(cx, db, token, &definition, &parameters).await,
                 Err(refusal) => Err(refusal),
             },

@@ -59,7 +59,9 @@ pub(crate) async fn prepare_read(
             .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
         let selector =
             PreparedGraphBranchText::prepare(&request.statement).map_err(branch_error)?;
-        let selected = selector.bind_parameters(&parameters).map_err(branch_error)?;
+        let selected = selector
+            .bind_parameters(&parameters)
+            .map_err(branch_error)?;
         authorized_branch(&selected)?;
         let native = PreparedNativeRead::prepare(
             selected.statement(),

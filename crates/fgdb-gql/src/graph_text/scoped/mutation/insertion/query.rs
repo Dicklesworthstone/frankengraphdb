@@ -1,11 +1,11 @@
 //! RETURN binds the identities and fields frozen by the native CREATE
 //! collector. These names are compiler scope, never a later graph lookup.
 
+use super::super::mutation_query::{self, ReturnLeaves};
 use super::*;
 use crate::algebra::GraphValueOrder;
 use crate::insertion_query_text::{InsertReturnTemplate, PreparedGraphInsertQueryText};
 use crate::mutation_text::WriteReturnGroupTemplate;
-use super::super::mutation_query::{self, ReturnLeaves};
 use crate::set_text::{ReadPageNumber, ReadProjectionTemplate};
 use crate::{GraphInsertBinding, GraphSetProjection, GraphSetQuantifier, PreparedGraphInsertQuery};
 
@@ -59,7 +59,11 @@ impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
     }
 
     fn types(&self) -> Vec<GraphSetColumnType> {
-        self.returning.bindings.iter().map(|(_, _, kind)| *kind).collect()
+        self.returning
+            .bindings
+            .iter()
+            .map(|(_, _, kind)| *kind)
+            .collect()
     }
 }
 
@@ -443,7 +447,10 @@ impl InsertReturnTemplate {
             self.bindings.clone(),
             projection,
             self.quantifier,
-            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
         )
         .map_err(|kind| GraphInsertTextError {
             offset: self.at,

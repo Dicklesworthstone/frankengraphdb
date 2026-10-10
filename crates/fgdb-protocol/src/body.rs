@@ -1554,28 +1554,48 @@ mod tests {
 
         let execution = ExecutePrepared {
             handle,
-            parameters: vec![("a".into(), sample_value()), ("b".into(), WireValue::Int(9))],
+            parameters: vec![
+                ("a".into(), sample_value()),
+                ("b".into(), WireValue::Int(9)),
+            ],
         };
         let bytes = execution.encode().unwrap();
         assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
         every_prefix_refuses::<ExecutePrepared>(&bytes);
 
         assert_eq!(Prepared::decode(&[0; 16]), Err(BodyError::Noncanonical));
-        assert_eq!(ReleasePrepared::decode(&[0; 16]), Err(BodyError::Noncanonical));
+        assert_eq!(
+            ReleasePrepared::decode(&[0; 16]),
+            Err(BodyError::Noncanonical)
+        );
         assert_eq!(
             ExecutePrepared::decode(&[0; 20]),
             Err(BodyError::Noncanonical)
         );
         let zero = PreparedHandle([0; 16]);
-        assert_eq!((Prepared { handle: zero }).encode(), Err(BodyError::Noncanonical));
-        assert_eq!((ReleasePrepared { handle: zero }).encode(), Err(BodyError::Noncanonical));
-        let duplicate = vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)];
         assert_eq!(
-            Prepare { statement: "a".into(), parameters: duplicate.clone() }.encode(),
+            (Prepared { handle: zero }).encode(),
             Err(BodyError::Noncanonical)
         );
         assert_eq!(
-            ExecutePrepared { handle, parameters: duplicate }.encode(),
+            (ReleasePrepared { handle: zero }).encode(),
+            Err(BodyError::Noncanonical)
+        );
+        let duplicate = vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)];
+        assert_eq!(
+            Prepare {
+                statement: "a".into(),
+                parameters: duplicate.clone()
+            }
+            .encode(),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(
+            ExecutePrepared {
+                handle,
+                parameters: duplicate
+            }
+            .encode(),
             Err(BodyError::Noncanonical)
         );
         // Independent malformed bytes: two null arguments named "a".

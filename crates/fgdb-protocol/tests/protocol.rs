@@ -517,8 +517,20 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
             Err(ProtocolError::InvalidState)
         );
     }
-    assert_eq!(FrameKind::try_from(0x001c).unwrap(), FrameKind::SubscriptionReset);
-    assert_eq!(FrameKind::try_from(0x001d).unwrap(), FrameKind::ExecutePrepared);
-    assert_eq!(FrameKind::try_from(0x001e).unwrap(), FrameKind::ReleasePrepared);
-    assert_eq!(FrameKind::try_from(0x001f).unwrap(), FrameKind::PreparedReleased);
+    assert_eq!(
+        FrameKind::try_from(0x001c).unwrap(),
+        FrameKind::SubscriptionReset
+    );
+    assert_eq!(
+        FrameKind::try_from(0x001d).unwrap(),
+        FrameKind::ExecutePrepared
+    );
+    assert_eq!(
+        FrameKind::try_from(0x001e).unwrap(),
+        FrameKind::ReleasePrepared
+    );
+    assert_eq!(
+        FrameKind::try_from(0x001f).unwrap(),
+        FrameKind::PreparedReleased
+    );
 }

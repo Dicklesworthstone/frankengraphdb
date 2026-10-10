@@ -112,8 +112,7 @@ impl<'a> Parser<'a> {
                     }
                     function = F::CountRows;
                     ReadValueTemplate::Literal(
-                        GqlScalarParameter::new(CanonicalScalar::Null)
-                            .expect("canonical null"),
+                        GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
                     )
                 } else {
                     self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?
@@ -183,10 +182,12 @@ impl<'a> Parser<'a> {
             }
             let input_kind = value.column_type(&leaves.types(), &self.syntax.parameters);
             let kind = match aggregate {
-                Some(crate::GraphAggregateFunction::Collect | crate::GraphAggregateFunction::CollectDistinct) => {
-                    GraphSetColumnType::List
-                }
-                Some(crate::GraphAggregateFunction::Min | crate::GraphAggregateFunction::Max) | None => input_kind,
+                Some(
+                    crate::GraphAggregateFunction::Collect
+                    | crate::GraphAggregateFunction::CollectDistinct,
+                ) => GraphSetColumnType::List,
+                Some(crate::GraphAggregateFunction::Min | crate::GraphAggregateFunction::Max)
+                | None => input_kind,
                 Some(_) => GraphSetColumnType::Scalar,
             };
             functions.push(aggregate);
@@ -218,7 +219,9 @@ impl<'a> Parser<'a> {
                     });
                     output
                 } else {
-                    keys.iter().position(|&key| key == column).expect("grouping key")
+                    keys.iter()
+                        .position(|&key| key == column)
+                        .expect("grouping key")
                 };
                 items.projection.push(ReadProjectionTemplate {
                     name: input.name.clone(),
@@ -613,7 +616,10 @@ impl MutationReturnTemplate {
             self.bindings.clone(),
             projection,
             self.quantifier,
-            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
         )
         .map_err(|kind| GraphMutationTextError {
             offset: self.at,

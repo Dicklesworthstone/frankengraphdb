@@ -773,14 +773,20 @@ fn aggregate_returning_counts_occurrences_and_keeps_one_transaction_row_allowanc
                 ), "{text}");
                 let updated = rows_at(&text, 2);
                 assert_eq!(updated.len(), 1, "{text}");
-                assert!(updated[0].contains(
-                    r#""cells":[{"type":"int","value":"3"},{"type":"int","value":"11"}]"#
-                ), "{text}");
+                assert!(
+                    updated[0].contains(
+                        r#""cells":[{"type":"int","value":"3"},{"type":"int","value":"11"}]"#
+                    ),
+                    "{text}"
+                );
                 let merged = rows_at(&text, 3);
                 assert_eq!(merged.len(), 1, "{text}");
-                assert!(merged[0].contains(
-                    r#""cells":[{"type":"int","value":"1"},{"type":"int","value":"15"}]"#
-                ), "{text}");
+                assert!(
+                    merged[0].contains(
+                        r#""cells":[{"type":"int","value":"1"},{"type":"int","value":"15"}]"#
+                    ),
+                    "{text}"
+                );
                 assert_eq!(rows_at(&text, 4).len(), 1, "{text}");
                 assert!(text.ends_with(
                     "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":5,\"statements\":4}\n"

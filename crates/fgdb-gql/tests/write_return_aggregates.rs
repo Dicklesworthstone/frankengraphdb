@@ -84,7 +84,11 @@ fn list(values: Vec<GraphValue>) -> GraphValue {
 }
 
 fn rows(execution: &GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
-    execution.value.iter().map(|row| row.values().to_vec()).collect()
+    execution
+        .value
+        .iter()
+        .map(|row| row.values().to_vec())
+        .collect()
 }
 
 #[test]
@@ -111,17 +115,29 @@ fn create_groups_actual_frozen_identities_and_null_keys() {
         rows(batch.returning()),
         vec![
             vec![
-                int(1), int(2), int(2), int(2),
-                list(vec![GraphValue::Vertex(VId(100)), GraphValue::Vertex(VId(116))]),
+                int(1),
+                int(2),
+                int(2),
+                int(2),
+                list(vec![
+                    GraphValue::Vertex(VId(100)),
+                    GraphValue::Vertex(VId(116))
+                ]),
                 list(vec![int(1)]),
             ],
             vec![
-                int(2), int(1), int(1), int(2),
+                int(2),
+                int(1),
+                int(1),
+                int(2),
                 list(vec![GraphValue::Vertex(VId(132))]),
                 list(vec![int(2)]),
             ],
             vec![
-                null(), int(1), int(0), null(),
+                null(),
+                int(1),
+                int(0),
+                null(),
                 list(vec![GraphValue::Vertex(VId(148))]),
                 list(vec![]),
             ],
@@ -144,7 +160,13 @@ fn all_native_scalar_and_collection_aggregates_keep_occurrence_and_distinct_sema
     assert_eq!(
         rows(batch.returning()),
         vec![vec![
-            int(4), int(3), int(2), int(7), int(4), int(1), int(3),
+            int(4),
+            int(3),
+            int(2),
+            int(7),
+            int(4),
+            int(1),
+            int(3),
             list(vec![int(1), int(3), int(3)]),
             list(vec![int(1), int(3)]),
         ]],
@@ -160,7 +182,8 @@ fn all_native_scalar_and_collection_aggregates_keep_occurrence_and_distinct_sema
         ),
         policy(1),
         || Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         rows(floating.returning()),
         vec![vec![
@@ -180,17 +203,27 @@ fn empty_keyless_and_grouped_sources_keep_native_empty_group_semantics() {
         ),
         policy(1),
         || Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(global.insertion().stats().created_vertices, 0);
     assert_eq!(
         rows(global.returning()),
-        vec![vec![int(0), int(0), null(), null(), null(), list(vec![]), null()]],
+        vec![vec![
+            int(0),
+            int(0),
+            null(),
+            null(),
+            null(),
+            list(vec![]),
+            null()
+        ]],
     );
     let grouped = create(
         &prepare("UNWIND [] AS x CREATE (n {p:x}) RETURN n.p AS p,count(*) AS rows"),
         policy(0),
         || Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(grouped.returning().value.is_empty());
     assert_eq!(grouped.insertion().stats().created_vertices, 0);
 }
@@ -238,7 +271,11 @@ fn mutation_groups_post_statement_values_and_duplicate_matches_without_rematchin
         ((VId(2), P), CanonicalScalar::Int(7)),
         ((VId(3), P), CanonicalScalar::Int(11)),
     ]);
-    let edges = [(VId(1), R, VId(2)), (VId(1), R, VId(2)), (VId(1), R, VId(3))];
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(3)),
+    ];
     let batch = mutate(
         "MATCH (a)-[:R]->(b) SET a.p=a.p+1,b.q=0 \
          RETURN a.p AS p,count(*) AS matches,count(DISTINCT b) AS neighbors, \
@@ -246,10 +283,17 @@ fn mutation_groups_post_statement_values_and_duplicate_matches_without_rematchin
         &[VId(1), VId(2), VId(3)],
         &edges,
         &properties,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         rows(batch.returning()),
-        vec![vec![int(6), int(3), int(2), int(25), list(vec![int(0), int(0), int(0)])]],
+        vec![vec![
+            int(6),
+            int(3),
+            int(2),
+            int(25),
+            list(vec![int(0), int(0), int(0)])
+        ]],
     );
     assert_eq!(batch.mutation().stats().effects, 3);
     assert_eq!(batch.mutation().stats().selection.result_rows, 3);
@@ -261,7 +305,8 @@ fn mutation_groups_post_statement_values_and_duplicate_matches_without_rematchin
         &[VId(1), VId(2), VId(3)],
         &edges,
         &properties,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(rows(empty.returning()), vec![vec![int(0), null()]]);
     assert_eq!(empty.mutation().stats().effects, 0);
 }
@@ -288,7 +333,8 @@ fn ordering_paging_and_zero_final_allowance_never_limit_effects() {
         &prepare("UNWIND [1,2,3] AS x CREATE (n {p:x}) RETURN count(*) AS rows"),
         policy(0),
         || Ok(()),
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         GqlQueryError::Rows(error) if error.dimension == GqlBudgetDimension::ResultRows
@@ -304,10 +350,13 @@ fn late_argument_and_output_conversion_errors_survive_limit_zero() {
         "UNWIND [1,3] AS x CREATE (n {p:x}) RETURN avg(n.p) AS exact LIMIT 0",
     ] {
         let error = create(&prepare(statement), policy(0), || Ok(())).unwrap_err();
-        assert!(matches!(
-            error,
-            GqlQueryError::Source(GraphInsertQueryError::Returning(_))
-        ), "{statement}: {error:?}");
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(GraphInsertQueryError::Returning(_))
+            ),
+            "{statement}: {error:?}"
+        );
     }
 }
 
@@ -348,14 +397,14 @@ fn grouping_continues_the_complete_write_work_and_scratch_allowances() {
 
 #[test]
 fn cancelled_grouping_retries_from_frozen_definition_without_partial_output() {
-    let query = prepare(
-        "UNWIND [1,2,2,3] AS x CREATE (n {p:x}) RETURN n.p AS p,collect(n) AS nodes",
-    );
+    let query =
+        prepare("UNWIND [1,2,2,3] AS x CREATE (n {p:x}) RETURN n.p AS p,collect(n) AS nodes");
     let visits = Cell::new(0_usize);
     let expected = create(&query, policy(3), || {
         visits.set(visits.get() + 1);
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     for stop in [0, visits.get() / 2, visits.get() - 1] {
         let observed = Cell::new(0_usize);
         let result = create(&query, policy(3), || {
@@ -379,24 +428,40 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
         "CREATE (n:Item {p:1}) RETURN count(*) AS same,max(n.p) AS same",
     ] {
         let calls = Cell::new(0);
-        assert!(PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls.get(), 0, "{text}");
     }
     let calls = Cell::new(0);
-    assert!(PreparedGraphMutationQueryText::prepare(
-        "MATCH (n:Item) SET n.p=2 RETURN sum(n)",
-        R,
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-    ).is_err());
+    assert!(
+        PreparedGraphMutationQueryText::prepare(
+            "MATCH (n:Item) SET n.p=2 RETURN sum(n)",
+            R,
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
     assert_eq!(calls.get(), 0);
-    assert!(PreparedGraphVertexUpsertQueryText::prepare(
-        "MERGE (n:Item {p:1}) RETURN count(DISTINCT *)",
-        R,
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-    ).is_err());
+    assert!(
+        PreparedGraphVertexUpsertQueryText::prepare(
+            "MERGE (n:Item {p:1}) RETURN count(DISTINCT *)",
+            R,
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
     assert_eq!(calls.get(), 0);
 }
 
@@ -406,14 +471,27 @@ fn grouping_definition_binds_parameters_once_and_separates_aggregate_semantics()
         "CREATE (n {p:$p}) RETURN sum(n.p+$step) AS total LIMIT $limit",
         R,
         symbols,
-    ).unwrap();
+    )
+    .unwrap();
     let arguments = GqlParameters::new()
-        .with_int64("p", 7).unwrap()
-        .with_int64("step", 3).unwrap()
-        .with_uint64("limit", 1).unwrap();
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("step", 3)
+        .unwrap()
+        .with_uint64("limit", 1)
+        .unwrap();
     let query = template.bind_parameters(&arguments).unwrap();
-    assert_eq!(rows(create(&query, policy(1), || Ok(())).unwrap().returning()), vec![vec![int(10)]]);
-    assert_eq!(query.canonical_bytes(), template.bind_parameters(&arguments).unwrap().canonical_bytes());
+    assert_eq!(
+        rows(create(&query, policy(1), || Ok(())).unwrap().returning()),
+        vec![vec![int(10)]]
+    );
+    assert_eq!(
+        query.canonical_bytes(),
+        template
+            .bind_parameters(&arguments)
+            .unwrap()
+            .canonical_bytes()
+    );
 
     let sum = prepare("UNWIND [1,1] AS x CREATE (n {p:x}) RETURN sum(n.p) AS answer");
     let distinct = prepare("UNWIND [1,1] AS x CREATE (n {p:x}) RETURN sum(DISTINCT n.p) AS answer");

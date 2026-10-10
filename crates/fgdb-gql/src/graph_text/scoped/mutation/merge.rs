@@ -926,7 +926,10 @@ impl VertexReturnTemplate {
             self.bindings.clone(),
             projection,
             self.quantifier,
-            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
         )
         .map_err(|kind| GraphVertexUpsertTextError {
             offset: self.at,

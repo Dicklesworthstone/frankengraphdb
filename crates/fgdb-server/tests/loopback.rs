@@ -2462,10 +2462,18 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             .await
             .unwrap();
         assert_eq!(answer.columns, ["name"]);
-        assert_eq!(answer.rows, ["C", "D", "E", "F"].map(|name| vec![text(name)]));
+        assert_eq!(
+            answer.rows,
+            ["C", "D", "E", "F"].map(|name| vec![text(name)])
+        );
         assert!(matches!(answer.outcome, Outcome::Rows { seq: 1 }));
         assert_eq!(
-            server_code(owner.execute_prepared(cx, handle, vec![]).await.unwrap_err()),
+            server_code(
+                owner
+                    .execute_prepared(cx, handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
             ErrorCode::Statement
         );
         let mut foreign = Client::connect(cx, addr, original).await.unwrap();
@@ -2489,7 +2497,10 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
                 },
             )
             .await;
-        assert!(matches!(cancelled, Err(ClientError::Protocol("the consumer stopped"))));
+        assert!(matches!(
+            cancelled,
+            Err(ClientError::Protocol("the consumer stopped"))
+        ));
         assert_eq!(delivered, 1);
         let answer = owner
             .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(6))])
@@ -2510,7 +2521,10 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             .execute_prepared(
                 cx,
                 exact_name,
-                vec![("name".into(), text("A' CREATE (:Person {name:'injected'}) //"))],
+                vec![(
+                    "name".into(),
+                    text("A' CREATE (:Person {name:'injected'}) //"),
+                )],
             )
             .await
             .unwrap();
@@ -2524,13 +2538,20 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
         owner.release_prepared(cx, exact_name).await.unwrap();
         assert_eq!(
             server_code(
-                owner.execute_prepared(cx, exact_name, vec![("name".into(), text("B"))])
-                    .await.unwrap_err()
+                owner
+                    .execute_prepared(cx, exact_name, vec![("name".into(), text("B"))])
+                    .await
+                    .unwrap_err()
             ),
             ErrorCode::Statement
         );
         assert_eq!(
-            server_code(owner.prepare_read(cx, "CREATE (:Person)", vec![]).await.unwrap_err()),
+            server_code(
+                owner
+                    .prepare_read(cx, "CREATE (:Person)", vec![])
+                    .await
+                    .unwrap_err()
+            ),
             ErrorCode::Statement
         );
         let narrowed = token(&Grant {
@@ -2541,8 +2562,10 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
         owner.refresh_authority(cx, narrowed).await.unwrap();
         assert_eq!(
             server_code(
-                owner.execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(1))])
-                    .await.unwrap_err()
+                owner
+                    .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(1))])
+                    .await
+                    .unwrap_err()
             ),
             ErrorCode::Statement,
             "even narrowing discards every old compiled template"
@@ -2552,7 +2575,10 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             .await
             .unwrap();
         let answer = owner.execute_prepared(cx, visible, vec![]).await.unwrap();
-        assert_eq!(answer.rows, ["A", "B", "C", "D", "E", "F"].map(|name| vec![text(name)]));
+        assert_eq!(
+            answer.rows,
+            ["A", "B", "C", "D", "E", "F"].map(|name| vec![text(name)])
+        );
         owner.release_prepared(cx, visible).await.unwrap();
         foreign.close(cx).await.unwrap();
         owner.close(cx).await.unwrap();

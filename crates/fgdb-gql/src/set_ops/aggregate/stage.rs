@@ -85,7 +85,6 @@ impl PreparedGraphSetAggregate {
     }
 }
 
-
 /// Bound input expressions and native aggregate declarations for a write
 /// RETURN. Preparation below checks them against the write collector's actual
 /// binding schema before any source or effect can execute.
@@ -122,13 +121,14 @@ impl WriteReturnGroupSpec {
             .iter()
             .map(crate::set_text::aggregate::ReadAggregateSpec::declaration)
             .collect::<Vec<_>>();
-        let summary = crate::aggregation::OwnedRowAggregate::prepare(
-            &columns,
-            &self.keys,
-            &declarations,
-        )?;
+        let summary =
+            crate::aggregation::OwnedRowAggregate::prepare(&columns, &self.keys, &declarations)?;
         let input_types = checked.column_types();
-        let mut types = self.keys.iter().map(|&column| input_types[column]).collect::<Vec<_>>();
+        let mut types = self
+            .keys
+            .iter()
+            .map(|&column| input_types[column])
+            .collect::<Vec<_>>();
         for aggregate in &self.aggregates {
             types.push(match aggregate.function {
                 Function::CountRows

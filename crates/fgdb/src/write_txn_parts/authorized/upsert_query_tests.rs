@@ -403,13 +403,17 @@ fn aggregate_write_returns_mask_before_grouping_and_charge_only_final_rows() {
             assert_eq!(merged.value[0].values(), &[int(1), int(112), int(0)]);
             assert_eq!(merged.rows.result_rows, 1);
             if hidden {
-                assert_eq!(db.vertex(VId(3)).unwrap().unwrap().props, vec![
-                    (P, CanonicalScalar::Int(30))
-                ]);
-                assert!(db.vertex(VId(1)).unwrap().unwrap().props.contains(&(
-                    SECRET,
-                    CanonicalScalar::Int(71),
-                )));
+                assert_eq!(
+                    db.vertex(VId(3)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(30))]
+                );
+                assert!(
+                    db.vertex(VId(1))
+                        .unwrap()
+                        .unwrap()
+                        .props
+                        .contains(&(SECRET, CanonicalScalar::Int(71),))
+                );
                 let second = db.vertex(VId(2)).unwrap().unwrap();
                 assert!(second.labels.contains(&HIDDEN));
                 assert!(second.props.contains(&(SECRET, CanonicalScalar::Int(72))));
@@ -439,7 +443,11 @@ fn aggregate_merge_failure_with_zero_output_allowance_preserves_committed_state(
         ] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             seed(&mut db, &commit, true).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let error = db
                 .execute_graph_vertex_upsert_query_authorized(
                     &txn,
@@ -456,7 +464,11 @@ fn aggregate_merge_failure_with_zero_output_allowance_preserves_committed_state(
                 .unwrap_err();
             assert!(error.to_string().contains("SUM"), "{error}");
             assert_eq!(
-                (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
                 before,
             );
             assert_eq!(txn.outstanding_obligations(), 0);

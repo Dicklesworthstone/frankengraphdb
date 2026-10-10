@@ -575,8 +575,7 @@ impl PreparedGraphAggregate {
             .map(crate::PreparedGraphSet::columns)
             .or(projected_columns.as_deref())
             .unwrap_or(input.columns());
-        let mut definition =
-            Self::prepare_row_columns(columns, keys, aggregates, offset, count)?;
+        let mut definition = Self::prepare_row_columns(columns, keys, aggregates, offset, count)?;
         definition.input = AggregateInput(Some(input));
         definition.computed_input = computed_input;
         definition.relational_input = relational_input;

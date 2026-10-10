@@ -465,7 +465,6 @@ fn merge_return_row_allowance_applies_after_projection_on_both_branches() {
     });
 }
 
-
 /// Aggregation consumes the statement's complete post-effect occurrence bag.
 /// Refused aggregate arguments or output conversions restore that statement's
 /// overlay while retaining an earlier successful write in the same transaction.
@@ -503,15 +502,20 @@ fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay(
             "MATCH (n:Item) DETACH DELETE n RETURN sum(n.p) AS deleted LIMIT 0",
         ] {
             assert!(
-                txn.execute_graph_mutation_query_governed(
-                    &mut db, cx, &prepare(text), hidden,
-                ).is_err(),
+                txn.execute_graph_mutation_query_governed(&mut db, cx, &prepare(text), hidden,)
+                    .is_err(),
                 "{text}",
             );
             assert_eq!(txn.staged_effect_digest().unwrap(), staged);
             assert_eq!(db.frontier().unwrap(), basis);
-            assert_eq!(txn.vertex_property(&db, VId(1), P).unwrap(), Some(CanonicalScalar::Int(11)));
-            assert_eq!(txn.vertex_property(&db, VId(4), Q).unwrap(), Some(CanonicalScalar::Int(10)));
+            assert_eq!(
+                txn.vertex_property(&db, VId(1), P).unwrap(),
+                Some(CanonicalScalar::Int(11))
+            );
+            assert_eq!(
+                txn.vertex_property(&db, VId(4), Q).unwrap(),
+                Some(CanonicalScalar::Int(10))
+            );
         }
 
         let (_, returned) = txn
@@ -524,11 +528,18 @@ fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay(
             .unwrap();
         assert!(returned.value.is_empty());
         for id in 1..=4 {
-            assert_eq!(txn.vertex_property(&db, VId(id), Q).unwrap(), Some(CanonicalScalar::Int(0)));
+            assert_eq!(
+                txn.vertex_property(&db, VId(id), Q).unwrap(),
+                Some(CanonicalScalar::Int(0))
+            );
         }
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(
-            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p,n.q AS q ORDER BY p"),
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) RETURN n.p AS p,n.q AS q ORDER BY p"
+            ),
             vec![
                 vec![int(11), int(0)],
                 vec![int(12), int(0)],

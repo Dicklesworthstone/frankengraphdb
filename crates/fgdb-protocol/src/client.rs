@@ -352,7 +352,9 @@ impl Client {
         }
         let released: ReleasePrepared = expect(&frame, FrameKind::PreparedReleased)?;
         if released.handle != handle {
-            return Err(ClientError::Protocol("released a different prepared handle"));
+            return Err(ClientError::Protocol(
+                "released a different prepared handle",
+            ));
         }
         Ok(())
     }
@@ -378,7 +380,11 @@ impl Client {
                 },
             )
             .await?;
-        Ok(Answer { columns, rows, outcome })
+        Ok(Answer {
+            columns,
+            rows,
+            outcome,
+        })
     }
 
     /// Rebind real typed operands and stream a prepared read. A callback
@@ -406,7 +412,9 @@ impl Client {
             .await?;
         let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
         if !matches!(outcome, Outcome::Rows { .. }) {
-            return Err(ClientError::Protocol("prepared read returned a write outcome"));
+            return Err(ClientError::Protocol(
+                "prepared read returned a write outcome",
+            ));
         }
         Ok(outcome)
     }
@@ -461,7 +469,9 @@ impl Client {
                 return Err(ClientError::Closed);
             }
             if header.request_id() != request {
-                return Err(ClientError::Protocol("result frame for a different request"));
+                return Err(ClientError::Protocol(
+                    "result frame for a different request",
+                ));
             }
             match stream {
                 None if !header.stream_id().is_control() => stream = Some(header.stream_id()),
@@ -500,9 +510,7 @@ impl Client {
                         }
                     }
                     let frame_limit = self.send_limits.max_frame_len() as u64;
-                    if callback_error.is_none()
-                        && (available.0 < frame_limit || available.1 == 0)
-                    {
+                    if callback_error.is_none() && (available.0 < frame_limit || available.1 == 0) {
                         let Some(id) = stream else {
                             return Err(ClientError::Protocol("chunk on the control stream"));
                         };
@@ -999,7 +1007,10 @@ mod tests {
             FrameKind::SnapshotResultEnd,
             request,
             StreamId([5; 16]),
-            &ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows },
+            &ResultEnd {
+                outcome: Outcome::Rows { seq: 3 },
+                rows,
+            },
         )
     }
 
@@ -1022,22 +1033,29 @@ mod tests {
         let limits = FrameLimits::new(4096).unwrap();
         for kind in [FrameKind::Prepared, FrameKind::PreparedReleased] {
             let reply = rpc(
-                kind, 4, StreamId::CONTROL,
-                &Prepared { handle: PreparedHandle([0x31; 16]) },
+                kind,
+                4,
+                StreamId::CONTROL,
+                &Prepared {
+                    handle: PreparedHandle([0x31; 16]),
+                },
             );
             assert_eq!(server_header(reply.header(), current), Ok(()));
             let child = rpc(
-                kind, 4, StreamId([5; 16]),
-                &Prepared { handle: PreparedHandle([0x31; 16]) },
+                kind,
+                4,
+                StreamId([5; 16]),
+                &Prepared {
+                    handle: PreparedHandle([0x31; 16]),
+                },
             );
             assert_eq!(
                 server_header(child.header(), current),
                 Err(ProtocolError::InvalidState),
             );
             for unselected in [Binding::Transport, Binding::Session(session())] {
-                let frame = Frame::new(
-                    kind, 4, StreamId::CONTROL, unselected, vec![], limits,
-                ).unwrap();
+                let frame =
+                    Frame::new(kind, 4, StreamId::CONTROL, unselected, vec![], limits).unwrap();
                 assert_eq!(
                     server_header(frame.header(), unselected),
                     Err(ProtocolError::InvalidState),
@@ -1046,8 +1064,14 @@ mod tests {
             let mut stale = ready().binding(session());
             stale.session.auth_generation += 1;
             let frame = Frame::new(
-                kind, 4, StreamId::CONTROL, Binding::Ready(stale), vec![], limits,
-            ).unwrap();
+                kind,
+                4,
+                StreamId::CONTROL,
+                Binding::Ready(stale),
+                vec![],
+                limits,
+            )
+            .unwrap();
             assert_eq!(
                 server_header(frame.header(), current),
                 Err(ProtocolError::InvalidBinding),
@@ -1065,13 +1089,21 @@ mod tests {
                         FrameKind::Error,
                         5,
                         StreamId([5; 16]),
-                        &ErrorBody { code: ErrorCode::Cancelled, message: "cancelled".into() },
+                        &ErrorBody {
+                            code: ErrorCode::Cancelled,
+                            message: "cancelled".into(),
+                        },
                     )
                 } else {
                     result_end(5, 2)
                 };
                 let io = script(vec![
-                    rpc(FrameKind::Prepared, 4, StreamId::CONTROL, &Prepared { handle }),
+                    rpc(
+                        FrameKind::Prepared,
+                        4,
+                        StreamId::CONTROL,
+                        &Prepared { handle },
+                    ),
                     result_chunk(5, &[1, 2]),
                     terminal,
                     result_chunk(7, &[20]),
@@ -1114,14 +1146,13 @@ mod tests {
                         },
                     )
                     .await;
-                assert!(matches!(stopped, Err(ClientError::Protocol("caller stopped"))));
+                assert!(matches!(
+                    stopped,
+                    Err(ClientError::Protocol("caller stopped"))
+                ));
                 assert_eq!(delivered, 1, "cancel suppresses all remaining callbacks");
                 let result = client
-                    .execute_prepared(
-                        &root,
-                        handle,
-                        vec![("value".into(), WireValue::Int(20))],
-                    )
+                    .execute_prepared(&root, handle, vec![("value".into(), WireValue::Int(20))])
                     .await
                     .unwrap();
                 assert_eq!(result.rows, [vec![WireValue::Int(20)]]);
@@ -1129,11 +1160,19 @@ mod tests {
                 client.release_prepared(&root, handle).await.unwrap();
                 let frames = sent_frames(&written.lock().unwrap());
                 assert_eq!(
-                    frames.iter().map(|frame| frame.header().kind()).collect::<Vec<_>>(),
+                    frames
+                        .iter()
+                        .map(|frame| frame.header().kind())
+                        .collect::<Vec<_>>(),
                     [
-                        FrameKind::Hello, FrameKind::Auth, FrameKind::SelectDatabase,
-                        FrameKind::Prepare, FrameKind::ExecutePrepared, FrameKind::QueryCancel,
-                        FrameKind::ExecutePrepared, FrameKind::ReleasePrepared,
+                        FrameKind::Hello,
+                        FrameKind::Auth,
+                        FrameKind::SelectDatabase,
+                        FrameKind::Prepare,
+                        FrameKind::ExecutePrepared,
+                        FrameKind::QueryCancel,
+                        FrameKind::ExecutePrepared,
+                        FrameKind::ReleasePrepared,
                         FrameKind::ReleasePrepared,
                     ]
                 );
@@ -1158,31 +1197,58 @@ mod tests {
                 FrameKind::SnapshotResultEnd,
                 5,
                 StreamId([6; 16]),
-                &ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows: 1 },
+                &ResultEnd {
+                    outcome: Outcome::Rows { seq: 3 },
+                    rows: 1,
+                },
             );
             let wrong_request = result_end(6, 1);
             let malformed = Frame::new(
-                FrameKind::Error, 5, StreamId([5; 16]),
-                Binding::Ready(ready().binding(session())), vec![0], limits,
-            ).unwrap();
-            let stale = Frame::new(
-                FrameKind::SnapshotResultEnd, 5, StreamId([5; 16]),
-                Binding::Ready(stale),
-                ResultEnd { outcome: Outcome::Rows { seq: 3 }, rows: 1 }.encode().unwrap(),
+                FrameKind::Error,
+                5,
+                StreamId([5; 16]),
+                Binding::Ready(ready().binding(session())),
+                vec![0],
                 limits,
-            ).unwrap();
+            )
+            .unwrap();
+            let stale = Frame::new(
+                FrameKind::SnapshotResultEnd,
+                5,
+                StreamId([5; 16]),
+                Binding::Ready(stale),
+                ResultEnd {
+                    outcome: Outcome::Rows { seq: 3 },
+                    rows: 1,
+                }
+                .encode()
+                .unwrap(),
+                limits,
+            )
+            .unwrap();
             for terminal in [foreign, wrong_request, malformed, stale] {
                 let io = script(vec![
-                    rpc(FrameKind::Prepared, 4, StreamId::CONTROL, &Prepared { handle }),
+                    rpc(
+                        FrameKind::Prepared,
+                        4,
+                        StreamId::CONTROL,
+                        &Prepared { handle },
+                    ),
                     result_chunk(5, &[1]),
                     terminal,
                 ]);
                 let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
                 client.select(&root, "test").await.unwrap();
-                client.prepare_read(&root, "MATCH (n) RETURN n", vec![]).await.unwrap();
+                client
+                    .prepare_read(&root, "MATCH (n) RETURN n", vec![])
+                    .await
+                    .unwrap();
                 let error = client
                     .execute_prepared_streaming(
-                        &root, handle, vec![], |_| {},
+                        &root,
+                        handle,
+                        vec![],
+                        |_| {},
                         |_| Err(ClientError::Protocol("caller stopped")),
                     )
                     .await
