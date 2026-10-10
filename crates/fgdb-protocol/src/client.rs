@@ -10,9 +10,9 @@
 
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
-    ErrorCode, Execute, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
-    Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
-    SubscriptionBatch, WindowUpdate, WireValue,
+    ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
+    Prepare, Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
+    SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -294,6 +294,52 @@ impl Client {
             rows,
             outcome,
         })
+    }
+
+    /// Bind every argument set to one native write-script definition and
+    /// execute the resulting program atomically. The server allocates IDs;
+    /// the complete batch shares one signed allowance and one commit. Only
+    /// statement statistics/completion are returned, and RETURN is refused
+    /// before effects. A transport failure can leave the outcome unknown:
+    /// this method never retries, and repeating it can duplicate writes.
+    pub async fn execute_batch(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        mut argument_sets: Vec<Vec<(String, WireValue)>>,
+    ) -> Result<Outcome, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        for parameters in &mut argument_sets {
+            parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        }
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecuteBatch,
+                StreamId::CONTROL,
+                &ExecuteBatch {
+                    statement: statement.to_owned(),
+                    argument_sets,
+                },
+            )
+            .await?;
+        let mut unexpected_columns = false;
+        let outcome = self
+            .receive_result(
+                cx,
+                request,
+                |columns| unexpected_columns |= !columns.is_empty(),
+                |_| Err(ClientError::Protocol("a stats-only batch returned a row")),
+            )
+            .await?;
+        if unexpected_columns || matches!(outcome, Outcome::Rows { .. }) {
+            return Err(ClientError::Protocol(
+                "a stats-only write batch returned a query result",
+            ));
+        }
+        Ok(outcome)
     }
 
     /// Prepare one native read template without executing it or pinning a
@@ -1025,6 +1071,108 @@ mod tests {
             frames.push(part.frame.expect("complete sent frame"));
         }
         frames
+    }
+
+    #[test]
+    fn atomic_batch_client_sends_once_and_preserves_unknown_outcomes() {
+        let ((), report) = run_async_under_lab(0x79a0_0303, |root| async move {
+            for scenario in 0..3 {
+                let replies = match scenario {
+                    0 => vec![
+                        rpc(
+                            FrameKind::SnapshotResultChunk,
+                            4,
+                            StreamId([5; 16]),
+                            &ResultChunk {
+                                columns: Some(vec![]),
+                                rows: vec![],
+                            },
+                        ),
+                        rpc(
+                            FrameKind::SnapshotResultEnd,
+                            4,
+                            StreamId([5; 16]),
+                            &ResultEnd {
+                                outcome: Outcome::WriteCommitted {
+                                    seq: 8,
+                                    statements: 2,
+                                },
+                                rows: 0,
+                            },
+                        ),
+                    ],
+                    1 => vec![rpc(
+                        FrameKind::Error,
+                        4,
+                        StreamId([5; 16]),
+                        &ErrorBody {
+                            code: ErrorCode::OutcomeUnknown,
+                            message: "write outcome unknown; do not replay".into(),
+                        },
+                    )],
+                    _ => vec![],
+                };
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let result = client
+                    .execute_batch(
+                        &root,
+                        "CREATE (:Person {name:$name,age:$age})",
+                        vec![
+                            vec![
+                                ("name".into(), WireValue::Text("Ann".into())),
+                                ("age".into(), WireValue::Int(30)),
+                            ],
+                            vec![
+                                ("name".into(), WireValue::Text("Bob".into())),
+                                ("age".into(), WireValue::Int(25)),
+                            ],
+                        ],
+                    )
+                    .await;
+                match scenario {
+                    0 => assert_eq!(
+                        result.unwrap(),
+                        Outcome::WriteCommitted {
+                            seq: 8,
+                            statements: 2
+                        }
+                    ),
+                    1 => assert!(matches!(
+                        result,
+                        Err(ClientError::Server {
+                            code: ErrorCode::OutcomeUnknown,
+                            ..
+                        })
+                    )),
+                    _ => assert!(matches!(result, Err(ClientError::Closed))),
+                }
+                let sent = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    sent.len(),
+                    4,
+                    "unknown outcome/EOF must never resend a write"
+                );
+                assert_eq!(sent[3].header().kind(), FrameKind::ExecuteBatch);
+                let request = ExecuteBatch::decode(sent[3].payload()).unwrap();
+                assert_eq!(
+                    request.argument_sets,
+                    vec![
+                        vec![
+                            ("age".into(), WireValue::Int(30)),
+                            ("name".into(), WireValue::Text("Ann".into()))
+                        ],
+                        vec![
+                            ("age".into(), WireValue::Int(25)),
+                            ("name".into(), WireValue::Text("Bob".into()))
+                        ],
+                    ]
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

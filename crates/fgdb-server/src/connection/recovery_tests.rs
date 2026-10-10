@@ -183,6 +183,64 @@ fn recovery_resets_credit_blocked_subscriptions_at_the_last_complete_batch() {
 }
 
 #[test]
+fn committed_atomic_batch_becomes_unknown_if_recovery_precedes_its_first_output_byte() {
+    let ((), report) = run_async_under_lab(0x79a0_0103, |root| async move {
+        let (server, token, _) = served(&root, "committed-batch-output-fence").await;
+        let db = &server.databases["test"];
+        let (mut lane, wire) = lane(&root, db, &token, [0], false);
+        let waiter = server.shutdown.waiter();
+        let mut execution = Box::pin(lane.execute_statement(
+            &root,
+            &waiter,
+            db,
+            &token,
+            1,
+            Statement::Batch(ExecuteBatch {
+                statement: "CREATE ()".into(),
+                argument_sets: vec![vec![], vec![]],
+            }),
+        ));
+        poll_fn(|task| {
+            assert!(execution.as_mut().poll(task).is_pending());
+            if wire.writes.load(Ordering::Acquire) > 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(wire.bytes().is_empty());
+        {
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), CommitSeq(1));
+            assert_eq!(guard.vertices().unwrap().len(), 2);
+        }
+        fail_after_marker(&root, db, 777).await;
+        assert!(execution.await.is_ok());
+        let sent = frames(&wire.bytes());
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].header().kind(), FrameKind::Error);
+        let refusal = ErrorBody::decode(sent[0].payload()).unwrap();
+        assert_eq!(refusal.code, ErrorCode::OutcomeUnknown);
+        assert!(refusal.message.contains("do not replay"));
+        assert_eq!(lane.conn.children_in_flight(), 0);
+        assert_eq!(lane.conn.sends_in_flight(), 0);
+        settled(db).await;
+        {
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), CommitSeq(2));
+            assert_eq!(
+                guard.vertices().unwrap().len(),
+                3,
+                "the batch committed exactly once"
+            );
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn generation_fence_cancels_unwritten_frames_but_closes_partial_frames_and_flushes() {
     let ((), report) = run_async_under_lab(0x79a0_0102, |root| async move {
         for (name, writes, flush_pending, unwritten) in [

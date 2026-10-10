@@ -134,6 +134,254 @@ fn server_code(error: ClientError) -> ErrorCode {
 }
 
 #[test]
+fn fgp_atomic_parameter_batches_share_one_commit_and_refuse_without_a_prefix() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "atomic-parameter-batch").await;
+        let mut scope = grant(Rights::Write);
+        scope.limits.max_rows = 0;
+        let mut writer = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        writer.select(cx, "social").await.unwrap();
+        let mut reader = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let arguments = |name: &str, age| {
+            vec![
+                // The client canonicalizes names within EACH argument set.
+                ("name".into(), text(name)),
+                ("age".into(), WireValue::Int(age)),
+            ]
+        };
+        let literal = "'); MATCH (n) DETACH DELETE n; //";
+        let outcome = writer
+            .execute_batch(
+                cx,
+                "CREATE (:Person {name:$name,age:$age})",
+                vec![
+                    arguments("Ann", 30),
+                    arguments("Bob", 25),
+                    arguments(literal, 7),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 3
+            }
+        );
+        let query = "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY age";
+        let expected = vec![
+            vec![text(literal), WireValue::Int(7)],
+            vec![text("Bob"), WireValue::Int(25)],
+            vec![text("Ann"), WireValue::Int(30)],
+        ];
+        assert_eq!(
+            reader
+                .execute(cx, ExecuteMode::Read, query, vec![])
+                .await
+                .unwrap()
+                .rows,
+            expected
+        );
+
+        let error = writer
+            .execute_batch(
+                cx,
+                "CREATE (:Person {name:$name,age:$age})",
+                vec![
+                    arguments("must roll back", 90),
+                    vec![("name".into(), text("missing age"))],
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Statement);
+        let error = writer
+            .execute_batch(
+                cx,
+                "CREATE (:Person {age:12/$divisor})",
+                vec![
+                    vec![("divisor".into(), WireValue::Int(3))],
+                    vec![("divisor".into(), WireValue::Int(0))],
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Server {
+                code: ErrorCode::Statement | ErrorCode::Execution,
+                ..
+            }
+        ));
+        let error = writer
+            .execute_batch(
+                cx,
+                "CREATE (n:Person {age:$age}) RETURN 1/0 AS invalid LIMIT 0",
+                vec![vec![("age".into(), WireValue::Int(3))]],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Statement);
+        // The request cannot inject an element identity through a parameter.
+        let error = writer
+            .execute_batch(
+                cx,
+                "CREATE (:Person {age:$age})",
+                vec![vec![("age".into(), WireValue::Vertex(77))]],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Statement);
+        let error = writer
+            .execute_batch(cx, "CREATE (:Person)", vec![vec![]; 65])
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(error), ErrorCode::Budget);
+        let result = reader
+            .execute(cx, ExecuteMode::Read, query, vec![])
+            .await
+            .unwrap();
+        assert_eq!(result.rows, expected);
+        assert_eq!(result.outcome, Outcome::Rows { seq: 1 });
+
+        // A refused batch leaves the connection usable; this is a new request,
+        // not a retry by the client and not the publication of a staged prefix.
+        assert_eq!(
+            writer
+                .execute_batch(
+                    cx,
+                    "CREATE (:Person {age:$age})",
+                    vec![vec![("age".into(), WireValue::Int(40))]]
+                )
+                .await
+                .unwrap(),
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1
+            }
+        );
+        let mut tiny = grant(Rights::Write);
+        tiny.limits.max_work = 1;
+        tiny.limits.max_rows = 0;
+        let mut limited = Client::connect(cx, addr, token(&tiny)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                limited
+                    .execute_batch(cx, "CREATE (:Person)", vec![vec![]])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        let count = reader
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN count(n) AS n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.rows, [[WireValue::Count(4)]]);
+        assert_eq!(count.outcome, Outcome::Rows { seq: 2 });
+        limited.close(cx).await.unwrap();
+        writer.close(cx).await.unwrap();
+        reader.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn http_atomic_parameter_batches_preserve_the_native_atomic_authority_boundary() {
+    run(async |cx| {
+        let server = Arc::new(served(cx, "atomic-batch-http").await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let mut task = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let mut scope = grant(Rights::ReadWrite);
+        scope.limits.max_rows = 0;
+        let writer = token(&scope);
+        let reader = token(&grant(Rights::Read));
+        let path = "/v1/databases/social/write-batch";
+        let (status, body) = http(addr, "POST", path, "127.0.0.1", Some(&writer),
+            r#"{"statement":"MERGE (n:Person {name:$name}) ON CREATE SET n.age=$age ON MATCH SET n.age=n.age+$age","argument_sets":[{"name":"Ann","age":10},{"name":"Ann","age":20},{"name":"Bob","age":7}]}"#).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, r#"{"v":1,"seq":1,"statements":3,"committed":true}"#);
+        for body in [
+            r#"{"statement":"CREATE (:Person {age:$age})","argument_sets":[{"age":3},{}]}"#,
+            r#"{"statement":"CREATE (:Person {age:12/$divisor})","argument_sets":[{"divisor":3},{"divisor":0}]}"#,
+            r#"{"statement":"CREATE (n:Person) RETURN 1/0 AS invalid LIMIT 0","argument_sets":[{}]}"#,
+            r#"{"statement":"CREATE (:Person)","argument_sets":[]}"#,
+            r#"{"statement":"CREATE (:Person)","argument_sets":[{},null]}"#,
+            r#"{"statement":"CREATE (:Person)","argument_sets":[{}],"parameters":{}}"#,
+        ] {
+            let (status, response) =
+                http(addr, "POST", path, "127.0.0.1", Some(&writer), body).await;
+            assert_ne!(status, 200, "{response}");
+            assert!(response.contains("\"error\""), "{response}");
+        }
+        // Read-only authority cannot use a batch to acquire write authority.
+        let (status, body) = http(
+            addr,
+            "POST",
+            path,
+            "127.0.0.1",
+            Some(&reader),
+            r#"{"statement":"CREATE (:Person)","argument_sets":[{}]}"#,
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            "127.0.0.1",
+            Some(&reader),
+            r#"{"statement":"MATCH (n:Person) RETURN n.name AS name,n.age AS age ORDER BY name"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","age"],"rows":[[{"type":"text","value":"Ann"},{"type":"int","value":"30"}],[{"type":"text","value":"Bob"},{"type":"int","value":"7"}]],"seq":1}"#
+        );
+        let oversized = format!(
+            r#"{{"statement":"CREATE (:Person)","argument_sets":[{}]}}"#,
+            vec!["{}"; 65].join(",")
+        );
+        let (status, body) = http(addr, "POST", path, "127.0.0.1", Some(&writer), &oversized).await;
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("\"budget\""), "{body}");
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/missing/write-batch",
+            "127.0.0.1",
+            Some(&writer),
+            r#"{"statement":"CREATE (:Person)","argument_sets":[{}]}"#,
+        )
+        .await;
+        assert_eq!(status, 404, "{body}");
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn fgp_refresh_narrows_live_authority_and_rejects_restoration_without_losing_the_session() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "refresh-scope").await;

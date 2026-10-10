@@ -55,6 +55,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_PREPARED | 0x001d | client |
 | RELEASE_PREPARED / PREPARED_RELEASED | 0x001e / 0x001f | client / server |
 | PING / PONG | 0x0020 / 0x0021 | client / server |
+| EXECUTE_BATCH | 0x0022 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -80,7 +81,7 @@ valid only between frames. Any malformed/truncated frame poisons its decoder;
 there is no resynchronization by scanning untrusted payload bytes.
 
 `Connection::validate_client_header` enforces direction, phase, complete binding,
-nonzero request IDs and control/child-stream distinction. EXECUTE, PREPARE,
+nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
 EXECUTE_PREPARED and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
@@ -162,6 +163,7 @@ redacted from `Debug`.
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
 | PREPARED | nonzero connection-owned `handle [16]` |
 | EXECUTE_PREPARED | `handle [16]`, execution `parameters [(name text, value)]` (names strictly ascending) |
@@ -531,6 +533,67 @@ source-free grouping, complete support limits on pending redelivery,
 persistent maintenance ceilings and replacement baselines after replay
 eviction. These new tests have likewise received source review only; no
 runtime or formatting pass was available in this session.
+
+## Atomic parameter batches
+
+`EXECUTE_BATCH` and `POST /v1/databases/<name>/write-batch` prepare one native
+write script, bind all argument sets, and execute one atomic program. The engine
+allocates graph identities. Each record runs the complete script in input order,
+so later records can match or update earlier records' checked effects. Preparation,
+binding and execution share one signed work/node allowance; a bad final argument
+set or a precommit execution failure leaves no committed prefix.
+
+With the database's `Person`, `name` and `age` symbols configured, send this JSON
+to `/v1/databases/social/write-batch` with `Authorization: Bearer <hex token>`:
+
+```json
+{
+  "statement": "CREATE (:Person {name:$name,age:$age})",
+  "argument_sets": [
+    {"name": "Ann", "age": 30},
+    {"name": "Bob", "age": 25}
+  ]
+}
+```
+
+The Rust client exposes the same operation after `client.select(cx, "social")`:
+
+```rust
+use fgdb_protocol::body::WireValue;
+
+let outcome = client.execute_batch(
+    cx,
+    "CREATE (:Person {name:$name,age:$age})",
+    vec![
+        vec![("name".into(), WireValue::Text("Ann".into())),
+             ("age".into(), WireValue::Int(30))],
+        vec![("name".into(), WireValue::Text("Bob".into())),
+             ("age".into(), WireValue::Int(25))],
+    ],
+).await?;
+```
+
+The example creates both vertices in one commit and reports two completed
+statements. HTTP returns `{"v":1,"seq":N,"statements":2,"committed":true}`;
+the client returns `Outcome::WriteCommitted { seq, statements: 2 }`. A program
+that needs no durable write can instead return `ReadClosed` (`committed:false`).
+
+- Supply 1–1024 argument sets. The first set establishes parameter types;
+  every set must bind the same schema. Each set allows at most 1024 parameters.
+  FGP's negotiated frame and shared value-node bounds, and HTTP's 8 MiB body
+  and JSON bounds, still apply.
+- The host's `DatabaseConfig::max_statements` defaults to **64 expanded
+  statements** for the whole request. A two-statement script with 32 sets uses
+  that entire allowance. The native hard maximum is 65,536; a request is never
+  split into smaller commits to fit a limit.
+- Write authority is required; scripts that read, including `MATCH` and
+  `MERGE`, require ReadWrite. Existing label/relation/property restrictions apply.
+- This is a statistics-only operation. **`RETURN` is refused before effects**,
+  including `RETURN ... LIMIT 0`; no requested expression is silently skipped.
+  No rows or identity receipts are delivered, so a signed `max_rows=0` is valid.
+- A missing terminal response, transport loss or `outcome_unknown` can mean the
+  batch already committed. The client never retries automatically. Repeating
+  the call is a new write and can duplicate effects; recovery does not replay it.
 
 ## Remaining integration
 

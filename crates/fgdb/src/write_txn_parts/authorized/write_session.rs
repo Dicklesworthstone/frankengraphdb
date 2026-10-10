@@ -268,6 +268,7 @@ impl<V: Vfs + Clone> Database<V> {
 
 enum Request<'a> {
     Text(&'a str, &'a GqlParameters),
+    TextBatch(&'a str, &'a [GqlParameters]),
     Prepared(&'a AuthorizedPreparedWrite, &'a GqlParameters),
     Batch(&'a AuthorizedPreparedWrite, &'a [GqlParameters]),
     Bound(&'a AuthorizedBoundWriteBatch),
@@ -366,6 +367,36 @@ where
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.run(cx, Request::Text(text, params), false, |stats, _| stats)
             .await
+    }
+
+    /// Prepare native write text once, bind every argument set, then commit
+    /// one stats-only ingestion program under ONE live execution permit.
+    /// Preparation, all record bindings, execution and final admission share
+    /// the signed work/node limits and the host's expanded-statement ceiling.
+    /// The first argument set declares operand types; every set must satisfy
+    /// that same native schema. Empty input, unsupported syntax and a bad final
+    /// record refuse before graph observation or engine identity allocation.
+    ///
+    /// This uses the native write-script compiler, which refuses RETURN;
+    /// it never strips or silently skips a requested projection. Successful
+    /// ingestion exposes no identity receipts, so max_rows=0 is usable. The
+    /// engine allocates identities and publishes at the ordinary single
+    /// Chronicle completion boundary. Repeating this call is a new write,
+    /// never an idempotent retry or a retained multi-request transaction.
+    #[allow(clippy::result_large_err)]
+    pub async fn query_batch_stats(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        arguments: &[GqlParameters],
+    ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
+        self.run(
+            cx,
+            Request::TextBatch(text, arguments),
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Rebind a template from this exact session, then execute one atomic
@@ -649,6 +680,19 @@ where
                         *max_statements,
                         resolver,
                     )?,
+                    Request::TextBatch(text, arguments) => {
+                        let first = arguments.first().ok_or(Fault::BatchBinding(
+                            fgdb_gql::GraphWriteScriptBatchError::Empty,
+                        ))?;
+                        let script =
+                            super::prepare(cx, &mut execution, text, first, *relation, resolver)?;
+                        let Bound::Batch(batch) = Input::Batch(&script, arguments, *max_statements)
+                            .bind(cx, capability.predicates(), &mut execution)?
+                        else {
+                            unreachable!("text batch input always returns an owned batch")
+                        };
+                        Bound::Batch(batch)
+                    }
                     Request::Prepared(prepared, params) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));

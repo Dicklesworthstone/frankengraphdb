@@ -18,7 +18,7 @@ use fgdb_gql::{
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
     PreparedGraphVertexUpsertQueryText,
 };
-use fgdb_protocol::body::{ErrorCode, Execute, Outcome, WireValue};
+use fgdb_protocol::body::{ErrorCode, Execute, ExecuteBatch, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
 use fgdb_warden::CapabilityToken;
 
@@ -74,6 +74,17 @@ pub(crate) fn write<'a>(
     statement: &'a Execute,
 ) -> Execution<'a> {
     Box::pin(write_inner(cx, db, token, statement))
+}
+
+/// One finite parameter batch through the same native authorized program as
+/// embedded ingestion. The request can select no identity or raw write batch.
+pub(crate) fn write_batch<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    statement: &'a ExecuteBatch,
+) -> Execution<'a> {
+    Box::pin(write_batch_inner(cx, db, token, statement))
 }
 
 /// A read-only authorized session over one served database: it cannot
@@ -236,6 +247,78 @@ async fn write_inner(
         EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
             // Wake subscriptions only after the write lock is released, so
             // their polls observe the published generation.
+            db.commits.committed();
+            Outcome::WriteCommitted {
+                seq: commit_seq.0,
+                statements,
+            }
+        }
+        EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => Outcome::ReadClosed {
+            seq: snapshot_seq.0,
+            statements,
+        },
+    };
+    Ok(Answer {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        outcome,
+        generation,
+    })
+}
+
+async fn write_batch_inner(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    statement: &ExecuteBatch,
+) -> Result<Answer, Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let generation = guard.generation();
+    let mut session = guard
+        .authorized_write_session(
+            &txn,
+            &commit,
+            &db.authority,
+            token,
+            TRUNK,
+            |kind, name| db.symbols.resolve(kind, name),
+            db.write_relation,
+            db.write_policy,
+            db.max_statements,
+            unix_millis,
+        )
+        .map_err(|error| write_refusal(&error))?;
+    // Authenticate Write rights before inspecting argument values. The wire
+    // codec bounds this finite request; native preparation, all bindings and
+    // graph execution then share ONE signed permit inside query_batch_stats.
+    let parameters = statement
+        .argument_sets
+        .iter()
+        .enumerate()
+        .map(|(record, arguments)| {
+            query
+                .checkpoint()
+                .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+            convert::parameters(arguments, None).map_err(|error| {
+                Refusal::new(
+                    ErrorCode::Statement,
+                    format!("argument set {record}: {error}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, Refusal>>()?;
+    let (stats, completion) = session
+        .query_batch_stats(&query, &statement.statement, &parameters)
+        .await
+        .map_err(|error| write_refusal(&error))?;
+    let statements = stats.completed_statements as u64;
+    drop(session);
+    drop(guard);
+    let outcome = match completion {
+        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
             db.commits.committed();
             Outcome::WriteCommitted {
                 seq: commit_seq.0,
@@ -483,6 +566,13 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
     let mut code = ErrorCode::Statement;
     let mut source = Some(error);
     while let Some(current) = source {
+        if matches!(
+            current.downcast_ref::<fgdb_gql::GraphWriteScriptBatchError>(),
+            Some(fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { .. })
+        ) {
+            code = ErrorCode::Budget;
+            break;
+        }
         if let Some(warden) = current.downcast_ref::<fgdb_warden::Error>() {
             code = warden_code(*warden);
             break;

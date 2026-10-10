@@ -16,8 +16,10 @@
 //! GET  /v1/databases/<name>/schema         (the names the token may see)
 //! POST /v1/databases/<name>/query          (read)
 //! POST /v1/databases/<name>/write          (write)
+//! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
 //!      Authorization: Bearer <hex capability token>
 //!      {"statement": "<gql>", "parameters": {"name": <json>, ...}}
+//!      {"statement": "<write script>", "argument_sets": [{"name": <json>}, ...]}
 //! ```
 //!
 //! A query answers `{"v":1,"columns":[...],"rows":[[cell,...],...],"seq":N}`
@@ -31,7 +33,7 @@
 
 use crate::Server;
 use crate::commits::CommitWatcher;
-use crate::execute::{Answer, Refusal, read, write};
+use crate::execute::{Answer, Refusal, read, write, write_batch};
 use crate::recovery::Generation;
 use asupersync::Cx;
 use asupersync::http::h1::types::{Method, Request, Response};
@@ -39,7 +41,7 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::sync::Mutex;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use fgdb_protocol::body::{ErrorCode, Execute, ExecuteMode, Outcome};
+use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteBatch, ExecuteMode, Outcome};
 use fgdb_protocol::json::{Json, argument, cell, parse_json, quote};
 use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::io;
@@ -357,15 +359,21 @@ fn bearer(request: &Request) -> Result<CapabilityToken, Response> {
     crate::capability_from_hex(hex).ok_or_else(unauthenticated)
 }
 
-/// The statement and arguments of one request body.
-fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> {
+fn body_fields(request: &Request) -> Result<std::collections::BTreeMap<String, Json>, Response> {
     let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
     let text = core::str::from_utf8(&request.body).map_err(|_| malformed("body is not UTF-8"))?;
     let json = parse_json(text, MAX_JSON_VALUES, MAX_JSON_TOKEN_BYTES)
         .map_err(|error| malformed(&format!("invalid JSON body: {error}")))?;
-    let Json::Object(mut fields) = json else {
+    let Json::Object(fields) = json else {
         return Err(malformed("body must be a JSON object"));
     };
+    Ok(fields)
+}
+
+/// The statement and arguments of one request body.
+fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> {
+    let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
+    let mut fields = body_fields(request)?;
     let Some(Json::String(statement)) = fields.remove("statement") else {
         return Err(malformed("body needs a \"statement\" string"));
     };
@@ -390,6 +398,60 @@ fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> 
         statement,
         parameters,
     })
+}
+
+/// The batch uses exactly the native FGP value/schema limits, plus HTTP's
+/// existing whole-body JSON limits. No field can select raw graph identities.
+fn batch_statement(request: &Request) -> Result<ExecuteBatch, Response> {
+    let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
+    let mut fields = body_fields(request)?;
+    let Some(Json::String(statement)) = fields.remove("statement") else {
+        return Err(malformed("body needs a \"statement\" string"));
+    };
+    let Some(Json::Array(records)) = fields.remove("argument_sets") else {
+        return Err(malformed(
+            "\"argument_sets\" must be a nonempty array of objects",
+        ));
+    };
+    if records.is_empty() || records.len() > fgdb_protocol::body::MAX_BATCH_ARGUMENT_SETS {
+        return Err(malformed(
+            "\"argument_sets\" exceeds the batch count bounds",
+        ));
+    }
+    if let Some(unknown) = fields.keys().next() {
+        return Err(malformed(&format!("unknown body field {unknown:?}")));
+    }
+    let argument_sets = records
+        .into_iter()
+        .enumerate()
+        .map(|(record, value)| {
+            let Json::Object(parameters) = value else {
+                return Err(malformed("every argument set must be an object"));
+            };
+            parameters
+                .iter()
+                .map(|(name, value)| {
+                    argument(value)
+                        .map(|value| (name.clone(), value))
+                        .map_err(|error| {
+                            malformed(&format!(
+                                "argument set {record}, parameter ${name}: {error}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let batch = ExecuteBatch {
+        statement,
+        argument_sets,
+    };
+    // Enforce every FGP name, value, recursion and parameter-map bound before
+    // the shared executor sees this alternative transport's request.
+    batch
+        .encode()
+        .map_err(|error| malformed(&format!("invalid batch: {error}")))?;
+    Ok(batch)
 }
 
 fn answer_response(answer: &Answer) -> Response {
@@ -536,8 +598,9 @@ pub(crate) async fn respond<'s>(
         return schema_response(cx, server, name, &request, output);
     }
     let mode = match verb {
-        "query" => ExecuteMode::Read,
-        "write" => ExecuteMode::Write,
+        "query" => Some(ExecuteMode::Read),
+        "write" => Some(ExecuteMode::Write),
+        "write-batch" => None,
         _ => {
             return json_response(
                 404,
@@ -571,17 +634,25 @@ pub(crate) async fn respond<'s>(
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
     }
-    let statement = match statement(&request, mode) {
-        Ok(statement) => statement,
-        Err(response) => return response,
-    };
-    let answer = match mode {
-        ExecuteMode::Read => read(cx, db, &token, &statement).await,
-        ExecuteMode::Write => write(cx, db, &token, &statement).await,
-        // A change stream needs a long-lived, flow-controlled connection.
-        ExecuteMode::Subscribe => {
-            return refusal_response(ErrorCode::Protocol, "subscriptions are served over FGP");
+    let answer = if let Some(mode) = mode {
+        let statement = match statement(&request, mode) {
+            Ok(statement) => statement,
+            Err(response) => return response,
+        };
+        match mode {
+            ExecuteMode::Read => read(cx, db, &token, &statement).await,
+            ExecuteMode::Write => write(cx, db, &token, &statement).await,
+            // A change stream needs a long-lived, flow-controlled connection.
+            ExecuteMode::Subscribe => {
+                return refusal_response(ErrorCode::Protocol, "subscriptions are served over FGP");
+            }
         }
+    } else {
+        let statement = match batch_statement(&request) {
+            Ok(statement) => statement,
+            Err(response) => return response,
+        };
+        write_batch(cx, db, &token, &statement).await
     };
     match answer {
         Ok(answer) => {

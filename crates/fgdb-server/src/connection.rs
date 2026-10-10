@@ -9,6 +9,7 @@
 use crate::commits::CommitWatcher;
 use crate::execute::{
     Answer, PreparedRead, Refusal, poll, prepare_read, read, read_prepared, subscribe, write,
+    write_batch,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -18,9 +19,9 @@ use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare, Prepared,
-    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
-    WireValue,
+    Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
+    Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
+    WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -108,6 +109,7 @@ impl PreparedReads {
 
 enum Statement {
     Native(Execute),
+    Batch(ExecuteBatch),
     Prepared {
         definition: Result<Arc<PreparedRead>, Refusal>,
         parameters: Vec<(String, WireValue)>,
@@ -626,6 +628,27 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
+            FrameKind::ExecuteBatch => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecuteBatch::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed EXECUTE_BATCH")
+                        .await;
+                };
+                match lane
+                    .execute_statement(cx, &waiter, db, token, request, Statement::Batch(statement))
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::Execute => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -966,6 +989,7 @@ impl Lane {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
                 _ => write(cx, db, token, &statement).await,
             },
+            Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
             Statement::Prepared {
                 definition,
                 parameters,
@@ -1426,6 +1450,7 @@ impl Lane {
                 }
             }
             FrameKind::Execute
+            | FrameKind::ExecuteBatch
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ReleasePrepared
@@ -1765,6 +1790,7 @@ impl Lane {
                 Err(Stop::Drain)
             }
             FrameKind::Execute
+            | FrameKind::ExecuteBatch
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ReleasePrepared
