@@ -206,7 +206,7 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
         .collect();
     assert_eq!(listed, registered);
     run_transaction(async |commit, cx, txcx| {
-        let db = open(commit).await;
+        let mut db = open(commit).await;
         let txn = db.begin(txcx).unwrap();
         for (name, arguments, field, undirected) in CALLS {
             let standalone = db
@@ -957,7 +957,7 @@ fn transaction_call_refusal_and_savepoint_rollback_preserve_graph_dependencies()
 #[test]
 fn transaction_call_sources_share_one_allowance_across_union_and_aggregate() {
     run_transaction(async |commit, cx, txcx| {
-        let db = open(commit).await;
+        let mut db = open(commit).await;
         let params = GqlParameters::new();
         let txn = db.begin(txcx).unwrap();
         let text = "CALL fnx.weakly_connected_components() YIELD component RETURN component";
