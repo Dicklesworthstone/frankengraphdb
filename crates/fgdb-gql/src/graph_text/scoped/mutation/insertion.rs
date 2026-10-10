@@ -384,7 +384,6 @@ impl<'a> Parser<'a> {
     fn insertion_clauses(
         &mut self,
         row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
-        returning: bool,
     ) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
         let create_at = self.current.at;
         if !self.take_word("INSERT")? {
@@ -403,7 +402,9 @@ impl<'a> Parser<'a> {
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
-                let name = if returning && matches!(self.current.kind, TokenKind::Word(_)) {
+                // A name binds the edge for RETURN; without one it is only a
+                // declaration, which openCypher allows on any CREATE.
+                let name = if matches!(self.current.kind, TokenKind::Word(_)) {
                     let name = self.name()?;
                     if self.insertion_match_kind(name.text).is_some()
                         || row_schema.is_some_and(|schema| {
@@ -462,7 +463,10 @@ impl<'a> Parser<'a> {
                 });
                 left = right;
             }
-            if !self.take(b',')? {
+            // Consecutive CREATE clauses with no reading clause between them
+            // run on the same row, so CREATE p1 CREATE p2 is CREATE p1, p2 and
+            // p2 may reuse p1's bindings.
+            if !self.take(b',')? && !self.take_word("CREATE")? && !self.take_word("INSERT")? {
                 break;
             }
         }
@@ -639,10 +643,8 @@ impl PreparedGraphInsertText {
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         let matched = parser.insertion_match_prefix(&row_schema)?;
         let at = parser.current.at;
-        let mut parsed = parser.insertion_clauses(
-            (!leading.is_empty()).then_some(row_schema.as_slice()),
-            returning,
-        )?;
+        let mut parsed =
+            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()))?;
         let returning = if returning {
             Some(parser.insertion_return(&mut parsed, &row_schema)?)
         } else {

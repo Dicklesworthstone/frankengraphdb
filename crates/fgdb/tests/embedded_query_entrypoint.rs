@@ -735,6 +735,10 @@ fn every_write_facade_matches_two_specific_queries_in_autocommit_and_outer_trans
                 WriteFacade::Insert,
                 "MATCH (a:Person) WHERE a.p=1 CREATE (a)-[:R]->(n:Person {p:8})",
             ),
+            (
+                WriteFacade::Insert,
+                "MATCH (a:Person) WHERE a.p=1 CREATE (n:Person {p:8}) CREATE (a)-[e:R]->(n)",
+            ),
             (WriteFacade::Delete, "MATCH (n:Person) WHERE n.p=4 DELETE n"),
             (
                 WriteFacade::Delete,

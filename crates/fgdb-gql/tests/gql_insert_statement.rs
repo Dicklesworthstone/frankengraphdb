@@ -231,7 +231,7 @@ fn bound_node_redeclarations_and_malformed_syntax_have_identical_typed_refusals(
         ("", "(a)-[:R]-(b)"),
         ("", "(a)<-[:R]->(b)"),
         ("", "(a)-[:R*2]->(b)"),
-        ("", "(a)-[edge:R]->(b)"),
+        ("", "(a)-[a:R]->(b)"),
         ("", "(x"),
         ("", ""),
         ("", "(x) RETURN x"),

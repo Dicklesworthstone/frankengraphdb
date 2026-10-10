@@ -239,7 +239,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         "CREATE (a)-[:R*2]->(b)",
         "MATCH (n) CREATE (n:Copy)-[:R]->(x)",
         "MATCH (n) CREATE (n {})-[:R]->(x)",
-        "CREATE (a)-[edge:R]->(b)",
+        "CREATE (a)-[a:R]->(b)",
         "CREATE (a)-[:R]->(b {q:a.p})",
         "MATCH (n) CREATE (x) RETURN x",
         "MATCH (n) CREATE (x) SET n.p=1",
@@ -516,6 +516,71 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
         ),
         (0, 1)
     );
+}
+
+#[test]
+fn consecutive_create_clauses_are_one_creation_over_shared_bindings() {
+    for (chained, joined) in [
+        (
+            "CREATE (a:Copy {p:1}), (b {p:2}) CREATE (a)-[:R]->(b), (b)-[:R]->(a)",
+            "CREATE (a:Copy {p:1}), (b {p:2}), (a)-[:R]->(b), (b)-[:R]->(a)",
+        ),
+        (
+            "INSERT (a) INSERT (b) CREATE (a)<-[:R]-(b)",
+            "CREATE (a), (b), (a)<-[:R]-(b)",
+        ),
+        (
+            "MATCH (n) CREATE (c:Copy {p:n.p}) CREATE (n)-[:R]->(c)",
+            "MATCH (n) CREATE (c:Copy {p:n.p}), (n)-[:R]->(c)",
+        ),
+    ] {
+        assert_eq!(
+            prepare(chained).canonical_bytes(),
+            prepare(joined).canonical_bytes(),
+            "{chained}"
+        );
+    }
+    // A creation without MATCH never reads the graph: a source call would
+    // surface as this Err, and the unwrap below would fail.
+    let query = prepare("CREATE (a:Copy {p:1}), (b {p:2}) CREATE (a)-[:R]->(b), (b)-[:R]->(a)");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| Err(GqlQueryError::Source(())),
+        identity,
+        || Ok(()),
+    );
+    let mut expected = vec![
+        GraphInsertIntent::Vertex {
+            vertex: VId(100),
+            labels: vec![COPY],
+            properties: vec![(P, CanonicalScalar::Int(1))],
+        },
+        GraphInsertIntent::Vertex {
+            vertex: VId(101),
+            labels: vec![],
+            properties: vec![(P, CanonicalScalar::Int(2))],
+        },
+    ];
+    for (index, source, destination) in [(0, 100, 101), (1, 101, 100)] {
+        expected.push(GraphInsertIntent::Edge {
+            edge: EId(1_000 + index),
+            relation: R,
+            source: VId(source),
+            destination: VId(destination),
+            properties: vec![],
+        });
+    }
+    assert_eq!(result.unwrap().intents(), expected);
+    // A named edge needs no RETURN; the later clause still cannot redeclare a
+    // node it reuses, and an edge name stays unique across clauses.
+    prepare("CREATE ()-[r:R {p:42}]->()");
+    for (text, at) in [
+        ("CREATE (a) CREATE (a:Copy)", 19),
+        ("CREATE ()-[r:R]->() CREATE ()-[r:R]->()", 31),
+    ] {
+        let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
+        assert_eq!(error.offset, at, "{text}: {error:?}");
+    }
 }
 
 #[test]
