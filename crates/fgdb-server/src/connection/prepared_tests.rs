@@ -102,7 +102,7 @@ fn a_prepared_read_rebinds_operands_and_observes_commits_after_preparation() {
             db.db.read(&root).await.unwrap().frontier().unwrap(),
             CommitSeq(1)
         );
-        server.join_databases(&root).await;
+        server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -152,7 +152,7 @@ fn prepared_cache_is_bounded_and_foreign_release_cannot_remove_another_owner() {
         let replacement = ok(cache.insert(&root, replacement)).0;
         assert_ne!(replacement, handles[0]);
         assert_eq!(cache.entries.len(), MAX_PREPARED_READS);
-        server.join_databases(&root).await;
+        server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -198,7 +198,7 @@ fn prepared_handles_and_borrowed_templates_never_revive_after_recovery() {
                 .await
                 .is_err()
         );
-        server.join_databases(&root).await;
+        server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
