@@ -4,6 +4,8 @@
 use super::*;
 use crate::algebra::GraphValueOrder;
 use crate::insertion_query_text::{InsertReturnTemplate, PreparedGraphInsertQueryText};
+use crate::mutation_text::WriteReturnGroupTemplate;
+use super::super::mutation_query::{self, ReturnLeaves};
 use crate::set_text::{ReadPageNumber, ReadProjectionTemplate};
 use crate::{GraphInsertBinding, GraphSetProjection, GraphSetQuantifier, PreparedGraphInsertQuery};
 
@@ -33,11 +35,32 @@ impl Binding<'_> {
 pub(super) struct ParsedReturn<'a> {
     bindings: Vec<(Binding<'a>, Name<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
+    grouping: Option<WriteReturnGroupTemplate>,
     quantifier: GraphSetQuantifier,
     order: Vec<GraphValueOrder>,
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+}
+
+struct InsertLeaves<'r, 'a> {
+    returning: &'r mut ParsedReturn<'a>,
+    syntax: &'r mut InsertionSyntax<'a>,
+    source: &'r [(Name<'a>, GraphSetColumnType)],
+}
+
+impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        self.returning.leaf(parser, self.syntax, self.source)
+    }
+
+    fn name(&self, column: usize) -> Name<'a> {
+        self.returning.bindings[column].1
+    }
+
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.returning.bindings.iter().map(|(_, _, kind)| *kind).collect()
+    }
 }
 
 impl<'a> ParsedReturn<'a> {
@@ -232,20 +255,14 @@ impl<'a> ParsedReturn<'a> {
         &self,
         parameters: &[GqlParameterSpec],
     ) -> Result<(), GraphInsertTextError> {
-        let values = shape_arguments(parameters);
         let types: Vec<_> = self.bindings.iter().map(|(_, _, kind)| *kind).collect();
-        for (column, output) in self.projection.iter().enumerate() {
-            let value = return_projection::bind_read_value(&output.value, &values)?;
-            for result in [
-                GraphSetProjection::validate_output_name(&output.name, column),
-                GraphSetProjection::admit_output(&value, &types, column).map(|_| ()),
-            ] {
-                result.map_err(|kind| crate::GraphSetTextError {
-                    offset: self.at,
-                    kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
-                })?;
-            }
-        }
+        mutation_query::admit_return(
+            &self.projection,
+            &types,
+            parameters,
+            self.grouping.as_ref(),
+            self.at,
+        )?;
         Ok(())
     }
 
@@ -278,6 +295,7 @@ impl<'a> ParsedReturn<'a> {
         Ok(InsertReturnTemplate {
             bindings,
             projection: self.projection,
+            grouping: self.grouping,
             quantifier: self.quantifier,
             order: self.order,
             offset: self.offset,
@@ -304,6 +322,7 @@ impl<'a> Parser<'a> {
         let mut returning = ParsedReturn {
             bindings: Vec::new(),
             projection: Vec::new(),
+            grouping: None,
             quantifier,
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
@@ -381,62 +400,15 @@ impl<'a> Parser<'a> {
                 ));
             }
         } else {
-            // Source text of each derived output, as in a read RETURN.
-            let mut sources = Vec::<Option<Name<'a>>>::new();
-            loop {
-                self.capacity(
-                    output.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let at = self.current.at;
-                let value = self
-                    .read_resolved_value(&mut |parser| returning.leaf(parser, syntax, source), 0)?;
-                let end = self.current.at;
-                spellings.push(self.source_name(at, end));
-                let (mut name, derived) = if self.take_word("AS")? {
-                    (self.name()?, None)
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    (
-                        returning.bindings[*column].1,
-                        Some(self.source_name(at, end)),
-                    )
-                } else {
-                    let derived = self.source_name(at, end);
-                    (derived, Some(derived))
-                };
-                if let Some(derived) = derived
-                    && let Some(previous) = output.iter().position(|(old, _)| old.text == name.text)
-                {
-                    if let Some(earlier) = sources[previous] {
-                        output[previous].0 = earlier;
-                        returning.projection[previous].name = earlier.text.to_owned();
-                    }
-                    name = derived;
-                }
-                sources.push(derived);
-                if output.iter().any(|(old, _)| old.text == name.text) {
-                    return Err(error(
-                        name.at,
-                        GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
-                    )
-                    .into());
-                }
-                let types: Vec<_> = returning
-                    .bindings
-                    .iter()
-                    .map(|(_, _, kind)| *kind)
-                    .collect();
-                let kind = value.column_type(&types, &self.syntax.parameters);
-                returning.projection.push(ReadProjectionTemplate {
-                    name: name.text.to_owned(),
-                    value,
-                });
-                output.push((name, kind));
-                if !self.take(b',')? {
-                    break;
-                }
-            }
+            let items = self.write_return_items(&mut InsertLeaves {
+                returning: &mut returning,
+                syntax: &mut *syntax,
+                source,
+            })?;
+            returning.projection = items.projection;
+            returning.grouping = items.grouping;
+            output = items.output;
+            spellings = items.spellings;
         }
         if let Some(ReadStageTemplate::Page {
             order,
@@ -466,11 +438,12 @@ impl InsertReturnTemplate {
                 return_projection::bind_read_value(&output.value, values)?,
             ));
         }
-        let mut query = PreparedGraphInsertQuery::prepare(
+        let mut query = PreparedGraphInsertQuery::prepare_with_grouping(
             insertion,
             self.bindings.clone(),
             projection,
             self.quantifier,
+            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
         )
         .map_err(|kind| GraphInsertTextError {
             offset: self.at,

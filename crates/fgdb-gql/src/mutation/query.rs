@@ -12,6 +12,7 @@ pub enum GraphMutationQueryBuildError {
     Binding { binding: usize },
     TooManyBindings { limit: usize, observed: usize },
     Projection(RowProjectionBuildError),
+    Aggregate(crate::GraphAggregateBuildError),
     InputDepth(crate::GraphSetBuildError),
 }
 impl core::fmt::Display for GraphMutationQueryBuildError {
@@ -54,6 +55,7 @@ pub struct PreparedGraphMutationQuery {
     mutation: PreparedGraphMutation,
     bindings: Vec<GraphMutationBinding>,
     projection: Vec<GraphSetProjection>,
+    grouping: Option<crate::set_ops::WriteReturnGroup>,
     quantifier: GraphSetQuantifier,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
@@ -75,6 +77,16 @@ impl PreparedGraphMutationQuery {
         bindings: Vec<GraphMutationBinding>,
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
+    ) -> Result<Self, GraphMutationQueryBuildError> {
+        Self::prepare_with_grouping(mutation, bindings, projection, quantifier, None)
+    }
+
+    pub(crate) fn prepare_with_grouping(
+        mutation: PreparedGraphMutation,
+        bindings: Vec<GraphMutationBinding>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+        grouping: Option<crate::set_ops::WriteReturnGroupSpec>,
     ) -> Result<Self, GraphMutationQueryBuildError> {
         let limit = crate::algebra::MAX_PATTERN_VERTICES;
         if bindings.len() > limit {
@@ -106,9 +118,17 @@ impl PreparedGraphMutationQuery {
             };
             input_types.push(kind.ok_or(GraphMutationQueryBuildError::Binding { binding: at })?);
         }
-        // The ordinary complete expression/name/schema admission, including
-        // references hidden in lazy branches; the row VM is shared below.
-        let checked = RowProjectionSpec::new(input_types, projection.clone(), quantifier)
+        let grouping = grouping
+            .map(|group| group.prepare(input_types.clone()))
+            .transpose()
+            .map_err(GraphMutationQueryBuildError::Aggregate)?;
+        let output_input = grouping
+            .as_ref()
+            .map(|group| group.column_types().to_vec())
+            .unwrap_or(input_types);
+        // Complete expression/name/schema admission includes lazy branches.
+        // Grouped outputs address native keys then aggregates, not bindings.
+        let checked = RowProjectionSpec::new(output_input, projection.clone(), quantifier)
             .map_err(GraphMutationQueryBuildError::Projection)?;
         let output = checked.columns().map(str::to_owned).collect();
         let types = checked.column_types().to_vec();
@@ -116,6 +136,7 @@ impl PreparedGraphMutationQuery {
             mutation,
             bindings,
             projection,
+            grouping,
             quantifier,
             columns: output,
             types,
@@ -197,12 +218,22 @@ impl PreparedGraphMutationQuery {
         )
         .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
         let prefix = mutation.stats();
+        let mut returning = GqlQueryExecution {
+            value,
+            rows: prefix.selection,
+            evaluator: prefix.evaluator,
+        };
+        if let Some(grouping) = &self.grouping {
+            returning = crate::set_ops::finish_owned_aggregate(
+                returning,
+                policy.query,
+                grouping,
+                &mut checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
+        }
         let returning = crate::set_ops::finish_owned_projection(
-            GqlQueryExecution {
-                value,
-                rows: prefix.selection,
-                evaluator: prefix.evaluator,
-            },
+            returning,
             policy.query,
             &self.projection,
             self.quantifier,
@@ -258,6 +289,9 @@ impl PreparedGraphMutationQuery {
         bytes.push(u8::from(self.count.is_some()));
         if let Some(count) = self.count {
             bytes.extend_from_slice(&count.to_be_bytes());
+        }
+        if let Some(grouping) = &self.grouping {
+            grouping.append_canonical_bytes(&mut bytes);
         }
         bytes
     }

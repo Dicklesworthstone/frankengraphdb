@@ -8,7 +8,7 @@ use crate::set_text::aggregate::{ReadAggregateSpec, ReadAggregateStage};
 
 mod graph;
 
-fn function(word: &str) -> Option<Function> {
+pub(in crate::graph_text::scoped::mutation) fn function(word: &str) -> Option<Function> {
     if word.eq_ignore_ascii_case("COUNT") {
         Some(Function::Count)
     } else if word.eq_ignore_ascii_case("SUM") || word.eq_ignore_ascii_case("SUM_INT") {
@@ -41,24 +41,7 @@ fn aggregate_error(at: usize, kind: crate::GraphAggregateBuildError) -> GraphSet
 }
 
 fn declarations(specs: &[ReadAggregateSpec]) -> Vec<crate::GraphAggregate<'_>> {
-    use crate::GraphAggregate as A;
-    specs
-        .iter()
-        .map(|spec| match (spec.function, spec.column) {
-            (Function::CountRows, None) => A::count_rows(&spec.name),
-            (Function::Count, Some(at)) => A::count(&spec.name, at),
-            (Function::CountDistinct, Some(at)) => A::count_distinct(&spec.name, at),
-            (Function::SumInt, Some(at)) => A::sum_int(&spec.name, at),
-            (Function::SumIntDistinct, Some(at)) => A::sum_int_distinct(&spec.name, at),
-            (Function::AverageInt, Some(at)) => A::average_int(&spec.name, at),
-            (Function::AverageIntDistinct, Some(at)) => A::average_int_distinct(&spec.name, at),
-            (Function::Min, Some(at)) => A::min(&spec.name, at),
-            (Function::Max, Some(at)) => A::max(&spec.name, at),
-            (Function::Collect, Some(at)) => A::collect(&spec.name, at),
-            (Function::CollectDistinct, Some(at)) => A::collect_distinct(&spec.name, at),
-            _ => unreachable!("the checked WITH grammar pairs functions and arguments"),
-        })
-        .collect()
+    specs.iter().map(ReadAggregateSpec::declaration).collect()
 }
 
 impl ReadAggregateStage {

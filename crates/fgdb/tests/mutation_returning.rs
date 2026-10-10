@@ -464,3 +464,77 @@ fn merge_return_row_allowance_applies_after_projection_on_both_branches() {
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
+
+
+/// Aggregation consumes the statement's complete post-effect occurrence bag.
+/// Refused aggregate arguments or output conversions restore that statement's
+/// overlay while retaining an earlier successful write in the same transaction.
+#[test]
+fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut one = policy();
+        one.query.rows = fgdb_gql::GqlExecutionBudget::new(1_000_000, 1);
+        let (stats, returned) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item) SET n.p=n.p+10 \
+                     RETURN count(*) AS rows,sum(n.p) AS total,max(n.p) AS largest",
+                ),
+                one,
+            )
+            .unwrap();
+        assert_eq!(stats.effects, 4);
+        assert_eq!(returned.value, rows(vec![vec![int(4), int(50), int(14)]]));
+        assert_eq!(returned.rows.result_rows, 1);
+        assert_eq!(db.frontier().unwrap(), basis);
+        let staged = txn.staged_effect_digest().unwrap();
+        let mut hidden = one;
+        hidden.query.rows = fgdb_gql::GqlExecutionBudget::new(1_000_000, 0);
+
+        for text in [
+            "MATCH (n:Item) SET n.q=88 RETURN sum(n.p/(n.p-13)) AS total LIMIT 0",
+            "MATCH (n:Item) SET n.q=88 RETURN sum(9223372036854775807) AS wide LIMIT 0",
+            "MATCH (n:Item) DETACH DELETE n RETURN sum(n.p) AS deleted LIMIT 0",
+        ] {
+            assert!(
+                txn.execute_graph_mutation_query_governed(
+                    &mut db, cx, &prepare(text), hidden,
+                ).is_err(),
+                "{text}",
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), staged);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(txn.vertex_property(&db, VId(1), P).unwrap(), Some(CanonicalScalar::Int(11)));
+            assert_eq!(txn.vertex_property(&db, VId(4), Q).unwrap(), Some(CanonicalScalar::Int(10)));
+        }
+
+        let (_, returned) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare("MATCH (n:Item) SET n.q=0 RETURN count(*) AS rows LIMIT 0"),
+                hidden,
+            )
+            .unwrap();
+        assert!(returned.value.is_empty());
+        for id in 1..=4 {
+            assert_eq!(txn.vertex_property(&db, VId(id), Q).unwrap(), Some(CanonicalScalar::Int(0)));
+        }
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p,n.q AS q ORDER BY p"),
+            vec![
+                vec![int(11), int(0)],
+                vec![int(12), int(0)],
+                vec![int(13), int(0)],
+                vec![int(14), int(0)],
+            ],
+        );
+    });
+}

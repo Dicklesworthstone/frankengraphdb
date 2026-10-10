@@ -251,7 +251,7 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "CREATE (n:Copy) RETURN CASE WHEN TRUE THEN 1 ELSE missing END AS bad",
         "CREATE (n:Copy) RETURN n AS duplicate,n AS duplicate",
         "CREATE (n:Copy) RETURN n AS renamed,renamed AS bad",
-        "CREATE (n:Copy) RETURN count(*) AS count",
+        "CREATE (n:Copy) RETURN count(DISTINCT *) AS count",
         "CREATE (n:Copy) RETURN labels(n) AS labels",
         "CREATE (a)-[e:R]->(b) RETURN type(e) AS kind",
         "CREATE (a)-[a:R]->(b) RETURN a",

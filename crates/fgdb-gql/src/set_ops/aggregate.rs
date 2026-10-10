@@ -3,6 +3,7 @@
 
 mod rows;
 mod stage;
+pub(crate) use stage::{WriteReturnGroup, WriteReturnGroupSpec};
 
 use super::*;
 use crate::{

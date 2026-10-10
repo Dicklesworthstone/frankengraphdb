@@ -3,7 +3,9 @@
 //! mutation's proposal for that field; nothing is rescanned or re-matched.
 
 use super::*;
-use crate::mutation_text::{MutationReturnTemplate, PreparedGraphMutationQueryText};
+use crate::mutation_text::{
+    MutationReturnTemplate, PreparedGraphMutationQueryText, WriteReturnGroupTemplate,
+};
 use crate::set_text::{
     ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
 };
@@ -53,6 +55,7 @@ pub(super) trait ReturnLeaves<'a> {
 /// The parsed items of a non-star write RETURN.
 pub(super) struct ReturnItems<'a> {
     pub projection: Vec<ReadProjectionTemplate>,
+    pub grouping: Option<WriteReturnGroupTemplate>,
     pub output: Vec<(Name<'a>, GraphSetColumnType)>,
     /// The source spelling of every item, for ORDER BY.
     pub spellings: Vec<Name<'a>>,
@@ -68,10 +71,12 @@ impl<'a> Parser<'a> {
     ) -> Result<ReturnItems<'a>, GraphSetTextError> {
         let mut items = ReturnItems {
             projection: Vec::new(),
+            grouping: None,
             output: Vec::new(),
             spellings: Vec::new(),
         };
         let mut sources = Vec::<Option<Name<'a>>>::new();
+        let mut functions = Vec::new();
         loop {
             self.capacity(
                 items.output.len(),
@@ -79,12 +84,78 @@ impl<'a> Parser<'a> {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = self.current.at;
-            let value = self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?;
+            let aggregate = match self.current.kind {
+                TokenKind::Word(word)
+                    if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) =>
+                {
+                    return_projection::with_aggregate::function(word)
+                }
+                _ => None,
+            };
+            let (value, aggregate) = if let Some(mut function) = aggregate {
+                use crate::GraphAggregateFunction as F;
+                self.name()?;
+                self.punct(b'(', "(")?;
+                let distinct = self.take_word("DISTINCT")?;
+                if !distinct {
+                    self.take_word("ALL")?;
+                }
+                let value = if self.take(b'*')? {
+                    if function != F::Count || distinct {
+                        return Err(error(
+                            at,
+                            GraphPatternTextErrorKind::Expected(
+                                "COUNT(*) without DISTINCT, or one aggregate argument",
+                            ),
+                        )
+                        .into());
+                    }
+                    function = F::CountRows;
+                    ReadValueTemplate::Literal(
+                        GqlScalarParameter::new(CanonicalScalar::Null)
+                            .expect("canonical null"),
+                    )
+                } else {
+                    self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?
+                };
+                self.punct(b')', "one aggregate argument")?;
+                if matches!(function, F::SumInt | F::AverageInt)
+                    && !matches!(
+                        value.column_type(&leaves.types(), &self.syntax.parameters),
+                        GraphSetColumnType::Scalar | GraphSetColumnType::Any
+                    )
+                {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a scalar argument for a numeric aggregate",
+                        ),
+                    )
+                    .into());
+                }
+                if distinct {
+                    function = match function {
+                        F::Count => F::CountDistinct,
+                        F::SumInt => F::SumIntDistinct,
+                        F::AverageInt => F::AverageIntDistinct,
+                        F::Collect => F::CollectDistinct,
+                        other => other,
+                    };
+                }
+                (value, Some(function))
+            } else {
+                (
+                    self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?,
+                    None,
+                )
+            };
             let end = self.current.at;
             items.spellings.push(self.source_name(at, end));
             let (mut name, derived) = if self.take_word("AS")? {
                 (self.name()?, None)
-            } else if let ReadValueTemplate::Column(column) = &value {
+            } else if aggregate.is_none()
+                && let ReadValueTemplate::Column(column) = &value
+            {
                 (leaves.name(*column), Some(self.source_name(at, end)))
             } else {
                 let derived = self.source_name(at, end);
@@ -110,7 +181,15 @@ impl<'a> Parser<'a> {
                 )
                 .into());
             }
-            let kind = value.column_type(&leaves.types(), &self.syntax.parameters);
+            let input_kind = value.column_type(&leaves.types(), &self.syntax.parameters);
+            let kind = match aggregate {
+                Some(crate::GraphAggregateFunction::Collect | crate::GraphAggregateFunction::CollectDistinct) => {
+                    GraphSetColumnType::List
+                }
+                Some(crate::GraphAggregateFunction::Min | crate::GraphAggregateFunction::Max) | None => input_kind,
+                Some(_) => GraphSetColumnType::Scalar,
+            };
+            functions.push(aggregate);
             items.projection.push(ReadProjectionTemplate {
                 name: name.text.to_owned(),
                 value,
@@ -119,6 +198,39 @@ impl<'a> Parser<'a> {
             if !self.take(b',')? {
                 break;
             }
+        }
+        if functions.iter().any(Option::is_some) {
+            let mut inputs = core::mem::take(&mut items.projection);
+            let keys = functions
+                .iter()
+                .enumerate()
+                .filter_map(|(column, function)| function.is_none().then_some(column))
+                .collect::<Vec<_>>();
+            let mut aggregates = Vec::new();
+            for (column, (input, function)) in inputs.iter_mut().zip(functions).enumerate() {
+                let output = if let Some(function) = function {
+                    let output = keys.len() + aggregates.len();
+                    aggregates.push(crate::set_text::aggregate::ReadAggregateSpec {
+                        name: format!("__write_summary_{}", aggregates.len()),
+                        function,
+                        column: (function != crate::GraphAggregateFunction::CountRows)
+                            .then_some(column),
+                    });
+                    output
+                } else {
+                    keys.iter().position(|&key| key == column).expect("grouping key")
+                };
+                items.projection.push(ReadProjectionTemplate {
+                    name: input.name.clone(),
+                    value: ReadValueTemplate::Column(output),
+                });
+                input.name = format!("__write_input_{column}");
+            }
+            items.grouping = Some(WriteReturnGroupTemplate {
+                inputs,
+                keys,
+                aggregates,
+            });
         }
         Ok(items)
     }
@@ -130,9 +242,24 @@ pub(super) fn admit_return(
     projection: &[ReadProjectionTemplate],
     types: &[GraphSetColumnType],
     parameters: &[GqlParameterSpec],
+    grouping: Option<&WriteReturnGroupTemplate>,
     at: usize,
 ) -> Result<(), GraphSetTextError> {
     let values = insertion::shape_arguments(parameters);
+    let grouping = grouping
+        .map(|group| {
+            group
+                .bind(&values)?
+                .prepare(types.to_vec())
+                .map_err(|kind| GraphSetTextError {
+                    offset: at,
+                    kind: crate::GraphSetTextErrorKind::AggregateBuild(kind),
+                })
+        })
+        .transpose()?;
+    let types = grouping
+        .as_ref()
+        .map_or(types, |group| group.column_types());
     for (column, output) in projection.iter().enumerate() {
         let value = return_projection::bind_read_value(&output.value, &values)?;
         for result in [
@@ -146,6 +273,29 @@ pub(super) fn admit_return(
         }
     }
     Ok(())
+}
+
+impl WriteReturnGroupTemplate {
+    pub(super) fn bind(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<crate::set_ops::WriteReturnGroupSpec, GraphSetTextError> {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|input| {
+                Ok(GraphSetProjection::new(
+                    &input.name,
+                    return_projection::bind_read_value(&input.value, values)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, GraphSetTextError>>()?;
+        Ok(crate::set_ops::WriteReturnGroupSpec {
+            inputs,
+            keys: self.keys.clone(),
+            aggregates: self.aggregates.clone(),
+        })
+    }
 }
 
 /// The mutation leaves: the parsed RETURN plus the selection it extends.
@@ -178,6 +328,7 @@ pub(super) struct ReturnScope {
 pub(super) struct ParsedMutationReturn<'a> {
     bindings: Vec<(Binding<'a>, Name<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
+    grouping: Option<WriteReturnGroupTemplate>,
     quantifier: GraphSetQuantifier,
     order: Vec<crate::algebra::GraphValueOrder>,
     offset: ReadPageNumber,
@@ -316,6 +467,7 @@ impl<'a> ParsedMutationReturn<'a> {
             &self.projection,
             &self.types(),
             parameters,
+            self.grouping.as_ref(),
             self.at,
         )?)
     }
@@ -347,6 +499,7 @@ impl<'a> ParsedMutationReturn<'a> {
         Ok(MutationReturnTemplate {
             bindings,
             projection: self.projection,
+            grouping: self.grouping,
             quantifier: self.quantifier,
             order: self.order,
             offset: self.offset,
@@ -373,6 +526,7 @@ impl<'a> Parser<'a> {
         let mut returning = ParsedMutationReturn {
             bindings: Vec::new(),
             projection: Vec::new(),
+            grouping: None,
             quantifier,
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
@@ -422,6 +576,7 @@ impl<'a> Parser<'a> {
                 scope,
             })?;
             returning.projection = items.projection;
+            returning.grouping = items.grouping;
             output = items.output;
             spellings = items.spellings;
         }
@@ -453,11 +608,12 @@ impl MutationReturnTemplate {
                 return_projection::bind_read_value(&output.value, values)?,
             ));
         }
-        let mut query = PreparedGraphMutationQuery::prepare(
+        let mut query = PreparedGraphMutationQuery::prepare_with_grouping(
             mutation,
             self.bindings.clone(),
             projection,
             self.quantifier,
+            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
         )
         .map_err(|kind| GraphMutationTextError {
             offset: self.at,

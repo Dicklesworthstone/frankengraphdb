@@ -8,7 +8,8 @@
 
 mod aggregate;
 mod execute;
-pub(crate) use execute::finish_owned_projection;
+pub(crate) use aggregate::{WriteReturnGroup, WriteReturnGroupSpec};
+pub(crate) use execute::{finish_owned_aggregate, finish_owned_projection};
 mod filter;
 mod incremental;
 mod join;

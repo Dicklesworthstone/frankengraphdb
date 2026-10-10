@@ -672,3 +672,127 @@ fn returning_steps_count_toward_the_same_native_statement_limit_as_scripts() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn aggregate_returning_counts_occurrences_and_keeps_one_transaction_row_allowance() {
+    let ((), report) = run_async_under_lab(0x7478_6411, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let options = options(&[
+            "--write",
+            "UNWIND [1,1,2] AS x CREATE (n:Person {p:x,q:x*2}) \
+             RETURN n.p AS p,count(*) AS c,sum(n.q) AS total ORDER BY p",
+            "--write",
+            "MATCH (n:Person) SET n.q=n.q+1 RETURN count(*) AS c,sum(n.q) AS total",
+            "--write",
+            "MERGE (n:Person {p:2}) ON MATCH SET n.q=n.q+10 \
+             RETURN count(*) AS c,max(n.q) AS top",
+            "--query",
+            "MATCH (n:Person) RETURN count(*) AS c",
+        ]);
+        for row_limit in [5, 4] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            let result = run_with_limits(
+                &mut db,
+                &contexts,
+                &options,
+                None,
+                true,
+                &mut bytes,
+                Limits {
+                    rows: row_limit,
+                    output_bytes: 100_000,
+                },
+                None,
+            )
+            .await;
+            if row_limit == 4 {
+                let error = result.expect_err("the final read exceeds the shared row allowance");
+                assert!(error.message.contains("step 4"), "{}", error.message);
+                assert!(bytes.is_empty());
+                assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+                assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            } else {
+                okay(result);
+                let text = String::from_utf8(bytes).unwrap();
+                let created = rows_at(&text, 1);
+                assert_eq!(created.len(), 2, "{text}");
+                assert!(created[0].contains(
+                    r#""cells":[{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"4"}]"#
+                ), "{text}");
+                assert!(created[1].contains(
+                    r#""cells":[{"type":"int","value":"2"},{"type":"int","value":"1"},{"type":"int","value":"4"}]"#
+                ), "{text}");
+                let updated = rows_at(&text, 2);
+                assert_eq!(updated.len(), 1, "{text}");
+                assert!(updated[0].contains(
+                    r#""cells":[{"type":"int","value":"3"},{"type":"int","value":"11"}]"#
+                ), "{text}");
+                let merged = rows_at(&text, 3);
+                assert_eq!(merged.len(), 1, "{text}");
+                assert!(merged[0].contains(
+                    r#""cells":[{"type":"int","value":"1"},{"type":"int","value":"15"}]"#
+                ), "{text}");
+                assert_eq!(rows_at(&text, 4).len(), 1, "{text}");
+                assert!(text.ends_with(
+                    "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":5,\"statements\":4}\n"
+                ), "{text}");
+                assert_eq!(text.matches("\"event\":\"result\"").count(), 1);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+                let vertices = db.vertices_at(CommitSeq(1)).unwrap();
+                assert_eq!(vertices.len(), 3);
+                assert_eq!(
+                    vertices
+                        .iter()
+                        .filter_map(|row| row.props.iter().find_map(|(key, value)| {
+                            match (key, value) {
+                                (PropertyKeyId(2), CanonicalScalar::Int(value)) => Some(*value),
+                                _ => None,
+                            }
+                        }))
+                        .sum::<i64>(),
+                    21,
+                );
+                assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
+            }
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn aggregate_returning_late_refusal_rolls_back_even_when_no_rows_are_requested() {
+    let ((), report) = run_async_under_lab(0x7478_6412, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for tail in [
+            "UNWIND [1,'bad'] AS x CREATE (n:Person {p:x}) \
+             RETURN sum(n.p) AS total LIMIT 0",
+            "MATCH (n:Person) SET n.q='bad' RETURN sum(n.q) AS total LIMIT 0",
+            "MERGE (n:Person {p:1}) ON MATCH SET n.q='bad' \
+             RETURN sum(n.q) AS total LIMIT 0",
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let options = options(&[
+                "--write",
+                "CREATE (n:Person {p:1,q:7}) RETURN n",
+                "--write",
+                tail,
+            ]);
+            let mut bytes = Vec::new();
+            let error = run(&mut db, &contexts, &options, None, true, &mut bytes)
+                .await
+                .expect_err("LIMIT 0 must not skip aggregate input validation");
+            assert!(error.message.contains("step 2"), "{}", error.message);
+            assert!(bytes.is_empty());
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+            assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

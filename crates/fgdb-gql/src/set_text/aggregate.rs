@@ -10,6 +10,26 @@ pub(crate) struct ReadAggregateSpec {
     pub(crate) column: Option<usize>,
 }
 
+impl ReadAggregateSpec {
+    pub(crate) fn declaration(&self) -> crate::GraphAggregate<'_> {
+        use crate::{GraphAggregate as A, GraphAggregateFunction as F};
+        match (self.function, self.column) {
+            (F::CountRows, None) => A::count_rows(&self.name),
+            (F::Count, Some(at)) => A::count(&self.name, at),
+            (F::CountDistinct, Some(at)) => A::count_distinct(&self.name, at),
+            (F::SumInt, Some(at)) => A::sum_int(&self.name, at),
+            (F::SumIntDistinct, Some(at)) => A::sum_int_distinct(&self.name, at),
+            (F::AverageInt, Some(at)) => A::average_int(&self.name, at),
+            (F::AverageIntDistinct, Some(at)) => A::average_int_distinct(&self.name, at),
+            (F::Min, Some(at)) => A::min(&self.name, at),
+            (F::Max, Some(at)) => A::max(&self.name, at),
+            (F::Collect, Some(at)) => A::collect(&self.name, at),
+            (F::CollectDistinct, Some(at)) => A::collect_distinct(&self.name, at),
+            _ => unreachable!("native aggregate grammar pairs functions and arguments"),
+        }
+    }
+}
+
 /// Input expressions run before grouping; output slots restore declaration
 /// order after the native key-first group schema. Private input names never
 /// participate in user alias resolution. All three operators are depth-counted.

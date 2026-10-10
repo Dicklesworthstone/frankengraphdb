@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::insertion::{GraphInsertBuildError, GraphInsertVertex, PreparedGraphInsert};
-use crate::mutation_text::VertexMergeValueTemplate;
+use crate::mutation_text::{VertexMergeValueTemplate, WriteReturnGroupTemplate};
 use crate::set_text::{
     ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
 };
@@ -601,6 +601,7 @@ impl PreparedGraphVertexUpsertText {
                 &parsed.projection,
                 &parsed.types(),
                 &parser.syntax.parameters,
+                parsed.grouping.as_ref(),
                 parsed.at,
             )?;
         }
@@ -759,6 +760,7 @@ pub(super) struct ParsedVertexReturn<'a> {
     variable: Name<'a>,
     bindings: Vec<(VertexBinding<'a>, Name<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
+    grouping: Option<WriteReturnGroupTemplate>,
     quantifier: GraphSetQuantifier,
     order: Vec<crate::algebra::GraphValueOrder>,
     offset: ReadPageNumber,
@@ -842,6 +844,7 @@ impl<'a> ParsedVertexReturn<'a> {
         Ok(VertexReturnTemplate {
             bindings,
             projection: self.projection,
+            grouping: self.grouping,
             quantifier: self.quantifier,
             order: self.order,
             offset: self.offset,
@@ -868,6 +871,7 @@ impl<'a> Parser<'a> {
             variable,
             bindings: Vec::new(),
             projection: Vec::new(),
+            grouping: None,
             quantifier,
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
@@ -886,6 +890,7 @@ impl<'a> Parser<'a> {
         } else {
             let items = self.write_return_items(&mut returning)?;
             returning.projection = items.projection;
+            returning.grouping = items.grouping;
             (items.output, items.spellings)
         };
         if let Some(ReadStageTemplate::Page {
@@ -916,11 +921,12 @@ impl VertexReturnTemplate {
                 return_projection::bind_read_value(&output.value, values)?,
             ));
         }
-        let mut query = PreparedGraphVertexUpsertQuery::prepare(
+        let mut query = PreparedGraphVertexUpsertQuery::prepare_with_grouping(
             upsert,
             self.bindings.clone(),
             projection,
             self.quantifier,
+            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
         )
         .map_err(|kind| GraphVertexUpsertTextError {
             offset: self.at,

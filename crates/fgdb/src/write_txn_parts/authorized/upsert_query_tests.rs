@@ -331,3 +331,135 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
         }
     });
 }
+
+#[test]
+fn aggregate_write_returns_mask_before_grouping_and_charge_only_final_rows() {
+    lab(0xb965, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 1;
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let mutation = fgdb_gql::PreparedGraphMutationQueryText::prepare(
+            "MATCH (n:Visible) SET n.q=n.p+1 \
+             RETURN count(*) AS c,sum(n.q) AS total,count(n.secret) AS secrets",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut mutation_policy = policy();
+        mutation_policy.query.rows = fgdb_gql::GqlExecutionBudget::new(10_000, 1);
+        let mut merge_policy = upsert_policy();
+        merge_policy.merge.query.rows = fgdb_gql::GqlExecutionBudget::new(10_000, 1);
+        let mut observed = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, hidden).await;
+            let before = db.frontier().unwrap();
+            let (_, result, completion) = db
+                .execute_graph_mutation_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &mutation,
+                    mutation_policy,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.value.len(), 1);
+            assert_eq!(result.value[0].values(), &[int(2), int(32), int(0)]);
+            assert_eq!(result.rows.result_rows, 1);
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { .. }
+            ));
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            let (_, outcome, merged, _) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared(
+                        "MERGE (n:Visible {p:10}) ON MATCH SET n.q=n.q+100 \
+                         SET n.q=n.q+1 \
+                         RETURN count(*) AS c,sum(n.q) AS total,count(n.secret) AS secrets",
+                    ),
+                    merge_policy,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(1)));
+            assert_eq!(merged.value.len(), 1);
+            assert_eq!(merged.value[0].values(), &[int(1), int(112), int(0)]);
+            assert_eq!(merged.rows.result_rows, 1);
+            if hidden {
+                assert_eq!(db.vertex(VId(3)).unwrap().unwrap().props, vec![
+                    (P, CanonicalScalar::Int(30))
+                ]);
+                assert!(db.vertex(VId(1)).unwrap().unwrap().props.contains(&(
+                    SECRET,
+                    CanonicalScalar::Int(71),
+                )));
+                let second = db.vertex(VId(2)).unwrap().unwrap();
+                assert!(second.labels.contains(&HIDDEN));
+                assert!(second.props.contains(&(SECRET, CanonicalScalar::Int(72))));
+            }
+            observed.push((result.value, merged.value));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(observed[0], observed[1]);
+    });
+}
+
+#[test]
+fn aggregate_merge_failure_with_zero_output_allowance_preserves_committed_state() {
+    lab(0xb966, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let mut zero_rows = upsert_policy();
+        zero_rows.merge.query.rows = fgdb_gql::GqlExecutionBudget::new(10_000, 0);
+        for text in [
+            "MERGE (n:Visible {p:10}) ON MATCH SET n.q='bad' \
+             RETURN sum(n.q) AS total LIMIT 0",
+            "MERGE (n:Visible {p:99}) ON CREATE SET n.q='bad' \
+             RETURN sum(n.q) AS total LIMIT 0",
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, true).await;
+            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let error = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared(text),
+                    zero_rows,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("SUM"), "{error}");
+            assert_eq!(
+                (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                before,
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}

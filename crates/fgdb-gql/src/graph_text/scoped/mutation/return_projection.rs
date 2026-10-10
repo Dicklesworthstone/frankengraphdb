@@ -4,7 +4,7 @@
 
 mod aggregate;
 pub(super) mod pipeline;
-mod with_aggregate;
+pub(super) mod with_aggregate;
 
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;

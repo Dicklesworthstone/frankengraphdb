@@ -85,5 +85,100 @@ impl PreparedGraphSetAggregate {
     }
 }
 
+
+/// Bound input expressions and native aggregate declarations for a write
+/// RETURN. Preparation below checks them against the write collector's actual
+/// binding schema before any source or effect can execute.
+pub(crate) struct WriteReturnGroupSpec {
+    pub(crate) inputs: Vec<crate::GraphSetProjection>,
+    pub(crate) keys: Vec<usize>,
+    pub(crate) aggregates: Vec<crate::set_text::aggregate::ReadAggregateSpec>,
+}
+
+/// One checked grouping stage over frozen write occurrences. No graph source
+/// is retained or callable; the owned-row reducer uses the same exact native
+/// accumulators and checked ordinary-row conversion as a read WITH grouping.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WriteReturnGroup {
+    pub(in crate::set_ops) inputs: Vec<crate::GraphSetProjection>,
+    summary: crate::aggregation::OwnedRowAggregate,
+    types: Vec<GraphSetColumnType>,
+}
+
+impl WriteReturnGroupSpec {
+    pub(crate) fn prepare(
+        self,
+        input: Vec<GraphSetColumnType>,
+    ) -> Result<WriteReturnGroup, GraphAggregateBuildError> {
+        let checked = crate::row_projection::RowProjectionSpec::new(
+            input,
+            self.inputs.clone(),
+            GraphSetQuantifier::All,
+        )
+        .map_err(GraphAggregateBuildError::InputRows)?;
+        let columns = checked.columns().map(str::to_owned).collect::<Vec<_>>();
+        let declarations = self
+            .aggregates
+            .iter()
+            .map(crate::set_text::aggregate::ReadAggregateSpec::declaration)
+            .collect::<Vec<_>>();
+        let summary = crate::aggregation::OwnedRowAggregate::prepare(
+            &columns,
+            &self.keys,
+            &declarations,
+        )?;
+        let input_types = checked.column_types();
+        let mut types = self.keys.iter().map(|&column| input_types[column]).collect::<Vec<_>>();
+        for aggregate in &self.aggregates {
+            types.push(match aggregate.function {
+                Function::CountRows
+                | Function::Count
+                | Function::CountDistinct
+                | Function::SumInt
+                | Function::SumIntDistinct
+                | Function::AverageInt
+                | Function::AverageIntDistinct => GraphSetColumnType::Scalar,
+                Function::Collect | Function::CollectDistinct => GraphSetColumnType::List,
+                Function::Min | Function::Max => {
+                    input_types[aggregate.column.expect("native extremum argument")]
+                }
+            });
+        }
+        Ok(WriteReturnGroup {
+            inputs: self.inputs,
+            summary,
+            types,
+        })
+    }
+}
+
+impl WriteReturnGroup {
+    pub(crate) fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+
+    pub(in crate::set_ops) fn summarize_value_rows<E, C>(
+        &self,
+        input: &[GraphValueRow],
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        let rows = self.summary.summarize(input, control)?;
+        super::rows::convert_rows(rows, control)
+    }
+
+    pub(crate) fn append_canonical_bytes(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(b"fgdb:write-return-group:v1\0");
+        bytes.extend_from_slice(&(self.inputs.len() as u64).to_be_bytes());
+        for input in &self.inputs {
+            input.value().append_canonical_bytes(bytes);
+        }
+        let summary = self.summary.canonical_bytes();
+        bytes.extend_from_slice(&(summary.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&summary);
+    }
+}
+
 #[cfg(test)]
 mod tests;

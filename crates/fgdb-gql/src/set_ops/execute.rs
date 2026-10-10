@@ -558,6 +558,54 @@ where
     })
 }
 
+/// Group the private occurrence bag of a write under its existing prefix.
+/// Input expressions, exact native accumulation and checked row conversion
+/// all precede final RETURN paging. Intermediate group rows consume work,
+/// never the final result-row allowance; no source is invoked here.
+pub(crate) fn finish_owned_aggregate<E, C>(
+    input: GqlQueryExecution<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    grouping: &super::WriteReturnGroup,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    let mut meter = Meter {
+        policy,
+        checkpoint,
+        rows: GqlExecutionStats {
+            snapshot_records: input.rows.snapshot_records,
+            result_rows: 0,
+        },
+        evaluator: input.evaluator,
+    };
+    let input = project_rows(
+        input.value,
+        &grouping.inputs,
+        GraphSetQuantifier::All,
+        true,
+        &mut meter,
+    )?;
+    let value = grouping
+        .summarize_value_rows(&input, &mut |event| {
+            let event = if event == GlaExecutionEvent::ResultRow {
+                GlaExecutionEvent::Work
+            } else {
+                event
+            };
+            meter
+                .event(event)
+                .map_err(|error| error.map_source(crate::GraphAggregateError::InputRelation))
+        })
+        .map_err(|error| {
+            error.map_source(|error| GraphSetExecutionError::Aggregate(Box::new(error)))
+        })?;
+    (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
+    Ok(GqlQueryExecution {
+        value,
+        rows: meter.rows,
+        evaluator: meter.evaluator,
+    })
+}
+
 /// Finish an already admitted owned bag using the ordinary native projection,
 /// DISTINCT, ordering and page kernels. The private owner has checked the input
 /// schema and charged every retained input cell; counters include its complete

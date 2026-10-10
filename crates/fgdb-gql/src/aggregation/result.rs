@@ -297,7 +297,7 @@ impl PreparedGraphAggregate {
         let source_types = if let Some(relation) = &self.relational_input {
             relation.column_types().to_vec()
         } else {
-            let source = crate::PreparedGraphSet::from(self.input.clone());
+            let source = crate::PreparedGraphSet::from(self.input_pattern().clone());
             if let Some(input) = &self.computed_input {
                 input
                     .iter()

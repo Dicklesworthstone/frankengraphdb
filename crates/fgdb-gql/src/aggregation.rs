@@ -170,6 +170,7 @@ pub enum GraphAggregateBuildError {
     TooManyFilters { limit: usize, observed: usize },
     DuplicateOrder { column: GraphAggregateColumn },
     InputProjection(crate::GraphSetProjectionError),
+    InputRows(crate::row_projection::RowProjectionBuildError),
     OutputProjection(crate::GraphSetProjectionError),
 }
 
@@ -202,6 +203,7 @@ impl core::fmt::Display for GraphAggregateBuildError {
                 write!(f, "aggregate ORDER BY repeats column {column:?}")
             }
             Self::InputProjection(error) | Self::OutputProjection(error) => error.fmt(f),
+            Self::InputRows(error) => error.fmt(f),
         }
     }
 }
@@ -439,13 +441,67 @@ struct KeyProjection {
     names: Box<[String]>,
 }
 
+/// The native graph owner always retains a real input. The private owned-row
+/// reducer below explicitly has no graph source and never exposes graph
+/// execution, input accessors or source certificates.
+#[derive(Clone, PartialEq, Eq)]
+struct AggregateInput(Option<PreparedGraphPattern<GraphValueRow>>);
+
+impl core::ops::Deref for AggregateInput {
+    type Target = PreparedGraphPattern<GraphValueRow>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("a graph aggregate owner always has its admitted source")
+    }
+}
+
+/// A source-independent owner for the same native accumulator/result engine.
+/// Only a complete, schema-checked occurrence bag may enter this private seam.
+/// It cannot be converted to a public graph aggregate or execute a source.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OwnedRowAggregate {
+    definition: PreparedGraphAggregate,
+}
+
+impl OwnedRowAggregate {
+    pub(crate) fn prepare(
+        columns: &[String],
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        Ok(Self {
+            definition: PreparedGraphAggregate::prepare_row_columns(
+                columns, keys, aggregates, 0, None,
+            )?,
+        })
+    }
+
+    pub(crate) fn summarize<E, C>(
+        &self,
+        rows: &[GraphValueRow],
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.definition.summarize_projected_rows(rows, control)
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:owned-row-group:v1\0".to_vec();
+        self.definition.append_grouping_transcript(&mut bytes);
+        bytes
+    }
+}
+
 /// Logical GroupAggregate over an immutable child. Ordinary ALL patterns stream
 /// directly; computed input and explicit single-source relational pipelines own
 /// bounded rows before grouping. A pipeline's existing pages remain input
 /// boundaries; offset/count here apply separately to the group output.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphAggregate {
-    input: PreparedGraphPattern<GraphValueRow>,
+    input: AggregateInput,
     computed_input: Option<Vec<crate::GraphSetProjection>>,
     relational_input: Option<crate::PreparedGraphSet>,
     keys: Vec<usize>,
@@ -509,16 +565,7 @@ impl PreparedGraphAggregate {
         {
             return Err(GraphAggregateBuildError::RequiresUnpaginatedAll);
         }
-        if aggregates.is_empty() {
-            return Err(GraphAggregateBuildError::EmptyAggregates);
-        }
-        let width = keys.len().saturating_add(aggregates.len());
-        if width > MAX_PATTERN_VERTICES {
-            return Err(GraphAggregateBuildError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES,
-                observed: width,
-            });
-        }
+        Self::admit_group_width(keys.len(), aggregates.len())?;
         let projected_columns = computed_input
             .as_deref()
             .map(|projection| computed::projected_schema(&input, projection))
@@ -528,6 +575,39 @@ impl PreparedGraphAggregate {
             .map(crate::PreparedGraphSet::columns)
             .or(projected_columns.as_deref())
             .unwrap_or(input.columns());
+        let mut definition =
+            Self::prepare_row_columns(columns, keys, aggregates, offset, count)?;
+        definition.input = AggregateInput(Some(input));
+        definition.computed_input = computed_input;
+        definition.relational_input = relational_input;
+        Ok(definition)
+    }
+
+    fn admit_group_width(keys: usize, aggregates: usize) -> Result<(), GraphAggregateBuildError> {
+        if aggregates == 0 {
+            return Err(GraphAggregateBuildError::EmptyAggregates);
+        }
+        let width = keys.saturating_add(aggregates);
+        if width > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: width,
+            });
+        }
+        Ok(())
+    }
+
+    /// Shared column/key/function admission. An absent source is private to
+    /// OwnedRowAggregate; public constructors install their actual source
+    /// before returning the prepared definition.
+    fn prepare_row_columns(
+        columns: &[String],
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+        offset: u64,
+        count: Option<u64>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        Self::admit_group_width(keys.len(), aggregates.len())?;
         let mut names = BTreeSet::new();
         for (at, column) in keys.iter().enumerate() {
             let name = columns
@@ -565,9 +645,9 @@ impl PreparedGraphAggregate {
             })
             .collect();
         Ok(Self {
-            input,
-            computed_input,
-            relational_input,
+            input: AggregateInput(None),
+            computed_input: None,
+            relational_input: None,
             keys: keys.to_vec(),
             aggregates,
             key_names,
@@ -773,29 +853,7 @@ impl PreparedGraphAggregate {
         let child = self.input.canonical_bytes();
         bytes.extend_from_slice(&(child.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&child);
-        bytes.extend_from_slice(&(self.keys.len() as u64).to_be_bytes());
-        for column in &self.keys {
-            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
-        }
-        bytes.extend_from_slice(&(self.aggregates.len() as u64).to_be_bytes());
-        for aggregate in &self.aggregates {
-            bytes.push(match aggregate.function {
-                GraphAggregateFunction::CountRows => 0,
-                GraphAggregateFunction::Count => 1,
-                GraphAggregateFunction::CountDistinct => 2,
-                GraphAggregateFunction::SumInt => 3,
-                GraphAggregateFunction::Min => 4,
-                GraphAggregateFunction::Max => 5,
-                GraphAggregateFunction::SumIntDistinct => 6,
-                GraphAggregateFunction::AverageInt => 7,
-                GraphAggregateFunction::AverageIntDistinct => 8,
-                GraphAggregateFunction::Collect => 9,
-                GraphAggregateFunction::CollectDistinct => 10,
-            });
-            if let Some(column) = aggregate.column {
-                bytes.extend_from_slice(&(column as u64).to_be_bytes());
-            }
-        }
+        self.append_grouping_transcript(&mut bytes);
         bytes.extend_from_slice(&self.offset.to_be_bytes());
         bytes.push(u8::from(self.count.is_some()));
         if let Some(count) = self.count {
@@ -836,6 +894,32 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(&relation);
         }
         bytes
+    }
+
+    fn append_grouping_transcript(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&(self.keys.len() as u64).to_be_bytes());
+        for column in &self.keys {
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+        }
+        bytes.extend_from_slice(&(self.aggregates.len() as u64).to_be_bytes());
+        for aggregate in &self.aggregates {
+            bytes.push(match aggregate.function {
+                GraphAggregateFunction::CountRows => 0,
+                GraphAggregateFunction::Count => 1,
+                GraphAggregateFunction::CountDistinct => 2,
+                GraphAggregateFunction::SumInt => 3,
+                GraphAggregateFunction::Min => 4,
+                GraphAggregateFunction::Max => 5,
+                GraphAggregateFunction::SumIntDistinct => 6,
+                GraphAggregateFunction::AverageInt => 7,
+                GraphAggregateFunction::AverageIntDistinct => 8,
+                GraphAggregateFunction::Collect => 9,
+                GraphAggregateFunction::CollectDistinct => 10,
+            });
+            if let Some(column) = aggregate.column {
+                bytes.extend_from_slice(&(column as u64).to_be_bytes());
+            }
+        }
     }
 
     /// Evaluate an already admitted source under one policy. Storage callers

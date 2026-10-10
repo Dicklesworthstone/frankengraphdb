@@ -139,10 +139,21 @@ impl core::fmt::Display for GraphMutationTextError {
 }
 impl core::error::Error for GraphMutationTextError {}
 
+/// Shared unbound grouping over a write statement's own frozen occurrences.
+/// Inputs contain native value expressions; output slots live in the enclosing
+/// RETURN projection, after key-first native aggregation.
+#[derive(Clone)]
+pub(crate) struct WriteReturnGroupTemplate {
+    pub inputs: Vec<ReadProjectionTemplate>,
+    pub keys: Vec<usize>,
+    pub aggregates: Vec<crate::set_text::aggregate::ReadAggregateSpec>,
+}
+
 #[derive(Clone)]
 pub(crate) struct MutationReturnTemplate {
     pub bindings: Vec<crate::GraphMutationBinding>,
     pub projection: Vec<ReadProjectionTemplate>,
+    pub grouping: Option<WriteReturnGroupTemplate>,
     pub quantifier: crate::GraphSetQuantifier,
     pub order: Vec<GraphValueOrder>,
     pub offset: ReadPageNumber,
@@ -157,13 +168,14 @@ pub(crate) struct MutationReturnTemplate {
 /// returns the incremented value. Assignments are simultaneous and
 /// conflict-checked, so every read has one answer, never an order-dependent
 /// one. RETURN accepts native scalar/CASE/list expressions, graph functions,
-/// DISTINCT, output-column ordering, SKIP and LIMIT; paging never limits
-/// which occurrences are updated.
+/// grouped COUNT/SUM/AVG/MIN/MAX/COLLECT, argument DISTINCT, output DISTINCT,
+/// ordering, SKIP and LIMIT. Grouping counts selection occurrences, not unique
+/// changed identities; paging never limits which occurrences are updated.
 ///
 /// `labels()` after a label action or DETACH DELETE, an edge property after
-/// DETACH DELETE (cascades are not visible to the statement) and aggregate
-/// RETURN are refused; a vertex property of an element the statement
-/// deletes is a typed execution error.
+/// DETACH DELETE (cascades are not visible to the statement) are refused; a
+/// property of a deleted vertex is a typed execution error, including inside
+/// an aggregate. Grouped output keeps the ordinary row numeric domain.
 #[derive(Clone)]
 pub struct PreparedGraphMutationQueryText {
     pub(crate) statement: String,

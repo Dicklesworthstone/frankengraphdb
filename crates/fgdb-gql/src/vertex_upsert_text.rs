@@ -125,6 +125,7 @@ impl PreparedGraphVertexUpsertText {
 pub(crate) struct VertexReturnTemplate {
     pub bindings: Vec<crate::GraphVertexReturnBinding>,
     pub projection: Vec<crate::set_text::ReadProjectionTemplate>,
+    pub grouping: Option<crate::mutation_text::WriteReturnGroupTemplate>,
     pub quantifier: crate::GraphSetQuantifier,
     pub order: Vec<crate::algebra::GraphValueOrder>,
     pub offset: crate::set_text::ReadPageNumber,
@@ -136,8 +137,9 @@ pub(crate) struct VertexReturnTemplate {
 /// MERGE chooses exactly one vertex, so RETURN projects one row: the merge
 /// variable's identity and its properties after every clause, read from the
 /// staged transaction state, plus expressions, DISTINCT, ordering and paging
-/// over them. A MERGE with no SET clause is accepted here. `labels(n)` and
-/// aggregate RETURN are refused.
+/// over them, including grouped COUNT/SUM/AVG/MIN/MAX/COLLECT with argument
+/// DISTINCT. A MERGE with no SET clause is accepted here. Grouped output keeps
+/// the ordinary row numeric domain; `labels(n)` remains outside this shape.
 #[derive(Clone)]
 pub struct PreparedGraphVertexUpsertQueryText {
     pub(crate) statement: String,
