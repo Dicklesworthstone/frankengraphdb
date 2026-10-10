@@ -364,9 +364,9 @@ impl PreparedGraphAggregateText {
                         GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
                     ));
                 }
-                let descending = parser.take_word("DESC")?;
-                if !descending {
-                    parser.take_word("ASC")?;
+                let descending = parser.take_word("DESC")? || parser.take_word("DESCENDING")?;
+                if !descending && !parser.take_word("ASC")? {
+                    parser.take_word("ASCENDING")?;
                 }
                 let nulls = if parser.take_word("NULLS")? {
                     if parser.take_word("FIRST")? {

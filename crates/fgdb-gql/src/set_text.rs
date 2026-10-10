@@ -1220,7 +1220,11 @@ impl<'a> Composition<'a> {
                 }
                 at += 1;
             }
-            if token(at).is_some_and(|token| token.word("ASC") || token.word("DESC")) {
+            if token(at).is_some_and(|token| {
+                ["ASC", "ASCENDING", "DESC", "DESCENDING"]
+                    .iter()
+                    .any(|direction| token.word(direction))
+            }) {
                 at += 1;
             }
             if token(at).is_some_and(|token| token.word("NULLS")) {
@@ -1407,9 +1411,11 @@ impl<'a> Composition<'a> {
                     variable = Some(std::mem::replace(&mut name, property.to_owned()));
                     self.advance();
                 }
-                let descending = self.take_word("DESC");
-                if !descending {
-                    self.take_word("ASC");
+                // openCypher and GQL spell the directions ASC/ASCENDING and
+                // DESC/DESCENDING.
+                let descending = self.take_word("DESC") || self.take_word("DESCENDING");
+                if !descending && !self.take_word("ASC") {
+                    self.take_word("ASCENDING");
                 }
                 let nulls_first = if self.take_word("NULLS") {
                     if self.take_word("FIRST") {

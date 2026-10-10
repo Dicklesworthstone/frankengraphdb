@@ -157,9 +157,11 @@ impl Parser<'_> {
                     ),
                 ));
             }
-            let descending = self.take_word("DESC")?;
-            if !descending {
-                self.take_word("ASC")?;
+            // openCypher and GQL spell the directions ASC/ASCENDING and
+            // DESC/DESCENDING.
+            let descending = self.take_word("DESC")? || self.take_word("DESCENDING")?;
+            if !descending && !self.take_word("ASC")? {
+                self.take_word("ASCENDING")?;
             }
             let nulls_first = if self.take_word("NULLS")? {
                 if self.take_word("FIRST")? {

@@ -1291,6 +1291,95 @@ fn identity_functions_return_engine_identities_on_the_embedded_surface() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// openCypher and GQL spell the sort directions ASC/ASCENDING and
+/// DESC/DESCENDING. Every ORDER BY parser accepts both spellings with the same
+/// meaning: a pattern RETURN, an aggregate RETURN, a WITH page and a set
+/// composition. The long forms used to refuse; 56 openCypher TCK scenarios use
+/// them.
+#[test]
+fn ascending_and_descending_spell_the_same_directions_as_asc_and_desc() {
+    let ((), report) = run_async_under_lab(0x7d14_0094, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .map_err(|error| format!("{statement}: {error}"))
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        let int = |value: i64| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
+        };
+        // Each long spelling answers exactly what its short spelling answers,
+        // and that answer is in the named direction.
+        for (long, short, expected) in [
+            (
+                "MATCH (n) RETURN n.p AS p ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p ORDER BY p DESC",
+                vec![vec![int(4)], vec![int(3)], vec![int(2)], vec![int(1)]],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p ORDER BY p ASCENDING",
+                "MATCH (n) RETURN n.p AS p ORDER BY p ASC",
+                vec![vec![int(1)], vec![int(2)], vec![int(3)], vec![int(4)]],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p, count(*) AS c ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p, count(*) AS c ORDER BY p DESC",
+                [4, 3, 2, 1]
+                    .map(|p| vec![int(p), GraphAggregateValue::Count(1)])
+                    .to_vec(),
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p UNION MATCH (n) RETURN n.p AS p ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p UNION MATCH (n) RETURN n.p AS p ORDER BY p DESC",
+                vec![vec![int(4)], vec![int(3)], vec![int(2)], vec![int(1)]],
+            ),
+        ] {
+            assert_eq!(rows(long), expected, "{long}");
+            assert_eq!(rows(short), expected, "{short}");
+        }
+        // A WITH page: the final RETURN has its own (canonical) order, so the
+        // direction shows in which rows the LIMIT keeps.
+        // Debug of a cell is redacted, so compare the kept integers sorted.
+        let kept = |statement: &str| {
+            let mut kept: Vec<i64> = rows(statement)
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(p)))] => {
+                        Some(*p)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .ok_or_else(|| format!("{statement}: expected one integer cell per row"))
+                .unwrap();
+            kept.sort_unstable();
+            kept
+        };
+        for (long, short, expected) in [
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p DESCENDING LIMIT 2 RETURN p",
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 RETURN p",
+                [3, 4],
+            ),
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p ASCENDING LIMIT 2 RETURN p",
+                "MATCH (n) WITH n.p AS p ORDER BY p ASC LIMIT 2 RETURN p",
+                [1, 2],
+            ),
+        ] {
+            assert_eq!(kept(long), expected, "{long}");
+            assert_eq!(kept(short), expected, "{short}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// openCypher binds the string, list and null predicates (IS [NOT] NULL,
 /// [NOT] IN, STARTS WITH, ENDS WITH, CONTAINS) tighter than comparisons.
 /// Expected values are the openCypher TCK's: Precedence1 [8] and [11],
