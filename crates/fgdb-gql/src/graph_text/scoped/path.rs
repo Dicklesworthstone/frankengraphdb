@@ -82,7 +82,9 @@ impl Parser<'_> {
     fn single_path_count(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.current.at;
         match self.current.kind {
-            TokenKind::Digits(digits) if matches!(digits.parse::<u64>(), Ok(1)) => {
+            TokenKind::Digits(digits)
+                if crate::graph_text::integer_magnitude(digits) == Some(1) =>
+            {
                 self.advance()?;
                 Ok(())
             }

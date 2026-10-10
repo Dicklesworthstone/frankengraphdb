@@ -612,11 +612,17 @@ fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
     // Independent: 0.75, 1.0 and the Int 1 exceed 0.5; the absent row never does.
     assert_eq!(run(&literal(">"), &values), [VId(2), VId(3), VId(4)]);
     assert_eq!(run(&literal("<"), &values), [VId(0)]);
-    // Not decimals: a trailing or leading point, and a magnitude with no
-    // finite f64, refuse.
+    // openCypher's `.5` (fgdb-yyygp) is the same literal as `0.5`.
+    let dot = PreparedGraphText::prepare("MATCH (n) WHERE n.p > .5 RETURN n", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(run(&dot, &values), run(&literal(">"), &values));
+    // Not decimals: a trailing point, a point apart from its digits, and a
+    // magnitude with no finite f64, refuse.
     for text in [
         "MATCH (n) WHERE n.p > 1. RETURN n".to_owned(),
-        "MATCH (n) WHERE n.p > .5 RETURN n".to_owned(),
+        "MATCH (n) WHERE n.p > . 5 RETURN n".to_owned(),
         format!("MATCH (n) WHERE n.p > {}.0 RETURN n", "9".repeat(400)),
     ] {
         assert!(

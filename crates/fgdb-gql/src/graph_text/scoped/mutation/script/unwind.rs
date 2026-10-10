@@ -88,9 +88,8 @@ fn field_path(
             else {
                 return Err(syntax(offset, "a constant signed integer list index"));
             };
-            let magnitude = digits
-                .parse::<u64>()
-                .map_err(|_| syntax(offset, "a list index in the Int64 range"))?;
+            let magnitude = crate::graph_text::integer_magnitude(digits)
+                .ok_or_else(|| syntax(offset, "a list index in the Int64 range"))?;
             let signed = if negative {
                 -i128::from(magnitude)
             } else {

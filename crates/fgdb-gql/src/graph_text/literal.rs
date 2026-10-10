@@ -354,10 +354,11 @@ impl<'a> Parser<'a> {
     /// `0.5`, `1e5`, `1.5e-3`: a decimal literal with a fraction, an
     /// exponent or both, as a Float scalar (fgdb-qnqrj), so a Float value (a
     /// Prism score, a float property) compares with a Float of the same
-    /// kind. The exponent is written without spaces (`e5`, `E-3`, `e+10`). A
-    /// leading `-` makes it negative where no unary operator exists
-    /// (`n.p > -0.5`); in an expression the sign is the ordinary unary
-    /// operator. `None` consumes nothing, and plain digits stay an integer.
+    /// kind. The integer digits may be omitted (`.5`, `.1e9`). The exponent is
+    /// written without spaces (`e5`, `E-3`, `e+10`). A leading `-` makes it
+    /// negative where no unary operator exists (`n.p > -0.5`); in an
+    /// expression the sign is the ordinary unary operator. `None` consumes
+    /// nothing, and plain digits stay an integer.
     /// The text is parsed once, to the nearest f64, and must be finite.
     pub(in crate::graph_text) fn float_literal(
         &mut self,
@@ -385,6 +386,20 @@ impl<'a> Parser<'a> {
         &self,
     ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
+        let decimal = |digits: &str| digits.bytes().all(|byte| byte.is_ascii_digit());
+        if self.is_punct(b'.') {
+            // No integer digits: `.5`, `.1e9`. An operand never starts with a
+            // property dot, so the dot must touch its digits.
+            let digits = lexer.next()?;
+            let TokenKind::Digits(fraction) = digits.kind else {
+                return Ok(None);
+            };
+            if digits.at != self.current.at + 1 || !decimal(fraction) {
+                return Ok(None);
+            }
+            let text = format!("0.{fraction}");
+            return Self::scan_float_exponent(lexer, text, digits.at + fraction.len(), 2, true);
+        }
         let negative = self.is_punct(b'-');
         let (whole, mut end, mut consumed) = if negative {
             let token = lexer.next()?;
@@ -398,6 +413,10 @@ impl<'a> Parser<'a> {
             };
             (whole, self.current.at + whole.len(), 1)
         };
+        // 0x1, 0o7 and 0b1 spell integers only.
+        if !decimal(whole) {
+            return Ok(None);
+        }
         let mut text = format!("{}{whole}", if negative { "-" } else { "" });
         let mut float = false;
         let mut peek = lexer.clone();
@@ -413,6 +432,18 @@ impl<'a> Parser<'a> {
             float = true;
             lexer = peek;
         }
+        Self::scan_float_exponent(lexer, text, end, consumed, float)
+    }
+
+    /// Extend a scanned mantissa ending at byte `end` with an adjacent
+    /// exponent, which alone makes digits a float.
+    fn scan_float_exponent(
+        lexer: Lexer<'a>,
+        mut text: String,
+        end: usize,
+        mut consumed: usize,
+        mut float: bool,
+    ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
         let mut peek = lexer;
         let exponent = peek.next()?;
         if let TokenKind::Word(word) = exponent.kind

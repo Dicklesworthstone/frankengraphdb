@@ -536,9 +536,8 @@ impl<'a> Parser<'a> {
         let at = self.offset();
         let operand = match &self.current().kind {
             TextKind::Digits(digits) => Operand::Literal(
-                digits
-                    .parse::<u64>()
-                    .map_err(|_| pattern(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
+                crate::graph_text::integer_magnitude(digits)
+                    .ok_or_else(|| pattern(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
             ),
             TextKind::Parameter(name) => {
                 let name = *name;

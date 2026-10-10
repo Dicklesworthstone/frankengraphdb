@@ -715,9 +715,9 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("finite integer WALK hop bound"),
             ));
         };
-        let hops = digits
-            .parse::<u32>()
-            .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
+        let hops = crate::graph_text::integer_magnitude(digits)
+            .and_then(|hops| u32::try_from(hops).ok())
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         self.advance()?;
         Ok(hops)
     }

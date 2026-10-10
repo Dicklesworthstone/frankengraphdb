@@ -1464,9 +1464,9 @@ impl<'a> Composition<'a> {
         let token = self.current();
         let result = match token.kind {
             TextKind::Digits(digits) => {
-                PageNumber::Literal(digits.parse::<u64>().map_err(|_| {
-                    pattern_kind(token.at, GraphPatternTextErrorKind::IntegerOutOfRange)
-                })?)
+                PageNumber::Literal(crate::graph_text::integer_magnitude(digits).ok_or_else(
+                    || pattern_kind(token.at, GraphPatternTextErrorKind::IntegerOutOfRange),
+                )?)
             }
             TextKind::Parameter(name) => {
                 let name = name.to_owned();

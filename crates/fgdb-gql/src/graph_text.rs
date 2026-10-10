@@ -306,6 +306,18 @@ struct Token<'a> {
     at: usize,
 }
 
+/// The magnitude a `Digits` token spells: decimal, or the openCypher and GQL
+/// hexadecimal `0x`, octal `0o` and binary `0b` forms. `None` past `u64`.
+pub(crate) fn integer_magnitude(digits: &str) -> Option<u64> {
+    let (radix, body) = match digits.as_bytes() {
+        [b'0', b'x', ..] => (16, &digits[2..]),
+        [b'0', b'o', ..] => (8, &digits[2..]),
+        [b'0', b'b', ..] => (2, &digits[2..]),
+        _ => (10, digits),
+    };
+    u64::from_str_radix(body, radix).ok()
+}
+
 /// Whether `statement` calls openCypher `id()` or `elementId()` (fgdb-j687q).
 /// Capability-scoped sessions refuse such statements before preparation,
 /// because engine identities are not masked (owner ruling 2026-09-30).
@@ -416,8 +428,18 @@ impl<'a> Lexer<'a> {
             ));
         }
         if ch.is_ascii_digit() {
-            self.at += 1;
-            while bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            // A radix prefix stays in the token; `integer_magnitude` reads it.
+            let radix = match (ch, bytes.get(at + 1), bytes.get(at + 2)) {
+                (b'0', Some(b'x'), Some(digit)) if digit.is_ascii_hexdigit() => 16,
+                (b'0', Some(b'o'), Some(b'0'..=b'7')) => 8,
+                (b'0', Some(b'b'), Some(b'0' | b'1')) => 2,
+                _ => 10,
+            };
+            self.at += if radix == 10 { 1 } else { 2 };
+            while bytes
+                .get(self.at)
+                .is_some_and(|byte| char::from(*byte).is_digit(radix))
+            {
                 self.at += 1;
             }
             return Ok(Token {
@@ -1072,9 +1094,8 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("typed integer or numeric parameter"),
             ));
         };
-        let magnitude = digits
-            .parse::<u64>()
-            .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
+        let magnitude = integer_magnitude(digits)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         let value = match expected {
             GqlParameterType::Scalar(_) => {
                 return Err(error(
@@ -2417,9 +2438,10 @@ mod tests {
             "MATCH (a) RETURN a ORDER BY missing",
             "MATCH (a) WHERE a.n = 1 OR OR a.n = 2 RETURN a",
             "MATCH (a) WHERE a > a RETURN a",
-            // `1.5` is a Float literal (fgdb-qnqrj); these are not decimals.
+            // `1.5` and `.5` are Float literals (fgdb-qnqrj, fgdb-yyygp);
+            // these are not decimals.
             "MATCH (a) WHERE a.n = 1. RETURN a",
-            "MATCH (a) WHERE a.n = .5 RETURN a",
+            "MATCH (a) WHERE a.n = . 5 RETURN a",
             "MATCH (a) WHERE a.n = $ x RETURN a",
             "MATCH (a) RETURN a SKIP -1",
             "MATCH (a) RETURN a LIMIT 18446744073709551616",

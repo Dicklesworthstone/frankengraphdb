@@ -487,6 +487,49 @@ fn optional_and_existential_children_share_scalar_lowering_and_aggregate_null_ru
 }
 
 #[test]
+fn radix_integers_and_dot_floats_spell_ordinary_values() {
+    let values = [
+        Some(CanonicalScalar::Int(31)),
+        Some(CanonicalScalar::Int(-8)),
+        Some(CanonicalScalar::Int(5)),
+        Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.5))),
+        Some(CanonicalScalar::Int(i64::MIN)),
+        Some(CanonicalScalar::Int(i64::MAX)),
+        Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1e8))),
+    ];
+    for (literal, matched) in [
+        ("0x1F", 0),
+        ("0x1f", 0),
+        ("-0o10", 1),
+        ("0b101", 2),
+        (".5", 3),
+        ("-0x8000000000000000", 4),
+        ("0o777777777777777777777", 5),
+        (".1e9", 6),
+    ] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        assert_eq!(ids(&statement, &values), [VId(matched)], "{statement}");
+    }
+    for literal in ["0x8000000000000000", "0o1000000000000000000000"] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        let error = PreparedGraphText::prepare(&statement, symbols).unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphPatternTextErrorKind::IntegerOutOfRange,
+            "{statement}"
+        );
+    }
+    // The prefixes are lower case, and a prefix needs a digit of its radix.
+    for literal in ["0X1F", "0O7", "0x", "0o8", "0b2", ". 5"] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        assert!(
+            PreparedGraphText::prepare(&statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
 fn malformed_or_oversized_literals_refuse_before_catalog_calls() {
     for statement in [
         "MATCH (n) WHERE n.p = 'unterminated RETURN n",

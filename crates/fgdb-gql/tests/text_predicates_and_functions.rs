@@ -482,6 +482,28 @@ fn opencypher_plus_over_text_is_concatenation() {
     }
 }
 
+/// openCypher's hexadecimal and octal integers (TCK Literals3, Literals4), GQL's
+/// binary ones, and floats without integer digits (Literals5) are ordinary
+/// operands of a computed projection.
+#[test]
+fn radix_integers_and_dot_floats_compute_in_projections() {
+    let float = |value: f64| CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value));
+    for (expression, expected) in [
+        ("0x1F + 0o7 + 0b1", CanonicalScalar::Int(39)),
+        ("0x1a2b3c4d5e6f7", CanonicalScalar::Int(460_367_961_908_983)),
+        ("-0x8000000000000000", CanonicalScalar::Int(i64::MIN)),
+        ("-0o1000000000000000000000", CanonicalScalar::Int(i64::MIN)),
+        ("0o777777777777777777777", CanonicalScalar::Int(i64::MAX)),
+        ("-0x1", CanonicalScalar::Int(-1)),
+        (".5 * 2", float(1.0)),
+        (".1e9", float(1e8)),
+        (".1E-5", float(1e-6)),
+        ("-.25", float(-0.25)),
+    ] {
+        assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,
