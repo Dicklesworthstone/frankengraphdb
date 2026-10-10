@@ -2,7 +2,7 @@
 //! transaction workspace. These are production parser/engine/VFS tests.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, IdentityPermutation, MemVfs, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
@@ -26,6 +26,22 @@ fn keys() -> DatabaseKeys {
         DatabaseSecurityNamespaceId([0xc5; 32]),
         [0xc6; 32],
     )
+}
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
+}
+/// The edge identity the engine issues for `counter` under [`keys`].
+fn engine_edge(counter: u64) -> EId {
+    EId(u128::from(
+        IdentityPermutation::edges(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -88,21 +104,26 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
         assert_eq!(db.delta_since(before).unwrap().count(), 1);
         assert_eq!(db.vertices().unwrap().len(), 8);
         assert_eq!(db.edges().unwrap().len(), 5);
+        // The first statement takes vertex counters 1, 2 and 3 for its Source
+        // rows p=1, p=2 and p=2. The second statement's rows follow $keys
+        // [2,1,2], each key's matches in ascending identity order, and each row
+        // takes its Copy vertex counter (4..=8) and edge counter (1..=5) in
+        // row order.
+        let sources = [engine_vertex(1), engine_vertex(2), engine_vertex(3)];
+        let (low, high) = (sources[1].min(sources[2]), sources[1].max(sources[2]));
         for (edge, source, destination, key) in [
-            (1, 2, 4, 2),
-            (2, 3, 5, 2),
-            (3, 1, 6, 1),
-            (4, 2, 7, 2),
-            (5, 3, 8, 2),
+            (1, low, 4, 2),
+            (2, high, 5, 2),
+            (3, sources[0], 6, 1),
+            (4, low, 7, 2),
+            (5, high, 8, 2),
         ] {
-            let stored = db.edge(EId(edge)).unwrap().unwrap();
-            assert_eq!(
-                (stored.entry.src, stored.entry.dst),
-                (VId(source), VId(destination))
-            );
+            let destination = engine_vertex(destination);
+            let stored = db.edge(engine_edge(edge)).unwrap().unwrap();
+            assert_eq!((stored.entry.src, stored.entry.dst), (source, destination));
             assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(key + 10))]);
             assert_eq!(
-                db.vertex(VId(destination)).unwrap().unwrap().props,
+                db.vertex(destination).unwrap().unwrap().props,
                 vec![
                     (P, CanonicalScalar::Int(key + 100)),
                     (Q, CanonicalScalar::Int((key + 100) * 2)),
@@ -201,14 +222,22 @@ fn returning_imports_keep_matched_and_created_endpoint_functions_in_their_slots(
             )
             .await
             .unwrap();
-        let expected: Vec<_> = [3, 4]
+        // Each UNWIND row takes one Copy vertex counter and one edge counter,
+        // in row order. ORDER BY new_start then sorts by the Copy identity.
+        let created = [
+            (engine_edge(1), engine_vertex(1)),
+            (engine_edge(2), engine_vertex(2)),
+        ];
+        let mut starts = created.map(|(_, vertex)| vertex);
+        starts.sort();
+        let expected: Vec<_> = starts
             .into_iter()
             .map(|created| {
                 GraphValueRow::from_owned_values(vec![
                     int(1),
                     GraphValue::Vertex(VId(1)),
                     GraphValue::Vertex(VId(2)),
-                    GraphValue::Vertex(VId(created)),
+                    GraphValue::Vertex(created),
                     GraphValue::Vertex(VId(1)),
                     int(3),
                 ])
@@ -216,9 +245,9 @@ fn returning_imports_keep_matched_and_created_endpoint_functions_in_their_slots(
             .collect();
         assert_eq!(rows.value, expected);
         assert_eq!((stats.created_vertices, stats.created_edges), (2, 2));
-        for (edge, created) in [(11, 3), (12, 4)] {
-            let edge = db.edge(EId(edge)).unwrap().unwrap();
-            assert_eq!((edge.entry.src, edge.entry.dst), (VId(created), VId(1)));
+        for (edge, created) in created {
+            let edge = db.edge(edge).unwrap().unwrap();
+            assert_eq!((edge.entry.src, edge.entry.dst), (created, VId(1)));
         }
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);

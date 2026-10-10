@@ -285,6 +285,7 @@ mod tests {
             resource_effect_digest: Digest([0x37; 32]),
             payload_availability_certificate_oid: None,
             flags: 0,
+            identity_counters: None,
         }
     }
 

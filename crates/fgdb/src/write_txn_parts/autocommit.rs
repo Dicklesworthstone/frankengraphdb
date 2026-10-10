@@ -339,12 +339,12 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Reserve an identity above every durable partition identity of its kind.
-    /// Reservations are shared by staged transactions on this opened handle.
-    /// Reopen reconstructs the floor from all retained blocks and patches,
-    /// including deleted IDs. A creation and deletion folded away inside one
-    /// commit never became a durable identity and may be reissued after reopen;
-    /// neither it nor never-committed reservations are durable leases.
+    /// Reserve a fresh engine identity: the keyed permutation of the next
+    /// counter of its kind ([`IdentityPermutation`], fgdb-hxgm1 channel 2),
+    /// skipping any identity the writer already holds. Reservations are shared
+    /// by staged transactions on this opened handle. Every engine commit
+    /// records the counters in its marker, so after reopen no identity this
+    /// handle issued before that commit is reissued, deleted or not.
     pub fn allocate_identity(
         &mut self,
         cx: &fgdb_types::QueryCx,
@@ -361,53 +361,37 @@ impl<V: Vfs + Clone> Database<V> {
         WriteTxnError,
     > {
         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-        let index = self.delta_index()?;
-        let mut state = self
-            .identity_allocation
-            .lock()
-            .map_err(|_| WriteTxnError::IdentityExhausted)?;
-        for batch in index
-            .since(state.frontier)
-            .map_err(crate::read_error_from_index)?
-        {
-            for coordinate in batch.coordinate_entries() {
-                for row in &coordinate.rows {
-                    match row {
-                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. } => {
-                            state.vertex = state.vertex.max(vid.0)
-                        }
-                        fgdb_delta_types::DeltaRow::CreateEdge { eid, .. } => {
-                            state.edge = state.edge.max(eid.0)
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        state.frontier = index.frontier();
-        drop(state);
+        self.ensure_readable()?;
+        // Weak handles on the committed identities: the existence check that
+        // keeps an engine identity off one a client chose explicitly. Weak,
+        // not Arc, because an autocommit commits while its allocator is still
+        // in scope: the fold then mutates the sets in place instead of copying
+        // them. A handle that outlived that commit no longer upgrades and
+        // skips the check; the commit-time spent check still refuses any
+        // collision (AlreadyLive / IdentitySpent), so nothing is lost but
+        // the skip.
+        let spent_vertices = std::sync::Arc::downgrade(&self.writer.spent_vertices());
+        let spent_edges = std::sync::Arc::downgrade(&self.writer.spent_edges());
         let allocation = self.identity_allocation.clone();
         Ok(move |request| {
             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
             let mut state = allocation
                 .lock()
                 .map_err(|_| WriteTxnError::IdentityExhausted)?;
-            let vertex = matches!(
-                request,
-                fgdb_gql::insertion::GraphInsertRequest::Vertex { .. }
-            );
-            let high = if vertex {
-                &mut state.vertex
-            } else {
-                &mut state.edge
-            };
-            *high = high
-                .checked_add(1)
-                .ok_or(WriteTxnError::IdentityExhausted)?;
-            Ok(if vertex {
-                ElementId::Vertex(VId(*high))
-            } else {
-                ElementId::Edge(EId(*high))
+            Ok(match request {
+                fgdb_gql::insertion::GraphInsertRequest::Vertex { .. } => {
+                    ElementId::Vertex(VId(state.issue(true, |id| {
+                        spent_vertices
+                            .upgrade()
+                            .is_some_and(|spent| spent.contains(&VId(id)))
+                    })?))
+                }
+                fgdb_gql::insertion::GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(state
+                    .issue(false, |id| {
+                        spent_edges
+                            .upgrade()
+                            .is_some_and(|spent| spent.contains(&EId(id)))
+                    })?)),
             })
         })
     }
@@ -416,8 +400,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// private transaction in one call; no caller allocator is accepted. The
     /// identity reservation shares the explicit-transaction allocator: an
     /// aborted autocommit never reissues or reclaims its issued identities on
-    /// this handle, and reopen rebuilds the floor from retained partition
-    /// history, including tombstones but excluding same-commit folded rows.
+    /// this handle, and reopen resumes from the counters the last engine
+    /// commit recorded (fgdb-hxgm1 channel 2).
     pub async fn execute_graph_insert_autocommit_engine_governed(
         &mut self,
         txcx: &TxnCx,

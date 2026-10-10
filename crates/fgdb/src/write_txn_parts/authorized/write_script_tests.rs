@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphMutationProgramError, GraphSymbol, GraphSymbolKind, GraphWriteProgramError,
     GraphWriteScriptBatchError,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -111,6 +111,8 @@ fn single_script_executes_dependent_statements_with_and_without_identity_receipt
         for returning in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
+            // The script's one CREATE takes engine vertex counter 1 of this handle.
+            let created = crate::write_txn::engine_vertex(&keys(), 1);
             let token = token
                 .attenuate(Restriction::MaxRows(if returning { 2 } else { 0 }))
                 .unwrap();
@@ -130,8 +132,8 @@ fn single_script_executes_dependent_statements_with_and_without_identity_receipt
                     )
                     .await
                     .unwrap();
-                assert_eq!(receipt.steps()[0].created_vertices(), Some(&[VId(1)][..]));
-                assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[VId(1)][..]));
+                assert_eq!(receipt.steps()[0].created_vertices(), Some(&[created][..]));
+                assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[created][..]));
                 assert!(matches!(
                     completion,
                     EmbeddedTxnCompletion::WriteCommitted { .. }
@@ -164,7 +166,7 @@ fn single_script_executes_dependent_statements_with_and_without_identity_receipt
             );
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             assert_eq!(
-                db.vertex(VId(1)).unwrap().unwrap().props,
+                db.vertex(created).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(70))]
             );
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -234,10 +236,21 @@ fn relationship_ingestion_reuses_shared_vertices_and_edges_and_reopens_one_commi
             ),
             (9, 3, 2, 3)
         );
+        // Record 0 creates a {p:0} and b {p:1} (engine vertex counters 1 and 2)
+        // and their relationship (engine edge counter 1); record 1 creates the
+        // second relationship (engine edge counter 2); record 2 matches the first.
+        let (a, b) = (
+            crate::write_txn::engine_vertex(&keys(), 1),
+            crate::write_txn::engine_vertex(&keys(), 2),
+        );
+        let (first, second) = (
+            crate::write_txn::engine_edge(&keys(), 1),
+            crate::write_txn::engine_edge(&keys(), 2),
+        );
         for (record, outcome) in [
-            GraphEdgeMergeOutcome::Created(EId(1)),
-            GraphEdgeMergeOutcome::Created(EId(2)),
-            GraphEdgeMergeOutcome::Matched(EId(1)),
+            GraphEdgeMergeOutcome::Created(first),
+            GraphEdgeMergeOutcome::Created(second),
+            GraphEdgeMergeOutcome::Matched(first),
         ]
         .into_iter()
         .enumerate()
@@ -252,11 +265,11 @@ fn relationship_ingestion_reuses_shared_vertices_and_edges_and_reopens_one_commi
             EmbeddedTxnCompletion::WriteCommitted { .. }
         ));
         assert_eq!(db.vertices().unwrap().len(), 3);
-        let one = db.edge(EId(1)).unwrap().unwrap();
-        assert_eq!((one.entry.src, one.entry.dst), (VId(1), VId(2)));
+        let one = db.edge(first).unwrap().unwrap();
+        assert_eq!((one.entry.src, one.entry.dst), (a, b));
         assert_eq!(one.props, vec![(Q, CanonicalScalar::Int(33))]);
         assert_eq!(
-            db.edge(EId(2)).unwrap().unwrap().props,
+            db.edge(second).unwrap().unwrap().props,
             vec![(Q, CanonicalScalar::Int(22))]
         );
         let state = (
@@ -320,7 +333,7 @@ fn a_late_binding_error_opens_no_transaction_and_reserves_no_identity() {
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -380,7 +393,7 @@ fn authority_rights_and_merge_relation_preflight_precede_argument_values() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -461,10 +474,12 @@ fn late_runtime_expression_failure_retains_record_coordinates_and_rolls_back_all
         ));
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
+        // Records 0 and 1 each issued one vertex (engine vertex counters 1 and
+        // 2) before the rollback, so the next engine vertex is counter 3.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(3)),
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 3)),
             "issued prefix identities are not reclaimed"
         );
         assert_eq!(txn.outstanding_obligations(), 0);
@@ -880,8 +895,11 @@ fn explicit_larger_batch_uses_one_write_only_transaction_not_per_record_commits(
         ));
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(db.vertices().unwrap().len(), 65);
+        // The refused admission issued nothing, so the committed batch began at
+        // engine vertex counter 1.
+        let first = crate::write_txn::engine_vertex(&keys(), 1);
         assert!(
-            db.vertex(VId(1)).unwrap().is_some(),
+            db.vertex(first).unwrap().is_some(),
             "refused count admission must reserve no ID"
         );
         assert_eq!(txn.outstanding_obligations(), 0);

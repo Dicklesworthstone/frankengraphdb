@@ -1,7 +1,9 @@
 //! Native UNWIND ingress shares real Warden permits and one Chronicle completion.
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch, WriteTxnError};
+use fgdb::{
+    Database, DatabaseKeys, IdentityPermutation, MemVfs, QueryResult, WriteBatch, WriteTxnError,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
@@ -33,6 +35,14 @@ const COUNTER: &str = "UNWIND $rows AS row MERGE (n:Visible {p:row.p}) \
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xa5; 32], NS, [0xa7; 32])
+}
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(0xa611), NS, "graph", SchemaEpoch(1), 1).unwrap()
@@ -399,10 +409,12 @@ fn malformed_tail_and_row_limit_refuse_before_resolution_or_identity_reservation
         ));
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
+        // Neither refusal took a counter: this handle's first engine
+        // allocation is still vertex counter 1.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1)),
+            ElementId::Vertex(engine_vertex(1)),
             "binding must not reserve graph IDs"
         );
         assert_eq!(txcx.outstanding_obligations(), 0);

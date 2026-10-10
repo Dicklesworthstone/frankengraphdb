@@ -55,13 +55,17 @@ impl<V: Vfs + Clone> Database<V> {
     /// delivers no identity rows and works with max_rows = 0. Stats and the
     /// completion value are control receipts, not graph-query result rows.
     ///
-    /// Allocation uses the existing engine high-water allocator, including
-    /// retired committed identities. Reservations are never reclaimed on this
-    /// handle, even after refusal; uncommitted reservations are not durable ID
-    /// leases. Sequential IDs expose allocation order: this API removes chosen
-    /// collision probes, NOT that metadata channel or timing channels. It does
-    /// not establish the final privacy-preserving allocator, mandatory secure
-    /// view, persistent revocation, durable audit protocol or full SSI.
+    /// Allocation issues the keyed permutation of the engine's per-kind counter
+    /// (fgdb-hxgm1 channel 2). Every engine commit records the counters, so an
+    /// identity issued before the last commit, retired or not, is never issued
+    /// again. Reservations are never reclaimed on this handle, even after
+    /// refusal; uncommitted reservations are not durable ID leases. Without the
+    /// database keys, the gap between two issued identities does not reveal how
+    /// many records, hidden or not, were created between them. The guarantee is
+    /// computational: two databases that differ only in hidden creations still
+    /// issue different identities. Timing channels remain. It does not establish
+    /// the mandatory secure view, persistent revocation, durable audit protocol
+    /// or full SSI.
     ///
     /// The trusted host supplies the issuer, branch routing and monotone clock.
     /// Signature/rights checks precede database access. There is no fallible

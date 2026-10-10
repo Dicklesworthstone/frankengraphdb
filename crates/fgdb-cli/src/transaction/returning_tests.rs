@@ -44,6 +44,18 @@ fn rows_at(text: &str, index: usize) -> Vec<&str> {
     let prefix = format!(r#""event":"row","statement":{index},"#);
     text.lines().filter(|line| line.contains(&prefix)).collect()
 }
+// Engine identities are the keyed permutation of each kind's counter
+// (fgdb-hxgm1 channel 2).
+fn vertex(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::vertices(&keys())
+        .permute(counter)
+        .unwrap()
+}
+fn edge(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::edges(&keys())
+        .permute(counter)
+        .unwrap()
+}
 
 #[test]
 fn returning_writes_and_reads_share_one_workspace_and_one_completion() {
@@ -68,24 +80,48 @@ fn returning_writes_and_reads_share_one_workspace_and_one_completion() {
         let text = String::from_utf8(bytes).unwrap();
         let first = rows_at(&text, 1);
         assert_eq!(first.len(), 3, "{text}");
-        for (row, (id, value)) in first.iter().zip([(1, 3), (2, 1), (3, 3)]) {
+        for (row, (counter, value)) in first.iter().zip([(1, 3), (2, 1), (3, 3)]) {
+            let id = vertex(counter);
             assert!(row.contains(&format!(
                 r#""cells":[{{"type":"vertex","value":"{id}"}},{{"type":"int","value":"{value}"}}]"#
             )), "{row}");
         }
         let second = rows_at(&text, 2);
         assert_eq!(second.len(), 1, "{text}");
-        assert!(second[0].contains(
-            r#""cells":[{"type":"vertex","value":"2"},{"type":"edge","value":"1"},{"type":"vertex","value":"4"},{"type":"int","value":"11"}]"#
-        ), "{text}");
-        assert_eq!(rows_at(&text, 3).len(), 3);
-        assert!(
-            rows_at(&text, 3)
-                .iter()
-                .all(|row| row.contains(r#""type":"int","value":"9""#))
-        );
-        assert_eq!(rows_at(&text, 4).len(), 4);
-        assert!(rows_at(&text, 4)[0].contains(r#""type":"int","value":"9""#));
+        assert!(second[0].contains(&format!(
+            r#""cells":[{{"type":"vertex","value":"{}"}},{{"type":"edge","value":"{}"}},{{"type":"vertex","value":"{}"}},{{"type":"int","value":"11"}}]"#,
+            vertex(2),
+            edge(1),
+            vertex(4)
+        )), "{text}");
+        // ORDER BY n is identity order: the three Person vertices read 9 after
+        // the SET, and the Copy vertex 11, wherever their identities fall.
+        let mut persons = vec![vertex(1), vertex(2), vertex(3)];
+        persons.sort_unstable();
+        let third = rows_at(&text, 3);
+        assert_eq!(third.len(), 3, "{text}");
+        for (row, id) in third.iter().zip(persons) {
+            assert!(
+                row.contains(&format!(
+                    r#""cells":[{{"type":"vertex","value":"{id}"}},{{"type":"int","value":"9"}}]"#
+                )),
+                "{row}"
+            );
+        }
+        let mut ordered = vec![
+            (vertex(1), 9),
+            (vertex(2), 9),
+            (vertex(3), 9),
+            (vertex(4), 11),
+        ];
+        ordered.sort_unstable();
+        let fourth = rows_at(&text, 4);
+        assert_eq!(fourth.len(), 4, "{text}");
+        for (row, (id, value)) in fourth.iter().zip(ordered) {
+            assert!(row.contains(&format!(
+                r#""cells":[{{"type":"vertex","value":"{id}"}},{{"type":"int","value":"{value}"}}]"#
+            )), "{row}");
+        }
         assert!(text.contains(
             r#""index":1,"kind":"write","view":"transaction_local","basis":0,"count":3,"statements":1"#
         ), "{text}");
@@ -145,30 +181,35 @@ fn merge_and_mutation_returning_freeze_post_statement_values_in_clause_order() {
         // Both MERGEs select the same staged identity. ON CREATE or ON MATCH
         // runs first, trailing SET reads its result, and later writes cannot
         // rewrite any preceding statement's buffered values.
+        let (first, second) = (vertex(1), vertex(2));
         for (index, value) in [(1, 11), (2, 112), (3, 1112)] {
             let rows = rows_at(&text, index);
             assert_eq!(rows.len(), 1, "{text}");
             assert!(rows[0].contains(&format!(
-                r#""cells":[{{"type":"vertex","value":"1"}},{{"type":"int","value":"{value}"}}]"#
+                r#""cells":[{{"type":"vertex","value":"{first}"}},{{"type":"int","value":"{value}"}}]"#
             )), "{text}");
         }
         assert!(
-            rows_at(&text, 4)[0]
-                .contains(r#""cells":[{"type":"vertex","value":"1"},{"type":"null"}]"#),
+            rows_at(&text, 4)[0].contains(&format!(
+                r#""cells":[{{"type":"vertex","value":"{first}"}},{{"type":"null"}}]"#
+            )),
             "{text}"
         );
         assert!(
-            rows_at(&text, 5)[0].contains(r#""cells":[{"type":"vertex","value":"1"}]"#),
+            rows_at(&text, 5)[0].contains(&format!(
+                r#""cells":[{{"type":"vertex","value":"{first}"}}]"#
+            )),
             "{text}"
         );
         assert!(
-            rows_at(&text, 6)[0]
-                .contains(r#""cells":[{"type":"vertex","value":"2"},{"type":"int","value":"8"}]"#),
+            rows_at(&text, 6)[0].contains(&format!(
+                r#""cells":[{{"type":"vertex","value":"{second}"}},{{"type":"int","value":"8"}}]"#
+            )),
             "{text}"
         );
-        assert!(rows_at(&text, 7)[0].contains(
-            r#""cells":[{"type":"vertex","value":"2"},{"type":"int","value":"8"},{"type":"int","value":"8"}]"#
-        ), "{text}");
+        assert!(rows_at(&text, 7)[0].contains(&format!(
+            r#""cells":[{{"type":"vertex","value":"{second}"}},{{"type":"int","value":"8"}},{{"type":"int","value":"8"}}]"#
+        )), "{text}");
         assert!(
             text.ends_with(
                 "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":7,\"statements\":7}\n"
@@ -178,7 +219,7 @@ fn merge_and_mutation_returning_freeze_post_statement_values_in_clause_order() {
         assert_eq!(text.matches("\"event\":\"result\"").count(), 1);
         let vertices = db.vertices_at(CommitSeq(1)).unwrap();
         assert_eq!(vertices.len(), 1);
-        assert_eq!(vertices[0].vid, fgdb_types::VId(2));
+        assert_eq!(vertices[0].vid, fgdb_types::VId(u128::from(second)));
         assert_eq!(
             vertices[0].props,
             [
@@ -245,8 +286,11 @@ fn savepoint_rollback_discards_mutation_and_merge_rows_and_restores_the_row_allo
             );
         }
         assert!(text.contains(r#""index":5,"kind":"rollback_to""#));
-        // The discarded MERGE issued vertex 2; rollback must not recycle it.
-        assert!(rows_at(&text, 6)[0].contains(r#""type":"vertex","value":"3""#));
+        // The discarded MERGE issued the second vertex identity; rollback must
+        // not recycle it, so the next MERGE issues the third.
+        assert!(
+            rows_at(&text, 6)[0].contains(&format!(r#""type":"vertex","value":"{}""#, vertex(3)))
+        );
         let final_rows = rows_at(&text, 7);
         assert_eq!(final_rows.len(), 2);
         for (row, value) in final_rows.iter().zip([1, 3]) {
@@ -403,9 +447,11 @@ fn returning_and_read_rows_consume_one_transaction_wide_allowance() {
         assert!(rows_at(&text, 3).is_empty());
         let vertices = db.vertices_at(CommitSeq(1)).unwrap();
         assert_eq!(vertices.len(), 6);
+        // The MERGE created the sixth engine identity; LIMIT 0 rows still stage.
+        let merged = fgdb_types::VId(u128::from(vertex(6)));
         assert!(vertices.iter().all(|row| row.props.contains(&(
             PropertyKeyId(2),
-            CanonicalScalar::Int(if row.vid == fgdb_types::VId(6) { 8 } else { 7 }),
+            CanonicalScalar::Int(if row.vid == merged { 8 } else { 7 }),
         ))));
         assert!(text.contains(r#""count":1,"statements":5"#));
         assert_eq!(contexts.txn().outstanding_obligations(), 0);

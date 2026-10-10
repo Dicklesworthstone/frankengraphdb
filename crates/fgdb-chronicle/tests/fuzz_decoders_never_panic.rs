@@ -193,7 +193,13 @@ fn marker() -> CommitMarker {
         authorization_decision_digest: digest(5),
         resource_effect_digest: digest(6),
         payload_availability_certificate_oid: None,
-        flags: 0,
+        // The seed carries identity counters so mutations reach their decode
+        // path (fgdb-hxgm1 channel 2).
+        flags: fgdb_chronicle::marker::MARKER_FLAG_IDENTITY_COUNTERS,
+        identity_counters: Some(fgdb_chronicle::marker::IdentityCounters {
+            vertex: 0x1234,
+            edge: 0x5678,
+        }),
     }
 }
 

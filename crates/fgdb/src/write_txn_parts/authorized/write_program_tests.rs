@@ -28,6 +28,14 @@ const NOW: u64 = 100;
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0x72; 32], NS, [0x74; 32])
 }
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn issued_vertex(counter: u64) -> VId {
+    crate::write_txn::engine_vertex(&keys(), counter)
+}
+/// The edge identity the engine issues for `counter` under [`keys`].
+fn issued_edge(counter: u64) -> EId {
+    crate::write_txn::engine_edge(&keys(), counter)
+}
 fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(9973), NS, "graph", SchemaEpoch(1), 1).unwrap()
 }
@@ -230,27 +238,32 @@ fn dependent_cross_relation_crud_has_ordered_receipts_one_commit_and_reopen() {
             ),
             (5, 3, 2, 4)
         );
+        // Step 1 issues vertex counters 1 (a) and 2 (b) and edge counter 1; step 2
+        // issues vertex counter 3 (copy) and edge counter 2. Every later list has
+        // one element, so the domain sort cannot reorder it.
+        let (a, b, copy) = (issued_vertex(1), issued_vertex(2), issued_vertex(3));
+        let (r, s) = (issued_edge(1), issued_edge(2));
         assert_eq!(
             receipt.steps(),
             &[
                 GraphWriteStepReceipt::Insert {
-                    vertices: vec![VId(1), VId(2)],
-                    edges: vec![EId(1)]
+                    vertices: vec![a, b],
+                    edges: vec![r]
                 },
                 GraphWriteStepReceipt::Insert {
-                    vertices: vec![VId(3)],
-                    edges: vec![EId(2)]
+                    vertices: vec![copy],
+                    edges: vec![s]
                 },
                 GraphWriteStepReceipt::Mutation {
-                    targets: vec![VId(2)],
-                    edges: vec![EId(2)]
+                    targets: vec![b],
+                    edges: vec![s]
                 },
                 GraphWriteStepReceipt::Delete {
                     targets: vec![],
-                    edges: vec![EId(1)]
+                    edges: vec![r]
                 },
                 GraphWriteStepReceipt::Delete {
-                    targets: vec![VId(1)],
+                    targets: vec![a],
                     edges: vec![]
                 },
             ]
@@ -261,20 +274,20 @@ fn dependent_cross_relation_crud_has_ordered_receipts_one_commit_and_reopen() {
             completion,
             EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
         );
-        assert!(db.vertex(VId(1)).unwrap().is_none());
+        assert!(db.vertex(a).unwrap().is_none());
         assert_eq!(
-            db.vertex(VId(2)).unwrap().unwrap().props,
+            db.vertex(b).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(31))]
         );
         assert_eq!(
-            db.vertex(VId(3)).unwrap().unwrap().props,
+            db.vertex(copy).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(30))]
         );
-        assert!(db.edge(EId(1)).unwrap().is_none());
-        let edge = db.edge(EId(2)).unwrap().unwrap();
+        assert!(db.edge(r).unwrap().is_none());
+        let edge = db.edge(s).unwrap().unwrap();
         assert_eq!(
             (edge.entry.src, edge.entry.relation, edge.entry.dst),
-            (VId(2), S, VId(3))
+            (b, S, copy)
         );
         assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(9))]);
         let vertices = db.vertices().unwrap();
@@ -342,7 +355,11 @@ fn denied_tail_discards_created_prefix_without_reclaiming_issued_ids() {
             )
             .await
             .unwrap();
-        assert_eq!(receipt.steps()[0].created_vertices(), Some(&[VId(2)][..]));
+        // The denied program's prefix consumed vertex counter 1; the retry takes 2.
+        assert_eq!(
+            receipt.steps()[0].created_vertices(),
+            Some(&[issued_vertex(2)][..])
+        );
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -456,11 +473,12 @@ fn creation_quota_counts_a_vertex_even_after_a_later_delete() {
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
         // The refused third step never reached the allocator; the first step's
-        // reservation is nevertheless not reclaimed by the program rollback.
+        // reservation (vertex counter 1) is nevertheless not reclaimed by the
+        // program rollback, so the next allocation takes counter 2.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(2))
+            ElementId::Vertex(issued_vertex(2))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -508,14 +526,14 @@ fn plain_delete_proves_incidence_from_staged_creations_and_prior_deletions() {
             if remove_all {
                 let (receipt, _) = result.unwrap();
                 assert_eq!(receipt.stats().mutation_effects, 5);
-                assert_eq!(
-                    receipt.steps()[2].deleted_vertices(),
-                    Some(&[VId(1), VId(2)][..])
-                );
-                assert_eq!(
-                    receipt.steps()[2].deleted_edges(),
-                    Some(&[EId(1), EId(2)][..])
-                );
+                // Step 0 issues vertex counters 1 and 2 and edge counters 1-3 (the two
+                // R edges take 1 and 2). Delete receipts are sorted by identity.
+                let mut vertices = [issued_vertex(1), issued_vertex(2)];
+                vertices.sort_unstable();
+                let mut edges = [issued_edge(1), issued_edge(2)];
+                edges.sort_unstable();
+                assert_eq!(receipt.steps()[2].deleted_vertices(), Some(&vertices[..]));
+                assert_eq!(receipt.steps()[2].deleted_edges(), Some(&edges[..]));
                 assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             } else {
                 assert!(matches!(
@@ -589,10 +607,11 @@ fn whole_program_rights_are_checked_before_allocating() {
             assert_eq!(authorization(error), Error::PermissionDenied);
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
+            // The refusal precedes the prefix's allocation: counter 1 is still next.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(issued_vertex(1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -673,10 +692,11 @@ fn empty_mixed_selection_closes_without_a_marker_or_id_reservation() {
             }
         );
         assert_eq!(db.frontier().unwrap(), before);
+        // No step reserved an identity: vertex counter 1 is still next.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(issued_vertex(1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -888,17 +908,19 @@ fn vertex_merge_and_branch_actions_observe_prior_steps_publish_once_and_reopen()
             ),
             (3, 1, 1)
         );
+        // The first MERGE issues vertex counter 1; the later steps match it.
+        let merged = issued_vertex(1);
         assert_eq!(
             receipt.steps(),
             &[
                 GraphWriteStepReceipt::VertexMerge {
-                    outcome: GraphVertexMergeOutcome::Created(VId(1))
+                    outcome: GraphVertexMergeOutcome::Created(merged)
                 },
                 GraphWriteStepReceipt::VertexUpsert {
-                    outcome: GraphVertexMergeOutcome::Matched(VId(1))
+                    outcome: GraphVertexMergeOutcome::Matched(merged)
                 },
                 GraphWriteStepReceipt::VertexMerge {
-                    outcome: GraphVertexMergeOutcome::Matched(VId(1))
+                    outcome: GraphVertexMergeOutcome::Matched(merged)
                 },
             ]
         );
@@ -909,7 +931,7 @@ fn vertex_merge_and_branch_actions_observe_prior_steps_publish_once_and_reopen()
             EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
         );
         assert_eq!(
-            db.vertex(VId(1)).unwrap().unwrap().props,
+            db.vertex(merged).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(20))]
         );
         let rows = db.vertices().unwrap();
@@ -942,7 +964,7 @@ fn vertex_merge_and_branch_actions_observe_prior_steps_publish_once_and_reopen()
             .unwrap();
         assert_eq!(
             receipt.steps()[0].merged_vertex(),
-            Some(GraphVertexMergeOutcome::Matched(VId(1)))
+            Some(GraphVertexMergeOutcome::Matched(merged))
         );
         assert_eq!(
             completion,
@@ -951,10 +973,12 @@ fn vertex_merge_and_branch_actions_observe_prior_steps_publish_once_and_reopen()
                 validated_through: seq
             }
         );
+        // The reopen resumes from the committed counter 1, and the matched MERGE
+        // reserved nothing, so counter 2 is next.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(2))
+            ElementId::Vertex(issued_vertex(2))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -1001,7 +1025,10 @@ fn vertex_upsert_executes_only_the_selected_branch_and_preserves_hidden_fields()
                 expected.push((SECRET, CanonicalScalar::Int(77)));
             }
             expected.push((Q, CanonicalScalar::Int(8)));
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, expected);
+            // The seed's VId(1) is an explicit client identity; a created vertex is
+            // the first engine vertex (counter 1).
+            let target = if existing { VId(1) } else { issued_vertex(1) };
+            assert_eq!(db.vertex(target).unwrap().unwrap().props, expected);
             if existing {
                 assert!(db.vertex(VId(900)).unwrap().is_some());
                 assert!(db.edge(EId(900)).unwrap().is_some());
@@ -1054,6 +1081,10 @@ fn hidden_matching_vertices_neither_suppress_creation_nor_make_a_match_ambiguous
             assert_ne!(outcome.vertex(), VId(900));
             if visible {
                 assert_eq!(outcome.vertex(), VId(1));
+            } else {
+                // The explicit seeds move no counter: the creation is the
+                // handle's first engine vertex.
+                assert_eq!(outcome.vertex(), issued_vertex(1));
             }
             assert_eq!(db.vertex(VId(900)).unwrap(), hidden);
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -1359,10 +1390,12 @@ fn merge_creation_and_action_limits_use_the_programs_remaining_allowance() {
             }
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
+            // Statement 0 created a vertex with counter 1, which the rollback does
+            // not return; statement 1 was refused before allocating. Counter 2 is next.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(2))
+                ElementId::Vertex(issued_vertex(2))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -1408,10 +1441,11 @@ fn merge_and_upsert_require_readwrite_before_a_prefix_can_allocate() {
                     .unwrap_err();
                 assert_eq!(authorization(error), fgdb_warden::Error::PermissionDenied);
                 assert_eq!(db.frontier().unwrap(), before);
+                // The refusal precedes the prefix's allocation: counter 1 is still next.
                 assert_eq!(
                     db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                         .unwrap(),
-                    ElementId::Vertex(VId(1))
+                    ElementId::Vertex(issued_vertex(1))
                 );
                 assert_eq!(txn.outstanding_obligations(), 0);
             }

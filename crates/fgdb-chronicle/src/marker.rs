@@ -97,6 +97,27 @@ impl HeadUpdate {
     }
 }
 
+/// Bit 0 of [`CommitMarker::flags`]: the marker carries [`IdentityCounters`]
+/// immediately after `flags`. A marker written before the field existed has
+/// the bit clear and decodes unchanged (additive minor). A reader that
+/// predates the field meets trailing bytes and refuses the marker.
+pub const MARKER_FLAG_IDENTITY_COUNTERS: u32 = 1;
+
+/// The engine identity allocator's persisted counters (fgdb-hxgm1 channel 2,
+/// owner ruling 2026-10-09).
+///
+/// Engine-issued identities are a keyed permutation of a per-kind counter.
+/// Every counter at or below these values may already have issued an
+/// identity, and the next engine allocation of each kind takes a larger one.
+/// Each engine commit records the counters, so an open reads the allocator
+/// floor from the last marker instead of inverting the permutation over
+/// every retained identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityCounters {
+    pub vertex: u64,
+    pub edge: u64,
+}
+
 /// A canonical commit marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitMarker {
@@ -119,7 +140,11 @@ pub struct CommitMarker {
     pub authorization_decision_digest: Digest,
     pub resource_effect_digest: Digest,
     pub payload_availability_certificate_oid: Option<ObjectId>,
+    /// Encoded verbatim. Bit 0 is [`MARKER_FLAG_IDENTITY_COUNTERS`] and must
+    /// agree with `identity_counters`.
     pub flags: u32,
+    /// Present exactly when `flags` carries [`MARKER_FLAG_IDENTITY_COUNTERS`].
+    pub identity_counters: Option<IdentityCounters>,
 }
 
 impl CommitMarker {
@@ -129,8 +154,13 @@ impl CommitMarker {
     /// a marker's bytes are.
     ///
     /// Returns [`ChainError::HeadUpdateCountOverflow`] when the in-memory
-    /// update count cannot be represented by the format's `u32` count field.
+    /// update count cannot be represented by the format's `u32` count field,
+    /// and [`ChainError::IdentityCountersFlagMismatch`] when `flags` bit 0
+    /// disagrees with `identity_counters`.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ChainError> {
+        if (self.flags & MARKER_FLAG_IDENTITY_COUNTERS != 0) != self.identity_counters.is_some() {
+            return Err(ChainError::IdentityCountersFlagMismatch);
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&self.logical_command_seq.to_be_bytes());
         out.extend_from_slice(&self.commit_seq.to_be_bytes());
@@ -171,7 +201,19 @@ impl CommitMarker {
             }
         }
         out.extend_from_slice(&self.flags.to_be_bytes());
+        if let Some(counters) = self.identity_counters {
+            out.extend_from_slice(&counters.vertex.to_be_bytes());
+            out.extend_from_slice(&counters.edge.to_be_bytes());
+        }
         Ok(out)
+    }
+
+    /// This marker carrying `counters`, with flags bit 0 set to match.
+    #[must_use]
+    pub fn with_identity_counters(mut self, counters: IdentityCounters) -> Self {
+        self.flags |= MARKER_FLAG_IDENTITY_COUNTERS;
+        self.identity_counters = Some(counters);
+        self
     }
 
     /// `chain_hash` hashes the prior chain value plus marker bytes excluding
@@ -240,6 +282,10 @@ pub enum ChainError {
     HeadUpdateCountOverflow { count: usize, max: usize },
     /// Head updates are unsorted or contain a duplicate `(graph, branch)`.
     NonCanonicalHeadUpdates,
+    /// `flags` bit 0 says identity counters follow, but the marker carries
+    /// none, or carries counters with the bit clear. Either would encode a
+    /// transcript that decodes to a different marker.
+    IdentityCountersFlagMismatch,
     /// A branch head compare-and-swap failed: the branch's head is not what
     /// this marker expected. THE WRITE IS REFUSED — this is the mechanism that
     /// makes concurrent branch advancement safe, so it must never be a
@@ -267,6 +313,9 @@ impl core::fmt::Display for ChainError {
             ),
             Self::NonCanonicalHeadUpdates => {
                 f.write_str("head updates are unsorted or contain a duplicate coordinate")
+            }
+            Self::IdentityCountersFlagMismatch => {
+                f.write_str("marker flags disagree with the presence of identity counters")
             }
             Self::HeadCasMismatch(mismatch) => write!(
                 f,
@@ -637,6 +686,14 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
         _ => return None,
     };
     let flags = cursor.u32()?;
+    let identity_counters = if flags & MARKER_FLAG_IDENTITY_COUNTERS != 0 {
+        Some(IdentityCounters {
+            vertex: cursor.u64()?,
+            edge: cursor.u64()?,
+        })
+    } else {
+        None
+    };
 
     let consumed = cursor.position();
     Some((
@@ -658,6 +715,7 @@ pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usi
             resource_effect_digest,
             payload_availability_certificate_oid,
             flags,
+            identity_counters,
         },
         consumed,
     ))
@@ -765,6 +823,7 @@ mod commit_seq_exhaustion_tests {
             resource_effect_digest: Digest([0x77; 32]),
             payload_availability_certificate_oid: None,
             flags: 0,
+            identity_counters: None,
         }
     }
 

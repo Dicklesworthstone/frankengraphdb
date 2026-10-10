@@ -6,7 +6,7 @@ use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, SchemaEpoch};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{GqlParameterValue, GqlQueryPolicy, GqlScalarParameter};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -138,11 +138,15 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
             ),
             (2, 1)
         );
-        assert_eq!(
-            receipt.steps()[0].created_vertices(),
-            Some(&[VId(1), VId(2)][..])
+        // a and b take engine vertex counters 1 and 2 in occurrence order; the
+        // relationship takes engine edge counter 1.
+        let (a, b) = (
+            crate::write_txn::engine_vertex(&keys(), 1),
+            crate::write_txn::engine_vertex(&keys(), 2),
         );
-        assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[VId(1)][..]));
+        let edge = crate::write_txn::engine_edge(&keys(), 1);
+        assert_eq!(receipt.steps()[0].created_vertices(), Some(&[a, b][..]));
+        assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[a][..]));
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, before.0 + 1);
         assert_eq!(
@@ -150,10 +154,10 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
             Some(fgdb_types::EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq })
         );
         assert_eq!(
-            db.vertex(VId(1)).unwrap().unwrap().props,
+            db.vertex(a).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(21))]
         );
-        assert!(db.edge(EId(1)).unwrap().is_none());
+        assert!(db.edge(edge).unwrap().is_none());
         assert!(!calls.is_empty());
         assert!(
             calls.values().all(|count| *count == 1),
@@ -338,7 +342,7 @@ fn expiry_in_a_catalog_callback_is_not_misreported_as_unknown_symbol() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1)),
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1)),
                 "preparation cannot reserve a graph identity"
             );
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -384,7 +388,7 @@ fn malformed_or_late_unbound_text_never_stages_its_valid_prefix() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -435,7 +439,9 @@ fn string_parameters_remain_data_and_write_only_creation_remains_usable() {
             }
         ));
         assert_eq!(db.vertices().unwrap().len(), 1);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, value)]);
+        // The one created vertex takes engine vertex counter 1 of this handle.
+        let created = crate::write_txn::engine_vertex(&keys(), 1);
+        assert_eq!(db.vertex(created).unwrap().unwrap().props, vec![(P, value)]);
         let before = db.frontier().unwrap();
         let error = db
             .query_write_authorized(

@@ -286,9 +286,11 @@ fn ambiguous_pairs_parallel_eids_and_null_endpoints_never_allocate_or_commit() {
                 ),
                 before
             );
+            // The probe took edge counter 1; the refused merge took none.
+            assert_eq!(reserved, crate::write_txn::engine_edge(&keys(), 1));
             assert_eq!(
                 db.allocate_identity(&query, request).unwrap(),
-                ElementId::Edge(EId(reserved.0 + 1))
+                ElementId::Edge(crate::write_txn::engine_edge(&keys(), 2))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }

@@ -619,25 +619,31 @@ fn mixed_program_observes_created_and_updated_relationships_and_commits_once() {
             ),
             (6, 2, 2, 4)
         );
+        // Engine counters on this fresh database: the INSERT step issues
+        // vertices 1 (a) and 2 (b) and edge 1 (the :S edge); the first
+        // conditional MERGE creates the :R edge from edge counter 2.
+        let source = crate::write_txn::engine_vertex(&keys(), 1);
+        let inserted = crate::write_txn::engine_edge(&keys(), 1);
+        let merged = crate::write_txn::engine_edge(&keys(), 2);
         assert_eq!(
             receipt.steps()[1].merged_edge(),
-            Some(GraphEdgeMergeOutcome::Created(EId(2)))
+            Some(GraphEdgeMergeOutcome::Created(merged))
         );
         assert_eq!(
             receipt.steps()[2].merged_edge(),
-            Some(GraphEdgeMergeOutcome::Matched(EId(2)))
+            Some(GraphEdgeMergeOutcome::Matched(merged))
         );
         assert_eq!(
             receipt.steps()[3].merged_edge(),
-            Some(GraphEdgeMergeOutcome::Matched(EId(2)))
+            Some(GraphEdgeMergeOutcome::Matched(merged))
         );
-        assert_eq!(receipt.steps()[5].deleted_edges(), Some(&[EId(2)][..]));
+        assert_eq!(receipt.steps()[5].deleted_edges(), Some(&[merged][..]));
         assert_eq!(
-            db.vertex(VId(1)).unwrap().unwrap().props,
+            db.vertex(source).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(99))]
         );
-        assert!(db.edge(EId(2)).unwrap().is_none());
-        assert!(db.edge(EId(1)).unwrap().is_some());
+        assert!(db.edge(merged).unwrap().is_none());
+        assert!(db.edge(inserted).unwrap().is_some());
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
         assert_eq!(
@@ -889,15 +895,17 @@ fn whole_program_edge_scope_and_rights_precede_all_identity_reservations() {
                 ) if error == expected));
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert!(db.vertices().unwrap().is_empty() && db.edges().unwrap().is_empty());
+                // The refused program reserved nothing: both counters of this
+                // fresh database still issue their first identity.
                 assert_eq!(
                     db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                         .unwrap(),
-                    ElementId::Vertex(VId(1)),
+                    ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1)),
                 );
                 assert_eq!(
                     db.allocate_identity(&query, GraphInsertRequest::Edge { row: 0, edge: 0 })
                         .unwrap(),
-                    ElementId::Edge(EId(1)),
+                    ElementId::Edge(crate::write_txn::engine_edge(&keys(), 1)),
                 );
                 assert_eq!(txn.outstanding_obligations(), 0);
             }

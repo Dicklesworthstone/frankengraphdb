@@ -174,6 +174,7 @@ fn debug_marker(capsule_oid: ObjectId) -> CommitMarker {
         resource_effect_digest: Digest([0x36; 32]),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 

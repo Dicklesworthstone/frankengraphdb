@@ -2,7 +2,7 @@
 //! stage once, and expose autocommit rows only after durable completion.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
+use fgdb::{Database, DatabaseKeys, IdentityPermutation, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertRequest};
@@ -26,6 +26,24 @@ fn keys() -> DatabaseKeys {
         DatabaseSecurityNamespaceId([0x72; 32]),
         [0x73; 32],
     )
+}
+
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
+}
+
+/// The edge identity the engine issues for `counter` under [`keys`].
+fn engine_edge(counter: u64) -> EId {
+    EId(u128::from(
+        IdentityPermutation::edges(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -106,13 +124,24 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
             "RETURN must not rescan creations"
         );
         assert_eq!(rows.rows.result_rows, 3);
-        let expected = [(3, 2, 4, 1), (1, 1, 2, 3), (5, 3, 6, 3)]
+        // Each UNWIND row takes its source then its destination vertex
+        // counter, then one edge counter, in UNWIND order.
+        let created = [
+            (engine_vertex(1), engine_edge(1), engine_vertex(2), 3),
+            (engine_vertex(3), engine_edge(2), engine_vertex(4), 1),
+            (engine_vertex(5), engine_edge(3), engine_vertex(6), 3),
+        ];
+        // ORDER BY p, then the canonical whole-row tie break, whose first
+        // column is the source identity.
+        let mut ordered = created;
+        ordered.sort_by_key(|&(source, _, _, value)| (value, source));
+        let expected = ordered
             .into_iter()
             .map(|(source, edge, destination, value)| {
                 GraphValueRow::from_owned_values(vec![
-                    GraphValue::Vertex(VId(source)),
-                    GraphValue::Edge(EId(edge)),
-                    GraphValue::Vertex(VId(destination)),
+                    GraphValue::Vertex(source),
+                    GraphValue::Edge(edge),
+                    GraphValue::Vertex(destination),
                     int(value),
                     int(value + 10),
                     int(value * 2),
@@ -120,19 +149,19 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
             })
             .collect::<Vec<_>>();
         assert_eq!(rows.value, expected);
-        for (source, edge, destination, value) in [(1, 1, 2, 3), (3, 2, 4, 1), (5, 3, 6, 3)] {
+        for (source, edge, destination, value) in created {
             assert_eq!(
-                db.vertex(VId(source)).unwrap().unwrap().props,
+                db.vertex(source).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(value))]
             );
             assert_eq!(
-                db.vertex(VId(destination)).unwrap().unwrap().props,
+                db.vertex(destination).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(value * 2))]
             );
-            let created = db.edge(EId(edge)).unwrap().unwrap();
+            let created = db.edge(edge).unwrap().unwrap();
             assert_eq!(
                 (created.entry.src, created.entry.dst),
-                (VId(source), VId(destination))
+                (source, destination)
             );
             assert_eq!(created.props, vec![(P, CanonicalScalar::Int(value + 10))]);
         }

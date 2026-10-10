@@ -67,7 +67,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// only writer. No caller-selected identity or allocator callback is exposed.
     ///
     /// Engine ID reservations are not reclaimed on failure and are not durable
-    /// leases. Sequential ID allocation still exposes allocation-order metadata.
+    /// leases. Engine identities are a keyed permutation of a persisted counter,
+    /// so without the database keys their gaps reveal no allocation order
+    /// (fgdb-hxgm1 channel 2).
     /// Native overlay materialization and preparation remain resident operations,
     /// not bounded-memory or preemptible query execution. This is not a mandatory
     /// facade over privileged APIs, durable audit/revocation protocol or full SSI.

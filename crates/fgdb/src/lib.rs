@@ -172,8 +172,8 @@ pub use query::{
     RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
-    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession, WriteTxn,
-    WriteTxnError,
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
+    IdentityPermutation, WriteTxn, WriteTxnError,
 };
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
@@ -2178,8 +2178,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// The published generation's version heads and birth-ordinal allocator,
     /// derived with the writer and replaced with it at every publication.
     heads: WriteHeads,
-    /// Per-open-handle, engine-owned identity reservations. Reopen seeds the
-    /// durable floor from all admitted partition history, including tombstones.
+    /// Per-open-handle, engine-owned identity reservations (fgdb-hxgm1
+    /// channel 2). Open seeds the counters from the last marker that records
+    /// them, and every engine commit records the current ones.
     identity_allocation: std::sync::Arc<std::sync::Mutex<crate::write_txn::IdentityAllocation>>,
     /// Prefix omitted by checkpoint open, distinct from a subsequently retired
     /// window. Only explicit authenticated reconstruction can lower this cut.
@@ -2794,7 +2795,7 @@ impl<V: Vfs + Clone> Database<V> {
             CommitSeq::ORIGIN
         };
         let identity_allocation =
-            crate::write_txn::IdentityAllocation::from_partition(cx, &snapshot)?;
+            crate::write_txn::IdentityAllocation::from_chain(coordinator.chain(), &keys);
         let published_frontier = snapshot.frontier;
         Ok(Self {
             coordinator,
@@ -3727,6 +3728,15 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
+        // The allocator's counters ride in the marker (fgdb-hxgm1 channel 2):
+        // every identity this handle has issued so far, committed here or
+        // not, sits at or below them, so no reopen can reissue one. Counters
+        // are plain data, so a poisoned lock still holds a valid value.
+        let identity_counters = self
+            .identity_allocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .counters();
         self.retain_preparation_anchor();
         let published_frontier = self.snapshot.frontier;
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
@@ -3741,7 +3751,10 @@ impl<V: Vfs + Clone> Database<V> {
             .commit_with_crash(
                 cx,
                 &capsule.bytes,
-                |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
+                |seq, oid| {
+                    marker_for_capsule(seq, oid, &capsule, Vec::new())
+                        .with_identity_counters(identity_counters)
+                },
                 crash_at,
             )
             .await
@@ -5090,6 +5103,8 @@ pub fn prepare_capsule(
 /// The marker's `capsule_ref` and `logical_delta_template_digest` both come from
 /// the same [`PreparedCapsule`], so the write-time cross-check and the
 /// recovery-time cross-check are asking about the same object by construction.
+/// It carries no identity counters; the engine's own commits attach them with
+/// [`CommitMarker::with_identity_counters`].
 pub fn marker_for_capsule(
     commit_seq: u64,
     capsule_oid: ObjectId,
@@ -5117,6 +5132,7 @@ pub fn marker_for_capsule(
         resource_effect_digest: Digest([0u8; 32]),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 
@@ -6303,13 +6319,15 @@ mod lazy_delta_laws {
                     .unwrap();
                 assert_eq!(vfs.count(), 0, "checkpoint open must not read any capsule");
                 assert!(db.vertex(VId(u128::from(count))).unwrap().is_some());
+                // Explicit client identities leave the vertex counter at 0, so this is
+                // the first engine vertex.
                 assert_eq!(
                     db.allocate_identity(
                         &contexts.query(),
                         fgdb_gql::insertion::GraphInsertRequest::Vertex { row: 0, vertex: 0 }
                     )
                     .unwrap(),
-                    ElementId::Vertex(VId(u128::from(count) + 1))
+                    ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
                 );
                 assert_eq!(
                     vfs.count(),

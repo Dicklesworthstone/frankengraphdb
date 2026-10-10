@@ -1,8 +1,13 @@
-//! Allocation follows retained partition history, not just the live graph.
-//! Never-committed reservations are not claimed to be durable leases.
+//! Engine identities are a keyed permutation of per-kind counters
+//! (fgdb-hxgm1 channel 2, owner ruling 2026-10-09). Every engine commit
+//! records the counters in its Chronicle marker, so a reopen never reissues an
+//! identity the handle issued before that commit. Never-committed
+//! reservations are not claimed to be durable leases.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CrashPoint, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};
+use fgdb::{
+    CrashPoint, Database, DatabaseKeys, IdentityPermutation, WriteBatch, WriteError, WriteTxnError,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest, PreparedGraphInsert};
 use fgdb_gql::{
@@ -29,6 +34,24 @@ fn keys() -> DatabaseKeys {
         DatabaseSecurityNamespaceId([0x7c; 32]),
         [0x71; 32],
     )
+}
+
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
+}
+
+/// The edge identity the engine issues for `counter` under [`keys`].
+fn edge(counter: u64) -> EId {
+    EId(u128::from(
+        IdentityPermutation::edges(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -76,7 +99,10 @@ fn program_policy() -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(query_policy(), 100, 100, 100)
 }
 
-async fn deleted_maxima(cx: &CommitCx, path: &Path) -> Database {
+/// Explicit client identities, one pair deleted again. The engine never
+/// derives its counters from these: explicit identities matter to it only
+/// through the existence check.
+async fn deleted_explicit(cx: &CommitCx, path: &Path) -> Database {
     let mut db = Database::create(cx, path, keys()).await.unwrap();
     let mut seed = WriteBatch::new(R);
     seed.create_vertex(VId(7), vec![], vec![]);
@@ -93,7 +119,7 @@ async fn deleted_maxima(cx: &CommitCx, path: &Path) -> Database {
 }
 
 #[test]
-fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
+fn engine_identities_follow_the_counters_across_fast_open_rebuild_and_compaction() {
     under_lab(0xcd70, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -104,7 +130,7 @@ fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
             } else {
                 "delete-fast"
             });
-            drop(deleted_maxima(&commit, &path).await);
+            drop(deleted_explicit(&commit, &path).await);
             let mut db = if rebuilding {
                 Database::open_rebuilding(&commit, &path, keys())
                     .await
@@ -113,23 +139,28 @@ fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
                 Database::open(&commit, &path, keys()).await.unwrap()
             };
             db.compact(&commit).await.unwrap();
-            let vertex = db.allocate_identity(&query, VERTEX).unwrap();
-            let edge = db.allocate_identity(&query, EDGE).unwrap();
-            assert_eq!(vertex, ElementId::Vertex(VId(1001)));
-            assert_eq!(edge, ElementId::Edge(EId(9001)));
+            // Explicit-identity commits leave the counters at zero.
+            assert_eq!(
+                db.allocate_identity(&query, VERTEX).unwrap(),
+                ElementId::Vertex(vertex(1))
+            );
+            assert_eq!(
+                db.allocate_identity(&query, EDGE).unwrap(),
+                ElementId::Edge(edge(1))
+            );
             let mut created = WriteBatch::new(R);
-            created.create_vertex(VId(1001), vec![PERSON], vec![(P, CanonicalScalar::Int(11))]);
-            created.add_edge(EId(9001), VId(7), VId(1001), vec![]);
+            created.create_vertex(vertex(1), vec![PERSON], vec![(P, CanonicalScalar::Int(11))]);
+            created.add_edge(edge(1), VId(7), vertex(1), vec![]);
             db.write(&commit, created).await.unwrap();
             drop(db);
 
             let mut db = Database::open(&commit, &path, keys()).await.unwrap();
             assert_eq!(
-                db.vertex(VId(1001)).unwrap().unwrap().props,
+                db.vertex(vertex(1)).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(11))]
             );
-            let edge = db.edge(EId(9001)).unwrap().unwrap();
-            assert_eq!((edge.entry.src, edge.entry.dst), (VId(7), VId(1001)));
+            let created = db.edge(edge(1)).unwrap().unwrap();
+            assert_eq!((created.entry.src, created.entry.dst), (VId(7), vertex(1)));
             assert!(db.vertex(VId(1000)).unwrap().is_none());
             assert!(db.edge(EId(9000)).unwrap().is_none());
             let (_, vertices, edges, completion) = db
@@ -142,8 +173,8 @@ fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
                 )
                 .await
                 .unwrap();
-            assert_eq!(vertices, vec![VId(1002), VId(1003)]);
-            assert_eq!(edges, vec![EId(9002)]);
+            assert_eq!(vertices, vec![vertex(2), vertex(3)]);
+            assert_eq!(edges, vec![edge(2)]);
             assert!(matches!(
                 completion,
                 EmbeddedTxnCompletion::WriteCommitted { .. }
@@ -153,17 +184,24 @@ fn deleted_maxima_survive_fast_open_rebuild_and_compaction() {
                 .await
                 .unwrap();
             assert_eq!(
-                db.vertex(VId(1003)).unwrap().unwrap().props,
+                db.vertex(vertex(3)).unwrap().unwrap().props,
                 vec![(P, CanonicalScalar::Int(13))]
             );
-            let edge = db.edge(EId(9002)).unwrap().unwrap();
-            assert_eq!((edge.entry.src, edge.entry.dst), (VId(1002), VId(1003)));
+            let created = db.edge(edge(2)).unwrap().unwrap();
+            assert_eq!(
+                (created.entry.src, created.entry.dst),
+                (vertex(2), vertex(3))
+            );
+            // Every engine identity fits an i64: openCypher id() and Bolt.
+            for id in [vertex(1), vertex(2), vertex(3)] {
+                assert!(id.0 <= u128::from(IdentityPermutation::MAX) && id.0 != 0);
+            }
         }
     });
 }
 
 #[test]
-fn same_commit_folded_creations_may_reissue_after_reopen_without_reissuing_tombstones() {
+fn reopen_never_reissues_an_identity_issued_before_the_last_commit_even_when_folded_away() {
     under_lab(0xcd79, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -181,27 +219,31 @@ fn same_commit_folded_creations_may_reissue_after_reopen_without_reissuing_tombs
             db.write(&commit, seed).await.unwrap();
             assert_eq!(
                 db.allocate_identity(&query, VERTEX).unwrap(),
-                ElementId::Vertex(VId(8))
+                ElementId::Vertex(vertex(1))
             );
             assert_eq!(
                 db.allocate_identity(&query, EDGE).unwrap(),
-                ElementId::Edge(EId(10))
+                ElementId::Edge(edge(1))
             );
+            // Counter 1 of each kind is folded away inside one commit, so it
+            // never reaches a partition row. The commit's marker still
+            // records it.
             let mut folded = WriteBatch::new(R);
-            folded.create_vertex(VId(8), vec![], vec![]);
-            folded.add_edge(EId(10), VId(1), VId(8), vec![]);
-            folded.delete_edge(EId(10));
-            folded.delete_vertex(VId(8));
+            folded.create_vertex(vertex(1), vec![], vec![]);
+            folded.add_edge(edge(1), VId(1), vertex(1), vec![]);
+            folded.delete_edge(edge(1));
+            folded.delete_vertex(vertex(1));
             folded.delete_edge(EId(9));
             folded.delete_vertex(VId(7));
             db.write(&commit, folded).await.unwrap();
+            // Counter 2 is reserved after that commit and never committed.
             assert_eq!(
                 db.allocate_identity(&query, VERTEX).unwrap(),
-                ElementId::Vertex(VId(9))
+                ElementId::Vertex(vertex(2))
             );
             assert_eq!(
                 db.allocate_identity(&query, EDGE).unwrap(),
-                ElementId::Edge(EId(11))
+                ElementId::Edge(edge(2))
             );
             db.compact(&commit).await.unwrap();
             drop(db);
@@ -212,29 +254,30 @@ fn same_commit_folded_creations_may_reissue_after_reopen_without_reissuing_tombs
             } else {
                 Database::open(&commit, &path, keys()).await.unwrap()
             };
-            // V7 and E9 once reached durable partition rows, so their
-            // tombstones set the floor. Reserved V8 and E10 never did.
+            // The folded identities stay retired; the never-committed
+            // reservation is the next issue.
             assert_eq!(
                 db.allocate_identity(&query, VERTEX).unwrap(),
-                ElementId::Vertex(VId(8))
+                ElementId::Vertex(vertex(2))
             );
             assert_eq!(
                 db.allocate_identity(&query, EDGE).unwrap(),
-                ElementId::Edge(EId(10))
+                ElementId::Edge(edge(2))
             );
             let mut recreated = WriteBatch::new(R);
-            recreated.create_vertex(VId(8), vec![], vec![]);
-            recreated.add_edge(EId(10), VId(1), VId(8), vec![]);
+            recreated.create_vertex(vertex(2), vec![], vec![]);
+            recreated.add_edge(edge(2), VId(1), vertex(2), vec![]);
             db.write(&commit, recreated).await.unwrap();
             assert!(db.vertex(VId(7)).unwrap().is_none());
             assert!(db.edge(EId(9)).unwrap().is_none());
-            assert!(db.edge(EId(10)).unwrap().is_some());
+            assert!(db.edge(edge(2)).unwrap().is_some());
             drop(db);
             let recovered = Database::open_rebuilding(&commit, &path, keys())
                 .await
                 .unwrap();
-            assert!(recovered.vertex(VId(8)).unwrap().is_some());
-            assert!(recovered.edge(EId(10)).unwrap().is_some());
+            assert!(recovered.vertex(vertex(2)).unwrap().is_some());
+            assert!(recovered.edge(edge(2)).unwrap().is_some());
+            assert!(recovered.vertex(vertex(1)).unwrap().is_none());
             assert!(recovered.vertex(VId(7)).unwrap().is_none());
             assert!(recovered.edge(EId(9)).unwrap().is_none());
         }
@@ -248,7 +291,7 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
         let query = contexts.query();
         let txcx = contexts.txn();
         let path = scratch("same-basis");
-        let mut db = deleted_maxima(&commit, &path).await;
+        let mut db = deleted_explicit(&commit, &path).await;
         let basis = db.frontier().unwrap();
         let mut first = db.begin(&txcx).unwrap();
         let mut second = db.begin(&txcx).unwrap();
@@ -289,16 +332,10 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
             )
             .unwrap();
         assert_eq!(db.frontier().unwrap(), basis);
-        assert_eq!(first_vertices, vec![VId(1001), VId(1002)]);
-        assert_eq!(first_edges, vec![EId(9001)]);
-        assert_eq!(second_vertices, vec![VId(1003), VId(1004)]);
-        assert_eq!(second_edges, vec![EId(9002)]);
-        assert!(
-            first_vertices
-                .iter()
-                .all(|id| !second_vertices.contains(id))
-        );
-        assert!(first_edges.iter().all(|id| !second_edges.contains(id)));
+        assert_eq!(first_vertices, vec![vertex(1), vertex(2)]);
+        assert_eq!(first_edges, vec![edge(1)]);
+        assert_eq!(second_vertices, vec![vertex(3), vertex(4)]);
+        assert_eq!(second_edges, vec![edge(2)]);
         assert!(first.vertex(&db, first_vertices[0]).unwrap().is_some());
         assert!(second.vertex(&db, second_vertices[0]).unwrap().is_some());
         assert!(db.vertex(first_vertices[0]).unwrap().is_none());
@@ -315,14 +352,17 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
         // On the opened handle even the losing reservations remain disjoint.
         assert_eq!(
             db.allocate_identity(&query, VERTEX).unwrap(),
-            ElementId::Vertex(VId(1005))
+            ElementId::Vertex(vertex(5))
         );
         assert_eq!(
             db.allocate_identity(&query, EDGE).unwrap(),
-            ElementId::Edge(EId(9003))
+            ElementId::Edge(edge(3))
         );
         drop(db);
 
+        // The winner's marker recorded the counters as they stood at its
+        // commit, the loser's reservations included, so a reopen issues past
+        // both transactions.
         let mut db = Database::open(&commit, &path, keys()).await.unwrap();
         let (_, vertices, edges, _) = db
             .execute_graph_insert_returning_autocommit_engine_governed(
@@ -334,9 +374,8 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
             )
             .await
             .unwrap();
-        // No promise is made about the loser's never-committed reservations.
-        assert!(vertices.iter().all(|id| id.0 > first_vertices[1].0));
-        assert!(edges.iter().all(|id| id.0 > first_edges[0].0));
+        assert_eq!(vertices, vec![vertex(5), vertex(6)]);
+        assert_eq!(edges, vec![edge(3)]);
         drop(db);
         let db = Database::open_rebuilding(&commit, &path, keys())
             .await
@@ -352,7 +391,7 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
 }
 
 #[test]
-fn d1_d2_recovery_uses_only_committed_creation_maxima() {
+fn d1_d2_recovery_reads_the_counters_of_the_last_durable_marker() {
     under_lab(0xcd72, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -386,7 +425,7 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
             ("d2-complete", None, false, true),
         ] {
             let path = scratch(name);
-            let mut db = deleted_maxima(&commit, &path).await;
+            let mut db = deleted_explicit(&commit, &path).await;
             let basis = db.frontier().unwrap();
             let mut txn = db.begin(&txcx).unwrap();
             let create = insertion("CREATE (a:Person {p:21})-[:R]->(b:Person {p:22})");
@@ -398,8 +437,8 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
                     insert_policy(),
                 )
                 .unwrap();
-            assert_eq!(vertices, vec![VId(1001), VId(1002)]);
-            assert_eq!(edges, vec![EId(9001)]);
+            assert_eq!(vertices, vec![vertex(1), vertex(2)]);
+            assert_eq!(edges, vec![edge(1)]);
             let result = txn.commit_with_crash(&mut db, &commit, point).await;
             assert_eq!(result.is_ok(), point.is_none(), "injection reached: {name}");
             if matches!(
@@ -424,8 +463,11 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
                     &path, 1,
                 ).unwrap();
             }
-            let next_vertex = if committed { 1003 } else { 1001 };
-            let next_edge = if committed { 9002 } else { 9001 };
+            // A durable marker carries counters (2, 1). Without one, the last
+            // marker is the fixture's, at (0, 0), and the lost commit's
+            // identities were never durable.
+            let next_vertex = if committed { 3 } else { 1 };
+            let next_edge = if committed { 2 } else { 1 };
             for rebuilding in [false, true] {
                 let mut recovered = if rebuilding {
                     Database::open_rebuilding(&commit, &path, keys())
@@ -453,12 +495,12 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
                 );
                 assert_eq!(
                     recovered.allocate_identity(&query, VERTEX).unwrap(),
-                    ElementId::Vertex(VId(next_vertex)),
+                    ElementId::Vertex(vertex(next_vertex)),
                     "{name}"
                 );
                 assert_eq!(
                     recovered.allocate_identity(&query, EDGE).unwrap(),
-                    ElementId::Edge(EId(next_edge)),
+                    ElementId::Edge(edge(next_edge)),
                     "{name}"
                 );
             }
@@ -475,10 +517,10 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
                 .unwrap();
             assert_eq!(
                 vertices,
-                vec![VId(next_vertex), VId(next_vertex + 1)],
+                vec![vertex(next_vertex), vertex(next_vertex + 1)],
                 "{name}"
             );
-            assert_eq!(edges, vec![EId(next_edge)], "{name}");
+            assert_eq!(edges, vec![edge(next_edge)], "{name}");
             assert!(matches!(
                 completion,
                 EmbeddedTxnCompletion::WriteCommitted { .. }
@@ -487,9 +529,9 @@ fn d1_d2_recovery_uses_only_committed_creation_maxima() {
             let recovered = Database::open_rebuilding(&commit, &path, keys())
                 .await
                 .unwrap();
-            let edge = recovered.edge(edges[0]).unwrap().unwrap();
+            let created = recovered.edge(edges[0]).unwrap().unwrap();
             assert_eq!(
-                (edge.entry.src, edge.entry.dst),
+                (created.entry.src, created.entry.dst),
                 (vertices[0], vertices[1]),
                 "{name}"
             );
@@ -503,7 +545,7 @@ fn merge_program() -> PreparedGraphWriteProgram {
         PreparedGraphVertexMergeText::prepare("MERGE (n:Person {p:$left})", R, symbols).unwrap();
     let right =
         PreparedGraphVertexMergeText::prepare("MERGE (n:Person {p:$right})", R, symbols).unwrap();
-    let edge = PreparedGraphEdgeMergeText::prepare(
+    let merge_edge = PreparedGraphEdgeMergeText::prepare(
         "MATCH (a:Person),(b:Person) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b)",
         R,
         symbols,
@@ -512,8 +554,8 @@ fn merge_program() -> PreparedGraphWriteProgram {
     PreparedGraphWriteProgramTemplate::prepare(vec![
         left.into(),
         right.into(),
-        edge.clone().into(),
-        edge.into(),
+        merge_edge.clone().into(),
+        merge_edge.into(),
     ])
     .unwrap()
     .bind_parameters(
@@ -533,7 +575,7 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
         let query = contexts.query();
         let txcx = contexts.txn();
         let path = scratch("programs");
-        let mut db = deleted_maxima(&commit, &path).await;
+        let mut db = deleted_explicit(&commit, &path).await;
         let mut txn = db.begin(&txcx).unwrap();
         let stats = txn
             .execute_graph_insert_engine_governed(
@@ -546,7 +588,7 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
         assert_eq!(stats.created_vertices, 1);
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(
-            db.vertex(VId(1001)).unwrap().unwrap().props,
+            db.vertex(vertex(1)).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(30))]
         );
         let (stats, completion) = db
@@ -577,27 +619,27 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
             .unwrap();
         assert_eq!(
             receipt.steps()[0].merged_vertex(),
-            Some(GraphVertexMergeOutcome::Created(VId(1003)))
+            Some(GraphVertexMergeOutcome::Created(vertex(3)))
         );
         assert_eq!(
             receipt.steps()[1].merged_vertex(),
-            Some(GraphVertexMergeOutcome::Created(VId(1004)))
+            Some(GraphVertexMergeOutcome::Created(vertex(4)))
         );
         assert_eq!(
             receipt.steps()[2].merged_edge(),
-            Some(GraphEdgeMergeOutcome::Created(EId(9001)))
+            Some(GraphEdgeMergeOutcome::Created(edge(1)))
         );
         assert_eq!(
             receipt.steps()[3].merged_edge(),
-            Some(GraphEdgeMergeOutcome::Matched(EId(9001)))
+            Some(GraphEdgeMergeOutcome::Matched(edge(1)))
         );
         txn.commit(&mut db, &commit).await.unwrap();
         drop(db);
         let mut db = Database::open(&commit, &path, keys()).await.unwrap();
-        let edge = db.edge(EId(9001)).unwrap().unwrap();
+        let merged = db.edge(edge(1)).unwrap().unwrap();
         assert_eq!(
-            (edge.entry.src, edge.entry.dst, edge.entry.relation),
-            (VId(1003), VId(1004), R)
+            (merged.entry.src, merged.entry.dst, merged.entry.relation),
+            (vertex(3), vertex(4), R)
         );
         let frontier = db.frontier().unwrap();
         let (receipt, completion) = db
@@ -612,16 +654,16 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
             .unwrap();
         assert_eq!(
             receipt.steps()[0].merged_vertex(),
-            Some(GraphVertexMergeOutcome::Matched(VId(1003)))
+            Some(GraphVertexMergeOutcome::Matched(vertex(3)))
         );
         assert_eq!(
             receipt.steps()[1].merged_vertex(),
-            Some(GraphVertexMergeOutcome::Matched(VId(1004)))
+            Some(GraphVertexMergeOutcome::Matched(vertex(4)))
         );
         for step in &receipt.steps()[2..] {
             assert_eq!(
                 step.merged_edge(),
-                Some(GraphEdgeMergeOutcome::Matched(EId(9001)))
+                Some(GraphEdgeMergeOutcome::Matched(edge(1)))
             );
         }
         assert!(matches!(
@@ -660,41 +702,44 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(
             db.allocate_identity(&query, VERTEX).unwrap(),
-            ElementId::Vertex(VId(1005))
+            ElementId::Vertex(vertex(5))
         );
         assert_eq!(
             db.allocate_identity(&query, EDGE).unwrap(),
-            ElementId::Edge(EId(9002))
+            ElementId::Edge(edge(2))
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
 
+/// Explicit identities outside the engine's domain `[1, 2^63)` can neither
+/// collide with an engine identity nor exhaust the allocator, whether they
+/// are live, deleted, or compacted away.
 #[test]
-fn deleted_u128_maxima_exhaust_each_identity_kind_without_wrapping() {
+fn explicit_identities_outside_the_engine_domain_neither_collide_nor_exhaust() {
     under_lab(0xcd74, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
         let txcx = contexts.txn();
-        let path = scratch("exhausted");
+        let path = scratch("out-of-domain");
         let mut db = Database::create(&commit, &path, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![], vec![]);
         seed.create_vertex(VId(u128::MAX), vec![], vec![]);
-        seed.add_edge(EId(u128::MAX - 1), VId(1), VId(u128::MAX), vec![]);
+        seed.add_edge(EId(u128::MAX), VId(1), VId(u128::MAX), vec![]);
         db.write(&commit, seed).await.unwrap();
-        assert!(matches!(
-            db.allocate_identity(&query, VERTEX),
-            Err(WriteTxnError::IdentityExhausted)
-        ));
+        assert_eq!(
+            db.allocate_identity(&query, VERTEX).unwrap(),
+            ElementId::Vertex(vertex(1))
+        );
         let mut txn = db.begin(&txcx).unwrap();
         assert_eq!(
             txn.allocate_identity(&mut db, &query, EDGE).unwrap(),
-            ElementId::Edge(EId(u128::MAX))
+            ElementId::Edge(edge(1))
         );
-        let mut last = WriteBatch::new(R);
-        last.add_edge(EId(u128::MAX), VId(1), VId(u128::MAX), vec![]);
-        txn.write(&mut db, last).unwrap();
+        let mut issued = WriteBatch::new(R);
+        issued.add_edge(edge(1), VId(1), VId(u128::MAX), vec![]);
+        txn.write(&mut db, issued).unwrap();
         txn.commit(&mut db, &commit).await.unwrap();
         let mut deletion = WriteBatch::new(R);
         deletion.delete_vertex(VId(u128::MAX));
@@ -711,16 +756,165 @@ fn deleted_u128_maxima_exhaust_each_identity_kind_without_wrapping() {
             };
             assert!(db.vertex(VId(u128::MAX)).unwrap().is_none());
             assert!(db.edge(EId(u128::MAX)).unwrap().is_none());
-            assert!(matches!(
-                db.allocate_identity(&query, VERTEX),
-                Err(WriteTxnError::IdentityExhausted)
-            ));
-            assert!(matches!(
-                db.allocate_identity(&query, EDGE),
-                Err(WriteTxnError::IdentityExhausted)
-            ));
-            assert!(db.vertex(VId(0)).unwrap().is_none());
-            assert!(db.edge(EId(0)).unwrap().is_none());
+            assert!(db.edge(edge(1)).unwrap().is_none());
+            // The deletion commit recorded (1, 1), so issue continues at 2.
+            assert_eq!(
+                db.allocate_identity(&query, VERTEX).unwrap(),
+                ElementId::Vertex(vertex(2))
+            );
+            assert_eq!(
+                db.allocate_identity(&query, EDGE).unwrap(),
+                ElementId::Edge(edge(2))
+            );
         }
     });
+}
+
+/// The existence lookup (owner ruling 2026-10-09): an identity the engine
+/// would issue next, already taken by an explicit client creation, is
+/// skipped, and its counter is spent.
+#[test]
+fn an_explicit_identity_at_the_next_engine_identity_is_skipped() {
+    under_lab(0xcd75, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let path = scratch("existence");
+        let mut db = Database::create(&commit, &path, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![], vec![]);
+        seed.create_vertex(vertex(1), vec![], vec![]);
+        seed.add_edge(edge(1), VId(1), vertex(1), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        assert_eq!(
+            db.allocate_identity(&query, VERTEX).unwrap(),
+            ElementId::Vertex(vertex(2))
+        );
+        assert_eq!(
+            db.allocate_identity(&query, EDGE).unwrap(),
+            ElementId::Edge(edge(2))
+        );
+        // Deleted but retained, the explicit identities still block reissue.
+        let mut deletion = WriteBatch::new(R);
+        deletion.delete_edge(edge(1));
+        deletion.delete_vertex(vertex(1));
+        db.write(&commit, deletion).await.unwrap();
+        drop(db);
+        let mut db = Database::open(&commit, &path, keys()).await.unwrap();
+        // The deletion commit recorded (2, 2).
+        assert_eq!(
+            db.allocate_identity(&query, VERTEX).unwrap(),
+            ElementId::Vertex(vertex(3))
+        );
+        assert_eq!(
+            db.allocate_identity(&query, EDGE).unwrap(),
+            ElementId::Edge(edge(3))
+        );
+    });
+}
+
+/// Order hiding, the reason channel 2 exists: a capability that creates two
+/// records with k hidden creations between them must not learn k from the
+/// two identities. For one key and a fixed counter, the gap between the two
+/// identities as a function of k is not affine, and its low byte is not
+/// monotone. A deterministic check under the fixture key, not a statistical
+/// claim. The identity permutation fails both.
+#[test]
+fn consecutive_engine_identities_do_not_reveal_how_many_creations_came_between() {
+    for permutation in [
+        IdentityPermutation::vertices(&keys()),
+        IdentityPermutation::edges(&keys()),
+    ] {
+        let issued = |counter: u64| i128::from(permutation.permute(counter).unwrap());
+        let base = issued(100);
+        let gaps: Vec<i128> = (1..=64).map(|k| issued(100 + k) - base).collect();
+        let step = gaps[0];
+        assert!(
+            gaps.iter().zip(1i128..).any(|(gap, k)| *gap != k * step),
+            "identity gaps are affine in the number of hidden creations"
+        );
+        let low: Vec<i128> = gaps.iter().map(|gap| gap & 0xff).collect();
+        assert!(
+            low.windows(2).any(|pair| pair[1] < pair[0]),
+            "the low byte of the gap grows with the number of hidden creations"
+        );
+    }
+}
+
+/// The permutation is a bijection on `[1, 2^63)`, depends on the key and the
+/// kind, and refuses everything outside its domain.
+#[test]
+fn the_identity_permutation_is_a_keyed_bijection_on_the_engine_domain() {
+    let vertices = IdentityPermutation::vertices(&keys());
+    let edges = IdentityPermutation::edges(&keys());
+    let other = IdentityPermutation::vertices(&DatabaseKeys::new(
+        [0xce; 32],
+        DatabaseSecurityNamespaceId([0x7c; 32]),
+        [0x71; 32],
+    ));
+    let mut seen = std::collections::BTreeSet::new();
+    for counter in (1..=2_000).chain([IdentityPermutation::MAX - 1, IdentityPermutation::MAX]) {
+        let identity = vertices.permute(counter).unwrap();
+        assert!((1..=IdentityPermutation::MAX).contains(&identity));
+        assert_eq!(vertices.invert(identity), Some(counter));
+        assert!(
+            seen.insert(identity),
+            "counter {counter} reissued an identity"
+        );
+    }
+    let differs = |left: &IdentityPermutation, right: &IdentityPermutation| {
+        (1..=64).any(|counter| left.permute(counter) != right.permute(counter))
+    };
+    assert!(
+        differs(&vertices, &edges),
+        "vertex and edge keys are separated"
+    );
+    assert!(
+        differs(&vertices, &other),
+        "another database key issues another sequence"
+    );
+    assert_eq!(
+        (1..=64)
+            .map(|counter| vertices.permute(counter))
+            .collect::<Vec<_>>(),
+        (1..=64)
+            .map(|counter| IdentityPermutation::vertices(&keys()).permute(counter))
+            .collect::<Vec<_>>(),
+        "the same key replays the same sequence"
+    );
+    for outside in [0, IdentityPermutation::MAX + 1, u64::MAX] {
+        assert_eq!(vertices.permute(outside), None);
+        assert_eq!(vertices.invert(outside), None);
+    }
+    assert_eq!(
+        format!("{vertices:?}"),
+        "IdentityPermutation([REDACTED])",
+        "Debug never prints the key"
+    );
+}
+
+/// Known answers from an independent implementation: a pure-Python spelling
+/// of the construction with its own BLAKE3 compression, keyed hash and
+/// derive_key (checked against the BLAKE3 empty-input vector). It also
+/// reproduced every engine identity the restated laws observed, under four
+/// other key sets. Issued identities are durable, so a silent change to the
+/// rounds, half widths, key context or round input must fail here rather
+/// than quietly start issuing another sequence.
+#[test]
+fn the_identity_permutation_matches_independent_known_answers() {
+    let vertices = IdentityPermutation::vertices(&keys());
+    let edges = IdentityPermutation::edges(&keys());
+    for (counter, vertex, edge) in [
+        (1, 7_900_765_196_101_795_985, 6_940_111_937_711_507_570),
+        (2, 2_172_206_359_520_291_676, 1_270_560_709_950_562_404),
+        (3, 1_823_503_639_948_995_673, 414_856_192_363_316_142),
+        (1_000, 5_342_259_167_322_058_657, 6_560_166_291_354_285_435),
+        (
+            IdentityPermutation::MAX,
+            6_557_777_098_662_460_084,
+            799_399_801_540_463_107,
+        ),
+    ] {
+        assert_eq!(vertices.permute(counter), Some(vertex), "vertex {counter}");
+        assert_eq!(edges.permute(counter), Some(edge), "edge {counter}");
+    }
 }

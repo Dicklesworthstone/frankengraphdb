@@ -59,7 +59,8 @@ pub use identity::{
     VerificationOperation, VerificationOutcome,
 };
 pub use marker::{
-    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain,
+    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadCasMismatch, HeadUpdate,
+    IdentityCounters, MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
 };
 pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackProtectionProfile, PackedObjectGroup,

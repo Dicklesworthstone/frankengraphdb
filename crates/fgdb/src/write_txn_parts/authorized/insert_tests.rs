@@ -164,8 +164,23 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         assert_eq!(stats.selection.snapshot_records, 0);
         assert_eq!(vertices.len(), 2);
         assert_eq!(edges.len(), 3);
-        assert!(vertices.iter().all(|id| id.0 > 901));
-        assert!(edges.iter().all(|id| id.0 > 800));
+        // The explicit seeds and the retirement move no counter: a and b take
+        // vertex counters 1 and 2, and the three edges take edge counters 1-3.
+        assert_eq!(
+            vertices,
+            vec![
+                crate::write_txn::engine_vertex(&keys(), 1),
+                crate::write_txn::engine_vertex(&keys(), 2),
+            ]
+        );
+        assert_eq!(
+            edges,
+            vec![
+                crate::write_txn::engine_edge(&keys(), 1),
+                crate::write_txn::engine_edge(&keys(), 2),
+                crate::write_txn::engine_edge(&keys(), 3),
+            ]
+        );
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
         assert_eq!(
@@ -393,8 +408,16 @@ fn forbidden_creation_tail_aborts_every_relation_and_retries_without_reusing_ids
                 )
                 .await
                 .unwrap();
-            assert!(vertices.iter().all(|id| id.0 > 2));
-            assert!(edges.iter().all(|id| id.0 > 2));
+            // The refused attempt reserved vertex counters 1-2 and edge counters
+            // 1-2 before staging refused its tail; the retry reuses none of them.
+            assert_eq!(
+                vertices,
+                vec![
+                    crate::write_txn::engine_vertex(&keys(), 3),
+                    crate::write_txn::engine_vertex(&keys(), 4),
+                ]
+            );
+            assert_eq!(edges, vec![crate::write_txn::engine_edge(&keys(), 3)]);
             assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
             assert_eq!(txn.outstanding_obligations(), baseline);
         }
@@ -514,7 +537,7 @@ fn permission_and_creation_limits_precede_identity_issuance() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
         }
     });
@@ -838,13 +861,16 @@ fn empty_scoped_match_closes_without_publication_or_identity_reservations() {
         );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(db.vertices().unwrap(), original);
+        // The probes took counter 1 of each kind; the empty match took none.
+        assert_eq!(before_vertex, crate::write_txn::engine_vertex(&keys(), 1));
+        assert_eq!(before_edge, crate::write_txn::engine_edge(&keys(), 1));
         assert_eq!(
             db.allocate_identity(&query, vertex_request).unwrap(),
-            ElementId::Vertex(VId(before_vertex.0 + 1))
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 2))
         );
         assert_eq!(
             db.allocate_identity(&query, edge_request).unwrap(),
-            ElementId::Edge(EId(before_edge.0 + 1))
+            ElementId::Edge(crate::write_txn::engine_edge(&keys(), 2))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -1222,14 +1248,18 @@ fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
             let edges = db.edges().unwrap();
             assert_eq!((vertices.len(), edges.len()), (6, 3));
             let properties: Vec<_> = vertices.iter().filter_map(|v| v.props.first()).collect();
-            assert_eq!(
-                properties,
-                vec![
-                    &(P, CanonicalScalar::Int(3)),
-                    &(P, CanonicalScalar::Int(1)),
-                    &(P, CanonicalScalar::Int(3)),
-                ]
-            );
+            // Each UNWIND row [3, 1, 3] issues its `a` and then its `b`, so row
+            // r's `a` takes vertex counter 2r + 1. vertices() is in identity order.
+            let mut created = Vec::new();
+            for (counter, p) in [(1, 3), (3, 1), (5, 3)] {
+                created.push((crate::write_txn::engine_vertex(&keys(), counter), p));
+            }
+            created.sort_by_key(|(vertex, _)| *vertex);
+            let ordered: Vec<_> = created
+                .iter()
+                .map(|(_, p)| (P, CanonicalScalar::Int(*p)))
+                .collect();
+            assert_eq!(properties, ordered.iter().collect::<Vec<_>>());
             db.compact(&commit).await.unwrap();
             drop(db);
             let db = Database::open_with_vfs(&commit, vfs, &path, keys())
@@ -1284,7 +1314,7 @@ fn insertion_query_requires_readwrite_before_identity_allocation_even_with_limit
             assert_eq!(
                 db.allocate_identity(&query_cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }

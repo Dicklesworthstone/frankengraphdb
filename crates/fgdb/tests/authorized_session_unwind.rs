@@ -1,7 +1,7 @@
 //! Native ingestion through a capability-only session, not a raw Database writer.
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
+use fgdb::{Database, DatabaseKeys, IdentityPermutation, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
@@ -32,6 +32,14 @@ const COUNTER: &str = "UNWIND $rows AS row MERGE (n:Visible {p:row.p}) \
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xc1; 32], NS, [0xc3; 32])
+}
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(10121), NS, "graph", SchemaEpoch(1), 1).unwrap()
@@ -308,10 +316,12 @@ fn expanded_host_limits_precede_catalog_and_allocation_and_cannot_be_retried() {
             drop(session);
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(db.vertices().unwrap().is_empty());
+            // Nothing refused above took a counter: this fresh handle's first
+            // engine allocation is still vertex counter 1.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(engine_vertex(1))
             );
         }
         // Ordinary text must not lose the host cap while adopting native binding.
@@ -707,10 +717,12 @@ fn frozen_batch_preparation_neither_allocates_graph_ids_nor_accepts_nonbatch_fal
             drop(session);
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(db.vertices().unwrap().is_empty());
+            // Preparation took no counter: this fresh handle's first engine
+            // allocation is still vertex counter 1.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(engine_vertex(1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -780,10 +792,11 @@ fn frozen_unwind_handle_cannot_cross_identical_sessions() {
         drop(second);
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertices().unwrap().is_empty());
+        // Neither the binding nor the refused execution took a counter.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(engine_vertex(1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });

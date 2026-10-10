@@ -44,6 +44,7 @@ use fgdb_types::CanonicalScalar;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// A sealed block: its identity, its bytes, the range it covers, and — when
 /// any of its entries carry properties — the hosted edge property patch the
@@ -292,8 +293,10 @@ pub struct BlockWriter {
     /// Every EId admitted while replaying this partition-local writer.
     ///
     /// The graph-wide allocator is enforced before partition routing; this is a
-    /// defense-in-depth check over the history visible to this fold.
-    spent: BTreeSet<EId>,
+    /// defense-in-depth check over the history visible to this fold. Shared
+    /// copy-on-write so the engine allocator can probe it without a copy
+    /// ([`BlockWriter::spent_edges`]).
+    spent: Arc<BTreeSet<EId>>,
     sealed: Vec<SealedBlock>,
     /// The newest sealed block per descriptor family — the predecessor each
     /// family's NEXT block links (V6, fgdb-4391). Rebuilt deterministically by
@@ -313,8 +316,9 @@ pub struct BlockWriter {
     /// SEALED row must restate the exact birth — ordinal, labels, properties —
     /// and only the creation carried those.
     live_vertices: BTreeMap<VId, VertexRow>,
-    /// Every VId admitted while replaying this partition-local writer.
-    spent_vertices: BTreeSet<VId>,
+    /// Every VId admitted while replaying this partition-local writer, shared
+    /// copy-on-write like `spent`.
+    spent_vertices: Arc<BTreeSet<VId>>,
     sealed_patches: Vec<SealedPatch>,
     /// Live identities whose same-seq creation has already been sealed in
     /// this run. A later same-seq delete cannot fold those away — the
@@ -450,12 +454,12 @@ impl BlockWriter {
             partition,
             pending: BTreeMap::new(),
             live,
-            spent,
+            spent: Arc::new(spent),
             sealed,
             chain_heads,
             pending_vertices: BTreeMap::new(),
             live_vertices,
-            spent_vertices,
+            spent_vertices: Arc::new(spent_vertices),
             sealed_patches,
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
@@ -470,12 +474,12 @@ impl BlockWriter {
             partition,
             pending: BTreeMap::new(),
             live: BTreeMap::new(),
-            spent: BTreeSet::new(),
+            spent: Arc::default(),
             sealed: Vec::new(),
             chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
             live_vertices: BTreeMap::new(),
-            spent_vertices: BTreeSet::new(),
+            spent_vertices: Arc::default(),
             sealed_patches: Vec::new(),
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
@@ -531,6 +535,22 @@ impl BlockWriter {
     /// The vertex counterpart of [`BlockWriter::is_edge_spent`].
     pub fn is_vertex_spent(&self, vid: VId) -> bool {
         self.spent_vertices.contains(&vid)
+    }
+
+    /// A shared, immutable view of every edge identity this fold admitted:
+    /// the engine allocator's existence check (fgdb-hxgm1 channel 2). The
+    /// handle is an O(1) clone. While a strong handle is outstanding, the
+    /// fold's next admission copies the set instead of mutating it under the
+    /// reader. A caller that may outlive that admission keeps an
+    /// `Arc::downgrade` instead: the fold then mutates in place, and the weak
+    /// handle stops upgrading.
+    pub fn spent_edges(&self) -> Arc<BTreeSet<EId>> {
+        Arc::clone(&self.spent)
+    }
+
+    /// The vertex counterpart of [`BlockWriter::spent_edges`].
+    pub fn spent_vertices(&self) -> Arc<BTreeSet<VId>> {
+        Arc::clone(&self.spent_vertices)
     }
 
     /// Is `vid` live in this fold?
@@ -650,7 +670,7 @@ impl BlockWriter {
                         props: props.clone(),
                     },
                 );
-                let was_fresh = self.spent.insert(*eid);
+                let was_fresh = Arc::make_mut(&mut self.spent).insert(*eid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::DeleteEdge { eid, .. } => {
@@ -834,7 +854,7 @@ impl BlockWriter {
                 }
                 self.pending_vertices.insert((*vid, seq), row.clone());
                 self.live_vertices.insert(*vid, row);
-                let was_fresh = self.spent_vertices.insert(*vid);
+                let was_fresh = Arc::make_mut(&mut self.spent_vertices).insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::LabelMembership {

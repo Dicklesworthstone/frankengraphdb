@@ -73,6 +73,7 @@ fn marker(seq: u64, capsule_ref: ObjectId) -> CommitMarker {
         resource_effect_digest: Digest([7; 32]),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 

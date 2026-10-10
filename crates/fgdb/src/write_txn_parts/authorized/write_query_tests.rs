@@ -417,10 +417,12 @@ fn readwrite_preflight_precedes_creation_even_when_the_result_would_be_empty() {
                 .unwrap_err();
             assert_eq!(authorization(&error), Some(Error::PermissionDenied));
             assert_eq!(db.frontier().unwrap(), before);
+            // The refused CREATE reserved nothing: the vertex counter of this
+            // fresh database still issues its first identity.
             assert_eq!(
                 db.allocate_identity(&query_cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }

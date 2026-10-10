@@ -120,7 +120,8 @@ fn scoped_merge_creates_once_matches_without_a_commit_and_reopens() {
             .await
             .unwrap();
         assert!(first.created());
-        assert!(first.vertex().0 > 100);
+        // The explicit seed moved no counter: the creation takes vertex counter 1.
+        assert_eq!(first.vertex(), crate::write_txn::engine_vertex(&keys(), 1));
         assert_eq!(stats.created_vertices, 1);
         assert_eq!(stats.match_selection.result_rows, 0);
         let seq = db.frontier().unwrap();
@@ -160,7 +161,10 @@ fn scoped_merge_creates_once_matches_without_a_commit_and_reopens() {
         let next = db
             .allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
             .unwrap();
-        assert_eq!(next, ElementId::Vertex(VId(first.vertex().0 + 1)));
+        assert_eq!(
+            next,
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 2))
+        );
         db.compact(&commit).await.unwrap();
         drop(db);
         let mut db = Database::open_with_vfs(&commit, vfs, &path, keys())
@@ -235,7 +239,7 @@ fn ambiguity_counts_only_visible_identities_and_never_allocates_or_publishes() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(104))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -286,7 +290,7 @@ fn readwrite_and_one_receipt_row_are_required_before_graph_access_or_allocation(
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -351,7 +355,7 @@ fn creation_limits_and_forbidden_fields_refuse_without_partial_effects() {
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });

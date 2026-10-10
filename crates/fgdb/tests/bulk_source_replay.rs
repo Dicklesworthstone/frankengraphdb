@@ -4,6 +4,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     BulkEdge, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys,
+    IdentityPermutation,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
@@ -57,6 +58,23 @@ fn keys() -> DatabaseKeys {
         DatabaseSecurityNamespaceId([0xb2; 32]),
         [0xb3; 32],
     )
+}
+/// The engine identity issued for `counter` under [`keys`] (fgdb-hxgm1
+/// channel 2): the next engine vertex on a handle that has issued none is
+/// counter 1.
+fn engine_vertex(counter: u64) -> fgdb_types::VId {
+    fgdb_types::VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
+}
+fn engine_edge(counter: u64) -> EId {
+    EId(u128::from(
+        IdentityPermutation::edges(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 fn vertex(key: &str) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
@@ -130,7 +148,7 @@ fn changed_vertex_fields_and_row_order_never_allocate_or_publish() {
             assert_eq!(
                 db.allocate_identity(&cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(fgdb_types::VId(1))
+                ElementId::Vertex(engine_vertex(1))
             );
         }
     });
@@ -191,10 +209,12 @@ fn changed_edge_fields_never_publish_an_unchecked_chunk_or_panic_on_endpoints() 
             assert!(error.pending.is_none());
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert!(db.edges().unwrap().is_empty());
+            // The committed first chunk took vertex counters only, and the
+            // refused edge chunk took none.
             assert_eq!(
                 db.allocate_identity(&cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
                     .unwrap(),
-                ElementId::Edge(EId(1))
+                ElementId::Edge(engine_edge(1))
             );
         }
     });
