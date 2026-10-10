@@ -2,6 +2,7 @@
 //! path every surface (FGP and HTTP) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+use crate::recovery::{Generation, Unavailable};
 use crate::{Served, TRUNK, convert, unix_millis};
 use asupersync::Cx;
 use fgdb::{
@@ -36,11 +37,18 @@ impl Refusal {
     }
 }
 
+impl From<Unavailable> for Refusal {
+    fn from(error: Unavailable) -> Self {
+        Self::new(error.code(), error.message())
+    }
+}
+
 /// A complete, already-decided statement answer.
 pub(crate) struct Answer {
     pub(crate) columns: Vec<String>,
     pub(crate) rows: Vec<Vec<WireValue>>,
     pub(crate) outcome: Outcome,
+    pub(crate) generation: Generation,
 }
 
 /// A statement's type-erased future: one `Send` proof here keeps every
@@ -70,7 +78,41 @@ pub(crate) fn write<'a>(
 
 /// A read-only authorized session over one served database: it cannot
 /// express a write, pins one generation, and outlives the read lock.
-pub(crate) type ReadSession<'a> = fgdb::AuthorizedReadSession<'a, crate::Symbols, fn() -> u64>;
+pub(crate) struct ReadSession<'a> {
+    native: fgdb::AuthorizedReadSession<'a, crate::Symbols, fn() -> u64>,
+    generation: Generation,
+}
+
+pub(crate) enum SessionError {
+    Query(QueryError),
+    Unavailable(Unavailable),
+}
+
+impl From<QueryError> for SessionError {
+    fn from(error: QueryError) -> Self {
+        Self::Query(error)
+    }
+}
+
+impl ReadSession<'_> {
+    pub(crate) fn generation(&self) -> Generation {
+        self.generation.clone()
+    }
+
+    pub(crate) fn query(
+        &mut self,
+        cx: &fgdb_types::QueryCx,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<QueryResult, SessionError> {
+        let _operation = self.generation.enter().map_err(SessionError::Unavailable)?;
+        let result = self.native.query(cx, text, parameters);
+        // A concurrently fenced write invalidates this source result even
+        // when its immutable snapshot remains readable in the engine.
+        self.generation.check().map_err(SessionError::Unavailable)?;
+        result.map_err(SessionError::Query)
+    }
+}
 
 /// Open a read session for `token` and report the generation it pinned.
 pub(crate) async fn read_session<'a>(
@@ -78,13 +120,11 @@ pub(crate) async fn read_session<'a>(
     db: &'a Served,
     token: &CapabilityToken,
 ) -> Result<(ReadSession<'a>, fgdb_types::CommitSeq), Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = contexts.query();
-    let guard = db
-        .db
-        .read(cx)
-        .await
-        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    let generation = guard.generation();
     // Under the read lock no write can land between these two reads, so
     // the session's pinned generation is exactly this frontier.
     let frontier = guard
@@ -101,7 +141,13 @@ pub(crate) async fn read_session<'a>(
             unix_millis as fn() -> u64,
         )
         .map_err(query_refusal)?;
-    Ok((session, frontier))
+    Ok((
+        ReadSession {
+            native: session,
+            generation,
+        },
+        frontier,
+    ))
 }
 
 async fn read_inner(
@@ -123,6 +169,7 @@ async fn read_inner(
                 .map(|row| row.iter().map(convert::cell).collect())
                 .collect(),
             outcome: Outcome::Rows { seq: frontier.0 },
+            generation: session.generation(),
         }),
         Ok(QueryResult::Write { .. }) => Err(Refusal::new(
             ErrorCode::Statement,
@@ -138,6 +185,7 @@ async fn write_inner(
     token: &CapabilityToken,
     statement: &Execute,
 ) -> Result<Answer, Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
     let parameters = convert::parameters(&statement.parameters, None)
@@ -145,11 +193,8 @@ async fn write_inner(
     if let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)? {
         return write_returning(cx, db, token, returning).await;
     }
-    let mut guard = db
-        .db
-        .write(cx)
-        .await
-        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let generation = guard.generation();
     let symbols = &db.symbols;
     let mut session = guard
         .authorized_write_session(
@@ -191,6 +236,7 @@ async fn write_inner(
         columns: Vec::new(),
         rows: Vec::new(),
         outcome,
+        generation,
     })
 }
 
@@ -274,14 +320,12 @@ async fn write_returning(
     token: &CapabilityToken,
     prepared: Returning,
 ) -> Result<Answer, Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
     let columns = prepared.columns().to_vec();
-    let mut guard = db
-        .db
-        .write(cx)
-        .await
-        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let generation = guard.generation();
     let result = match &prepared {
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized(
@@ -353,6 +397,7 @@ async fn write_returning(
         columns,
         rows,
         outcome,
+        generation,
     })
 }
 
@@ -397,7 +442,11 @@ fn procedure_statement<C>(
     }
 }
 
-pub(crate) fn query_refusal(error: QueryError) -> Refusal {
+pub(crate) fn query_refusal(error: impl Into<SessionError>) -> Refusal {
+    let error = match error.into() {
+        SessionError::Query(error) => error,
+        SessionError::Unavailable(error) => return error.into(),
+    };
     let code = match &error {
         QueryError::Authorization(error) => warden_code(*error),
         QueryError::Read(_) => ErrorCode::Execution,
@@ -415,7 +464,7 @@ pub(crate) fn query_refusal(error: QueryError) -> Refusal {
 
 /// Classify a write failure by walking its typed cause chain. Nothing here
 /// turns an unknown commit outcome into a refusal: that class is preserved.
-fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
+pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
     let mut code = ErrorCode::Statement;
     let mut source = Some(error);
     while let Some(current) = source {
@@ -427,6 +476,8 @@ fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
             code = match write {
                 fgdb::WriteError::FirstCommitterWins { .. } => ErrorCode::Conflict,
                 fgdb::WriteError::CommitOutcomeUnknown { .. }
+                | fgdb::WriteError::HandleCommitOutcomeUnknown { .. }
+                | fgdb::WriteError::CommittedNeedsRecovery { .. }
                 | fgdb::WriteError::RecoveryRequired(_) => ErrorCode::OutcomeUnknown,
                 _ => ErrorCode::Execution,
             };
@@ -455,6 +506,7 @@ fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refusal {
 pub(crate) struct Subscription {
     pub(crate) consumer: NativeSubscription,
     pub(crate) columns: Vec<String>,
+    pub(crate) generation: Generation,
 }
 
 /// Register `SUBSCRIBE TO <read>` for a capability that may observe it.
@@ -476,6 +528,7 @@ pub(crate) struct Schema {
 }
 
 pub(crate) fn schema(db: &Served, token: &CapabilityToken) -> Result<Schema, Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
     let now = unix_millis();
     let capability = db
         .authority
@@ -516,6 +569,7 @@ pub(crate) async fn subscribe(
     token: &CapabilityToken,
     statement: &Execute,
 ) -> Result<Subscription, Refusal> {
+    let _operation = db.db.enter().map_err(Refusal::from)?;
     let now = unix_millis();
     let capability = db
         .authority
@@ -533,6 +587,12 @@ pub(crate) async fn subscribe(
     }
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = contexts.query();
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let generation = guard.generation();
+    // The count belongs to this locked database generation. Reopen cannot
+    // reset it between reservation and installing the corresponding circuit.
     if db
         .subscriptions
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -542,16 +602,9 @@ pub(crate) async fn subscribe(
     {
         return Err(Refusal::new(
             ErrorCode::Budget,
-            "this database's subscription registrations are exhausted until restart",
+            "this database's subscription registrations are exhausted until reopen",
         ));
     }
-    let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
-    let mut guard = db
-        .db
-        .write(cx)
-        .await
-        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
     let mut consumer = guard
         .subscribe_native(
             &query,
@@ -587,7 +640,11 @@ pub(crate) async fn subscribe(
         .standing_native_columns(&query, consumer.handle())
         .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?
         .to_vec();
-    Ok(Subscription { consumer, columns })
+    Ok(Subscription {
+        consumer,
+        columns,
+        generation,
+    })
 }
 
 /// The next batch the subscriber has not acknowledged, or `None` when it is
@@ -600,16 +657,14 @@ pub(crate) async fn poll(
     token: &CapabilityToken,
     subscription: &mut Subscription,
 ) -> Result<Option<Arc<SubscriptionBatch>>, Refusal> {
+    let _operation = subscription.generation.enter().map_err(Refusal::from)?;
     db.authority
         .verify_at(token, TRUNK, unix_millis())
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = contexts.query();
-    let guard = db
-        .db
-        .read(cx)
-        .await
-        .map_err(|_| Refusal::new(ErrorCode::Execution, "database unavailable"))?;
+    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    subscription.generation.check().map_err(Refusal::from)?;
     match subscription.consumer.poll(&guard, &query, db.query_policy) {
         Err(SubscriptionError::Query(StandingQueryError::DeltaUnavailable { .. })) => {
             subscription

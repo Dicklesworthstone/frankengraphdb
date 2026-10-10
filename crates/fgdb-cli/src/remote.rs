@@ -355,9 +355,11 @@ fn failure(error: ClientError) -> Failure {
                 ErrorCode::Unauthenticated
                 | ErrorCode::NotFoundOrUnauthorized
                 | ErrorCode::UnsupportedVersion => Failure::open(message),
-                ErrorCode::Protocol | ErrorCode::OutcomeUnknown | ErrorCode::Draining => {
-                    Failure::io(message)
-                }
+                ErrorCode::Protocol
+                | ErrorCode::OutcomeUnknown
+                | ErrorCode::Draining
+                | ErrorCode::DatabaseRecovering
+                | ErrorCode::DatabaseUnavailable => Failure::io(message),
             }
         }
         ClientError::Io(_) => Failure::open(error),
@@ -533,13 +535,23 @@ async fn subscribe(
                 Ok(sink.borrow().1.is_none() && limit.is_none_or(|limit| batches < limit))
             },
         )
-        .await
-        .map_err(failure)?;
-    let _ = client.close(cx).await;
+        .await;
+    if end.is_ok() || matches!(&end, Err(ClientError::SubscriptionReset { .. })) {
+        let _ = client.close(cx).await;
+    }
     let (out, failed) = sink.into_inner();
     if let Some(error) = failed {
         return Err(error);
     }
+    let end = match end {
+        Ok(end) => end,
+        Err(error @ ClientError::SubscriptionReset { last_delivered_seq }) => {
+            emit(out, &subscription_reset_record(last_delivered_seq, robot))?;
+            out.flush().map_err(Failure::io)?;
+            return Err(failure(error));
+        }
+        Err(error) => return Err(failure(error)),
+    };
     if robot {
         emit(
             out,
@@ -547,6 +559,21 @@ async fn subscribe(
         )
     } else {
         emit(out, &format!("{changes} change(s) through seq {end}"))
+    }
+}
+
+fn subscription_reset_record(last_delivered_seq: Option<u64>, robot: bool) -> String {
+    if robot {
+        let seq = last_delivered_seq.map_or_else(|| "null".to_owned(), |seq| seq.to_string());
+        format!(
+            r#"{{"v":1,"event":"subscription_reset","resubscribe_required":true,"last_delivered_seq":{seq}}}"#
+        )
+    } else {
+        let seq = last_delivered_seq.map_or_else(
+            || "no complete baseline".to_owned(),
+            |seq| format!("seq {seq}"),
+        );
+        format!("subscription reset after {seq}; resubscribe for a replacement baseline")
     }
 }
 
@@ -621,6 +648,26 @@ pub(crate) fn packed_vector(text: &str) -> Result<Vec<u8>, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_reset_is_a_terminal_with_an_optional_complete_checkpoint() {
+        assert_eq!(
+            subscription_reset_record(None, true),
+            r#"{"v":1,"event":"subscription_reset","resubscribe_required":true,"last_delivered_seq":null}"#
+        );
+        assert_eq!(
+            subscription_reset_record(Some(42), true),
+            r#"{"v":1,"event":"subscription_reset","resubscribe_required":true,"last_delivered_seq":42}"#
+        );
+        assert!(subscription_reset_record(None, false).contains("no complete baseline"));
+        assert_eq!(
+            failure(ClientError::SubscriptionReset {
+                last_delivered_seq: Some(42)
+            })
+            .code,
+            5
+        );
+    }
 
     fn options(verb: &str, flags: &[&str]) -> Result<RemoteOptions, Failure> {
         let mut args = vec![

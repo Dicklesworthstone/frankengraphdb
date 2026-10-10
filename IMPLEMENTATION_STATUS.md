@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-10-05.
+Capability baseline: unreleased `main`. Each section carries the date it was last re-derived from the code; the latest is 2026-10-10.
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -117,6 +117,16 @@ Native `CALL hybrid.search(...) YIELD` also composes into transaction reads and 
 The CLI's ordered `transaction` driver accepts one native `CREATE`/`INSERT`, matched `SET`/`REMOVE`/deletion, or vertex `MERGE` statement with `RETURN` in each `--write` step. It shares preparation and execution with ordinary `fgdb write`, binds each step's own parameters before beginning the transaction, and freezes that statement's post-effect values. `ON CREATE`/`ON MATCH` and trailing `SET` retain native clause order. All read and write results share one transaction-wide row and encoded-output allowance and remain buffered until the sole completion boundary. Rolling back to a savepoint discards the later effects and buffered results and restores their output allowance; full rollback or any precommit expression/output refusal publishes neither effects nor rows. `LIMIT 0` still executes effects and validates return expressions. Regression sources are `crates/fgdb-cli/src/transaction/returning_tests.rs`. Aggregate write `RETURN` and relationship `MERGE RETURN` remain outside the supported native shapes.
 
 Full SSI, merge-ladder integration and transaction ownership/session policy remain incomplete.
+
+### Supervised served-database recovery
+
+Added 2026-10-10 for `fgdb-t79am`. `fgdbd` owns one host-region recovery child per opened database, shared by FGP, HTTP and Bolt. A write guard observes the native handle's state on drop, including future cancellation, and fences the current generation before releasing the database lock. New requests receive `database_recovering`; retained sessions, pending results and subscriptions keep their original generation and cannot resume against a reopened handle. Each protected physical write/flush poll checks that generation as well as the existing Warden authority. Partially written frames close the connection on invalidation.
+
+The child waits for admitted source operations, consumes the old `Database`, and calls the production `recover_authoritatively` path. A successful reopen restores admission with a new generation and an empty subscription registry. A failed or interrupted reopen remains fenced with `database_unavailable`; it does not retry automatically or serve the old handle. Trusted embedding hosts can inspect `Server::database_status`, including the retained failure reason. Recovery does not replay client statements. Post-marker uncertainty, post-D2 publication failure, and a completed write whose queued output is invalidated retain an `outcome_unknown` classification and no-replay diagnostic.
+
+FGP subscriptions terminate with `SUBSCRIPTION_RESET` at a complete frame boundary, independently of flow credit. Its optional sequence names the last complete batch delivered, including an empty baseline. The native client validates that checkpoint, discards any incomplete batch, and returns a typed reset; the CLI emits `subscription_reset` with `resubscribe_required` and `last_delivered_seq`. A new subscription replaces the old bag with a fresh baseline. This is recovery for ephemeral served sessions, not durable subscription resume, retained result recovery, or automatic write retry.
+
+Canonical owners are `crates/fgdb-server/src/recovery.rs`, the server execution/transport adapters, and `crates/fgdb-protocol/src/{body,client,frame}.rs`. Regression sources in `crates/fgdb-server/src/recovery/tests.rs` drive real Chronicle marker/publication failure boundaries, cancellation, generation invalidation, failed reopen and worker ownership. Standalone protocol library/mechanism tests pass on the pinned toolchain. The new server and client-transport regressions have not run in this session: compilation of the unchanged pinned asupersync dependency was killed by the environment's memory limit before reaching them.
 
 ## Reality check 2026-09-08 → 2026-09-22
 

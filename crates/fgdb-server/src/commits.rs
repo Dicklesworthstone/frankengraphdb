@@ -8,7 +8,7 @@
 use core::task::{Context, Waker};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Default)]
 pub(crate) struct CommitSignal {
@@ -32,9 +32,9 @@ impl CommitSignal {
         self.epoch.load(Ordering::Acquire)
     }
 
-    pub(crate) fn watcher(&self) -> CommitWatcher<'_> {
+    pub(crate) fn watcher(self: &Arc<Self>) -> CommitWatcher {
         CommitWatcher {
-            signal: self,
+            signal: Arc::clone(self),
             id: self.next.fetch_add(1, Ordering::Relaxed),
             seen: self.epoch(),
         }
@@ -42,13 +42,13 @@ impl CommitSignal {
 }
 
 /// One subscription's registration; dropping it unregisters.
-pub(crate) struct CommitWatcher<'a> {
-    signal: &'a CommitSignal,
+pub(crate) struct CommitWatcher {
+    signal: Arc<CommitSignal>,
     id: u64,
     seen: u64,
 }
 
-impl CommitWatcher<'_> {
+impl CommitWatcher {
     /// Whether a commit happened since the last call that returned true. The
     /// waker is registered before the epoch is reread, so a commit between
     /// the two still wakes the task.
@@ -70,7 +70,7 @@ impl CommitWatcher<'_> {
     }
 }
 
-impl Drop for CommitWatcher<'_> {
+impl Drop for CommitWatcher {
     fn drop(&mut self) {
         self.signal
             .wakers

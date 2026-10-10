@@ -1,7 +1,8 @@
 # Fabric protocol mechanisms
 
 Owner beads: `fgdb-w10-fgp-core-5b1`, `fgdb-w10-flow-send-obligations-smd`,
-`fgdb-w10-fgp-frame-catalog-j1bl`, `fgdb-w10-server-rte`. These beads remain open.
+`fgdb-w10-fgp-frame-catalog-j1bl`, `fgdb-w10-server-rte`, `fgdb-t79am`.
+These beads remain open.
 
 `fgdb-protocol` implements the transport-independent framing, connection-state,
 flow-credit and drain mechanisms. It is a std-only, unsafe-forbidden crate. It
@@ -50,6 +51,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | SNAPSHOT_RESULT_CHUNK / SNAPSHOT_RESULT_END | 0x0018 / 0x0019 | server |
 | WINDOW_UPDATE | 0x001a | client |
 | SUBSCRIPTION_BATCH | 0x001b | server |
+| SUBSCRIPTION_RESET | 0x001c | server |
 | PING / PONG | 0x0020 / 0x0021 | client / server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
@@ -160,6 +162,7 @@ redacted from `Debug`.
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
 | SUBSCRIPTION_BATCH | `frontier u64`, `snapshot bool`, `last bool`, `columns: none \| [text]` (first frame only), `entries [(weight i128 ≠ 0, [value])]` |
+| SUBSCRIPTION_RESET | `has_checkpoint bool`, then `last_delivered_seq u64` only when true |
 | ERROR | `code u16`, `message text` (structural diagnostics only) |
 | WINDOW_UPDATE | `sequence u64`, `bytes u64`, `rows u64` |
 | PING / PONG | `nonce u64` |
@@ -173,7 +176,8 @@ offset seconds, optional zone identifier plus tzdb object id), vertex, edge
 (i128) and exact average. Error codes are the closed set `protocol`,
 `unsupported_version`, `unauthenticated`, `not_found_or_unauthorized`,
 `statement`, `permission_denied`, `budget`, `conflict`, `execution`,
-`outcome_unknown`, `busy`, `draining` and `cancelled`.
+`outcome_unknown`, `busy`, `draining`, `cancelled`, `database_recovering`
+(tag 14) and `database_unavailable` (tag 15).
 
 ## fgdbd: the served subset
 
@@ -282,9 +286,27 @@ application output is admitted.
   connection closes, and GOODBYE is its last write. A drain never waits for an
   offline client.
 - **Children.** A finished read reports the new `ChildTerminus::
-  EphemeralCompleted` (legal for query children only: nothing durable is
+  EphemeralCompleted` (legal for query and subscription children: nothing durable is
   retained, so nothing is detached); a committed write reports
   `SemanticTerminalDurable`.
+- **Authoritative recovery.** Each opened database has one recovery child
+  owned by the host runtime, shared by all listeners. If a write leaves the
+  engine requiring recovery, its write guard fences the served generation
+  before releasing the database lock, including when the write future is
+  cancelled. New statements refuse `database_recovering`; old sessions and
+  queued results cannot become valid again after reopening. The child waits
+  for admitted source operations to drain, consumes the old database handle,
+  and calls `Database::recover_authoritatively`. A successful reopen serves a
+  new generation. Failure or interruption keeps the database fenced with
+  `database_unavailable`, without an automatic retry loop. The trusted host
+  can inspect `Server::database_status`; the unauthenticated health route does
+  not expose recovery diagnostics. Shutdown stops and joins the recovery child.
+  Recovery never replays a client statement. A write with uncertain completion,
+  or a completed write whose queued result is invalidated, retains
+  `outcome_unknown` and a no-replay diagnostic. Every protected physical output
+  poll checks its generation as well as its capability. If invalidation finds
+  a partially written frame, the connection closes instead of appending a
+  terminal control inside that frame.
 
 - **Subscriptions.** EXECUTE with mode `subscribe` and `SUBSCRIBE TO <read>`
   registers the engine's own maintained query (`Database::subscribe_native`)
@@ -307,8 +329,24 @@ application output is admitted.
   requires a read capability whose scope hides nothing (refused
   `permission_denied` otherwise), and because a registration lives as long as
   the open database, each served database admits a bounded number of
-  registrations per server lifetime (default 64; refused `budget` beyond).
-  `fgdb remote subscribe` streams `change` and `progress` records; the HTTP
+  registrations per opened database generation (default 64; refused `budget`
+  beyond). A successful authoritative reopen resets this registration count.
+  Recovery terminates an old subscription with `SUBSCRIPTION_RESET`, even when
+  it has no flow credit, provided the writer is at a complete frame boundary
+  and the capability is still live. The optional checkpoint is the last fully
+  delivered batch's sequence; it is absent if no complete baseline was sent.
+  The native client verifies that checkpoint against complete wire batches,
+  discards any incomplete batch, and returns `ClientError::SubscriptionReset`.
+  The error's `last_delivered_seq` reports its last successful `on_change`
+  callback. Batches received after that callback requested cancellation can
+  advance the wire checkpoint but do not advance the caller's checkpoint;
+  cancelled completion also reports the last successful callback frontier.
+  Subscribe again for a replacement baseline. The checkpoint grants no durable
+  resume authority and does not promise gap replay across reconnection.
+  `fgdb remote subscribe` streams `change` and `progress` records. A recovery
+  reset emits `subscription_reset` with `resubscribe_required: true` and
+  `last_delivered_seq` (a sequence or null), then exits with failure instead of
+  reporting a completed result. The HTTP
   adapter refuses subscriptions (they need a flow-controlled connection).
 - **HTTP/1.1 JSON adapter.** `fgdbd serve --http-listen` adds the same
   autocommit statements over plain HTTP: `POST /v1/databases/<name>/query`
@@ -329,7 +367,8 @@ application output is admitted.
   "committed":true|false}`; a refusal answers `{"v":1,"error":{"code","message"}}`
   under a status that follows its class (statement/protocol 400,
   unauthenticated 401, permission_denied 403, not_found_or_unauthorized 404,
-  conflict 409, budget 422, busy 429, draining 503, otherwise 500). A missing
+  conflict 409, budget 422, busy 429, draining/database_recovering/
+  database_unavailable 503, otherwise 500). A missing
   database and an unauthorized one share one 404. Requests must name an
   allowed `Host` (default `localhost`, `127.0.0.1`, `[::1]` and the listen IP),
   which defeats DNS rebinding against a loopback listener. Results are
@@ -358,9 +397,12 @@ application output is admitted.
   yet share one cumulative RUN allowance. `CALL db.labels()`,
   `db.relationshipTypes()` and `db.propertyKeys()` answer the same
   scope-filtered schema names as HTTP's schema route. The FGP error classes map
-  onto Neo4j status codes, and only Busy/Draining use a retryable
+  onto Neo4j status codes, and Busy/Draining/DatabaseRecovering use a retryable
   `TransientError`. Bookmarks name the generation read and are not required
-  inputs. Results are the same ephemeral class as FGP's.
+  inputs. A retained transaction, delayed PULL or COMMIT from an invalidated
+  generation refuses even after the database is ready again; start a new read
+  transaction. Failed recovery uses a non-retryable database error. Results are
+  the same ephemeral class as FGP's.
 
 Not served, and refused with a typed error rather than approximated: the
 durable `PublishedResultStream` class with RESULT_ACK/RESULT_RELEASE, PREPARE,

@@ -973,6 +973,37 @@ pub struct SubscriptionBatch {
     pub entries: Vec<(i128, Vec<WireValue>)>,
 }
 
+/// The session-local subscription's producer was replaced by authoritative
+/// database recovery. Discard any incomplete batch and subscribe again for a
+/// replacement baseline. The last fully delivered frontier is a checkpoint,
+/// not a durable resume capability or a promise to replay an unretained gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubscriptionReset {
+    pub last_delivered_seq: Option<u64>,
+}
+
+body!(
+    SubscriptionReset,
+    |s, out| {
+        match s.last_delivered_seq {
+            Some(seq) => {
+                out.u8(1);
+                out.u64(seq);
+            }
+            None => out.u8(0),
+        }
+    },
+    |input| {
+        SubscriptionReset {
+            last_delivered_seq: if input.bool()? {
+                Some(input.u64()?)
+            } else {
+                None
+            },
+        }
+    }
+);
+
 impl SubscriptionBatch {
     /// The encoded size of one entry, as a chunker needs to fill a frame.
     pub fn entry_len(row: &[WireValue]) -> Result<usize, BodyError> {
@@ -1137,6 +1168,10 @@ pub enum ErrorCode {
     Draining,
     /// The client cancelled the statement's result stream.
     Cancelled,
+    /// Authoritative recovery is running; a new request may be retried.
+    DatabaseRecovering,
+    /// Recovery failed or service stopped. The database remains fenced.
+    DatabaseUnavailable,
 }
 
 impl ErrorCode {
@@ -1155,6 +1190,8 @@ impl ErrorCode {
             Self::Busy => 11,
             Self::Draining => 12,
             Self::Cancelled => 13,
+            Self::DatabaseRecovering => 14,
+            Self::DatabaseUnavailable => 15,
         }
     }
     fn from_tag(tag: u16) -> Result<Self, BodyError> {
@@ -1172,6 +1209,8 @@ impl ErrorCode {
             11 => Self::Busy,
             12 => Self::Draining,
             13 => Self::Cancelled,
+            14 => Self::DatabaseRecovering,
+            15 => Self::DatabaseUnavailable,
             _ => return Err(BodyError::UnknownTag),
         })
     }
@@ -1192,6 +1231,8 @@ impl ErrorCode {
             Self::Busy => "busy",
             Self::Draining => "draining",
             Self::Cancelled => "cancelled",
+            Self::DatabaseRecovering => "database_recovering",
+            Self::DatabaseUnavailable => "database_unavailable",
         }
     }
 }
@@ -1415,6 +1456,49 @@ mod tests {
         let bytes = batch.encode().unwrap();
         assert_eq!(SubscriptionBatch::decode(&bytes).unwrap(), batch);
         every_prefix_refuses::<SubscriptionBatch>(&bytes);
+
+        for (reset, expected) in [
+            (
+                SubscriptionReset {
+                    last_delivered_seq: None,
+                },
+                vec![0],
+            ),
+            (
+                SubscriptionReset {
+                    last_delivered_seq: Some(0x0102_0304_0506_0708),
+                },
+                vec![1, 1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+        ] {
+            let bytes = reset.encode().unwrap();
+            assert_eq!(bytes, expected);
+            assert_eq!(SubscriptionReset::decode(&bytes).unwrap(), reset);
+            every_prefix_refuses::<SubscriptionReset>(&bytes);
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(SubscriptionReset::decode(&trailing).is_err());
+        }
+        assert!(SubscriptionReset::decode(&[2]).is_err());
+        assert_eq!(
+            crate::FrameKind::try_from(0x001c).unwrap(),
+            crate::FrameKind::SubscriptionReset
+        );
+        for (code, tag, name) in [
+            (ErrorCode::OutcomeUnknown, 10, "outcome_unknown"),
+            (ErrorCode::DatabaseRecovering, 14, "database_recovering"),
+            (ErrorCode::DatabaseUnavailable, 15, "database_unavailable"),
+        ] {
+            let body = ErrorBody {
+                code,
+                message: String::new(),
+            };
+            let bytes = body.encode().unwrap();
+            assert_eq!(bytes, [0, tag, 0, 0, 0, 0]);
+            assert_eq!(ErrorBody::decode(&bytes).unwrap(), body);
+            assert_eq!(code.name(), name);
+            every_prefix_refuses::<ErrorBody>(&bytes);
+        }
 
         let error = ErrorBody {
             code: ErrorCode::Conflict,

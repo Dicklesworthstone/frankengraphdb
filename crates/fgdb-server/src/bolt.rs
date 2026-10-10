@@ -30,7 +30,8 @@
 //!   and flush, including delayed PULLs and partial writes. This is the existing
 //!   cooperative Warden fence, not durable audit or revocation evidence.
 
-use crate::execute::{ReadSession, Refusal, query_refusal, read_session};
+use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
+use crate::recovery::Generation;
 use crate::shutdown::Waiter;
 use crate::{Served, Server, convert};
 use asupersync::Cx;
@@ -63,6 +64,9 @@ const HYDRATION_BATCH: usize = 4096;
 /// Why a connection ends without another message.
 #[derive(Debug, PartialEq, Eq)]
 struct Closed;
+
+#[cfg(test)]
+mod recovery_tests;
 
 /// Buffered socket I/O. Reads stop at the drain signal while idle.
 struct Io {
@@ -130,13 +134,15 @@ impl Io {
         &mut self,
         cx: &Cx,
         authority: Option<(&Authority, &CapabilityToken)>,
+        generation: Option<&Generation>,
     ) -> Result<(), Closed> {
-        flush_output(
+        flush_generation_output(
             &mut self.stream,
             cx,
             &mut self.out,
             &mut self.failed,
             authority,
+            generation,
             crate::unix_millis,
         )
         .await
@@ -149,19 +155,20 @@ impl Io {
 
 /// A flush's terminal state spans retries and future cancellation. Once a
 /// prefix might have escaped, another response must never restart the buffer.
-async fn flush_output<W: AsyncWrite + Unpin>(
+async fn flush_generation_output<W: AsyncWrite + Unpin>(
     stream: &mut W,
     cx: &Cx,
     out: &mut Vec<u8>,
     failed: &mut bool,
     authority: Option<(&Authority, &CapabilityToken)>,
+    generation: Option<&Generation>,
     clock: impl FnMut() -> u64,
 ) -> Result<(), Closed> {
     if *failed {
         return Err(Closed);
     }
     *failed = true;
-    write_output(stream, cx, out, authority, clock).await?;
+    write_output(stream, cx, out, authority, generation, clock).await?;
     out.clear();
     *failed = false;
     Ok(())
@@ -175,6 +182,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
     cx: &Cx,
     bytes: &[u8],
     authority: Option<(&Authority, &CapabilityToken)>,
+    generation: Option<&Generation>,
     mut clock: impl FnMut() -> u64,
 ) -> Result<(), Closed> {
     let authority = match authority {
@@ -195,31 +203,52 @@ async fn write_output<W: AsyncWrite + Unpin>(
         }
         Ok::<_, Closed>(())
     };
+    let mut watcher = generation.map(Generation::watcher);
     let mut written = 0;
     while written < bytes.len() {
         let count = poll_fn(|task| {
+            while watcher
+                .as_mut()
+                .is_some_and(|watcher| watcher.poll_changed(task))
+            {}
             if authorize().is_err() {
                 return Poll::Ready(Err(Closed));
             }
             let remaining = &bytes[written..];
-            match Pin::new(&mut *stream).poll_write(task, remaining) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(count)) if count > 0 && count <= remaining.len() => {
+            let mut physical = || Pin::new(&mut *stream).poll_write(task, remaining);
+            let progress = match generation {
+                Some(generation) => generation.with_current(physical).map_err(|_| Closed),
+                None => Ok(physical()),
+            };
+            match progress {
+                Err(error) => Poll::Ready(Err(error)),
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(Ok(count))) if count > 0 && count <= remaining.len() => {
                     Poll::Ready(Ok(count))
                 }
-                Poll::Ready(_) => Poll::Ready(Err(Closed)),
+                Ok(Poll::Ready(_)) => Poll::Ready(Err(Closed)),
             }
         })
         .await?;
         written += count;
     }
     poll_fn(|task| {
+        while watcher
+            .as_mut()
+            .is_some_and(|watcher| watcher.poll_changed(task))
+        {}
         if authorize().is_err() {
             return Poll::Ready(Err(Closed));
         }
-        match Pin::new(&mut *stream).poll_flush(task) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => Poll::Ready(result.map_err(|_| Closed)),
+        let mut physical = || Pin::new(&mut *stream).poll_flush(task);
+        let progress = match generation {
+            Some(generation) => generation.with_current(physical).map_err(|_| Closed),
+            None => Ok(physical()),
+        };
+        match progress {
+            Err(error) => Poll::Ready(Err(error)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(result)) => Poll::Ready(result.map_err(|_| Closed)),
         }
     })
     .await
@@ -255,9 +284,10 @@ impl Failure {
             ErrorCode::PermissionDenied => "Neo.ClientError.Security.Forbidden",
             ErrorCode::NotFoundOrUnauthorized => "Neo.ClientError.Database.DatabaseNotFound",
             ErrorCode::Budget => "Neo.ClientError.Statement.ExecutionFailed",
-            ErrorCode::Busy | ErrorCode::Draining => {
+            ErrorCode::Busy | ErrorCode::Draining | ErrorCode::DatabaseRecovering => {
                 "Neo.TransientError.General.DatabaseUnavailable"
             }
+            ErrorCode::DatabaseUnavailable => "Neo.DatabaseError.General.UnknownError",
             ErrorCode::Execution
             | ErrorCode::Conflict
             | ErrorCode::OutcomeUnknown
@@ -276,6 +306,7 @@ struct Pending<'s> {
     /// The generation read, which names the bookmark; none for an answer
     /// read from the server's bindings rather than the graph.
     seq: Option<CommitSeq>,
+    generation: Generation,
 }
 
 /// An explicit transaction: one read session, one pinned generation.
@@ -311,11 +342,11 @@ pub(crate) async fn run(
     let proposals: [u8; 16] = preamble[4..20].try_into().expect("sixteen bytes");
     let Some(version) = negotiate(&proposals) else {
         io.out.extend_from_slice(&[0, 0, 0, 0]);
-        let _ = io.flush(cx, None).await;
+        let _ = io.flush(cx, None, None).await;
         return;
     };
     io.out.extend_from_slice(&version.response());
-    if io.flush(cx, None).await.is_err() {
+    if io.flush(cx, None, None).await.is_err() {
         return;
     }
     let mut connection = Connection {
@@ -325,6 +356,7 @@ pub(crate) async fn run(
         pending: None,
         transaction: None,
         output_database: None,
+        output_generation: None,
         id: CONNECTIONS.fetch_add(1, Ordering::Relaxed),
     };
     while let Ok(message) = io.next_message(cx, &waiter).await {
@@ -333,12 +365,21 @@ pub(crate) async fn run(
             Err(error) => {
                 // An undecodable message leaves the stream state unknown.
                 io.respond(&failure(Failure::invalid(error.to_string())));
-                let _ = io.flush(cx, connection.output_authority()).await;
+                let _ = io.flush(cx, connection.output_authority(), None).await;
                 return;
             }
         };
         let close = connection.handle(cx, &mut io, request).await;
-        if io.flush(cx, connection.output_authority()).await.is_err() || close {
+        if io
+            .flush(
+                cx,
+                connection.output_authority(),
+                connection.output_generation.as_ref(),
+            )
+            .await
+            .is_err()
+            || close
+        {
             return;
         }
     }
@@ -360,6 +401,7 @@ struct Connection<'s> {
     /// Exact issuer selected by the request producing the buffered response,
     /// retained through final metadata after PULL/COMMIT consumes its owner.
     output_database: Option<&'s Served>,
+    output_generation: Option<Generation>,
     id: u64,
 }
 
@@ -373,6 +415,7 @@ impl<'s> Connection<'s> {
     /// Answer one request; true closes the connection.
     async fn handle(&mut self, cx: &Cx, io: &mut Io, request: Request) -> bool {
         self.output_database = None;
+        self.output_generation = None;
         match request {
             Request::Goodbye => return true,
             Request::Reset => {
@@ -422,10 +465,17 @@ impl<'s> Connection<'s> {
                 Some(transaction) => {
                     self.output_database = Some(transaction.db);
                     self.pending = None;
-                    Ok(vec![(
-                        "bookmark".to_owned(),
-                        Value::string(bookmark(&transaction.name, transaction.seq)),
-                    )])
+                    let generation = transaction.session.generation();
+                    match generation.check() {
+                        Ok(()) => {
+                            self.output_generation = Some(generation);
+                            Ok(vec![(
+                                "bookmark".to_owned(),
+                                Value::string(bookmark(&transaction.name, transaction.seq)),
+                            )])
+                        }
+                        Err(error) => Err(Failure::from_refusal(error.into())),
+                    }
                 }
                 None => Err(Failure::invalid("COMMIT outside a transaction")),
             },
@@ -449,6 +499,7 @@ impl<'s> Connection<'s> {
                 self.failed = true;
                 self.pending = None;
                 self.transaction = None;
+                self.output_generation = None;
                 io.respond(&failure(refusal));
             }
         }
@@ -530,6 +581,7 @@ impl<'s> Connection<'s> {
         let (session, seq) = read_session(cx, db, token)
             .await
             .map_err(Failure::from_refusal)?;
+        self.output_generation = Some(session.generation());
         self.transaction = Some(Transaction {
             name,
             db,
@@ -584,6 +636,8 @@ impl<'s> Connection<'s> {
             Some(session) => session,
             None => &mut self.transaction.as_mut().expect("in a transaction").session,
         };
+        let generation = session.generation();
+        self.output_generation = Some(generation.clone());
         let (columns, rows) = match session.query(&query_cx, query, &parameters) {
             Ok(QueryResult::Rows { columns, rows }) => (
                 columns,
@@ -614,6 +668,7 @@ impl<'s> Connection<'s> {
             database: name,
             db,
             seq: Some(seq),
+            generation,
         });
         let mut metadata = vec![
             (
@@ -634,6 +689,11 @@ impl<'s> Connection<'s> {
         };
         let db = pending.db;
         self.output_database = Some(db);
+        pending
+            .generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        self.output_generation = Some(pending.generation.clone());
         let token = self.token.as_ref().expect("authenticated");
         let count = if n < 0 {
             pending.rows.len()
@@ -650,7 +710,10 @@ impl<'s> Connection<'s> {
             io.respond(&Response::Record(row));
             // Stream large results instead of buffering every record.
             if index % RECORDS_PER_WRITE == RECORDS_PER_WRITE - 1
-                && io.flush(cx, Some((&db.authority, token))).await.is_err()
+                && io
+                    .flush(cx, Some((&db.authority, token)), Some(&pending.generation))
+                    .await
+                    .is_err()
             {
                 return Err(Failure::invalid("connection closed while streaming"));
             }
@@ -676,18 +739,27 @@ impl<'s> Connection<'s> {
     /// `CALL db.labels()` and its siblings: the schema names this token may
     /// see, the same filtered answer as HTTP's schema route.
     fn schema_rows(&mut self, extra: &Map, column: &str, kind: SchemaKind) -> Result<Map, Failure> {
-        let (name, db, seq) = match self.transaction.as_ref() {
+        let (name, db, seq, generation) = match self.transaction.as_ref() {
             Some(transaction) => (
                 transaction.name.clone(),
                 transaction.db,
                 Some(transaction.seq),
+                transaction.session.generation(),
             ),
             None => {
                 let (name, db) = self.database(extra)?;
-                (name, db, None)
+                let generation = db
+                    .db
+                    .generation()
+                    .map_err(|error| Failure::from_refusal(error.into()))?;
+                (name, db, None, generation)
             }
         };
         self.output_database = Some(db);
+        generation
+            .check()
+            .map_err(|error| Failure::from_refusal(error.into()))?;
+        self.output_generation = Some(generation.clone());
         let token = self.token.as_ref().expect("authenticated");
         let schema = crate::execute::schema(db, token).map_err(Failure::from_refusal)?;
         let names = match kind {
@@ -703,6 +775,7 @@ impl<'s> Connection<'s> {
             database: name,
             db,
             seq,
+            generation,
         });
         Ok(vec![
             (
@@ -718,6 +791,11 @@ impl<'s> Connection<'s> {
     fn route(&mut self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
+        self.output_generation = Some(
+            db.db
+                .generation()
+                .map_err(|error| Failure::from_refusal(error.into()))?,
+        );
         let address = get(routing, "address")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -985,7 +1063,9 @@ fn lookup(
             .map(|row| row.iter().map(convert::cell).collect())
             .collect()),
         Ok(QueryResult::Write { .. }) => Err(read_only()),
-        Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied)) => Ok(Vec::new()),
+        Err(SessionError::Query(QueryError::Authorization(fgdb_warden::Error::ScopeDenied))) => {
+            Ok(Vec::new())
+        }
         Err(error) => Err(Failure::from_refusal(query_refusal(error))),
     }
 }
@@ -1304,6 +1384,19 @@ fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Existing authority laws use the same production writer without a
+    // database generation; lifecycle laws supply one explicitly below.
+    async fn flush_output<W: AsyncWrite + Unpin>(
+        stream: &mut W,
+        cx: &Cx,
+        out: &mut Vec<u8>,
+        failed: &mut bool,
+        authority: Option<(&Authority, &CapabilityToken)>,
+        clock: impl FnMut() -> u64,
+    ) -> Result<(), Closed> {
+        flush_generation_output(stream, cx, out, failed, authority, None, clock).await
+    }
 
     fn graph_entities() -> Entities {
         Entities {

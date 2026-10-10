@@ -30,7 +30,9 @@
 //! nothing about databases.
 
 use crate::Server;
+use crate::commits::CommitWatcher;
 use crate::execute::{Answer, Refusal, read, write};
+use crate::recovery::Generation;
 use asupersync::Cx;
 use asupersync::http::h1::types::{Method, Request, Response};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -53,6 +55,7 @@ enum OutputDecision<'s> {
     Protected {
         issuer: &'s Authority,
         verified: VerifiedCapability<'s>,
+        generation: Option<(Generation, CommitWatcher)>,
     },
 }
 
@@ -60,6 +63,9 @@ pub(crate) struct OutputAuthority<'s> {
     decision: Mutex<OutputDecision<'s>>,
     stopped: AtomicBool,
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 impl<'s> OutputAuthority<'s> {
     pub(crate) fn new() -> Self {
@@ -112,21 +118,65 @@ impl<'s> OutputAuthority<'s> {
             self.stop();
             return false;
         };
-        *decision = OutputDecision::Protected { issuer, verified };
+        *decision = OutputDecision::Protected {
+            issuer,
+            verified,
+            generation: None,
+        };
         true
     }
 
-    fn authorize(&self, now: u64) -> io::Result<()> {
+    fn pin_generation(&self, generation: Generation) -> bool {
+        let Ok(mut decision) = self.decision.try_lock() else {
+            self.stop();
+            return false;
+        };
+        if let OutputDecision::Protected {
+            generation: pinned, ..
+        } = &mut *decision
+        {
+            let watcher = generation.watcher();
+            *pinned = Some((generation, watcher));
+            true
+        } else {
+            self.stop();
+            false
+        }
+    }
+
+    fn poll_authorized<T>(
+        &self,
+        now: u64,
+        task: &mut Context<'_>,
+        physical: impl FnOnce(&mut Context<'_>) -> T,
+    ) -> io::Result<T> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(self.stop());
         }
-        let decision = self.decision.try_lock().map_err(|_| self.stop())?;
-        if let OutputDecision::Protected { issuer, verified } = &*decision {
+        let mut decision = self.decision.try_lock().map_err(|_| self.stop())?;
+        if let OutputDecision::Protected {
+            issuer,
+            verified,
+            generation,
+        } = &mut *decision
+        {
             issuer
                 .recheck_at(verified, crate::TRUNK, now)
                 .map_err(|_| self.stop())?;
+            if let Some((generation, watcher)) = generation {
+                while watcher.poll_changed(task) {}
+                return generation
+                    .with_current(|| physical(task))
+                    .map_err(|_| self.stop());
+            }
         }
-        Ok(())
+        Ok(physical(task))
+    }
+
+    #[cfg(test)]
+    fn authorize(&self, now: u64) -> io::Result<()> {
+        let mut task = Context::from_waker(std::task::Waker::noop());
+        self.poll_authorized(now, &mut task, |_| ())
     }
 }
 
@@ -180,10 +230,16 @@ impl<T: AsyncWrite + Unpin> GuardedIo<'_, T> {
         bytes: &[u8],
         now: u64,
     ) -> Poll<io::Result<usize>> {
-        if let Err(error) = self.live().and_then(|()| self.authority.authorize(now)) {
+        if let Err(error) = self.live() {
             return Poll::Ready(Err(error));
         }
-        match Pin::new(&mut self.inner).poll_write(task, bytes) {
+        let result = self
+            .authority
+            .poll_authorized(now, task, |task| {
+                Pin::new(&mut self.inner).poll_write(task, bytes)
+            })
+            .unwrap_or_else(|error| Poll::Ready(Err(error)));
+        match result {
             Poll::Ready(Err(error)) => {
                 self.authority.stop();
                 Poll::Ready(Err(error))
@@ -193,10 +249,14 @@ impl<T: AsyncWrite + Unpin> GuardedIo<'_, T> {
     }
 
     fn poll_flush_at(&mut self, task: &mut Context<'_>, now: u64) -> Poll<io::Result<()>> {
-        if let Err(error) = self.live().and_then(|()| self.authority.authorize(now)) {
+        if let Err(error) = self.live() {
             return Poll::Ready(Err(error));
         }
-        match Pin::new(&mut self.inner).poll_flush(task) {
+        let result = self
+            .authority
+            .poll_authorized(now, task, |task| Pin::new(&mut self.inner).poll_flush(task))
+            .unwrap_or_else(|error| Poll::Ready(Err(error)));
+        match result {
             Poll::Ready(Err(error)) => {
                 self.authority.stop();
                 Poll::Ready(Err(error))
@@ -206,10 +266,14 @@ impl<T: AsyncWrite + Unpin> GuardedIo<'_, T> {
     }
 
     fn poll_shutdown_at(&mut self, task: &mut Context<'_>, now: u64) -> Poll<io::Result<()>> {
-        if let Err(error) = self.live().and_then(|()| self.authority.authorize(now)) {
+        if let Err(error) = self.live() {
             return Poll::Ready(Err(error));
         }
-        Pin::new(&mut self.inner).poll_shutdown(task)
+        self.authority
+            .poll_authorized(now, task, |task| {
+                Pin::new(&mut self.inner).poll_shutdown(task)
+            })
+            .unwrap_or_else(|error| Poll::Ready(Err(error)))
     }
 }
 
@@ -265,7 +329,7 @@ fn refusal_response(code: ErrorCode, message: &str) -> Response {
         ErrorCode::Conflict => 409,
         ErrorCode::Budget => 422,
         ErrorCode::Busy => 429,
-        ErrorCode::Draining => 503,
+        ErrorCode::Draining | ErrorCode::DatabaseRecovering | ErrorCode::DatabaseUnavailable => 503,
         ErrorCode::Execution | ErrorCode::OutcomeUnknown | ErrorCode::Cancelled => 500,
     };
     json_response(
@@ -399,8 +463,18 @@ fn schema_response<'s>(
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
     }
+    let generation = match db.db.generation() {
+        Ok(generation) => generation,
+        Err(error) => return refusal_response(error.code(), error.message()),
+    };
     match crate::execute::schema(db, &token) {
         Ok(schema) => {
+            if let Err(error) = generation.check() {
+                return refusal_response(error.code(), error.message());
+            }
+            if !output.pin_generation(generation) {
+                return refusal_response(ErrorCode::Execution, "connection unavailable");
+            }
             let list = |names: &[String]| {
                 names
                     .iter()
@@ -509,7 +583,22 @@ pub(crate) async fn respond<'s>(
         }
     };
     match answer {
-        Ok(answer) => answer_response(&answer),
+        Ok(answer) => {
+            if let Err(error) = answer.generation.check() {
+                return if matches!(answer.outcome, Outcome::WriteCommitted { .. }) {
+                    refusal_response(
+                        ErrorCode::OutcomeUnknown,
+                        "write completed before database recovery, but its result was not fully delivered; do not replay the write",
+                    )
+                } else {
+                    refusal_response(error.code(), error.message())
+                };
+            }
+            if !output.pin_generation(answer.generation.clone()) {
+                return refusal_response(ErrorCode::Execution, "connection unavailable");
+            }
+            answer_response(&answer)
+        }
         Err(Refusal { code, message }) => refusal_response(code, &message),
     }
 }

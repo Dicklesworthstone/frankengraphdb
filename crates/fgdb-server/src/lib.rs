@@ -55,24 +55,24 @@ mod convert;
 mod execute;
 mod http;
 mod keys;
+mod recovery;
 mod shutdown;
 mod symbols;
 mod tls;
 
 pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
+pub use recovery::DatabaseStatus;
 pub use shutdown::Shutdown;
 pub use symbols::{SymbolConflict, Symbols};
 pub use tls::{TlsConfig, TlsConfigError};
 
 use asupersync::Cx;
-use asupersync::fs::UnixVfs;
 use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server};
 use asupersync::http::h1::types::Response;
 use asupersync::net::TcpListener;
 use asupersync::runtime::TaskHandle;
 use asupersync::security::key::AuthKey;
 use asupersync::server::shutdown::ShutdownSignal;
-use asupersync::sync::RwLock;
 use core::future::poll_fn;
 use core::task::Poll;
 use fgdb::{Database, DatabaseKeys};
@@ -273,7 +273,7 @@ pub(crate) fn capability_from_hex(hex: &str) -> Option<CapabilityToken> {
 
 /// One served database and its fixed authority inputs.
 pub(crate) struct Served {
-    pub(crate) db: RwLock<Database<UnixVfs>>,
+    pub(crate) db: recovery::DatabaseSlot,
     pub(crate) authority: Authority,
     pub(crate) symbols: Symbols,
     pub(crate) write_relation: RelationId,
@@ -281,8 +281,8 @@ pub(crate) struct Served {
     pub(crate) write_policy: GraphWriteProgramPolicy,
     pub(crate) max_statements: usize,
     pub(crate) max_subscriptions: usize,
-    pub(crate) subscriptions: AtomicUsize,
-    pub(crate) commits: commits::CommitSignal,
+    pub(crate) subscriptions: Arc<AtomicUsize>,
+    pub(crate) commits: Arc<commits::CommitSignal>,
     pub(crate) namespace: [u8; 32],
     pub(crate) incarnation: [u8; 32],
     pub(crate) authority_commitment: [u8; 32],
@@ -340,6 +340,11 @@ impl Server {
     }
 
     /// Open the database at `path` and serve it under `config`.
+    ///
+    /// `cx` owns the database's recovery child and must belong to the host
+    /// region that lives with this server. Ending a temporary opening region
+    /// interrupts that child and fences the database; listener drain joins
+    /// it before returning.
     pub async fn open_database(
         &mut self,
         cx: &Cx,
@@ -372,10 +377,14 @@ impl Server {
         commitment_input.extend_from_slice(&namespace);
         commitment_input.extend_from_slice(&config.policy_epoch.to_be_bytes());
         let authority_commitment = fgdb_crypto::hash(&commitment_input).0;
+        let commits = Arc::new(commits::CommitSignal::default());
+        let subscriptions = Arc::new(AtomicUsize::new(0));
+        let db =
+            recovery::DatabaseSlot::new(cx, db, Arc::clone(&commits), Arc::clone(&subscriptions))?;
         self.databases.insert(
             config.name,
             Arc::new(Served {
-                db: RwLock::new(db),
+                db,
                 authority,
                 symbols: config.symbols,
                 write_relation: config.write_relation,
@@ -383,8 +392,8 @@ impl Server {
                 write_policy: config.write_policy,
                 max_statements: config.max_statements,
                 max_subscriptions: config.max_subscriptions,
-                subscriptions: AtomicUsize::new(0),
-                commits: commits::CommitSignal::default(),
+                subscriptions,
+                commits,
                 namespace,
                 incarnation,
                 authority_commitment,
@@ -401,6 +410,22 @@ impl Server {
         self.shutdown.clone()
     }
 
+    /// Inspect a served database's lifecycle from the trusted host. This is
+    /// not exposed by the unauthenticated health endpoint. A failed recovery
+    /// retains its diagnostic and never silently retries or serves the old pin.
+    pub fn database_status(&self, cx: &Cx, name: &str) -> Option<DatabaseStatus> {
+        cx.checkpoint().ok()?;
+        self.databases
+            .get(name)
+            .map(|database| database.db.status())
+    }
+
+    async fn join_database_workers(&self, cx: &Cx) {
+        for database in self.databases.values() {
+            database.db.stop_and_join(cx).await;
+        }
+    }
+
     /// Accept and serve FGP connections until the drain signal fires or `cx`
     /// is cancelled, then wait for every connection task to finish.
     pub async fn serve(self: Arc<Self>, cx: &Cx, listener: TcpListener) -> Result<(), ServerError> {
@@ -415,14 +440,22 @@ impl Server {
                     })
                 },
             )
-            .await?;
+            .await;
         // Admission is closed. Every connection drains at its next receive
         // point (an admitted statement finishes first), so this join is
         // bounded by in-flight statements, never by an idle client.
         self.shutdown.trigger();
+        let connections = match connections {
+            Ok(connections) => connections,
+            Err(error) => {
+                self.join_database_workers(cx).await;
+                return Err(error);
+            }
+        };
         for mut handle in connections {
             let _ = handle.join(cx).await;
         }
+        self.join_database_workers(cx).await;
         Ok(())
     }
 
@@ -445,11 +478,19 @@ impl Server {
                     })
                 },
             )
-            .await?;
+            .await;
         self.shutdown.trigger();
+        let connections = match connections {
+            Ok(connections) => connections,
+            Err(error) => {
+                self.join_database_workers(cx).await;
+                return Err(error);
+            }
+        };
         for mut handle in connections {
             let _ = handle.join(cx).await;
         }
+        self.join_database_workers(cx).await;
         Ok(())
     }
 
@@ -501,14 +542,23 @@ impl Server {
                     })
                 },
             )
-            .await?
+            .await
         };
         // Stop reading new requests on every keep-alive connection; a request
         // already being answered completes first.
         let _ = signal.begin_drain(Duration::from_secs(5));
+        self.shutdown.trigger();
+        let connections = match connections {
+            Ok(connections) => connections,
+            Err(error) => {
+                self.join_database_workers(cx).await;
+                return Err(error);
+            }
+        };
         for mut handle in connections {
             let _ = handle.join(cx).await;
         }
+        self.join_database_workers(cx).await;
         Ok(())
     }
 
@@ -560,18 +610,25 @@ impl Server {
             let local = stream.local_addr().ok();
             let server = Arc::clone(self);
             let connect = Arc::clone(&connect);
-            let handle = cx
-                .spawn(move |child| async move {
-                    let waiter = server.shutdown.waiter();
-                    let Some(stream) =
-                        tls::establish(&child, &waiter, stream, server.tls.as_ref(), protocol)
-                            .await
-                    else {
-                        return;
-                    };
-                    connect(server, child, stream, local).await;
-                })
-                .map_err(|_| ServerError::Spawn)?;
+            let handle = cx.spawn(move |child| async move {
+                let waiter = server.shutdown.waiter();
+                let Some(stream) =
+                    tls::establish(&child, &waiter, stream, server.tls.as_ref(), protocol).await
+                else {
+                    return;
+                };
+                connect(server, child, stream, local).await;
+            });
+            let handle = match handle {
+                Ok(handle) => handle,
+                Err(_) => {
+                    self.shutdown.trigger();
+                    for mut handle in connections {
+                        let _ = handle.join(cx).await;
+                    }
+                    return Err(ServerError::Spawn);
+                }
+            };
             connections.push(handle);
         }
         Ok(connections)

@@ -8,6 +8,7 @@
 
 use crate::commits::CommitWatcher;
 use crate::execute::{Answer, poll, read, subscribe, write};
+use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
 use asupersync::Cx;
@@ -49,6 +50,7 @@ enum Idle {
     Frame(Box<Frame>),
     Closed,
     Shutdown,
+    Recovery(Unavailable),
 }
 
 /// Why a result stream stopped before its END.
@@ -59,6 +61,8 @@ enum Stop {
     Cancelled,
     /// The client asked to drain, or the server is shutting down.
     Drain,
+    /// The old generation stopped at a complete physical-frame boundary.
+    Recovery(Unavailable),
 }
 
 struct Lane {
@@ -74,6 +78,7 @@ struct Lane {
     /// The selected issuer and bearer credential remain live while output can
     /// wait for credit or socket readiness. A Ready binding is not authority.
     send_authority: Option<(Arc<Served>, CapabilityToken)>,
+    send_generation: Option<Generation>,
 }
 
 pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
@@ -100,6 +105,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
         },
         finished: VecDeque::new(),
         send_authority: None,
+        send_generation: None,
     };
     let waiter = server.shutdown.waiter();
     let mut transcript: Option<[u8; 32]> = None;
@@ -365,9 +371,29 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                     continue;
                 };
-                let frontier = match chosen.db.read(cx).await {
-                    Ok(db) => db.frontier().map(|seq| seq.0),
-                    Err(_) => return,
+                lane.send_authority = Some((Arc::clone(&chosen), token.clone()));
+                let (frontier, generation) = match chosen.db.read(cx).await {
+                    Ok(db) => (db.frontier().map(|seq| seq.0), db.generation()),
+                    Err(error) => {
+                        let refusal = ErrorBody {
+                            code: error.code(),
+                            message: error.message().into(),
+                        };
+                        if !lane
+                            .send(
+                                cx,
+                                FrameKind::Error,
+                                request,
+                                StreamId::CONTROL,
+                                binding,
+                                &refusal,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        continue;
+                    }
                 };
                 let Ok(frontier) = frontier else {
                     return lane
@@ -385,21 +411,23 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 if lane.conn.selected(ready.binding(session)).is_err() {
                     return;
                 }
-                lane.send_authority = Some((Arc::clone(&chosen), token.clone()));
                 selected = Some(chosen);
-                if !lane
-                    .send(
-                        cx,
-                        FrameKind::Ready,
-                        request,
-                        StreamId::CONTROL,
-                        binding,
-                        &ready,
-                    )
-                    .await
-                {
+                let Ok(payload) = ready.encode() else { return };
+                let Ok(frame) = Frame::new(
+                    FrameKind::Ready,
+                    request,
+                    StreamId::CONTROL,
+                    binding,
+                    payload,
+                    lane.send_limits,
+                ) else {
+                    return;
+                };
+                lane.send_generation = Some(generation);
+                if lane.send_generation_frame(cx, &frame).await.is_err() {
                     return;
                 }
+                lane.send_generation = None;
             }
             FrameKind::Execute => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
@@ -417,6 +445,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     Ok(()) => {}
                     Err(Stop::Cancelled) => {}
                     Err(Stop::Transport) => return,
+                    Err(Stop::Recovery(_)) => return,
                     Err(Stop::Drain) => {
                         lane.goodbye(cx).await;
                         return;
@@ -505,6 +534,23 @@ impl Lane {
     /// every physical write/flush attempt, including a resumed partial write.
     /// An invalidated output closes delivery; it cannot undo a decided commit.
     async fn send_frame(&mut self, cx: &Cx, frame: &Frame) -> bool {
+        self.write_frame(cx, frame, None).await.is_ok()
+    }
+
+    async fn send_generation_frame(&mut self, cx: &Cx, frame: &Frame) -> Result<(), Stop> {
+        let generation = self.send_generation.clone().ok_or(Stop::Transport)?;
+        self.write_frame(cx, frame, Some(generation)).await
+    }
+
+    /// Terminal controls retain Warden authority but need no generation: in
+    /// particular the write that caused recovery still owes OutcomeUnknown.
+    /// An invalidated data frame may be replaced only before its first byte.
+    async fn write_frame(
+        &mut self,
+        cx: &Cx,
+        frame: &Frame,
+        generation: Option<Generation>,
+    ) -> Result<(), Stop> {
         let authority = self
             .send_authority
             .as_ref()
@@ -512,30 +558,57 @@ impl Lane {
         let Ok(authorization) =
             OutputGuard::new(self.conn.binding(), authority, crate::unix_millis())
         else {
-            return false;
+            return Err(Stop::Transport);
         };
         let Ok(ticket) = self.conn.queue_send() else {
-            return false;
+            return Err(Stop::Transport);
         };
         if self.writer.queue(cx, frame).is_err() {
             let _ = self
                 .conn
                 .send_terminal(&ticket, SendTerminus::CancelledBeforeWrite);
-            return false;
+            return Err(Stop::Transport);
         }
-        let result = self
-            .writer
-            .send(cx, |header| {
-                authorization.authorize(header, crate::unix_millis())
-            })
-            .await;
-        let terminus = if result.is_ok() {
-            SendTerminus::Sent
-        } else {
-            SendTerminus::Failed
+        let mut watcher = generation.as_ref().map(Generation::watcher);
+        let result = poll_fn(|task| {
+            // Register before the generation check. An epoch transition while
+            // the socket is Pending must wake this task without client input.
+            while watcher
+                .as_mut()
+                .is_some_and(|watcher| watcher.poll_changed(task))
+            {}
+            let mut send = || {
+                self.writer.poll_send(cx, task, |header| {
+                    authorization.authorize(header, crate::unix_millis())
+                })
+            };
+            let progress = match generation.as_ref() {
+                Some(generation) => generation.with_current(send),
+                None => Ok(send()),
+            };
+            match progress {
+                Ok(progress) => {
+                    progress.map(|result| result.map(|_| ()).map_err(|_| Stop::Transport))
+                }
+                Err(error) => {
+                    let unwritten = self.writer.accepted_bytes() == Some(0);
+                    let _ = self.writer.abandon(cx);
+                    Poll::Ready(Err(if unwritten {
+                        Stop::Recovery(error)
+                    } else {
+                        Stop::Transport
+                    }))
+                }
+            }
+        })
+        .await;
+        let terminus = match &result {
+            Ok(()) => SendTerminus::Sent,
+            Err(Stop::Recovery(_)) => SendTerminus::CancelledBeforeWrite,
+            Err(_) => SendTerminus::Failed,
         };
         let _ = self.conn.send_terminal(&ticket, terminus);
-        result.is_ok()
+        result
     }
 
     async fn send_bytes(
@@ -623,6 +696,7 @@ impl Lane {
         request: u64,
         statement: Execute,
     ) -> Result<(), Stop> {
+        self.send_generation = None;
         let binding = self.conn.binding();
         let stream = loop {
             let mut id = [0u8; 16];
@@ -666,6 +740,7 @@ impl Lane {
                 .conn
                 .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
             self.finish(stream);
+            self.send_generation = None;
             return delivered;
         }
         let answer = match statement.mode {
@@ -699,6 +774,22 @@ impl Lane {
                 }
             }
         };
+        let delivered = match delivered {
+            Err(Stop::Recovery(error)) => {
+                let (code, message) = if committed {
+                    (
+                        ErrorCode::OutcomeUnknown,
+                        "write completed before database recovery, but its result was not fully delivered; do not replay the write",
+                    )
+                } else {
+                    (error.code(), error.message())
+                };
+                self.refuse(cx, request, stream, binding, code, message)
+                    .await
+            }
+            result => result,
+        };
+        self.send_generation = None;
         // A committed write's semantic terminal is durable whether or not its
         // END reached the client; an ephemeral read simply ends.
         let terminus = if committed {
@@ -746,13 +837,17 @@ impl Lane {
         };
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
+        self.send_generation = Some(subscription.generation.clone());
         let mut columns = Some(core::mem::take(&mut subscription.columns));
         let mut watcher = db.commits.watcher();
-        let mut delivered = 0u64;
+        let mut delivered = None;
         let result = loop {
             let batch = match poll(cx, db, token, &mut subscription).await {
                 Ok(batch) => batch,
                 Err(refusal) => {
+                    if let Err(error) = subscription.generation.check() {
+                        break Err(Stop::Recovery(error));
+                    }
                     break self
                         .refuse(cx, request, stream, binding, refusal.code, &refusal.message)
                         .await;
@@ -796,6 +891,7 @@ impl Lane {
                 {
                     break Err(stop);
                 }
+                delivered = Some(frontier);
                 if subscription.consumer.acknowledge(batch.receipt()).is_err() {
                     break self
                         .refuse(
@@ -808,15 +904,22 @@ impl Lane {
                         )
                         .await;
                 }
-                delivered = frontier;
                 continue;
             }
             match self.idle(cx, waiter, &mut watcher).await {
                 Idle::Commit => {}
+                Idle::Recovery(error) => break Err(Stop::Recovery(error)),
                 Idle::Closed => break Err(Stop::Transport),
                 Idle::Shutdown => {
                     let _ = self
-                        .end(cx, &mut window, request, stream, binding, delivered)
+                        .end(
+                            cx,
+                            &mut window,
+                            request,
+                            stream,
+                            binding,
+                            delivered.unwrap_or(0),
+                        )
                         .await;
                     break Err(Stop::Drain);
                 }
@@ -825,7 +928,14 @@ impl Lane {
                     match header.kind() {
                         FrameKind::QueryCancel if header.stream_id() == stream => {
                             break self
-                                .end(cx, &mut window, request, stream, binding, delivered)
+                                .end(
+                                    cx,
+                                    &mut window,
+                                    request,
+                                    stream,
+                                    binding,
+                                    delivered.unwrap_or(0),
+                                )
                                 .await;
                         }
                         FrameKind::WindowUpdate if header.stream_id() == stream => {
@@ -853,7 +963,14 @@ impl Lane {
                         }
                         FrameKind::Drain => {
                             let _ = self
-                                .end(cx, &mut window, request, stream, binding, delivered)
+                                .end(
+                                    cx,
+                                    &mut window,
+                                    request,
+                                    stream,
+                                    binding,
+                                    delivered.unwrap_or(0),
+                                )
                                 .await;
                             break Err(Stop::Drain);
                         }
@@ -867,7 +984,29 @@ impl Lane {
             }
         };
         subscription.consumer.close();
-        result
+        match result {
+            Err(Stop::Recovery(_)) => {
+                let reset = fgdb_protocol::body::SubscriptionReset {
+                    last_delivered_seq: delivered,
+                };
+                if self
+                    .send(
+                        cx,
+                        FrameKind::SubscriptionReset,
+                        request,
+                        stream,
+                        binding,
+                        &reset,
+                    )
+                    .await
+                {
+                    Ok(())
+                } else {
+                    Err(Stop::Transport)
+                }
+            }
+            result => result,
+        }
     }
 
     /// One subscription batch, split across frames sized to the stream's
@@ -1013,16 +1152,13 @@ impl Lane {
         // END is a control-sized frame; it is not withheld for credit here,
         // because a cancelled stream may have none left and must still end.
         let _ = window;
-        if self.send_frame(cx, &frame).await {
-            Ok(())
-        } else {
-            Err(Stop::Transport)
-        }
+        self.send_generation_frame(cx, &frame).await
     }
 
     /// Wait while a subscription is caught up: for a commit, a client frame,
     /// the connection closing, or the drain signal.
-    async fn idle(&mut self, cx: &Cx, waiter: &Waiter, watcher: &mut CommitWatcher<'_>) -> Idle {
+    async fn idle(&mut self, cx: &Cx, waiter: &Waiter, watcher: &mut CommitWatcher) -> Idle {
+        let generation = self.send_generation.clone();
         let Self {
             reader,
             conn,
@@ -1030,6 +1166,11 @@ impl Lane {
             ..
         } = self;
         poll_fn(|task| {
+            if let Some(generation) = &generation
+                && let Err(error) = generation.check()
+            {
+                return Poll::Ready(Idle::Recovery(error));
+            }
             if waiter.poll_triggered(task) {
                 return Poll::Ready(Idle::Shutdown);
             }
@@ -1129,6 +1270,7 @@ impl Lane {
         binding: Binding,
         answer: Answer,
     ) -> Result<(), Stop> {
+        self.send_generation = Some(answer.generation);
         let mut window = FlowWindow::new(self.initial_window, self.maximum_window)
             .map_err(|_| Stop::Transport)?;
         let framing = binding.header_len() + CHUNK_OVERHEAD;
@@ -1302,11 +1444,12 @@ impl Lane {
             }
             let mut reservation = window.reserve(cost).map_err(|_| Stop::Transport)?;
             reservation.begin_write().map_err(|_| Stop::Transport)?;
-            return if self.send_frame(cx, frame).await {
-                reservation.sent().map_err(|_| Stop::Transport)
-            } else {
-                let _ = reservation.failed();
-                Err(Stop::Transport)
+            return match self.send_generation_frame(cx, frame).await {
+                Ok(()) => reservation.sent().map_err(|_| Stop::Transport),
+                Err(stop) => {
+                    let _ = reservation.failed();
+                    Err(stop)
+                }
             };
         }
     }
@@ -1323,10 +1466,17 @@ impl Lane {
         request: u64,
         binding: Binding,
     ) -> Result<(), Stop> {
-        let inbound = match self.receive(cx, waiter).await {
-            Inbound::Frame(inbound) => inbound,
-            Inbound::Closed => return Err(Stop::Transport),
-            Inbound::Shutdown => return Err(Stop::Drain),
+        let generation = self.send_generation.clone().ok_or(Stop::Transport)?;
+        let mut watcher = generation.watcher();
+        let inbound = loop {
+            generation.check().map_err(Stop::Recovery)?;
+            match self.idle(cx, waiter, &mut watcher).await {
+                Idle::Frame(inbound) => break inbound,
+                Idle::Closed => return Err(Stop::Transport),
+                Idle::Shutdown => return Err(Stop::Drain),
+                Idle::Recovery(error) => return Err(Stop::Recovery(error)),
+                Idle::Commit => {}
+            }
         };
         let header = *inbound.header();
         match header.kind() {
@@ -1492,6 +1642,9 @@ struct OutputGuard<'a> {
     binding: Binding,
     authority: Option<(&'a Authority, VerifiedCapability<'a>)>,
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 impl<'a> OutputGuard<'a> {
     fn new(
