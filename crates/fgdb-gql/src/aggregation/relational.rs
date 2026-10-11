@@ -92,10 +92,10 @@ impl PreparedGraphAggregate {
         self.relational_input.as_ref()
     }
 
-    /// Normalize a native vertex or one-edge COLLECT into the existing ordered
-    /// relational group owner. The retained source is the original graph plan,
-    /// with at most two private vertex identities, not a fabricated schema leaf.
-    /// Every input expression and result clause remains in the definition.
+    /// Normalize native COLLECT with a proved occurrence order into the
+    /// existing relational group owner. The retained source is the complete
+    /// original graph plan, not a fabricated schema leaf. Every input expression
+    /// and result clause remains in the definition.
     ///
     /// Ordinary native vertex scans visit ascending identities. Their private
     /// leading identity makes that occurrence order explicit in the row bag.
@@ -108,10 +108,16 @@ impl PreparedGraphAggregate {
     /// multiplicity. Neither argument order nor change-arrival order can stand
     /// in for the original occurrence sequence.
     ///
-    /// Multi-hop/scoped/captured sources, hidden columns and excessive widths
-    /// refuse. The consumer must still admit and meter the complete returned
-    /// relation through its ordinary maintained circuit. Iterator callers that
-    /// supply vertices in arbitrary order have no native ordering guarantee.
+    /// Computed inputs can retain multi-hop and scoped graph sources when
+    /// their complete rows use canonical ordering. Unprojected inputs still
+    /// require the native vertex/one-edge occurrence proof; visitation order
+    /// must never be replaced with argument order. Hidden source columns,
+    /// noncanonical input ordering and unsupported schema widths refuse.
+    /// The consumer must independently admit and meter the COMPLETE returned
+    /// relation through its ordinary maintained circuit. This normalization
+    /// does not add an eager fallback for unsupported source operators.
+    /// Iterator callers that supply vertices in arbitrary order have no native
+    /// ordering guarantee.
     #[must_use]
     pub fn incremental_collection_relation(&self) -> Option<PreparedGraphSetAggregate> {
         if self.relational_input.is_some()
@@ -139,7 +145,31 @@ impl PreparedGraphAggregate {
         let (source, projection, prefix) =
             match &self.computed_input {
                 Some(computed) => {
-                    let (source, _) = self.input.incremental_collection_source(None)?;
+                    // Batch computed aggregation first materializes and orders
+                    // COMPLETE graph rows, then evaluates every input expression.
+                    // This order does not depend on graph topology: the source
+                    // may contain joins, OPTIONAL or EXISTS. Keep those rows as
+                    // a private leading key, not the computed argument values.
+                    let [
+                        ..,
+                        GlaOperator::ProjectValues { columns },
+                        GlaOperator::OrderByValues,
+                        GlaOperator::Limit { offset: 0, count: None },
+                    ] = self.input.plan().operators()
+                    else {
+                        return None;
+                    };
+                    if columns.is_empty()
+                        || columns.len() != self.input.columns().len()
+                        || columns.len() >= MAX_PATTERN_VERTICES
+                        || !self.input.preserves_duplicates()
+                    {
+                        // Hidden order columns cannot be reconstructed from a
+                        // visible row. Reserve the counted source's private
+                        // COUNT column inside its complete-schema bound.
+                        return None;
+                    }
+                    let source = self.input_pattern().clone();
                     let prefix = source.columns().len();
                     let mut projection: Vec<_> = (0..prefix)
                         .map(|column| {
