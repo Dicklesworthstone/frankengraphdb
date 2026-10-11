@@ -1328,7 +1328,7 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
                         block
                             .property_patch
                             .as_ref()
-                            .map(|patch| patch.bytes.as_slice())
+                            .map(|patch| patch.bytes.as_ref())
                     )
                     .await
                     .expect("batch block"),
@@ -1363,7 +1363,7 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
                         .get_edge_property_patch_bytes(&cx, id)
                         .await
                         .expect("batch property bytes"),
-                    patch.bytes
+                    patch.bytes.as_ref()
                 );
             }
         }
@@ -1378,7 +1378,7 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
                     .get_patch_bytes(&cx, id)
                     .await
                     .expect("batch vertex bytes"),
-                patch.bytes
+                patch.bytes.as_ref()
             );
         }
         assert_eq!(

@@ -3965,7 +3965,7 @@ impl<V: Vfs + Clone> Database<V> {
                     block
                         .property_patch
                         .as_ref()
-                        .map(|patch| patch.bytes.as_slice()),
+                        .map(|patch| patch.bytes.as_ref()),
                 )
                 .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -5809,7 +5809,7 @@ fn consolidated_writer(
                     bytes,
                     Some(fgdb_strata::writer::SealedPropertyPatch {
                         patch_id,
-                        bytes: patch_bytes,
+                        bytes: patch_bytes.into(),
                     }),
                 )
             }
@@ -5825,7 +5825,7 @@ fn consolidated_writer(
         chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
         sealed.push(fgdb_strata::writer::SealedBlock {
             block_id,
-            bytes,
+            bytes: bytes.into(),
             first_seq,
             last_seq,
             property_patch,
@@ -5845,7 +5845,7 @@ fn consolidated_writer(
             fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
         sealed_patches.push(fgdb_strata::writer::SealedPatch {
             patch_id: fgdb_strata::vertex::vertex_patch_id(keys.k_oid(), keys.namespace, &bytes),
-            bytes,
+            bytes: bytes.into(),
             first_seq,
             last_seq,
         });
@@ -6147,7 +6147,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
                 block
                     .property_patch
                     .as_ref()
-                    .map(|patch| patch.bytes.as_slice()),
+                    .map(|patch| patch.bytes.as_ref()),
             )
             .await?;
     }

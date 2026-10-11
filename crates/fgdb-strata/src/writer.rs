@@ -52,7 +52,9 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedBlock {
     pub block_id: ObjectId,
-    pub bytes: Vec<u8>,
+    /// Immutable encoded payload. Retained writers and historical preparation
+    /// anchors share these bytes; cloning a writer never copies sealed history.
+    pub bytes: Arc<[u8]>,
     pub first_seq: CommitSeq,
     pub last_seq: CommitSeq,
     /// The FGSP object this block's locators reference, if any. The caller
@@ -65,7 +67,7 @@ pub struct SealedBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedPropertyPatch {
     pub patch_id: ObjectId,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
 }
 
 impl SealedBlock {
@@ -121,7 +123,7 @@ enum VertexContentUpdate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedPatch {
     pub patch_id: ObjectId,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
     pub first_seq: CommitSeq,
     pub last_seq: CommitSeq,
 }
@@ -269,14 +271,15 @@ impl core::error::Error for WriteError {}
 
 /// Folds delta rows into sealed blocks for one partition.
 ///
-/// `Clone` is load-bearing, not convenience: `publish` consumes the writer,
-/// so a caller that keeps folding across publications — the incremental
-/// snapshot path that removes the O(history) per-commit rebuild
-/// (`fgdb-fujt`) — publishes from a clone and retains the original. The fold
-/// is a deterministic function of the row sequence, so a clone-publish at
-/// sequence k is byte-identical to a fresh writer replaying rows 1..k and
-/// publishing; `tests/incremental_publish_equals_rebuild.rs` pins exactly
-/// that equality, per shape, with a control that can fail.
+/// `Clone` preserves an exact independent fold, including live rows and spent
+/// identities, for historical preparation. Sealed payloads are immutable and
+/// shared individually, so the clone copies maps and object metadata without
+/// copying historical encoded bytes. Continued folding changes only the
+/// clone's private staging/live state and appends new sealed objects.
+/// `publish_in_place` serves the retained live writer without a clone. A
+/// clone-publish at sequence k remains byte-identical to a fresh writer
+/// replaying rows 1..k; `tests/incremental_publish_equals_rebuild.rs` pins that
+/// equality, independent subsequent mutation, and payload sharing.
 #[derive(Debug, Clone)]
 pub struct BlockWriter {
     graph: GraphId,
@@ -1194,7 +1197,7 @@ impl BlockWriter {
                     bytes,
                     Some(SealedPropertyPatch {
                         patch_id,
-                        bytes: patch_bytes,
+                        bytes: patch_bytes.into(),
                     }),
                 )
             };
@@ -1204,7 +1207,7 @@ impl BlockWriter {
             advanced.insert(family, DeltaBlockVersion(sealed_id));
             sealed.push(SealedBlock {
                 block_id: sealed_id,
-                bytes,
+                bytes: bytes.into(),
                 first_seq,
                 last_seq,
                 property_patch,
@@ -1516,7 +1519,7 @@ impl BlockWriter {
             let (first_seq, last_seq) = span_of_rows(&chunk).expect("non-empty");
             sealed.push(SealedPatch {
                 patch_id: vertex_patch_id(keys.0, keys.1, &bytes),
-                bytes,
+                bytes: bytes.into(),
                 first_seq,
                 last_seq,
             });
