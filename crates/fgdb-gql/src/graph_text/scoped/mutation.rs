@@ -267,7 +267,9 @@ impl<'a> Parser<'a> {
             deletion_mode = Some((deleting, detach));
             loop {
                 self.mutation_action_capacity(actions.len())?;
-                let variable = if deleting {
+                // DETACH DELETE names a vertex. A plain DELETE, like SET and
+                // REMOVE, names a vertex or one fixed-length relationship.
+                let variable = if detach {
                     self.variable()?
                 } else {
                     self.property_variable()?
