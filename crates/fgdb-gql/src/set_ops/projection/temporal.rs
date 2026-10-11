@@ -72,6 +72,8 @@ impl<'a> MapArguments<'a> {
             F::Date => (true, false),
             F::LocalTime | F::Time => (false, true),
             F::LocalDateTime | F::DateTime => (true, true),
+            // Only the constructors take a map of fields.
+            _ => return Err(Invalid),
         };
         let zoned = matches!(function, F::Time | F::DateTime);
         let mut arguments = Self::default();
@@ -140,7 +142,258 @@ pub(crate) fn construct(
             local_datetime(argument).map(CanonicalScalar::LocalDateTime)
         }
         GraphTemporalFunction::DateTime => datetime(argument).map(CanonicalScalar::Timestamp),
+        GraphTemporalFunction::TruncateDate
+        | GraphTemporalFunction::TruncateLocalTime
+        | GraphTemporalFunction::TruncateTime
+        | GraphTemporalFunction::TruncateLocalDateTime
+        | GraphTemporalFunction::TruncateDateTime => truncate(function, arguments(argument)?),
+        GraphTemporalFunction::FromEpoch | GraphTemporalFunction::FromEpochMillis => {
+            from_epoch_call(function, arguments(argument)?)
+        }
     }
+}
+
+/// A dotted call's evaluated argument list.
+fn arguments(argument: &GraphValue) -> Result<&[GraphValue], GraphIntegerErrorKind> {
+    match argument {
+        GraphValue::List(items) => Ok(&items[..]),
+        _ => Err(Invalid),
+    }
+}
+
+/// A truncation unit, from the millennium down to the microsecond.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Unit {
+    Millennium,
+    Century,
+    Decade,
+    Year,
+    WeekYear,
+    Quarter,
+    Month,
+    Week,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+}
+
+impl Unit {
+    fn named(name: &str) -> Option<Self> {
+        [
+            ("millennium", Self::Millennium),
+            ("century", Self::Century),
+            ("decade", Self::Decade),
+            ("year", Self::Year),
+            ("weekYear", Self::WeekYear),
+            ("quarter", Self::Quarter),
+            ("month", Self::Month),
+            ("week", Self::Week),
+            ("day", Self::Day),
+            ("hour", Self::Hour),
+            ("minute", Self::Minute),
+            ("second", Self::Second),
+            ("millisecond", Self::Millisecond),
+            ("microsecond", Self::Microsecond),
+        ]
+        .into_iter()
+        .find_map(|(spelling, unit)| name.eq_ignore_ascii_case(spelling).then_some(unit))
+    }
+}
+
+/// `kind.truncate(unit, value[, map])`: the value cut down to the start of
+/// its `unit`, then the map's fields set over it as over a base. A date
+/// truncates to a day or coarser, a time to a day or finer; a date-time to
+/// any unit, a time-of-day unit keeping its date. NULL for a NULL unit or
+/// value. A map's `timezone` sets the offset without moving the clock, unlike
+/// a constructor's. As openCypher does, a sub-millisecond field after a
+/// millisecond or microsecond truncation keeps the truncated digits:
+/// millisecond truncation then `{nanosecond: 2}` is `.645000002`.
+fn truncate(
+    function: GraphTemporalFunction,
+    items: &[GraphValue],
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    use GraphTemporalFunction as F;
+    let (unit, value, map) = match items {
+        [unit, value] => (unit, value, None),
+        [unit, value, map] => (unit, value, Some(map)),
+        _ => return Err(Invalid),
+    };
+    if [unit, value]
+        .iter()
+        .any(|value| matches!(value, GraphValue::Scalar(CanonicalScalar::Null)))
+    {
+        return Ok(CanonicalScalar::Null);
+    }
+    let GraphValue::Scalar(CanonicalScalar::Text(unit)) = unit else {
+        return Err(Invalid);
+    };
+    let unit = Unit::named(unit.as_str()).ok_or(Invalid)?;
+    let mut arguments = match map {
+        None | Some(GraphValue::Scalar(CanonicalScalar::Null)) => MapArguments::default(),
+        Some(GraphValue::Map { keys, values }) => {
+            let kind = match function {
+                F::TruncateDate => F::Date,
+                F::TruncateLocalTime => F::LocalTime,
+                F::TruncateTime => F::Time,
+                F::TruncateLocalDateTime => F::LocalDateTime,
+                _ => F::DateTime,
+            };
+            MapArguments::split(kind, keys, values)?
+        }
+        Some(_) => return Err(Invalid),
+    };
+    if arguments.date_base.is_some()
+        || arguments.time_base.is_some()
+        || arguments.datetime_base.is_some()
+        || arguments.epoch_seconds.is_some()
+        || arguments.epoch_millis.is_some()
+    {
+        return Err(Invalid);
+    }
+    let zone = arguments
+        .timezone
+        .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+        .transpose()?;
+    Ok(match function {
+        F::TruncateDate => {
+            let date = truncate_date(date_part(value)?, unit)?;
+            CanonicalScalar::Date(date_from_fields(arguments.date, Some(date))?)
+        }
+        F::TruncateLocalTime => {
+            let time = truncate_time(time_part(value)?.0, unit)?;
+            keep_subseconds(&mut arguments.time, time, unit);
+            CanonicalScalar::LocalTime(time_from_fields(arguments.time, Some(time), false)?)
+        }
+        F::TruncateTime => {
+            let (time, offset) = time_part(value)?;
+            let time = truncate_time(time, unit)?;
+            keep_subseconds(&mut arguments.time, time, unit);
+            let time = time_from_fields(arguments.time, Some(time), false)?;
+            let offset = zone.or(offset).unwrap_or(0);
+            CanonicalScalar::Time(CanonicalTime::new(time, offset).map_err(|_| Invalid)?)
+        }
+        _ => {
+            let (local, offset) = match value {
+                GraphValue::Scalar(CanonicalScalar::Date(day)) => (
+                    CanonicalLocalDateTime::new(*day, CanonicalLocalTime::MIDNIGHT),
+                    None,
+                ),
+                other => zoned_part(other)?,
+            };
+            let (date, time) = if unit <= Unit::Day {
+                (
+                    truncate_date(local.date(), unit)?,
+                    CanonicalLocalTime::MIDNIGHT,
+                )
+            } else {
+                (local.date(), truncate_time(local.time(), unit)?)
+            };
+            keep_subseconds(&mut arguments.time, time, unit);
+            let local = CanonicalLocalDateTime::new(
+                date_from_fields(arguments.date, Some(date))?,
+                time_from_fields(arguments.time, Some(time), true)?,
+            );
+            if function == F::TruncateLocalDateTime {
+                CanonicalScalar::LocalDateTime(local)
+            } else {
+                CanonicalScalar::Timestamp(at_offset(local, zone.or(offset).unwrap_or(0))?)
+            }
+        }
+    })
+}
+
+/// `date` at the start of its `unit`, which must be a day or coarser.
+fn truncate_date(date: CanonicalDate, unit: Unit) -> Result<CanonicalDate, GraphIntegerErrorKind> {
+    let (year, month, _) = date.civil();
+    let floor = |step: i64| year.div_euclid(step) * step;
+    let truncated = match unit {
+        Unit::Millennium => CanonicalDate::from_civil(floor(1_000), 1, 1),
+        Unit::Century => CanonicalDate::from_civil(floor(100), 1, 1),
+        Unit::Decade => CanonicalDate::from_civil(floor(10), 1, 1),
+        Unit::Year => CanonicalDate::from_civil(year, 1, 1),
+        Unit::WeekYear => CanonicalDate::from_iso_week(date.iso_week().0, 1, 1),
+        Unit::Quarter => CanonicalDate::from_civil(year, (month - 1) / 3 * 3 + 1, 1),
+        Unit::Month => CanonicalDate::from_civil(year, month, 1),
+        Unit::Week => {
+            CanonicalDate::from_epoch_day(date.epoch_day() - i64::from(date.weekday() - 1))
+        }
+        Unit::Day => Ok(date),
+        _ => return Err(Invalid),
+    };
+    truncated.map_err(|_| Invalid)
+}
+
+/// `time` at the start of its `unit`, which must be a day or finer.
+fn truncate_time(
+    time: CanonicalLocalTime,
+    unit: Unit,
+) -> Result<CanonicalLocalTime, GraphIntegerErrorKind> {
+    const NANOS: u64 = 1_000_000_000;
+    let step = match unit {
+        Unit::Day => NANOS_PER_DAY,
+        Unit::Hour => 3_600 * NANOS,
+        Unit::Minute => 60 * NANOS,
+        Unit::Second => NANOS,
+        Unit::Millisecond => 1_000_000,
+        Unit::Microsecond => 1_000,
+        _ => return Err(Invalid),
+    };
+    let nanos = time.nanos_of_day();
+    CanonicalLocalTime::from_nanos_of_day(nanos - nanos % step).map_err(|_| Invalid)
+}
+
+/// After a millisecond (microsecond) truncation, a finer fraction field
+/// without its millisecond (microsecond) keeps the truncated digits.
+fn keep_subseconds(fields: &mut [Option<i64>; 6], truncated: CanonicalLocalTime, unit: Unit) {
+    let [.., millisecond, microsecond, nanosecond] = fields;
+    let fraction = i64::from(truncated.nanosecond());
+    if unit == Unit::Millisecond
+        && millisecond.is_none()
+        && (microsecond.is_some() || nanosecond.is_some())
+    {
+        *millisecond = Some(fraction / 1_000_000);
+    }
+    if unit == Unit::Microsecond
+        && millisecond.is_none()
+        && microsecond.is_none()
+        && nanosecond.is_some()
+    {
+        *microsecond = Some(fraction / 1_000);
+    }
+}
+
+/// `datetime.fromepoch(seconds, nanoseconds)` and
+/// `datetime.fromepochmillis(milliseconds)`, at UTC; NULL for a NULL
+/// argument.
+fn from_epoch_call(
+    function: GraphTemporalFunction,
+    items: &[GraphValue],
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    if items
+        .iter()
+        .any(|item| matches!(item, GraphValue::Scalar(CanonicalScalar::Null)))
+    {
+        return Ok(CanonicalScalar::Null);
+    }
+    let instant = match (function, items) {
+        (GraphTemporalFunction::FromEpoch, [seconds, nanoseconds]) => {
+            let nanoseconds = integer(nanoseconds)?;
+            if !(0..1_000_000_000).contains(&nanoseconds) {
+                return Err(Invalid);
+            }
+            i128::from(integer(seconds)?) * NANOS_PER_SECOND + i128::from(nanoseconds)
+        }
+        (GraphTemporalFunction::FromEpochMillis, [millis]) => {
+            i128::from(integer(millis)?) * 1_000_000
+        }
+        _ => return Err(Invalid),
+    };
+    CanonicalTimestamp::offset_only(instant, 0)
+        .map(CanonicalScalar::Timestamp)
+        .map_err(|_| Invalid)
 }
 
 fn date(argument: &GraphValue) -> Result<CanonicalDate, GraphIntegerErrorKind> {

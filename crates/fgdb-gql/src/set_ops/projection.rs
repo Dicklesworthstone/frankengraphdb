@@ -158,6 +158,17 @@ pub enum GraphTemporalFunction {
     /// fields and a `timezone` offset over `date`, `time` and `datetime`
     /// bases, or from `epochSeconds` or `epochMillis`.
     DateTime,
+    /// `date.truncate(unit, x[, map])`, and its siblings for the other
+    /// kinds. The argument is the list of the call's arguments.
+    TruncateDate,
+    TruncateLocalTime,
+    TruncateTime,
+    TruncateLocalDateTime,
+    TruncateDateTime,
+    /// `datetime.fromepoch(seconds, nanoseconds)`, at UTC.
+    FromEpoch,
+    /// `datetime.fromepochmillis(milliseconds)`, at UTC.
+    FromEpochMillis,
 }
 
 impl GraphTemporalFunction {
@@ -169,6 +180,13 @@ impl GraphTemporalFunction {
             Self::Time => 3,
             Self::LocalDateTime => 4,
             Self::DateTime => 5,
+            Self::TruncateDate => 6,
+            Self::TruncateLocalTime => 7,
+            Self::TruncateTime => 8,
+            Self::TruncateLocalDateTime => 9,
+            Self::TruncateDateTime => 10,
+            Self::FromEpoch => 11,
+            Self::FromEpochMillis => 12,
         }
     }
 
@@ -183,6 +201,47 @@ impl GraphTemporalFunction {
         ]
         .into_iter()
         .find_map(|(spelling, function)| name.eq_ignore_ascii_case(spelling).then_some(function))
+    }
+
+    /// The function a call `name.operation(...)` (any case) denotes.
+    pub(crate) fn dotted(name: &str, operation: &str) -> Option<Self> {
+        let function = if operation.eq_ignore_ascii_case("TRUNCATE") {
+            match Self::named(name)? {
+                Self::Date => Self::TruncateDate,
+                Self::LocalTime => Self::TruncateLocalTime,
+                Self::Time => Self::TruncateTime,
+                Self::LocalDateTime => Self::TruncateLocalDateTime,
+                _ => Self::TruncateDateTime,
+            }
+        } else if name.eq_ignore_ascii_case("DATETIME")
+            && operation.eq_ignore_ascii_case("FROMEPOCH")
+        {
+            Self::FromEpoch
+        } else if name.eq_ignore_ascii_case("DATETIME")
+            && operation.eq_ignore_ascii_case("FROMEPOCHMILLIS")
+        {
+            Self::FromEpochMillis
+        } else {
+            return None;
+        };
+        Some(function)
+    }
+
+    /// How many arguments a dotted call takes; `None` for a constructor,
+    /// whose one argument is not a list.
+    pub(crate) const fn arity(self) -> Option<(usize, usize)> {
+        match self {
+            Self::TruncateDate
+            | Self::TruncateLocalTime
+            | Self::TruncateTime
+            | Self::TruncateLocalDateTime
+            | Self::TruncateDateTime => Some((2, 3)),
+            Self::FromEpoch => Some((2, 2)),
+            Self::FromEpochMillis => Some((1, 1)),
+            Self::Date | Self::LocalTime | Self::Time | Self::LocalDateTime | Self::DateTime => {
+                None
+            }
+        }
     }
 }
 

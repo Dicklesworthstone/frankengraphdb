@@ -1177,16 +1177,33 @@ impl<'a> Parser<'a> {
         Ok(let_value(slots, body))
     }
 
-    /// The temporal constructor called here (fgdb-txbg9): `date(`,
-    /// `localtime(`, `time(` or `localdatetime(`, in any case.
-    fn temporal_call(&self) -> Result<Option<crate::GraphTemporalFunction>, GraphPatternTextError> {
+    /// The temporal function called here (fgdb-txbg9), in any case: a
+    /// constructor `date(`, `localtime(`, `time(`, `localdatetime(` or
+    /// `datetime(`, or a dotted call such as `date.truncate(` or
+    /// `datetime.fromepoch(`, which is reported with `true`.
+    fn temporal_call(
+        &self,
+    ) -> Result<Option<(crate::GraphTemporalFunction, bool)>, GraphPatternTextError> {
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(None);
         };
-        let Some(function) = crate::GraphTemporalFunction::named(word) else {
-            return Ok(None);
-        };
-        Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
+        let mut lexer = self.lexer.clone();
+        match lexer.next()?.kind {
+            TokenKind::Punct(b'(') => {
+                Ok(crate::GraphTemporalFunction::named(word).map(|function| (function, false)))
+            }
+            TokenKind::Punct(b'.') => {
+                let TokenKind::Word(operation) = lexer.next()?.kind else {
+                    return Ok(None);
+                };
+                if !matches!(lexer.next()?.kind, TokenKind::Punct(b'(')) {
+                    return Ok(None);
+                }
+                Ok(crate::GraphTemporalFunction::dotted(word, operation)
+                    .map(|function| (function, true)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Whether a composite value starts here that a scalar expression reads
@@ -1247,6 +1264,11 @@ impl<'a> Parser<'a> {
         let mut lexer = self.lexer.clone();
         if !self.is_punct(b'[') {
             lexer.next()?;
+            // A dotted temporal call: step over `.name` to its `(`.
+            if matches!(self.temporal_call()?, Some((_, true))) {
+                lexer.next()?;
+                lexer.next()?;
+            }
         }
         skip_group(&mut lexer)?;
         Ok(match after_postfix(&mut lexer)?.kind {
@@ -1493,15 +1515,51 @@ impl<'a> Parser<'a> {
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
-        } else if let Some(function) = self.temporal_call()? {
-            // date(...), localtime(...), time(...) or localdatetime(...) of a
-            // map, text, temporal value or NULL (fgdb-txbg9). An empty call
-            // reads the statement clock, which no read has yet.
+        } else if let Some((function, dotted)) = self.temporal_call()? {
+            // A temporal constructor of a map, text, temporal value or NULL,
+            // or a dotted call such as date.truncate(unit, value, map) whose
+            // argument is the list of its arguments (fgdb-txbg9). An empty
+            // constructor reads the statement clock, which no read has yet.
+            let at = self.current.at;
             self.advance()?;
+            if dotted {
+                self.advance()?;
+                self.advance()?;
+            }
             self.punct(b'(', "(")?;
-            let argument =
-                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-            self.punct(b')', ")")?;
+            let argument = if let Some((least, most)) = function.arity() {
+                let mut items = Vec::new();
+                loop {
+                    items.push(self.read_recursive_value(
+                        inputs.as_deref_mut(),
+                        schema,
+                        resolve,
+                        depth + 1,
+                    )?);
+                    if self.take(b')')? {
+                        break;
+                    }
+                    if items.len() == most {
+                        return Err(GraphSetTextError {
+                            offset: self.current.at,
+                            kind: GraphSetTextErrorKind::Expected(")"),
+                        });
+                    }
+                    self.punct(b',', ", or )")?;
+                }
+                if items.len() < least {
+                    return Err(GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::Expected("more temporal function arguments"),
+                    });
+                }
+                ReadValueTemplate::List(items)
+            } else {
+                let argument =
+                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+                self.punct(b')', ")")?;
+                argument
+            };
             ReadValueTemplate::Temporal {
                 function,
                 argument: Box::new(argument),

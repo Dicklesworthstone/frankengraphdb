@@ -1330,6 +1330,180 @@ fn datetimes_at_offsets_build_read_compare_and_convert() {
     }
 }
 
+/// fgdb-txbg9: date.truncate, localtime.truncate, time.truncate,
+/// localdatetime.truncate and datetime.truncate cut a value down to the start
+/// of a unit, then set a map's fields over it; datetime.fromepoch and
+/// datetime.fromepochmillis build a UTC datetime. A truncation map's
+/// `timezone` sets the offset without moving the clock, and a sub-millisecond
+/// field after a millisecond or microsecond truncation keeps the truncated
+/// digits. Expected texts are the TCK's (Temporal9 [1]-[5], Temporal1 [11]).
+#[test]
+fn truncation_and_epoch_calls_follow_the_tck() {
+    let x = text("x");
+    let as_text = |expression: &str| scalar(&format!("toString({expression})"), &x);
+    let local = "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})";
+    let local_dt = "localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, \
+                    second: 14, nanosecond: 645876123})";
+    let at_minus = "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, \
+                    nanosecond: 645876123, timezone: '-01:00'})";
+    let at_plus = "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, \
+                   nanosecond: 645876123, timezone: '+01:00'})";
+    for (expression, expected) in [
+        (
+            "date.truncate('millennium', date({year: 2017, month: 10, day: 11}), {day: 2})"
+                .to_owned(),
+            "2000-01-02",
+        ),
+        (
+            "date.truncate('century', date({year: 1984, month: 10, day: 11}))".to_owned(),
+            "1900-01-01",
+        ),
+        (
+            "date.truncate('decade', date({year: 1984, month: 10, day: 11}), {})".to_owned(),
+            "1980-01-01",
+        ),
+        (
+            "date.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {day: 5})".to_owned(),
+            "1984-01-05",
+        ),
+        (
+            "date.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12}))"
+                .to_owned(),
+            "1983-01-03",
+        ),
+        (
+            "date.truncate('quarter', date({year: 1984, month: 11, day: 11}), {day: 2})".to_owned(),
+            "1984-10-02",
+        ),
+        (
+            "DATE.TRUNCATE('week', date({year: 1984, month: 10, day: 11}), {dayOfWeek: 2})"
+                .to_owned(),
+            "1984-10-09",
+        ),
+        (format!("date.truncate('day', {at_plus})"), "1984-10-11"),
+        (
+            format!("localtime.truncate('millisecond', {local}, {{nanosecond: 2}})"),
+            "12:31:14.645000002",
+        ),
+        (
+            format!("localtime.truncate('microsecond', {local}, {{nanosecond: 2}})"),
+            "12:31:14.645876002",
+        ),
+        (
+            format!("localtime.truncate('second', {local}, {{nanosecond: 2}})"),
+            "12:31:14.000000002",
+        ),
+        (
+            format!("localtime.truncate('day', {local_dt}, {{nanosecond: 2}})"),
+            "00:00:00.000000002",
+        ),
+        (
+            format!("time.truncate('hour', {at_minus}, {{timezone: '+01:00'}})"),
+            "12:00+01:00",
+        ),
+        (format!("time.truncate('hour', {at_minus})"), "12:00-01:00"),
+        (format!("time.truncate('minute', {local})"), "12:31Z"),
+        (
+            "localdatetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), \
+             {day: 2})"
+                .to_owned(),
+            "2000-01-02T00:00",
+        ),
+        (
+            format!("localdatetime.truncate('second', {local_dt}, {{nanosecond: 2}})"),
+            "1984-10-11T12:31:14.000000002",
+        ),
+        (
+            format!("localdatetime.truncate('weekYear', {at_plus})"),
+            "1984-01-02T00:00",
+        ),
+        (
+            format!("datetime.truncate('day', {at_plus}, {{nanosecond: 2}})"),
+            "1984-10-11T00:00:00.000000002+01:00",
+        ),
+        (
+            "datetime.truncate('month', date({year: 1984, month: 10, day: 11}), {day: 2})"
+                .to_owned(),
+            "1984-10-02T00:00Z",
+        ),
+        (
+            format!("datetime.truncate('hour', {at_minus})"),
+            "1984-10-11T12:00-01:00",
+        ),
+        (
+            format!("datetime.truncate('hour', {local_dt}, {{timezone: '+01:00'}})"),
+            "1984-10-11T12:00+01:00",
+        ),
+        (
+            format!("datetime.truncate('millisecond', {at_plus})"),
+            "1984-10-11T12:31:14.645+01:00",
+        ),
+        (
+            "datetime.fromepoch(416779, 999999999)".to_owned(),
+            "1970-01-05T19:46:19.999999999Z",
+        ),
+        (
+            "datetime.fromepochmillis(237821673987)".to_owned(),
+            "1977-07-15T13:34:33.987Z",
+        ),
+    ] {
+        assert_eq!(as_text(&expression), text(expected), "{expression}");
+    }
+    for expression in [
+        "date.truncate(null, date('2015-07-21'))",
+        "date.truncate('day', null)",
+        "datetime.fromepoch(null, 1)",
+    ] {
+        assert_eq!(
+            scalar(expression, &x),
+            CanonicalScalar::Null,
+            "{expression}"
+        );
+    }
+    // A dotted call is an operand like any temporal value: compared, and
+    // read through a field.
+    assert_eq!(
+        scalar(
+            "date.truncate('month', date('2015-07-21')) = date('2015-07-01')",
+            &x
+        ),
+        CanonicalScalar::Bool(true)
+    );
+    assert_eq!(
+        scalar("date.truncate('month', date('2015-07-21')).day + 1", &x),
+        CanonicalScalar::Int(2)
+    );
+    // A unit the kind does not have, an unknown unit, a base in the map, a
+    // named zone and a nanosecond out of range refuse when evaluated; a
+    // wrong argument count refuses when prepared.
+    for expression in [
+        "date.truncate('hour', date('2015-07-21'))",
+        "localtime.truncate('year', localtime('12:00'))",
+        "date.truncate('fortnight', date('2015-07-21'))",
+        "date.truncate('day', date('2015-07-21'), {date: date('2015-07-22')})",
+        "datetime.truncate('day', date('2015-07-21'), {timezone: 'Europe/Stockholm'})",
+        "date.truncate('day', localtime('12:00'))",
+        "datetime.fromepoch(1, 1000000000)",
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("TemporalConstruction"),
+            "{expression}: {error:?}"
+        );
+    }
+    for statement in [
+        "MATCH (n) RETURN date.truncate('day') AS value",
+        "MATCH (n) RETURN date.truncate('day', date('2015-07-21'), {}, {}) AS value",
+        "MATCH (n) RETURN datetime.fromepochmillis(1, 2) AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,
