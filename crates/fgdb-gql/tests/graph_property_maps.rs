@@ -156,37 +156,45 @@ fn typed_maps_keep_parallel_edge_identity_and_share_cumulative_limits() {
             .collect::<Vec<_>>(),
         expected
     );
-    source.edges.reverse();
-    assert_eq!(
-        source.execute(&pattern, policy()).unwrap().value,
-        complete.value
-    );
-    for (work, scratch) in [
-        (
-            complete.evaluator.work_units - 1,
-            complete.evaluator.scratch_entries,
-        ),
-        (
-            complete.evaluator.work_units,
-            complete.evaluator.scratch_entries - 1,
-        ),
-    ] {
-        let mut bounded = policy();
-        bounded.evaluator = GlaExecutionLimits::new(work, scratch);
-        assert!(matches!(
-            source.execute(&pattern, bounded),
-            Err(GqlQueryError::Evaluator(_))
-        ));
+    // Each bound is the cost measured on the same input. The reversed edge
+    // order is a different input with the same values, whose cost may
+    // differ; it was once measured against the original order's cost
+    // (fgdb-nevwt). Both orders are now held to their own measurement.
+    for order in ["original", "reversed"] {
+        let measured = source.execute(&pattern, policy()).unwrap();
+        assert_eq!(measured.value, complete.value, "{order}");
+        for (work, scratch) in [
+            (
+                measured.evaluator.work_units - 1,
+                measured.evaluator.scratch_entries,
+            ),
+            (
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries - 1,
+            ),
+        ] {
+            let mut bounded = policy();
+            bounded.evaluator = GlaExecutionLimits::new(work, scratch);
+            assert!(
+                matches!(
+                    source.execute(&pattern, bounded),
+                    Err(GqlQueryError::Evaluator(_))
+                ),
+                "{order}: work {work}, scratch {scratch}"
+            );
+        }
+        let mut exact = policy();
+        exact.evaluator = GlaExecutionLimits::new(
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            source.execute(&pattern, exact).unwrap().value,
+            complete.value,
+            "{order}"
+        );
+        source.edges.reverse();
     }
-    let mut exact = policy();
-    exact.evaluator = GlaExecutionLimits::new(
-        complete.evaluator.work_units,
-        complete.evaluator.scratch_entries,
-    );
-    assert_eq!(
-        source.execute(&pattern, exact).unwrap().value,
-        complete.value
-    );
 }
 
 #[test]
