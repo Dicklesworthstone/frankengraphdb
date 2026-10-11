@@ -885,7 +885,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.projected_sources = (!repeatable.is_empty()).then(|| (outputs.len(), repeatable));
+        self.projected_sources = (!repeatable.is_empty()).then_some((outputs.len(), repeatable));
         Ok(GraphProjectionHead {
             with,
             plain: with && !self.syntax.distinct,

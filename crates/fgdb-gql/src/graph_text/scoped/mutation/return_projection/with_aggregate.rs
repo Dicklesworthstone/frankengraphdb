@@ -472,7 +472,7 @@ impl<'a> Parser<'a> {
             grouped: Vec::new(),
             scoped: Vec::new(),
         });
-        self.projected_sources = (!sources.is_empty()).then(|| (output_schema.len(), sources));
+        self.projected_sources = (!sources.is_empty()).then_some((output_schema.len(), sources));
         Ok((
             ReadStageTemplate::Aggregate {
                 at,

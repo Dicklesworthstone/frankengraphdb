@@ -629,11 +629,14 @@ struct Parser<'a> {
     /// so alternating values and expressions stay within one nesting bound.
     let_base: usize,
     /// The repeatable items of the grouping or DISTINCT WITH whose own ORDER
-    /// BY is next, as (row width, [(source start, source end, output
-    /// column)]): a repeat of one item's expression there is that output
+    /// BY is next: a repeat of one item's expression there is that output
     /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
-    projected_sources: Option<(usize, Vec<(usize, usize, usize)>)>,
+    projected_sources: Option<ProjectedSources>,
 }
+
+/// A WITH's row width and its repeatable items as (source start, source
+/// end, output column).
+type ProjectedSources = (usize, Vec<(usize, usize, usize)>);
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
 /// binding (`WITH n WHERE n.p = 3 ORDER BY n.q RETURN n.r`). Each is a hidden
