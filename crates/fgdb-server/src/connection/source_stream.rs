@@ -98,6 +98,7 @@ impl Chunks {
 }
 
 impl Lane {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn source_read(
         &mut self,
         cx: &Cx,
