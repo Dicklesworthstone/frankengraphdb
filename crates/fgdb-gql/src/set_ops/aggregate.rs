@@ -3,6 +3,8 @@
 
 mod rows;
 mod stage;
+pub use rows::SpillSetAggregateRowError;
+pub(super) use rows::{convert_row, finish_conversion};
 pub(crate) use stage::{WriteReturnGroup, WriteReturnGroupSpec};
 
 use super::*;

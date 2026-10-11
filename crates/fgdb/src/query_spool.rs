@@ -30,6 +30,8 @@ pub enum NativeSpoolError {
     /// Snapshot admission for a source that opens no graph scan.
     BufferedRead(Box<crate::BufferedReadError>),
     SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
+    /// A completed intermediate group preserves the native reducer's errors.
+    Aggregate(Box<NativeAggregateSpoolError>),
     Spill(SpillError),
     Encode(fgdb_types::ScalarEncodeError),
     Decode(fgdb_gql::algebra::GraphValueDecodeError),
@@ -56,6 +58,7 @@ impl core::fmt::Display for NativeSpoolError {
             Self::BufferedExecute(e) => e.fmt(f),
             Self::BufferedRead(e) => e.fmt(f),
             Self::SetExecution(e) => e.fmt(f),
+            Self::Aggregate(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
             Self::Decode(e) => e.fmt(f),
@@ -84,6 +87,7 @@ impl core::error::Error for NativeSpoolError {
             Self::BufferedExecute(e) => Some(e.as_ref()),
             Self::BufferedRead(e) => Some(e.as_ref()),
             Self::SetExecution(e) => Some(e),
+            Self::Aggregate(e) => Some(e.as_ref()),
             Self::Spill(e) => Some(e),
             Self::Encode(e) => Some(e),
             Self::Decode(e) => Some(e),
@@ -95,6 +99,14 @@ impl core::error::Error for NativeSpoolError {
 impl From<SpillError> for NativeSpoolError {
     fn from(error: SpillError) -> Self {
         Self::Spill(error)
+    }
+}
+impl From<NativeAggregateSpoolError> for NativeSpoolError {
+    fn from(error: NativeAggregateSpoolError) -> Self {
+        match error {
+            NativeAggregateSpoolError::Spool(error) => error,
+            error => Self::Aggregate(Box::new(error)),
+        }
     }
 }
 impl NativeSpoolError {

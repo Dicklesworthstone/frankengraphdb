@@ -89,6 +89,18 @@ fn rebase_error(
             .map(|error| NativeSpoolError::BufferedExecute(Box::new(error))),
         NativeSpoolError::Execute(error) => rebase_query_error(*error, policy, left)
             .map(|error| NativeSpoolError::Execute(Box::new(error))),
+        NativeSpoolError::Aggregate(error) => match *error {
+            NativeAggregateSpoolError::Execute(error) => rebase_query_error(*error, policy, left)
+                .map(|error| NativeAggregateSpoolError::Execute(Box::new(error)).into()),
+            NativeAggregateSpoolError::BufferedExecute(error) => {
+                rebase_query_error(*error, policy, left)
+                    .map(|error| NativeAggregateSpoolError::BufferedExecute(Box::new(error)).into())
+            }
+            NativeAggregateSpoolError::Spool(error) => {
+                Ok(rebase_error(error, policy, left, prior_work, work_limit))
+            }
+            other => Ok(other.into()),
+        },
         NativeSpoolError::SortWorkLimit { attempted, .. } => prior_work
             .checked_add(attempted)
             .map(|attempted| NativeSpoolError::SortWorkLimit {
@@ -104,7 +116,7 @@ fn rebase_error(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<V, A, B>(
+pub(super) async fn execute<V, A, B, C>(
     plan: SpillSetBinaryPlan,
     snapshot: CommitSeq,
     view: &mut BufferedReadView<V>,
@@ -112,6 +124,9 @@ pub(super) async fn execute<V, A, B>(
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
+    auxiliary: &mut SpillFile<C>,
+    group_capacity: usize,
+    max_partitions: usize,
     run_rows: usize,
     max_runs: usize,
     page_bytes: usize,
@@ -124,6 +139,7 @@ where
     V: Vfs + Clone,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
@@ -136,6 +152,9 @@ where
                 policy,
                 scratch,
                 destination,
+                auxiliary,
+                group_capacity,
+                max_partitions,
                 run_rows,
                 max_runs,
                 page_bytes,
@@ -150,7 +169,7 @@ where
         .checked_sub(left_work)
         .ok_or(NativeSpoolError::IncompleteCursor)?;
     // Append-only files keep the complete left result alive while the right
-    // child runs through the same two files. Empty left bags do not skip it.
+    // child runs through the same files. Empty left bags do not skip it.
     let (right, right_work) =
         PreparedBufferedOrder::from_relation(plan.right().clone(), Some(snapshot))
             .spool_in_view_with_resolver(
@@ -159,6 +178,9 @@ where
                 right_policy,
                 scratch,
                 destination,
+                auxiliary,
+                group_capacity,
+                max_partitions,
                 run_rows,
                 max_runs,
                 page_bytes,

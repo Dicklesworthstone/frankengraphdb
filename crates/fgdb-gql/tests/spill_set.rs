@@ -6,12 +6,15 @@ use core::cmp::Ordering;
 use core::convert::Infallible;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::spill_aggregate::SpillAggregateDefinition;
 use fgdb_gql::spill_set::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBuildError, SpillSetRowError, SpillSetStage,
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregateRowError, SpillSetBuildError,
+    SpillSetRowError, SpillSetStage,
 };
 use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphAggregate, GraphIntegerErrorKind, GraphSetExecutionError, GraphSetOperation,
+    GraphAggregate, GraphAggregateError, GraphAggregateRow, GraphAggregateValue, GraphExactAverage,
+    GraphIntegerErrorKind, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
     GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphSetText, PreparedGraphText,
 };
@@ -172,6 +175,82 @@ fn staged(
     staged_plan(graph, &plan)
 }
 
+fn aggregate_error(
+    error: GqlQueryError<GraphAggregateError<Infallible>, ()>,
+) -> SpillSetRowError<()> {
+    match error {
+        GqlQueryError::Source(error) => {
+            SpillSetRowError::Native(GraphSetExecutionError::Aggregate(Box::new(error)))
+        }
+        GqlQueryError::Interrupted(error) => SpillSetRowError::Control(error),
+        error => panic!("this semantic test host has no resource ceilings: {error:?}"),
+    }
+}
+
+fn conversion_error(error: SpillSetAggregateRowError<()>) -> SpillSetRowError<()> {
+    match error {
+        SpillSetAggregateRowError::Control(error) => SpillSetRowError::Control(error),
+        SpillSetAggregateRowError::Value(error) => {
+            SpillSetRowError::Native(GraphSetExecutionError::Aggregate(Box::new(error)))
+        }
+    }
+}
+
+// A materialized reference host for the public reducer seam. Group populations
+// and argument support use ordinary ordered maps; production partitions/spill
+// algorithms are not involved. All accumulator arithmetic remains native.
+fn reduce_groups(
+    definition: &SpillAggregateDefinition,
+    rows: Vec<GraphValueRow>,
+) -> Result<Vec<GraphAggregateRow>, SpillSetRowError<()>> {
+    let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<Infallible>, ()>>(());
+    for row in &rows {
+        definition
+            .validate_input(row, &mut control)
+            .map_err(aggregate_error)?;
+    }
+    let mut groups = BTreeMap::<Vec<GraphValue>, Vec<GraphValueRow>>::new();
+    if rows.is_empty() && definition.group_key_columns().is_empty() {
+        groups.insert(Vec::new(), Vec::new());
+    }
+    for row in rows {
+        let key = definition
+            .group_key_columns()
+            .iter()
+            .map(|&column| row.values()[column].clone())
+            .collect();
+        groups.entry(key).or_default().push(row);
+    }
+    let mut output = Vec::new();
+    for (keys, rows) in groups {
+        let mut state = definition
+            .new_state(&mut control)
+            .map_err(aggregate_error)?;
+        for row in &rows {
+            definition
+                .update(&mut state, row, &mut control)
+                .map_err(aggregate_error)?;
+        }
+        for column in definition.distinct_argument_columns() {
+            let mut support = BTreeMap::new();
+            for row in &rows {
+                support.entry(&row.values()[column]).or_insert(row);
+            }
+            for row in support.into_values() {
+                definition
+                    .update_distinct_argument(&mut state, row, column, &mut control)
+                    .map_err(aggregate_error)?;
+            }
+        }
+        output.push(
+            definition
+                .finish(keys, state, &mut control)
+                .map_err(aggregate_error)?,
+        );
+    }
+    Ok(output)
+}
+
 fn staged_plan(
     graph: &Graph,
     plan: &AsyncSpillSetPlan,
@@ -223,6 +302,30 @@ fn staged_plan(
                 };
                 rows.extend(std::iter::repeat_n(row, count));
             }
+            rows
+        }
+        AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), aggregate.columns());
+            assert_eq!(plan.source().kind(), aggregate.input().source().kind());
+            assert!(!aggregate.definition().has_output_stage());
+            let input = staged_plan(graph, aggregate.input())?;
+            let groups = reduce_groups(aggregate.definition(), input)?;
+            let mut rows = Vec::new();
+            for group in groups {
+                rows.push(
+                    aggregate
+                        .convert_row_with_control(&group, &mut |event| {
+                            assert_ne!(event, GlaExecutionEvent::ResultRow);
+                            Ok(())
+                        })
+                        .map_err(conversion_error)?,
+                );
+            }
+            aggregate
+                .finish_conversion_with_control(&mut |_| Ok(()))
+                .map_err(conversion_error)?;
             rows
         }
         _ => {
@@ -1015,4 +1118,355 @@ fn fixed_hop_sources_preserve_computed_barriers_multiplicity_and_hidden_source_w
     assert_eq!(tail.offset(), 1);
     assert_eq!(tail.count(), Some(3));
     assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(4)])]);
+}
+
+#[test]
+fn intermediate_numeric_grouping_reuses_complete_native_rows_and_clause_boundaries() {
+    let graph = Graph::sample();
+    for text in [
+        "MATCH (n) WITH n.p AS value,COUNT(*) AS copies WHERE copies>1 RETURN value,copies ORDER BY value",
+        "MATCH (n) WITH n,COUNT(*) AS copies RETURN n.p AS value,copies ORDER BY value",
+        "MATCH (a)-[:R]->(b) WITH a,COUNT(*) AS copies RETURN a,copies ORDER BY copies DESC,a",
+        "UNWIND [3,1,3,NULL,2] AS value WITH value,COUNT(*) AS copies ORDER BY copies DESC,value LIMIT 2 RETURN value,copies ORDER BY value",
+        "UNWIND [1,1,2,3,3] AS value WITH value,COUNT(*) AS copies WITH copies,COUNT(*) AS groups WITH SUM(groups) AS total RETURN total",
+        "UNWIND [2,2,1] AS value WITH DISTINCT COUNT(*) AS copies UNWIND [copies,copies+1] AS item RETURN item",
+        "UNWIND [1,1,2,NULL] AS value WITH COUNT(*) AS rows,COUNT(value) AS nonnull,COUNT(DISTINCT value) AS unique_count,SUM(value) AS total,SUM(DISTINCT value) AS unique_total,MIN(value) AS minimum,MAX(value) AS maximum RETURN rows,nonnull,unique_count,total,unique_total,minimum,maximum",
+        "UNWIND [1.0,3.0] AS value WITH AVG(value) AS mean RETURN mean",
+        "UNWIND [[2],[1],[2],NULL] AS value WITH value AS key,COUNT(*) AS copies RETURN key,copies",
+        "UNWIND [[2],[1],[2],NULL] AS value WITH MIN(value) AS minimum,MAX(value) AS maximum RETURN minimum,maximum",
+        "UNWIND [] AS value WITH COUNT(*) AS rows,SUM(value) AS total,AVG(value) AS mean RETURN rows,total,mean",
+        "UNWIND [] AS value WITH value,COUNT(*) AS copies RETURN value,copies",
+    ] {
+        let query = prepare(text);
+        let transcript = query.canonical_bytes();
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        assert!(plan.aggregate_count() != 0, "{text}");
+        assert_eq!(
+            staged_plan(&graph, &plan).unwrap(),
+            graph.native(&query).unwrap(),
+            "{text}"
+        );
+        assert_eq!(query.canonical_bytes(), transcript);
+    }
+    assert_eq!(
+        staged(
+            &graph,
+            &prepare(
+                "MATCH (n) WITH n.p AS value,COUNT(*) AS copies WHERE copies>1 RETURN value,copies"
+            )
+        )
+        .unwrap(),
+        vec![row(vec![scalar(1), scalar(2)])]
+    );
+    let repeated = prepare(
+        "UNWIND [1,1,2,3,3] AS value WITH value,COUNT(*) AS copies WITH copies,COUNT(*) AS groups WITH SUM(groups) AS total RETURN total",
+    );
+    assert_eq!(
+        AsyncSpillSetPlan::compile(&repeated)
+            .unwrap()
+            .aggregate_count(),
+        3
+    );
+    assert_eq!(
+        staged(&graph, &repeated).unwrap(),
+        vec![row(vec![scalar(3)])]
+    );
+    assert_eq!(
+        staged(&graph, &prepare("UNWIND [] AS value WITH COUNT(*) AS rows,SUM(value) AS total,AVG(value) AS mean RETURN rows,total,mean")).unwrap(),
+        vec![row(vec![scalar(0),GraphValue::Scalar(CanonicalScalar::Null),GraphValue::Scalar(CanonicalScalar::Null)])]
+    );
+}
+
+#[test]
+fn aggregate_sources_retain_binary_children_own_pages_and_terminal_exact_summaries() {
+    let graph = Graph::sample();
+    let input = prepare(
+        "(UNWIND [1,1,2,3] AS value RETURN value ORDER BY value DESC LIMIT 3) EXCEPT ALL UNWIND [1] AS value RETURN value",
+    );
+    let query = input
+        .group_by(&[0], &[GraphAggregate::count_rows("copies")])
+        .unwrap()
+        .with_order_by(&[GraphValueOrder::descending(0)])
+        .unwrap()
+        .with_page(1, Some(1));
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Aggregate(aggregate) = plan.source() else {
+        panic!("a group is its own complete-input source");
+    };
+    assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
+    assert_eq!(aggregate.columns(), &["value", "copies"]);
+    assert_eq!(
+        aggregate.column_types(),
+        &[GraphSetColumnType::Any, GraphSetColumnType::Scalar]
+    );
+    assert!(matches!(
+        aggregate.input().source(),
+        AsyncSpillSetSourcePlan::Binary(_)
+    ));
+    assert_eq!(aggregate.definition().result_window(), (0, None));
+    assert_eq!(plan.stages().len(), 1);
+    assert_eq!(plan.stages()[0].offset(), 1);
+    assert_eq!(plan.stages()[0].count(), Some(1));
+    assert_eq!(plan.stage_count(), aggregate.input().stage_count() + 4);
+    assert_eq!(plan.aggregate_count(), 1);
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        vec![row(vec![scalar(2), scalar(1)])]
+    );
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        graph.native(&query).unwrap()
+    );
+
+    let binary = prepare(
+        "UNWIND [1,1,2] AS value WITH value,COUNT(*) AS copies RETURN value,copies UNION ALL (UNWIND [1,3,3] AS value WITH value,COUNT(*) AS copies RETURN copies,value) ORDER BY value,copies",
+    );
+    let terminal = PreparedGraphSetAggregate::prepare(
+        binary.clone(),
+        &[],
+        &[
+            GraphAggregate::sum_int("total", 1),
+            GraphAggregate::count_rows("groups"),
+        ],
+        0,
+        None,
+    )
+    .unwrap();
+    let physical =
+        fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::compile_relation(&terminal).unwrap();
+    let fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::Relation { input, definition } =
+        physical
+    else {
+        panic!("terminal grouping must consume every completed binary child");
+    };
+    assert_eq!(input.aggregate_count(), 2);
+    let rows = staged_plan(&graph, &input).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            row(vec![scalar(1), scalar(1)]),
+            row(vec![scalar(1), scalar(2)]),
+            row(vec![scalar(2), scalar(1)]),
+            row(vec![scalar(3), scalar(2)])
+        ]
+    );
+    let exact = reduce_groups(&definition, rows).unwrap();
+    assert_eq!(
+        exact[0].values(),
+        &[
+            GraphAggregateValue::Integer(6),
+            GraphAggregateValue::Count(4)
+        ]
+    );
+    assert_eq!(
+        exact,
+        terminal
+            .execute_governed(
+                policy(),
+                |pattern, policy| graph.execute(pattern, policy),
+                || Ok(())
+            )
+            .unwrap()
+            .value
+    );
+    let grouped_again = binary
+        .group_by(&[], &[GraphAggregate::sum_int("total", 1)])
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&grouped_again).unwrap();
+    assert_eq!(plan.aggregate_count(), 3);
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        vec![row(vec![scalar(6)])]
+    );
+}
+
+#[test]
+fn complete_group_conversion_and_input_errors_precede_downstream_zero_pages() {
+    let graph = Graph::sample();
+    for text in [
+        "UNWIND [9223372036854775807,1] AS value WITH SUM(value) AS total RETURN 1/(total-total) AS failure LIMIT 0",
+        "UNWIND [1,2] AS value WITH AVG(value) AS mean RETURN mean LIMIT 0",
+        "UNWIND [2,2] AS value WITH AVG(value) AS mean RETURN mean LIMIT 0",
+        "UNWIND [{key:1,value:1},{key:2,value:9223372036854775807},{key:2,value:1}] AS record WITH record.key AS key,SUM(record.value) AS total ORDER BY key LIMIT 1 RETURN total",
+        "UNWIND [1,0] AS value WITH SUM(1/value) AS total RETURN total LIMIT 0",
+        "UNWIND [1,'bad'] AS value WITH SUM(value) AS total RETURN total LIMIT 0",
+        "UNWIND [] AS value RETURN value UNION ALL UNWIND [1,2] AS item WITH AVG(item) AS value RETURN value LIMIT 0",
+    ] {
+        let query = prepare(text);
+        let Err(GqlQueryError::Source(expected)) = graph.native(&query) else {
+            panic!("{text}: expected complete-input failure");
+        };
+        assert_eq!(
+            staged(&graph, &query),
+            Err(SpillSetRowError::Native(expected)),
+            "{text}"
+        );
+    }
+    let empty =
+        prepare("UNWIND [] AS value WITH value,COUNT(*) AS copies RETURN 1/0 AS failure LIMIT 0");
+    assert!(staged(&graph, &empty).unwrap().is_empty());
+}
+
+#[test]
+fn aggregate_row_conversion_keeps_exact_domains_and_each_host_checkpoint() {
+    let query = prepare("RETURN [1,2] AS key,1 AS value")
+        .group_by(
+            &[0],
+            &[
+                GraphAggregate::count_rows("count"),
+                GraphAggregate::sum_int("sum", 1),
+                GraphAggregate::min("minimum", 0),
+            ],
+        )
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Aggregate(aggregate) = plan.source() else {
+        panic!("aggregate source");
+    };
+    let key = GraphValue::List(vec![scalar(1), scalar(2)].into_boxed_slice());
+    let complete = GraphAggregateRow::from_group_values(
+        vec![key.clone()],
+        vec![
+            GraphAggregateValue::Count(7),
+            GraphAggregateValue::Integer(-9),
+            GraphAggregateValue::Value(key.clone()),
+        ],
+    );
+    let expected = row(vec![key.clone(), scalar(7), scalar(-9), key]);
+    let mut events = Vec::new();
+    let converted = aggregate
+        .convert_row_with_control(&complete, &mut |event| {
+            events.push(event);
+            Ok::<_, usize>(())
+        })
+        .unwrap();
+    aggregate
+        .finish_conversion_with_control(&mut |event| {
+            events.push(event);
+            Ok::<_, usize>(())
+        })
+        .unwrap();
+    assert_eq!(converted, expected);
+    assert_eq!(events.last(), Some(&GlaExecutionEvent::Work));
+    assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
+    assert!(!events.contains(&GlaExecutionEvent::ResultRow));
+    for stop in 1..=events.len() {
+        let mut seen = 0;
+        let mut control = |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        };
+        let result = (|| {
+            let row = aggregate.convert_row_with_control(&complete, &mut control)?;
+            aggregate.finish_conversion_with_control(&mut control)?;
+            Ok(row)
+        })();
+        assert_eq!(result, Err(SpillSetAggregateRowError::Control(stop)));
+        assert_eq!(seen, stop);
+    }
+    assert_eq!(
+        aggregate
+            .convert_row_with_control(&complete, &mut |_| Ok::<_, ()>(()))
+            .unwrap(),
+        expected
+    );
+
+    let query = prepare("RETURN 1 AS value")
+        .group_by(&[], &[GraphAggregate::sum_int("total", 0)])
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Aggregate(aggregate) = plan.source() else {
+        panic!("aggregate source");
+    };
+    for (value, expected) in [
+        (
+            GraphAggregateValue::Count(i64::MAX as u64),
+            scalar(i64::MAX),
+        ),
+        (
+            GraphAggregateValue::Integer(i128::from(i64::MIN)),
+            scalar(i64::MIN),
+        ),
+        (
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                CanonicalF64::new(1.25),
+            ))),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(1.25))),
+        ),
+        (
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ),
+    ] {
+        let complete = GraphAggregateRow::from_group_values(vec![], vec![value]);
+        assert_eq!(
+            aggregate
+                .convert_row_with_control(&complete, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            row(vec![expected])
+        );
+    }
+    for (value, kind) in [
+        (
+            GraphAggregateValue::Count(i64::MAX as u64 + 1),
+            GraphIntegerErrorKind::Overflow,
+        ),
+        (
+            GraphAggregateValue::Integer(i128::from(i64::MAX) + 1),
+            GraphIntegerErrorKind::Overflow,
+        ),
+        (
+            GraphAggregateValue::Integer(i128::from(i64::MIN) - 1),
+            GraphIntegerErrorKind::Overflow,
+        ),
+        (
+            GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
+            GraphIntegerErrorKind::IncompatibleOperands,
+        ),
+    ] {
+        let complete = GraphAggregateRow::from_group_values(vec![], vec![value]);
+        assert!(
+            matches!(aggregate.convert_row_with_control(&complete,&mut |_|Ok::<_,()>(())),Err(SpillSetAggregateRowError::Value(GraphAggregateError::OutputExpression{column:0,error})) if error.kind==kind)
+        );
+    }
+    let wrong = GraphAggregateRow::from_group_values(vec![], vec![]);
+    assert_eq!(
+        aggregate.convert_row_with_control(&wrong, &mut |_| Ok::<_, ()>(())),
+        Err(SpillSetAggregateRowError::Value(
+            GraphAggregateError::InvalidReductionInput
+        ))
+    );
+    assert_eq!(
+        aggregate.finish_conversion_with_control(&mut |_| Err(7)),
+        Err(SpillSetAggregateRowError::Control(7))
+    );
+}
+
+#[test]
+fn collection_and_unsupported_group_descendants_still_refuse_before_zero_limit() {
+    let input = prepare("RETURN 1 AS value");
+    let collection = input
+        .clone()
+        .group_by(&[], &[GraphAggregate::collect("items", 0)])
+        .unwrap();
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&collection.clone().with_page(0, Some(0))),
+        Err(SpillSetBuildError::Unsupported { depth: 0 })
+    ));
+    let nested = collection.nested().unwrap().with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&nested),
+        Err(SpillSetBuildError::Unsupported { depth: 1 })
+    ));
+    let unsupported = input
+        .clone()
+        .cross_join(input)
+        .unwrap()
+        .group_by(&[], &[GraphAggregate::count_rows("count")])
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&unsupported),
+        Err(SpillSetBuildError::Unsupported { depth: 1 })
+    ));
 }

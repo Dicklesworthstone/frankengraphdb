@@ -256,6 +256,7 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                 let prepared = prepare(&text);
                 let (mut scratch, _) = file(&cx, &spill_pool).await;
                 let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
                 let result = prepared
                     .spool_in_view(
                         &mut view,
@@ -263,6 +264,9 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                         policy(expected.len() as u64),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        1,
+                        32,
                         1,
                         32,
                         31,
@@ -294,6 +298,7 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
             let prepared = prepare(&text);
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
             let (spool, _) = prepared
                 .spool_in_view(
                     &mut view,
@@ -301,6 +306,9 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                     policy(3),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    1,
+                    32,
                     1,
                     32,
                     31,
@@ -339,6 +347,7 @@ fn cold_join_spill_keeps_input_quota_separate_and_carries_native_and_external_wo
         for trial in 0..5 {
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
             let mut allowance = policy(2);
             let (external, native) = exact.unwrap_or((WORK, WORK));
             if trial == 3 {
@@ -351,6 +360,9 @@ fn cold_join_spill_keeps_input_quota_separate_and_carries_native_and_external_wo
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    1,
+                    32,
                     1,
                     32,
                     31,
@@ -409,6 +421,7 @@ fn cold_join_complete_stage_errors_are_not_hidden_by_downstream_zero_limit() {
         ));
         let (mut scratch, _) = file(&cx, &spill_pool).await;
         let (mut destination, _) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, _) = file(&cx, &spill_pool).await;
         let error = prepared
             .spool_in_view(
                 &mut view,
@@ -416,6 +429,9 @@ fn cold_join_complete_stage_errors_are_not_hidden_by_downstream_zero_limit() {
                 policy(0),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                1,
+                32,
                 1,
                 32,
                 31,
@@ -461,6 +477,7 @@ fn dropped_pending_join_spill_refunds_native_records_output_and_encoder_but_not_
         // land in the sort phase, after drain released the source by design.
         let (mut scratch, _) = file(&cx, &spill_pool).await;
         let (mut destination, backing) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, _) = file(&cx, &spill_pool).await;
         {
             let mut state = backing.0.lock().unwrap();
             state.pending = true;
@@ -472,6 +489,9 @@ fn dropped_pending_join_spill_refunds_native_records_output_and_encoder_but_not_
             policy(100),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            1,
+            32,
             1,
             32,
             1,

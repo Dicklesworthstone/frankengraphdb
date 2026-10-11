@@ -4,21 +4,103 @@
 use super::*;
 use crate::algebra::GraphValue;
 use crate::{GlaExecutionEvent, GraphAggregateValue, GraphIntegerError, GraphIntegerErrorKind};
+use core::convert::Infallible;
 use fgdb_types::CanonicalScalar;
 
 type ResultRows<E, C> = Result<Vec<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>>;
 
-fn conversion_error<E, C>(
-    column: usize,
-    kind: GraphIntegerErrorKind,
-) -> GqlQueryError<GraphAggregateError<E>, C> {
-    GqlQueryError::Source(GraphAggregateError::OutputExpression {
+/// Checked conversion never invokes a source. Host allocation, cancellation
+/// and quota failures remain in Control; native value refusals retain their
+/// original aggregate output column and error kind.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpillSetAggregateRowError<E> {
+    Control(E),
+    Value(GraphAggregateError<Infallible>),
+}
+impl<E: core::fmt::Display> core::fmt::Display for SpillSetAggregateRowError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Control(error) => error.fmt(f),
+            Self::Value(error) => error.fmt(f),
+        }
+    }
+}
+impl<E: core::error::Error + 'static> core::error::Error for SpillSetAggregateRowError<E> {}
+
+fn conversion_error<E>(column: usize, kind: GraphIntegerErrorKind) -> SpillSetAggregateRowError<E> {
+    SpillSetAggregateRowError::Value(GraphAggregateError::OutputExpression {
         column,
         error: GraphIntegerError {
             instruction: 0,
             kind,
         },
     })
+}
+
+/// Convert one complete group using the ordinary native row-domain contract.
+/// Every ownership event precedes its allocation; the caller retains the
+/// returned row's reservation until the row's final use.
+pub(in crate::set_ops) fn convert_row<E>(
+    row: &GraphAggregateRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValueRow, SpillSetAggregateRowError<E>> {
+    let mut control = |event| control(event).map_err(SpillSetAggregateRowError::Control);
+    control(GlaExecutionEvent::Work)?;
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut cells = Vec::new();
+    for key in row.keys() {
+        cells.push(super::super::projection::copy_value(key, &mut control)?);
+    }
+    for value in row.values() {
+        control(GlaExecutionEvent::Work)?;
+        let column = cells.len();
+        let value = match value {
+            GraphAggregateValue::Value(value) => {
+                super::super::projection::copy_value(value, &mut control)?
+            }
+            GraphAggregateValue::Count(value) => {
+                let value = i64::try_from(*value)
+                    .map_err(|_| conversion_error(column, GraphIntegerErrorKind::Overflow))?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                GraphValue::Scalar(CanonicalScalar::Int(value))
+            }
+            GraphAggregateValue::Integer(value) => {
+                let value = i64::try_from(*value)
+                    .map_err(|_| conversion_error(column, GraphIntegerErrorKind::Overflow))?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                GraphValue::Scalar(CanonicalScalar::Int(value))
+            }
+            // GraphValue has no exact rational variant. Even denominator one
+            // must not silently change the aggregate's declared domain.
+            GraphAggregateValue::Average(_) => {
+                return Err(conversion_error(
+                    column,
+                    GraphIntegerErrorKind::IncompatibleOperands,
+                ));
+            }
+        };
+        cells.push(value);
+    }
+    Ok(GraphValueRow::from_owned_values(cells))
+}
+
+/// One final checkpoint belongs to the complete conversion, including an
+/// empty grouped relation. It precedes any downstream row operation or page.
+pub(in crate::set_ops) fn finish_conversion<E>(
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), SpillSetAggregateRowError<E>> {
+    control(GlaExecutionEvent::Work).map_err(SpillSetAggregateRowError::Control)
+}
+
+fn query_error<E, C>(
+    error: SpillSetAggregateRowError<GqlQueryError<GraphAggregateError<E>, C>>,
+) -> GqlQueryError<GraphAggregateError<E>, C> {
+    match error {
+        SpillSetAggregateRowError::Control(error) => error,
+        SpillSetAggregateRowError::Value(error) => {
+            GqlQueryError::Source(error.map_source(|never| match never {}))
+        }
+    }
 }
 
 /// Both the public selected-output adapter and a relational stage can use this
@@ -30,47 +112,9 @@ pub(super) fn convert_rows<E, C>(
 ) -> ResultRows<E, C> {
     let mut output = Vec::new();
     for row in rows {
-        control(GlaExecutionEvent::Work)?;
-        control(GlaExecutionEvent::ScratchEntry)?;
-        let mut cells = Vec::new();
-        for key in row.keys() {
-            cells.push(super::super::projection::copy_value(key, control)?);
-        }
-        for value in row.values() {
-            control(GlaExecutionEvent::Work)?;
-            let column = cells.len();
-            let value = match value {
-                GraphAggregateValue::Value(value) => {
-                    super::super::projection::copy_value(value, control)?
-                }
-                GraphAggregateValue::Count(value) => {
-                    let value = i64::try_from(*value)
-                        .map_err(|_| conversion_error(column, GraphIntegerErrorKind::Overflow))?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    GraphValue::Scalar(CanonicalScalar::Int(value))
-                }
-                GraphAggregateValue::Integer(value) => {
-                    let value = i64::try_from(*value)
-                        .map_err(|_| conversion_error(column, GraphIntegerErrorKind::Overflow))?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    GraphValue::Scalar(CanonicalScalar::Int(value))
-                }
-                // As for native list construction, GraphValue has no exact
-                // rational variant. Even denominator one must not silently
-                // change the aggregate's declared domain. The original exact
-                // aggregate API remains available for every such result.
-                GraphAggregateValue::Average(_) => {
-                    return Err(conversion_error(
-                        column,
-                        GraphIntegerErrorKind::IncompatibleOperands,
-                    ));
-                }
-            };
-            cells.push(value);
-        }
-        output.push(GraphValueRow::from_owned_values(cells));
+        output.push(convert_row(&row, control).map_err(query_error)?);
     }
-    control(GlaExecutionEvent::Work)?;
+    finish_conversion(control).map_err(query_error)?;
     Ok(output)
 }
 

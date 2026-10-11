@@ -180,8 +180,9 @@ impl Scratch {
     async fn new(
         cx: &QueryCx,
         options: &Options,
-        aggregate: bool,
+        groupings: usize,
         stages: usize,
+        auxiliary: bool,
     ) -> Result<Self, Failure> {
         let limits = &options.spill;
         let directory = limits
@@ -190,7 +191,8 @@ impl Scratch {
             .ok_or_else(|| Failure::usage("--spill-dir required"))?;
         let memory = usize::try_from(limits.memory.unwrap_or(DEFAULT_MEMORY))
             .map_err(|_| Failure::usage("spill memory limit exceeds this platform"))?;
-        let file_count = if aggregate { 3 } else { 2 };
+        let needs_partition = auxiliary || groupings != 0;
+        let file_count = if needs_partition { 3 } else { 2 };
         let per_file = limits.disk.unwrap_or(DEFAULT_DISK) / file_count;
         if memory == 0 || per_file == 0 {
             return Err(Failure::query(
@@ -220,7 +222,7 @@ impl Scratch {
             .and_then(|stages| stages.checked_mul(4))
             .and_then(|passes| append_runs.checked_mul(passes))
             .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
-        let append_runs = if aggregate {
+        let append_runs = if groupings != 0 {
             // Completed-group clauses can sort canonical keys, DISTINCT equality
             // classes, and final representative rank. Every pass retains the same
             // byte/work quotas; only the finite append-attempt envelope expands.
@@ -245,8 +247,12 @@ impl Scratch {
                 })
                 .and_then(|runs| runs.checked_mul(fgdb_gql::algebra::MAX_PATTERN_VERTICES as u64))
                 .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
+            // Every intermediate reducer has its own bounded partitions and
+            // DISTINCT support passes. Count reducers across the entire tree,
+            // including both binary operands, without resetting byte/work caps.
             completed
                 .checked_add(argument_passes)
+                .and_then(|runs| runs.checked_mul(u64::try_from(groupings).ok()?))
                 .and_then(|runs| runs.checked_add(stage_runs))
                 .and_then(|runs| {
                     // A relational source also has its own complete sort tail
@@ -271,7 +277,7 @@ impl Scratch {
         let source = SpillFile::new(cx, owner.file("scratch")?, pool.clone(), file_limits)
             .await
             .map_err(execution_failure)?;
-        let partition = if aggregate {
+        let partition = if needs_partition {
             Some(
                 SpillFile::new(cx, owner.file("partitions")?, pool.clone(), file_limits)
                     .await
@@ -344,7 +350,7 @@ pub(super) async fn run(
     let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
         .map_err(execution_failure)?;
     let aggregate = is_aggregate(&prepared);
-    let mut scratch = Scratch::new(cx, options, aggregate, 0).await?;
+    let mut scratch = Scratch::new(cx, options, usize::from(aggregate), 0, false).await?;
     let outcome = async {
         if let Some(partition) = scratch.partition.as_mut() {
             return run_aggregate(
@@ -431,15 +437,21 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let aggregate = matches!(prepared, PreparedBuffered::Aggregate(_));
+    let groupings = match prepared {
+        PreparedBuffered::Ordered(prepared) => prepared.aggregate_count(),
+        PreparedBuffered::Aggregate(prepared) => prepared.aggregate_count(),
+    };
     let stages = match prepared {
         PreparedBuffered::Ordered(prepared) => prepared.stage_count(),
         PreparedBuffered::Aggregate(prepared) => prepared.stage_count(),
     };
-    let mut scratch = Scratch::new(cx, options, aggregate, stages).await?;
+    let mut scratch = Scratch::new(cx, options, groupings, stages, true).await?;
     let outcome = async {
         match prepared {
             PreparedBuffered::Ordered(prepared) => {
+                let auxiliary = scratch.partition.as_mut().ok_or_else(|| {
+                    Failure::query("buffered spill is missing its private auxiliary file")
+                })?;
                 let (spool, _) = prepared
                     .spool_in_view_with_resolver(
                         view,
@@ -447,6 +459,9 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
                         options.budget.policy(),
                         &mut scratch.source,
                         &mut scratch.destination,
+                        auxiliary,
+                        scratch.run_rows,
+                        scratch.max_partitions,
                         scratch.run_rows,
                         scratch.max_runs,
                         PAGE_BYTES,

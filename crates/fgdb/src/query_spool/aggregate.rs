@@ -25,6 +25,7 @@ mod codec_tests;
 #[path = "aggregate_output.rs"]
 mod output;
 pub use buffered::PreparedBufferedAggregate;
+pub(super) use buffered::spool_group_stage;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
 
@@ -1435,7 +1436,7 @@ where
             .map(|at| GraphValueOrder::ascending(at).with_nulls_first(true))
             .collect();
         let (sorted, used) = spool
-            .sort_into(
+            .sort_continuing(
                 cx,
                 destination,
                 source,
@@ -1443,15 +1444,11 @@ where
                 run_rows,
                 max_runs,
                 page_bytes,
-                work.limit
-                    .checked_sub(work.used)
-                    .ok_or(SpillError::SizeOverflow)?,
+                work.limit,
+                work.used,
             )
             .await?;
-        work.used = work
-            .used
-            .checked_add(used)
-            .ok_or(SpillError::SizeOverflow)?;
+        work.used = used;
         spool = copy_result(&sorted, source, destination, page_bytes, &mut work).await?;
     }
     drop(opened.input);

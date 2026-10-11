@@ -9,6 +9,7 @@ use fgdb_gql::spill_aggregate::{
     AsyncEdgeJoinSpillAggregateCursor, AsyncEdgeSpillAggregateCursor, AsyncSpillAggregatePlan,
     AsyncVertexSpillAggregateCursor,
 };
+use fgdb_gql::spill_set::{SpillSetAggregatePlan, SpillSetAggregateRowError};
 use fgdb_gql::stream::AsyncVertexScanSource;
 use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension};
 
@@ -126,6 +127,21 @@ impl<'q> CompletedRelation<'q> {
             evaluator: input.evaluator_stats(),
         }
     }
+
+    fn conversion_event(
+        &mut self,
+        event: GlaExecutionEvent,
+    ) -> core::result::Result<(), NativeSpoolError> {
+        let event = match event {
+            GlaExecutionEvent::Work => VertexScanEvent::Work,
+            GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+            // A private group conversion cannot admit a public result row.
+            GlaExecutionEvent::ResultRow => return Err(NativeSpoolError::IncompleteCursor),
+        };
+        self.charge(event)
+            .map_err(execute_error)
+            .map_err(NativeSpoolError::from)
+    }
 }
 
 impl GroupInput for CompletedRelation<'_> {
@@ -184,6 +200,168 @@ impl GroupInput for CompletedRelation<'_> {
     }
 }
 
+fn conversion_error(error: SpillSetAggregateRowError<NativeSpoolError>) -> NativeSpoolError {
+    match error {
+        SpillSetAggregateRowError::Control(error) => error,
+        SpillSetAggregateRowError::Value(error) => NativeSpoolError::SetExecution(
+            fgdb_gql::GraphSetExecutionError::Aggregate(Box::new(error)),
+        ),
+    }
+}
+
+/// Complete an intermediate native grouping before any enclosing row stage.
+/// The child finishes in destination, the existing reducer alternates that
+/// input with scratch and writes exact groups to auxiliary. Only then convert
+/// EVERY group into ordinary rows appended to destination. No live writer
+/// aliases a reader, and earlier sibling/child runs remain intact.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::query_spool) async fn spool_group_stage<V, A, B, C>(
+    plan: SpillSetAggregatePlan,
+    snapshot: CommitSeq,
+    view: &mut BufferedReadView<V>,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    auxiliary: &mut SpillFile<C>,
+    group_capacity: usize,
+    max_partitions: usize,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_work_units: u64,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> core::result::Result<(NativeResultSpool, u64), NativeSpoolError>
+where
+    V: Vfs + Clone,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    validate_limits(
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+    )?;
+    let (initial, prior_work) =
+        crate::PreparedBufferedOrder::from_relation(plan.input().clone(), Some(snapshot))
+            .spool_in_view_with_resolver(
+                view,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                group_capacity,
+                max_partitions,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_input_rows,
+                max_work_units,
+                resolver,
+            )
+            .await?;
+    let definition = plan.definition().clone();
+    let slots = (0..definition.key_columns().len())
+        .map(GraphAggregateTextSlot::GroupKey)
+        .chain((0..definition.aggregate_columns().len()).map(GraphAggregateTextSlot::Aggregate))
+        .collect();
+    let opened = Opened {
+        input: Box::new(CompletedRelation::new(cx, policy, &initial)),
+        definition,
+        columns: plan.columns().to_vec(),
+        slots,
+    };
+    let (aggregate, prior_work) = execute(
+        opened,
+        Some(initial),
+        prior_work,
+        cx,
+        destination,
+        scratch,
+        auxiliary,
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_work_units,
+        resolver,
+    )
+    .await?;
+
+    let pool = destination.memory_pool().clone();
+    let mut meter = CompletedRelation::new(cx, policy, &aggregate.inner);
+    let mut work = Work {
+        cx,
+        used: prior_work,
+        limit: max_work_units,
+    };
+    let mut reader = aggregate.inner.reader(auxiliary);
+    let mut writer = destination.paged_writer(cx, page_bytes)?;
+    let mut rows = 0_u64;
+    let mut largest = 0;
+    while let Some(bytes) = reader.next_row(cx).await? {
+        work.charge(bytes.len())?;
+        let _decoded = decoded_reservation(&pool, cx, bytes.as_ref(), 2)?;
+        let envelope = decode_row(bytes.as_ref(), resolver)?;
+        let row = decode_envelope(&envelope, aggregate.keys.len(), aggregate.aggregates.len())?;
+        let mut converted_charge = pool.reserve(cx, 0).map_err(SpillError::Memory)?;
+        let converted = plan
+            .convert_row_with_control(&row, &mut |event| {
+                meter.conversion_event(event)?;
+                if event == GlaExecutionEvent::ScratchEntry {
+                    converted_charge
+                        .grow(
+                            cx,
+                            8 * size_of::<GraphValue>()
+                                .max(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                        )
+                        .map_err(SpillError::Memory)?;
+                }
+                Ok(())
+            })
+            .map_err(conversion_error)?;
+        let encoded = account::encode(&pool, &mut work, &converted, max_row_bytes)?;
+        work.write(&mut writer, &encoded.0).await?;
+        largest = largest.max(encoded.0.len());
+        rows = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+        // Both decoded copies, the native conversion and encoded frame stay
+        // reserved across the awaited append; their guards drop per group.
+    }
+    if reader.state() != ScanState::Exhausted || rows != aggregate.row_count() {
+        return Err(NativeSpoolError::IncompleteCursor);
+    }
+    plan.finish_conversion_with_control(&mut |event| meter.conversion_event(event))
+        .map_err(conversion_error)?;
+    let run = writer.finish(cx).await?;
+    Ok((
+        NativeResultSpool {
+            columns: plan.columns().to_vec().into(),
+            encoded_columns: plan.columns().len(),
+            snapshot: aggregate.snapshot_seq(),
+            kind: aggregate.kind(),
+            rows: GqlExecutionStats {
+                snapshot_records: aggregate.row_stats().snapshot_records,
+                result_rows: rows,
+            },
+            evaluator: meter.evaluator_stats(),
+            max_row_bytes: largest,
+            run,
+        },
+        work.used,
+    ))
+}
+
 /// A completely bound local aggregate source plus its ordinary numeric/output
 /// definition. Construction reads no graph. The only execution strategy is the
 /// buffered source feeding the native grace-partition reducer.
@@ -208,8 +386,9 @@ impl PreparedNativeRead {
     /// and ordering by returned aliases. Existing graph aggregate computed
     /// outputs use the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT
     /// arguments use bounded external support passes. Unary WITH
-    /// projection/filter/UNWIND pipelines retain intermediate expansion, DISTINCT, ordering and
-    /// pagination in external stages. COLLECT, relational joins,
+    /// projection/filter/UNWIND/grouping pipelines retain intermediate expansion,
+    /// DISTINCT, ordering and pagination in external stages. Binary set inputs
+    /// finish both operands before reduction. COLLECT, relational joins,
     /// OPTIONAL/variable-length expansion and probes refuse at preparation.
     /// Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.
@@ -273,6 +452,14 @@ impl PreparedBufferedAggregate {
     pub fn stage_count(&self) -> usize {
         match &self.plan {
             AsyncSpillAggregatePlan::Relation { input, .. } => input.stage_count(),
+            _ => 0,
+        }
+    }
+
+    /// Exact reducer count, including intermediate grouping in the input tree.
+    pub fn aggregate_count(&self) -> usize {
+        1 + match &self.plan {
+            AsyncSpillAggregatePlan::Relation { input, .. } => input.aggregate_count(),
             _ => 0,
         }
     }
@@ -355,6 +542,9 @@ impl PreparedBufferedAggregate {
                         private_policy,
                         partition,
                         source,
+                        destination,
+                        group_capacity,
+                        max_partitions,
                         run_rows,
                         max_runs,
                         page_bytes,

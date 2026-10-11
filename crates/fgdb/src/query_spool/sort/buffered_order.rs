@@ -7,7 +7,8 @@ use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
 };
 use fgdb_gql::spill_set::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBinaryPlan, SpillSetValuesPlan,
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetBinaryPlan,
+    SpillSetValuesPlan,
 };
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
@@ -17,6 +18,7 @@ use fgdb_types::CanonicalScalarResolver;
 enum Input {
     Values(SpillSetValuesPlan),
     Binary(SpillSetBinaryPlan),
+    Aggregate(SpillSetAggregatePlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
     Join(AsyncEdgeJoinPlan, ScanSortTail),
@@ -51,8 +53,12 @@ impl PreparedNativeRead {
     /// canonical external merging; every child window and the shared native
     /// occurrence/equality laws survive composition. All child sources share
     /// the same snapshot and cumulative record/evaluator/physical allowances.
+    /// Intermediate COUNT/SUM/AVG/MIN/MAX grouping completes through the native
+    /// partitioned reducer, then converts every group to ordinary row values
+    /// before downstream clauses. Exact rational averages and wide integer
+    /// overflow retain the native row-domain refusal. COLLECT is unsupported.
     /// Probes, OPTIONAL/variable-length paths and relational joins refuse.
-    /// Numeric aggregate plans have their own preparation.
+    /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
         let set = match self {
@@ -162,6 +168,16 @@ impl PreparedBufferedOrder {
         }
     }
 
+    /// Exact number of reducers in this complete relational tree. Each owns
+    /// partition and DISTINCT-argument passes within the shared scratch limits.
+    pub fn aggregate_count(&self) -> usize {
+        match &self.input {
+            Input::Set(plan) => plan.aggregate_count(),
+            Input::Aggregate(plan) => 1 + plan.input().aggregate_count(),
+            _ => 0,
+        }
+    }
+
     /// Evaluate the complete buffered source, externally order all occurrences,
     /// apply DISTINCT, then SKIP/LIMIT and the visible projection. LIMIT zero
     /// still evaluates the full source and preserves late failures. A handle
@@ -182,17 +198,22 @@ impl PreparedBufferedOrder {
     /// private input occurrences, and the original result quota governs only
     /// final selected rows. max_sort_work cumulatively covers input encoding and
     /// the existing sort/window work; no phase restarts the allowance.
-    /// Both scratch files must be distinct and query-private. No allowance is
-    /// reset or refunded for appended intermediates, errors or cancellation.
+    /// All three scratch files must be distinct and query-private. Grouping
+    /// reuses the auxiliary file for complete aggregate output while the other
+    /// two files own input partitions. No allowance is reset or refunded for
+    /// appended intermediates, errors or cancellation.
     /// The exact temporal cut is checked against this view's publication.
     #[allow(clippy::too_many_arguments)]
-    pub fn spool_in_view<'q, V, A, B>(
+    pub fn spool_in_view<'q, V, A, B, C>(
         &self,
         view: &'q mut BufferedReadView<V>,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,
         scratch: &'q mut SpillFile<A>,
         destination: &'q mut SpillFile<B>,
+        auxiliary: &'q mut SpillFile<C>,
+        group_capacity: usize,
+        max_partitions: usize,
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
@@ -204,6 +225,7 @@ impl PreparedBufferedOrder {
         V: Vfs + Clone + 'q,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         self.spool_in_view_with_resolver(
             view,
@@ -211,6 +233,9 @@ impl PreparedBufferedOrder {
             policy,
             scratch,
             destination,
+            auxiliary,
+            group_capacity,
+            max_partitions,
             run_rows,
             max_runs,
             page_bytes,
@@ -227,13 +252,16 @@ impl PreparedBufferedOrder {
     /// locale, timezone, or replacement artifact can be chosen by this executor.
     /// All quotas and memory guarantees of [`Self::spool_in_view`] apply.
     #[allow(clippy::too_many_arguments)]
-    pub fn spool_in_view_with_resolver<'q, V, A, B>(
+    pub fn spool_in_view_with_resolver<'q, V, A, B, C>(
         &self,
         view: &'q mut BufferedReadView<V>,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,
         scratch: &'q mut SpillFile<A>,
         destination: &'q mut SpillFile<B>,
+        auxiliary: &'q mut SpillFile<C>,
+        group_capacity: usize,
+        max_partitions: usize,
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
@@ -246,6 +274,7 @@ impl PreparedBufferedOrder {
         V: Vfs + Clone + 'q,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let as_of = self.as_of.unwrap_or_else(|| view.frontier());
         let columns = self.columns.clone();
@@ -266,6 +295,9 @@ impl PreparedBufferedOrder {
                             AsyncSpillSetSourcePlan::Binary(source) => {
                                 Input::Binary(source.clone())
                             }
+                            AsyncSpillSetSourcePlan::Aggregate(source) => {
+                                Input::Aggregate(source.clone())
+                            }
                             AsyncSpillSetSourcePlan::Vertex(source) => {
                                 Input::Vertex(source.clone(), tail()?)
                             }
@@ -285,6 +317,9 @@ impl PreparedBufferedOrder {
                             input_policy,
                             &mut *scratch,
                             &mut *destination,
+                            &mut *auxiliary,
+                            group_capacity,
+                            max_partitions,
                             run_rows,
                             max_runs,
                             page_bytes,
@@ -323,6 +358,31 @@ impl PreparedBufferedOrder {
                     input_policy,
                     scratch,
                     destination,
+                    auxiliary,
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                    resolver,
+                ))
+            }
+            Input::Aggregate(plan) => {
+                let plan = plan.clone();
+                Box::pin(crate::query_spool::aggregate::spool_group_stage(
+                    plan,
+                    as_of,
+                    view,
+                    cx,
+                    input_policy,
+                    scratch,
+                    destination,
+                    auxiliary,
+                    group_capacity,
+                    max_partitions,
                     run_rows,
                     max_runs,
                     page_bytes,

@@ -563,6 +563,18 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
                 "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 0 RETURN count(*) AS count,sum(n.p) AS total",
                 0,
             ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 WITH n.p%2 AS bucket,COUNT(*) AS c,SUM(n.p) AS total WHERE c>1 UNWIND [total,c] AS value RETURN value ORDER BY value DESC",
+                1,
+            ),
+            (
+                "MATCH (n) WITH n.p%2 AS bucket,SUM(n.p) AS total RETURN MAX(total) AS largest",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value,COUNT(*) AS copies RETURN value ORDER BY value DESC LIMIT 0",
+                2,
+            ),
             ("MATCH (n) RETURN DISTINCT n.p AS value LIMIT 0", 2),
         ] {
             let mut options = spill_options(&directory, text);
@@ -657,6 +669,22 @@ fn buffered_external_values_preserve_native_rows_and_complete_group_output_contr
             ),
             (
                 "UNWIND [4,1,3,4,NULL] AS x RETURN COUNT(DISTINCT x) AS rows,SUM(DISTINCT x) AS total",
+                2,
+            ),
+            (
+                "UNWIND [1,1,2,3,3] AS x WITH x,COUNT(*) AS c WITH c,COUNT(*) AS groups WITH SUM(groups) AS total RETURN total",
+                2,
+            ),
+            (
+                "UNWIND [3,1,3,NULL] AS x WITH SUM(DISTINCT x) AS total,COUNT(DISTINCT x) AS c RETURN {total:total,count:c} AS summary",
+                2,
+            ),
+            (
+                "UNWIND [1,1,2,3,3] AS x WITH x,COUNT(*) AS c WHERE c>1 RETURN SUM(c) AS total,MIN(c) AS least",
+                2,
+            ),
+            (
+                "UNWIND [] AS x WITH COUNT(*) AS c,SUM(x) AS total RETURN c,total",
                 2,
             ),
             (
@@ -769,6 +797,12 @@ fn buffered_external_binary_sets_match_native_frames_and_remove_all_scratch() {
                 0,
                 0,
             ),
+            (
+                "UNWIND [1,1,2] AS x WITH x,COUNT(*) AS c RETURN x,c UNION ALL (UNWIND [1,3,3] AS x WITH x,COUNT(*) AS c RETURN c,x) ORDER BY x,c",
+                2,
+                0,
+                4,
+            ),
         ] {
             cases.push((text.to_owned(), cut, records, count));
         }
@@ -838,6 +872,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS result LIMIT 0",
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
             "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m),(z) RETURN {value:m.p} AS value LIMIT 0",
+            "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
         ] {
             let options = spill_options(&directory, text);
             let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
@@ -955,6 +990,34 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
                 Some(("--max-spill-rows", "3")),
             ),
             (
+                "UNWIND [9223372036854775807,1] AS x WITH SUM(x) AS total RETURN total LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [2] AS x WITH AVG(x) AS mean RETURN mean LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [1,'bad'] AS x WITH SUM(x) AS total RETURN total LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [1,0] AS x WITH SUM(1/x) AS total RETURN total LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [1,2,3] AS x WITH COUNT(*) AS c RETURN c LIMIT 0",
+                Some(("--max-spill-rows", "2")),
+            ),
+            (
+                "(UNWIND [1,2] AS x WITH x,COUNT(*) AS c RETURN x) INTERSECT ALL (UNWIND [3,4] AS x WITH x,COUNT(*) AS c RETURN x) LIMIT 0",
+                Some(("--max-spill-rows", "3")),
+            ),
+            (
+                "(UNWIND [] AS x RETURN x+0 AS value) INTERSECT ALL (UNWIND [9223372036854775807,1] AS x WITH SUM(x) AS total RETURN total AS value) LIMIT 0",
+                None,
+            ),
+            (
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",
                 None,
             ),
@@ -1039,6 +1102,7 @@ fn buffered_external_output_failure_retires_all_files_without_a_success_record()
             "MATCH (n) RETURN sum(n.p) AS total GROUP BY n.p ORDER BY total DESC",
             "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result ORDER BY result DESC",
             "MATCH (n) WITH n.p AS value RETURN value,COUNT(*) AS rows GROUP BY value ORDER BY value DESC",
+            "MATCH (n) WITH n.p AS value,COUNT(*) AS copies RETURN value,copies ORDER BY value DESC",
         ] {
             let options = spill_options(&directory, text);
             let prepared = okay(prepare_query(&options));

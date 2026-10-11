@@ -2,25 +2,27 @@
 //! every child's complete evaluation and selected row order precede its
 //! parent's operation, including when a later stage requests LIMIT zero.
 
+pub use super::aggregate::SpillSetAggregateRowError;
 pub use super::merge::SpillSetMergeStep;
 use super::{
     GraphSetColumnType, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
     GraphSetQuantifier, GraphSetValue, PreparedGraphSet, SetNode, filter::RowPredicate, merge,
     projection,
 };
-use crate::GlaExecutionEvent;
 use crate::algebra::{GlaOperator, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
 use crate::edge_stream::{AsyncEdgeJoinPlan, AsyncEdgeScanPlan, EdgeScanBuildError};
 use crate::scan_stream::{ScanKind, ScanSortTail};
+use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
+use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
-    /// Scope, selection, projection, UNWIND and binary set operations over
-    /// native graph or singleton leaves are admitted. This ordinal is the
-    /// depth from the root, including across binary operands.
+    /// Scope, selection, projection, UNWIND, numeric grouping and binary set
+    /// operations over native graph or singleton leaves are admitted. This
+    /// ordinal is the depth from the root, including across binary operands.
     Unsupported {
         depth: usize,
     },
@@ -46,6 +48,7 @@ impl core::error::Error for SpillSetBuildError {}
 /// The ordinary async sort-input compiler owns all graph predicates, captures
 /// and projection. Values owns the native singleton and opens no graph source.
 /// Binary owns both complete operand plans and their checked set semantics.
+/// Aggregate owns one complete input and the existing exact numeric reducer.
 /// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillSetSourcePlan {
@@ -54,6 +57,7 @@ pub enum AsyncSpillSetSourcePlan {
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
     Binary(SpillSetBinaryPlan),
+    Aggregate(SpillSetAggregatePlan),
 }
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
@@ -62,7 +66,87 @@ impl AsyncSpillSetSourcePlan {
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
             Self::Binary(_) => ScanKind::Set,
+            Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
+    }
+}
+
+/// A compiler-owned intermediate numeric aggregate over a complete relation.
+///
+/// Finish the entire input, including every child grouping, DISTINCT, set
+/// operation, order and page, before invoking definition(). The ordinary
+/// external reducer owns all numeric and argument-DISTINCT semantics. Visit
+/// its completed groups in native canonical key order, then convert EVERY
+/// group to the ordinary row domain before starting the enclosing plan's
+/// first stage. That Identity stage owns this node's ORDER BY/SKIP/LIMIT;
+/// a later LIMIT zero cannot conceal a conversion or child-evaluation error.
+///
+/// Counts and integer sums require an exact Int64 representation. Exact
+/// rational averages refuse even when their denominator is one; floating
+/// results, extrema and NULL retain their canonical native values. No numeric
+/// coercion, collection reducer or graph source is synthesized here.
+#[derive(Clone)]
+pub struct SpillSetAggregatePlan {
+    input: Box<AsyncSpillSetPlan>,
+    definition: SpillAggregateDefinition,
+    columns: Vec<String>,
+    types: Vec<GraphSetColumnType>,
+}
+
+impl core::fmt::Debug for SpillSetAggregatePlan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillSetAggregatePlan")
+            .field("columns", &self.columns.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl SpillSetAggregatePlan {
+    pub fn input(&self) -> &AsyncSpillSetPlan {
+        &self.input
+    }
+    pub fn definition(&self) -> &SpillAggregateDefinition {
+        &self.definition
+    }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+
+    /// The SAME checked conversion as native materialized grouping. The host
+    /// retains the authenticated group's reservation, charges its cumulative
+    /// query meter and admits memory on ScratchEntry BEFORE this call owns a
+    /// value. Retain the new reservation through all uses of the returned row,
+    /// including awaited encoding/appends. No final ResultRow is charged.
+    ///
+    /// A value/control failure invalidates the entire tentative result. Do not
+    /// publish a prefix or retry with a different aggregate or scalar domain.
+    pub fn convert_row_with_control<E>(
+        &self,
+        row: &GraphAggregateRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetAggregateRowError<E>> {
+        if row.keys().len() != self.definition.key_columns().len()
+            || row.values().len() != self.definition.aggregate_columns().len()
+        {
+            return Err(SpillSetAggregateRowError::Value(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        super::aggregate::convert_row(row, control)
+    }
+
+    /// Complete the native conversion barrier once after every group succeeds,
+    /// including when a keyed input has no groups. This final Work checkpoint
+    /// precedes every downstream expression, filter, ordering and page.
+    pub fn finish_conversion_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetAggregateRowError<E>> {
+        super::aggregate::finish_conversion(control)
     }
 }
 
@@ -189,13 +273,14 @@ struct GraphSourceMetadata {
     tail: ScanSortTail,
 }
 
-/// A bound source or binary relation followed by native relational barriers.
+/// A bound source, binary relation or grouping followed by native row barriers.
 ///
 /// First consume the complete source and apply its source_tail(), when present,
 /// including hidden-column removal. Values emits one zero-column identity tuple
 /// and has no graph pattern or scan tail. Binary executes both complete child
 /// plans and merges them according to its native contract, also without a graph
-/// pattern or scan tail. Then execute stages() in order. The first graph stage
+/// pattern or scan tail. Aggregate reduces its complete child and converts all
+/// groups through the native row-domain boundary. Then execute stages() in order. The first graph stage
 /// canonicalizes visible source tuples as native Set admission does; a graph
 /// leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
 /// No source, expression, clause or unsupported descendant is erased even when
@@ -224,6 +309,13 @@ impl AsyncSpillSetPlan {
             CompiledSource::Binary(binary) => {
                 return Ok(Self {
                     source: AsyncSpillSetSourcePlan::Binary(binary),
+                    graph: None,
+                    stages,
+                });
+            }
+            CompiledSource::Aggregate(aggregate) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Aggregate(aggregate),
                     graph: None,
                     stages,
                 });
@@ -274,6 +366,7 @@ impl AsyncSpillSetPlan {
     pub fn source_columns(&self) -> &[String] {
         match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
             _ => self
                 .graph
                 .as_ref()
@@ -287,8 +380,11 @@ impl AsyncSpillSetPlan {
         &self.stages
     }
     /// Total bounded physical barriers, including both binary descendants and
-    /// their two canonicalization passes plus merge. Hosts use this finite count
-    /// to admit append-only scratch metadata; it never raises byte or work caps.
+    /// their two canonicalization passes plus merge, and every aggregate's
+    /// input, reduction, canonical group order and checked row conversion.
+    /// Internal aggregate partitions/argument support have their own finite
+    /// limits; aggregate_count() gives their number of independent reducers.
+    /// This admits append-only metadata, never larger byte or work allowances.
     pub fn stage_count(&self) -> usize {
         let descendants = match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary
@@ -296,9 +392,27 @@ impl AsyncSpillSetPlan {
                 .stage_count()
                 .saturating_add(binary.right().stage_count())
                 .saturating_add(3),
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
+                aggregate.input().stage_count().saturating_add(3)
+            }
             _ => 0,
         };
         self.stages.len().saturating_add(descendants)
+    }
+    /// Exact number of intermediate numeric reducers, including all binary
+    /// descendants. Hosts reserve each reducer's partition/DISTINCT append
+    /// envelope without refreshing the cumulative query's disk or work budget.
+    pub fn aggregate_count(&self) -> usize {
+        match &self.source {
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
+                aggregate.input().aggregate_count().saturating_add(1)
+            }
+            AsyncSpillSetSourcePlan::Binary(binary) => binary
+                .left()
+                .aggregate_count()
+                .saturating_add(binary.right().aggregate_count()),
+            _ => 0,
+        }
     }
     pub fn columns(&self) -> &[String] {
         self.stages
@@ -602,10 +716,26 @@ fn compile_stages<'a>(
             false,
             false,
         ),
-        SetNode::Aggregate(_)
-        | SetNode::ProcedureCall(_)
-        | SetNode::CrossJoin { .. }
-        | SetNode::Join { .. } => return Err(SpillSetBuildError::Unsupported { depth }),
+        SetNode::Aggregate(summary) => {
+            let input = AsyncSpillSetPlan::compile_at(summary.input(), depth + 1)?;
+            let definition = SpillAggregateDefinition::from_relation(summary)
+                .map_err(|_| SpillSetBuildError::Unsupported { depth })?;
+            (
+                CompiledSource::Aggregate(SpillSetAggregatePlan {
+                    input: Box::new(input),
+                    definition,
+                    columns: query.columns.clone(),
+                    types: query.types.clone(),
+                }),
+                query.types.clone(),
+                Operation::Identity,
+                false,
+                false,
+            )
+        }
+        SetNode::ProcedureCall(_) | SetNode::CrossJoin { .. } | SetNode::Join { .. } => {
+            return Err(SpillSetBuildError::Unsupported { depth });
+        }
     };
     let order = if !query.order.is_empty() {
         Some(query.order.clone())
@@ -629,4 +759,5 @@ enum CompiledSource<'a> {
     Values,
     Pattern(&'a PreparedGraphPattern<GraphValueRow>),
     Binary(SpillSetBinaryPlan),
+    Aggregate(SpillSetAggregatePlan),
 }

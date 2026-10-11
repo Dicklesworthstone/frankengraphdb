@@ -235,6 +235,7 @@ fn bound_historical_order_keeps_hidden_keys_and_cumulative_encoding_sort_window_
                 let (mut scratch, _) = file(&cx, &spill_pool).await;
                 let (mut destination, _) = file(&cx, &spill_pool).await;
                 let limit = exact.map_or(WORK, |work| work - u64::from(trial == 2));
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
                 let result = prepared
                     .spool_in_view(
                         &mut view,
@@ -242,6 +243,9 @@ fn bound_historical_order_keeps_hidden_keys_and_cumulative_encoding_sort_window_
                         policy(2),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        1,
+                        16,
                         1,
                         16,
                         PAGE,
@@ -417,6 +421,7 @@ fn buffered_row_cap_and_encoding_work_precede_encoder_memory_and_scratch_writes(
             let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, backing) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
             let error = prepared
                 .spool_in_view(
                     &mut view,
@@ -424,6 +429,9 @@ fn buffered_row_cap_and_encoding_work_precede_encoder_memory_and_scratch_writes(
                     policy(0),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    1,
+                    16,
                     1,
                     16,
                     PAGE,
@@ -525,6 +533,7 @@ fn buffered_unary_stages_preserve_inner_pages_exact_order_and_final_only_row_quo
                 let (mut scratch, _) = file(&cx, &spill_pool).await;
                 let (mut destination, _) = file(&cx, &spill_pool).await;
                 let limit = exact_work.map_or(WORK, |work| work - u64::from(trial == 2));
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
                 let mut policy = policy(expected.len() as u64);
                 if let Some(stats) = exact_evaluator {
                     let stats: GlaExecutionStats = stats;
@@ -538,6 +547,9 @@ fn buffered_unary_stages_preserve_inner_pages_exact_order_and_final_only_row_quo
                         policy,
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        1,
+                        16,
                         1,
                         16,
                         1024,
@@ -601,6 +613,7 @@ fn buffered_unary_failure_barriers_survive_limit_zero_and_release_all_reservatio
         let (mut scratch, _) = file(&cx, &spill_pool).await;
         let (mut destination, _) = file(&cx, &spill_pool).await;
         let params = GqlParameters::new();
+        let (mut auxiliary, _) = file(&cx, &spill_pool).await;
         let prepared = PreparedNativeRead::prepare(
             "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 WITH 12/(3-n.p) AS value RETURN 1/(value-6) AS result LIMIT 0",
             &params, resolve,
@@ -612,6 +625,9 @@ fn buffered_unary_failure_barriers_survive_limit_zero_and_release_all_reservatio
                 policy(0),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                1,
+                16,
                 1,
                 16,
                 1024,

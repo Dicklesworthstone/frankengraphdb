@@ -155,17 +155,14 @@ impl AsyncSpillAggregatePlan {
     /// definition. Zero-source Values/UNWIND pipelines require this owner;
     /// graph-backed and binary inputs retain the same stages and result clauses.
     /// Every descendant is admitted before I/O, including beneath LIMIT zero.
-    /// Unsupported joins and intermediate grouping refuse.
+    /// Unsupported joins and collection grouping refuse.
     /// The private summary never becomes an executable single-graph source.
     pub fn compile_relation(
         aggregate: &PreparedGraphSetAggregate,
     ) -> Result<Self, SpillAggregateBuildError> {
         let input = AsyncSpillSetPlan::compile(aggregate.input())
             .map_err(SpillAggregateBuildError::Relation)?;
-        let physical = aggregate
-            .prepare_spill_output()
-            .ok_or(SpillAggregateBuildError::Unsupported)?;
-        let definition = SpillAggregateDefinition::from_physical(physical)?;
+        let definition = SpillAggregateDefinition::from_relation(aggregate)?;
         Ok(Self::Relation {
             input: Box::new(input),
             definition,
@@ -220,6 +217,18 @@ impl core::fmt::Debug for SpillAggregateState {
 }
 
 impl SpillAggregateDefinition {
+    /// Share complete-group admission between terminal summaries and an
+    /// intermediate relational aggregate. Each caller separately compiles the
+    /// entire real input; this method never creates or admits a graph source.
+    pub(crate) fn from_relation(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let physical = aggregate
+            .prepare_spill_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        Self::from_physical(physical)
+    }
+
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
         let physical = aggregate
             .prepare_streamed_output()
