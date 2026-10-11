@@ -276,7 +276,7 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
         "MATCH (a) MATCH (b) WHERE c.p=1 MATCH (c) RETURN c",
         "MATCH (a) MATCH (b) WHERE EXISTS { MATCH (b) } RETURN b",
         "MATCH (a) WHERE EXISTS { MATCH (a) MATCH (a) } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*]->(b) RETURN b",
+        "MATCH (a) OPTIONAL MATCH (a) MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN b",
         "MATCH (a) MATCH ANY SHORTEST WALK (a)-[:R*1..2]->(b)-[:S]->(c) RETURN c LIMIT 0",
         &too_many,
     ] {

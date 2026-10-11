@@ -109,9 +109,10 @@ impl Parser<'_> {
         }
     }
 
-    /// Postfix `{m,n}`, `{n}` and `{,n}` follow the complete relationship,
-    /// including its direction. GQL's omitted lower bound is zero, unlike
-    /// Cypher's `*..n` lower bound of one. An upper bound is always required.
+    /// Postfix `{m,n}`, `{n}`, `{,n}` and the unbounded `{m,}` follow the
+    /// complete relationship, including its direction. GQL's omitted lower
+    /// bound is zero, unlike Cypher's `*..n` lower bound of one. An omitted
+    /// upper bound needs a repetition rule that ends (checked by the caller).
     /// A second quantifier refuses even when its interval happens to agree.
     pub(super) fn relationship_walk_bounds(
         &mut self,
@@ -129,27 +130,32 @@ impl Parser<'_> {
         }
         self.advance()?;
         let (minimum, maximum) = if self.take(b',')? {
-            (0, self.walk_hop_literal()?)
+            (0, Some(self.walk_hop_literal()?))
         } else {
             let minimum = self.walk_hop_literal()?;
-            let maximum = if self.take(b',')? {
-                self.walk_hop_literal()?
+            let maximum = if !self.take(b',')? {
+                Some(minimum)
+            } else if self.is_punct(b'}') {
+                None
             } else {
-                minimum
+                Some(self.walk_hop_literal()?)
             };
             (minimum, maximum)
         };
         self.punct(b'}', "}")?;
-        GraphWalkBounds::new(minimum, maximum)
-            .map(Some)
-            .map_err(|_| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected(
-                        "finite ordered WALK bounds within the hop limit",
-                    ),
-                )
-            })
+        match maximum {
+            Some(maximum) => GraphWalkBounds::new(minimum, maximum),
+            None => GraphWalkBounds::unbounded(minimum),
+        }
+        .map(Some)
+        .map_err(|_| {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "finite ordered WALK bounds within the hop limit",
+                ),
+            )
+        })
     }
 }
 

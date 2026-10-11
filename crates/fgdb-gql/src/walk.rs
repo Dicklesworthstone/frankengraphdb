@@ -33,15 +33,43 @@ impl core::fmt::Display for GraphWalkBoundsError {
 }
 impl core::error::Error for GraphWalkBoundsError {}
 
-/// Inclusive, finite hop interval. Private fields make unbounded or reversed
-/// intervals unrepresentable in an executable walk. Zero hops retain the source
-/// identity, including an isolated vertex whose adjacency entry is absent.
+/// The maximum of an interval with no upper bound.
+const UNBOUNDED: u32 = u32::MAX;
+
+/// Inclusive hop interval. Private fields make reversed intervals
+/// unrepresentable. An interval is finite unless built by
+/// [`GraphWalkBounds::unbounded`]: the pattern compiler admits that only where
+/// the repetition rule ends every expansion by itself (TRAIL or DIFFERENT
+/// EDGES reuse no edge, ACYCLIC and SIMPLE no vertex), never for a WALK or a
+/// shortest selector. Zero hops retain the source identity, including an
+/// isolated vertex whose adjacency entry is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWalkBounds {
     minimum: u32,
     maximum: u32,
 }
 impl GraphWalkBounds {
+    /// `[*]`, `[*k..]`, `{k,}`: at least `minimum` hops and no upper bound.
+    /// Its `maximum()` is `u32::MAX`, which no finite interval reaches, so a
+    /// depth test never stops the expansion; the work and scratch budgets
+    /// govern it as they govern every visited occurrence.
+    pub const fn unbounded(minimum: u32) -> Result<Self, GraphWalkBoundsError> {
+        if minimum > MAX_GRAPH_WALK_HOPS {
+            return Err(GraphWalkBoundsError::TooManyHops {
+                limit: MAX_GRAPH_WALK_HOPS,
+                observed: minimum,
+            });
+        }
+        Ok(Self {
+            minimum,
+            maximum: UNBOUNDED,
+        })
+    }
+    /// Whether the interval has an upper bound.
+    #[must_use]
+    pub const fn is_bounded(self) -> bool {
+        self.maximum != UNBOUNDED
+    }
     pub const fn new(minimum: u32, maximum: u32) -> Result<Self, GraphWalkBoundsError> {
         if minimum > maximum {
             return Err(GraphWalkBoundsError::Reversed);
@@ -562,6 +590,22 @@ mod tests {
         );
         assert_eq!(
             GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS + 1),
+            Err(GraphWalkBoundsError::TooManyHops {
+                limit: MAX_GRAPH_WALK_HOPS,
+                observed: MAX_GRAPH_WALK_HOPS + 1
+            })
+        );
+        // Only `unbounded` leaves the maximum open; its minimum is checked.
+        assert!(
+            GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS)
+                .unwrap()
+                .is_bounded()
+        );
+        let open = GraphWalkBounds::unbounded(2).unwrap();
+        assert!(!open.is_bounded());
+        assert_eq!((open.minimum(), open.maximum()), (2, u32::MAX));
+        assert_eq!(
+            GraphWalkBounds::unbounded(MAX_GRAPH_WALK_HOPS + 1),
             Err(GraphWalkBoundsError::TooManyHops {
                 limit: MAX_GRAPH_WALK_HOPS,
                 observed: MAX_GRAPH_WALK_HOPS + 1

@@ -126,14 +126,17 @@ fn quantified_text_has_the_same_plan_as_typed_walks_and_rebinds_without_resolvin
     );
 }
 
+/// Malformed, parameterized or over-limit quantifiers refuse before any
+/// catalog call, and so does an unbounded one that would not end: a WALK
+/// under REPEATABLE ELEMENTS. (Under the default DIFFERENT EDGES, or TRAIL,
+/// an unbounded quantifier ends by itself; match_modes covers it.)
 #[test]
-fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
+fn unsafe_ambiguous_or_unending_quantifiers_refuse_before_any_catalog_call() {
     for text in [
-        "MATCH (a)-[:R*]->(b) RETURN a",
-        "MATCH TRAIL (a)-[:R*]->(b) RETURN a",
-        "MATCH WALK (a)-[:R*]->(b) RETURN a",
-        "MATCH WALK (a)-[:R*..]->(b) RETURN a",
-        "MATCH WALK (a)-[:R*1..]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*..]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..]->(b) RETURN a",
         "MATCH WALK (a)-[:R*2..1]->(b) RETURN a",
         "MATCH WALK (a)-[:R*..0]->(b) RETURN a",
         "MATCH WALK (a)-[:R*-1..2]->(b) RETURN a",
@@ -145,7 +148,7 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
         "MATCH WALK (a)-[:R*0..$hops]->(b) RETURN a",
         "MATCH WALK (a)-[:R*1025]->(b) RETURN a LIMIT 0",
         "MATCH WALK (a)-[:R*4294967296]->(b) RETURN a",
-        "MATCH WALK (a) OPTIONAL MATCH (a)-[:R*0..]->(b) RETURN a",
+        "MATCH WALK (a) OPTIONAL MATCH REPEATABLE ELEMENTS (a)-[:R*0..]->(b) RETURN a",
     ] {
         let calls = Cell::new(0);
         assert!(

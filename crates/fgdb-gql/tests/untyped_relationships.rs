@@ -215,8 +215,8 @@ fn typed_plan_bytes_keep_the_existing_transcript_and_cannot_alias_any() {
     );
     for invalid in [
         "MATCH (a)-[:]->(b) RETURN a",
-        "MATCH (a)-[*]->(b) RETURN a",
-        "MATCH (a)-[*1..]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS (a)-[*]->(b) RETURN a",
+        "MATCH REPEATABLE ELEMENTS (a)-[*1..]->(b) RETURN a",
     ] {
         assert!(PreparedGraphText::prepare(invalid, |_, _: &str| None).is_err());
     }

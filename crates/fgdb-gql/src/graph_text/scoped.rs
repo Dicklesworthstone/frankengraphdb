@@ -729,6 +729,19 @@ impl<'a> Parser<'a> {
                 // openCypher `<-->` matches either direction, as `--` does.
                 let outgoing = self.take(b'>')?;
                 let walk = self.relationship_walk_bounds(walk)?;
+                // Shape only, so before any catalog call: an omitted upper
+                // bound needs a repetition rule that ends (the compiler
+                // checks the same rule for every builder).
+                if walk.is_some_and(|bounds| {
+                    !bounds.is_bounded() && !search.ends_unbounded(self.syntax.match_mode)
+                }) {
+                    return Err(error(
+                        bound_at,
+                        GraphPatternTextErrorKind::Expected(
+                            "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE or DIFFERENT EDGES for an unbounded quantifier",
+                        ),
+                    ));
+                }
                 if selected && walk.is_none() {
                     return Err(error(
                         bound_at,
@@ -796,8 +809,10 @@ impl<'a> Parser<'a> {
 
     /// Bound metadata is parsed once, before catalog resolution. This profile
     /// accepts exact *k, inclusive *m..n, and *..n with the conventional minimum
-    /// one. Every upper bound is mandatory and checked, including LIMIT 0.
-    /// No source-text rewriting, guessed bound or implicit truncation occurs.
+    /// one, and the unbounded *, *.., *m.. (openCypher Match5, Match6). A
+    /// written upper bound is checked, including LIMIT 0; an omitted one is
+    /// unbounded, never a guessed bound or an implicit truncation, and the
+    /// pattern compiler admits it only under a repetition rule that ends.
     fn pattern_walk_bounds(
         &mut self,
     ) -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
@@ -805,29 +820,36 @@ impl<'a> Parser<'a> {
         if !self.take(b'*')? {
             return Ok(None);
         }
-        let (minimum, maximum) = if self.take(b'.')? {
-            self.punct(b'.', "..")?;
-            (1, self.walk_hop_literal()?)
+        let digits = |parser: &Self| matches!(parser.current.kind, TokenKind::Digits(_));
+        let minimum = if digits(self) {
+            Some(self.walk_hop_literal()?)
         } else {
-            let minimum = self.walk_hop_literal()?;
-            let maximum = if self.take(b'.')? {
-                self.punct(b'.', "..")?;
-                self.walk_hop_literal()?
-            } else {
-                minimum
-            };
-            (minimum, maximum)
+            None
         };
-        crate::GraphWalkBounds::new(minimum, maximum)
-            .map(Some)
-            .map_err(|_| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected(
-                        "finite ordered WALK bounds within the hop limit",
-                    ),
-                )
-            })
+        let maximum = if self.take(b'.')? {
+            self.punct(b'.', "..")?;
+            if digits(self) {
+                Some(self.walk_hop_literal()?)
+            } else {
+                None
+            }
+        } else {
+            minimum
+        };
+        let minimum = minimum.unwrap_or(1);
+        match maximum {
+            Some(maximum) => crate::GraphWalkBounds::new(minimum, maximum),
+            None => crate::GraphWalkBounds::unbounded(minimum),
+        }
+        .map(Some)
+        .map_err(|_| {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "finite ordered WALK bounds within the hop limit",
+                ),
+            )
+        })
     }
 
     // Look ahead through the SAME lexer, without consuming its token budget.

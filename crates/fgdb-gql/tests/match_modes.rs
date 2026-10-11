@@ -342,3 +342,98 @@ fn explicit_and_implicit_modes_have_stable_distinct_plan_identities() {
         bind("MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)<-[:R]-(c) RETURN a,b,c").canonical_bytes()
     );
 }
+
+/// An unbounded quantifier (`*`, `*..`, `*k..`, `{k,}`) under DIFFERENT
+/// EDGES, TRAIL or ACYCLIC ends by its own repetition rule, also over a
+/// cycle, and matches exactly what a written bound as long as the longest
+/// admitted path matches (openCypher Match5 [1], [2], [16]-[18], Pattern1
+/// [7]). A starved budget is the typed evaluator refusal, never a truncated
+/// result. WALK under REPEATABLE ELEMENTS and the shortest selectors still
+/// need an upper bound, refused before any catalog call.
+#[test]
+fn unbounded_quantifiers_end_by_their_repetition_rule() {
+    // 1 -> 2 -> 3 -> 1: no trail is longer than three edges and no acyclic
+    // path longer than two.
+    let cycle = [
+        (EId(11), VId(1), R, VId(2)),
+        (EId(12), VId(2), R, VId(3)),
+        (EId(13), VId(3), R, VId(1)),
+    ];
+    let sorted = |text: &str| {
+        let mut rows = run(text, &cycle);
+        rows.sort();
+        rows
+    };
+    for (open, closed) in [
+        (
+            "MATCH (a:A)-[:R*]->(b) RETURN b",
+            "MATCH (a:A)-[:R*1..3]->(b) RETURN b",
+        ),
+        (
+            "MATCH (a:A)-[:R*..]->(b) RETURN b",
+            "MATCH (a:A)-[:R*1..3]->(b) RETURN b",
+        ),
+        (
+            "MATCH (a:A)-[:R*0..]->(b) RETURN b",
+            "MATCH (a:A)-[:R*0..3]->(b) RETURN b",
+        ),
+        (
+            "MATCH (a:A)-[:R*2..]->(b) RETURN b",
+            "MATCH (a:A)-[:R*2..3]->(b) RETURN b",
+        ),
+        (
+            "MATCH (a:A)-[:R]->{1,}(b) RETURN b",
+            "MATCH (a:A)-[:R]->{1,3}(b) RETURN b",
+        ),
+        (
+            "MATCH TRAIL (a:A)-[:R*]-(b) RETURN b",
+            "MATCH TRAIL (a:A)-[:R*1..3]-(b) RETURN b",
+        ),
+        (
+            "MATCH ACYCLIC (a:A)-[:R*]->(b) RETURN b",
+            "MATCH ACYCLIC (a:A)-[:R*1..2]->(b) RETURN b",
+        ),
+        (
+            "MATCH (n) WHERE (n)-[:R*]->(n) RETURN n",
+            "MATCH (n) WHERE (n)-[:R*1..3]->(n) RETURN n",
+        ),
+    ] {
+        assert_eq!(sorted(open), sorted(closed), "{open}");
+    }
+    assert_eq!(run("MATCH (a:A)-[:R*]->(b) RETURN b", &cycle).len(), 3);
+    assert_eq!(
+        run("MATCH (n) WHERE (n)-[:R*]->(n) RETURN n", &cycle).len(),
+        3
+    );
+    let starved = bind("MATCH (a:A)-[:R*]->(b) RETURN b")
+        .plan()
+        .execute_governed_with_identified_properties(
+            (VERTICES.len() + cycle.len()) as u64,
+            VERTICES,
+            cycle.iter().copied(),
+            matches,
+            |vid, key| Ok((key == P).then_some(&NUMBERS[vid.0 as usize - 1])),
+            GqlQueryPolicy::new(10_000, 10_000, 3, 4_000_000),
+            || Ok::<_, ()>(()),
+        );
+    assert!(matches!(
+        starved,
+        Err(fgdb_gql::GqlQueryError::Evaluator(_))
+    ));
+    for refused in [
+        "MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN b",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->{2,}(b) RETURN b",
+        "MATCH ANY SHORTEST (a)-[:R*]->(b) RETURN b",
+        "MATCH ALL SHORTEST (a)-[:R*2..]->(b) RETURN b",
+        "MATCH (n) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (n)-[:R*]->() } RETURN n",
+    ] {
+        let mut calls = 0;
+        let refused_text =
+            PreparedGraphText::prepare(refused, |kind: GraphSymbolKind, name: &str| {
+                calls += 1;
+                symbols(kind, name)
+            });
+        assert!(refused_text.is_err(), "{refused}");
+        assert_eq!(calls, 0, "{refused}");
+    }
+}

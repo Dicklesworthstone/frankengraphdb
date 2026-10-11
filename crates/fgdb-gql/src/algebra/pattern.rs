@@ -51,6 +51,9 @@ pub enum PatternBuildError {
     InvalidColumnName,
     RequiresValueProjection,
     InvalidPathCapture,
+    /// A quantified atom with no upper hop bound whose repetition rule does
+    /// not end it: a WALK that may repeat edges, or a shortest selector.
+    UnboundedWalk,
     LimitExceeded {
         dimension: PatternLimitDimension,
         limit: usize,
@@ -77,6 +80,7 @@ impl core::fmt::Display for PatternBuildError {
                 "binding property comparisons, path captures and relationship uniqueness require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
+            Self::UnboundedWalk => f.write_str("an unbounded quantified atom requires TRAIL, ACYCLIC, SIMPLE or DIFFERENT EDGES"),
             Self::LimitExceeded {
                 dimension,
                 limit,
@@ -1091,6 +1095,14 @@ impl GraphPatternBuilder {
         &self,
         root: Option<usize>,
     ) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
+        // Only a repetition rule that ends may leave the hop count open; the
+        // text parsers refuse the same shapes before any catalog call.
+        if self.edges.iter().any(|edge| {
+            edge.walk.is_some_and(|bounds| !bounds.is_bounded())
+                && !edge.search.ends_unbounded(self.match_mode)
+        }) {
+            return Err(PatternBuildError::UnboundedWalk);
+        }
         let first_local = self
             .variables
             .iter()

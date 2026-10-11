@@ -191,6 +191,21 @@ pub enum GraphWalkSearch {
     Trail,
 }
 
+impl GraphWalkSearch {
+    /// Whether an atom with no upper hop bound still ends: TRAIL reuses no
+    /// edge and ACYCLIC or SIMPLE no vertex, and an ALL atom under DIFFERENT
+    /// EDGES runs as a trail. A WALK that may repeat edges, or a shortest
+    /// selector, could revisit a cycle forever.
+    #[must_use]
+    pub fn ends_unbounded(self, mode: GraphMatchMode) -> bool {
+        match self {
+            Self::Trail | Self::Acyclic | Self::Simple => true,
+            Self::All => mode == GraphMatchMode::DifferentEdges,
+            Self::AllShortest | Self::AnyShortest => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntegerComparison {
     Equal,
