@@ -1226,6 +1226,17 @@ impl<'a> Parser<'a> {
         };
         self.let_base = base;
         let (operand, slots) = parsed.map_err(expression_error)?;
+        self.scalar_let_value(operand, slots, at)
+    }
+
+    /// A parsed scalar operand and the let slots its composites took, as one
+    /// value: the body inside a Let when there are slots.
+    pub(super) fn scalar_let_value(
+        &mut self,
+        operand: Operand,
+        slots: Vec<ReadValueTemplate>,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let body = self.read_value_template(operand, at)?;
         Ok(let_value(slots, body))
     }

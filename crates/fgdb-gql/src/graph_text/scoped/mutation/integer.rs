@@ -316,6 +316,21 @@ impl<'a> Parser<'a> {
         Ok(!matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
     }
 
+    /// The left side of `operand IN value` (starts_operand_membership): one
+    /// operand at the concatenation level, with its own let slots, as a value.
+    fn membership_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let base = core::mem::replace(&mut self.let_base, nesting);
+        let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Operand, true);
+        self.let_base = base;
+        let (operand, slots) = parsed?;
+        Ok(self.scalar_let_value(operand, slots, at)?)
+    }
+
     /// `[..] = rhs`, `{..} <> rhs` or `[..] IN list`, read whole in the
     /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
     /// equality. `operand IN value` with a non-literal list takes the same
@@ -327,9 +342,16 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
         at: usize,
+        lone_operand: bool,
     ) -> Result<(), GraphMutationTextError> {
         let nesting = self.let_base + depth + 1;
-        let left = self.composite_value(columns, nesting, at)?;
+        // A lone scalar operand is read up to the IN and no further: read as a
+        // whole expression it would rediscover this same membership.
+        let left = if lone_operand {
+            self.membership_operand(columns, nesting, at)?
+        } else {
+            self.composite_value(columns, nesting, at)?
+        };
         let (value, negate) = if self.take_word("IN")? {
             let list = self.composite_value(columns, nesting, at)?;
             let value = ReadValueTemplate::In {
@@ -753,7 +775,7 @@ impl<'a> Parser<'a> {
         // `1 + x` as its left side; a list literal keeps the scalar IN.
         if self.lets.is_some() && self.starts_operand_membership()? {
             let at = self.current.at;
-            self.composite_comparison(columns, depth, program, at)?;
+            self.composite_comparison(columns, depth, program, at, true)?;
         } else {
             self.scalar_concat(columns, depth, program)?;
         }
@@ -972,7 +994,7 @@ impl<'a> Parser<'a> {
         // A list or map literal compared with `=`, `<>`, `!=` or IN is one
         // three-valued comparison in the value language (fgdb-9cawv).
         if self.lets.is_some() && self.starts_composite_comparison()? {
-            return self.composite_comparison(columns, depth, program, at);
+            return self.composite_comparison(columns, depth, program, at, false);
         }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.

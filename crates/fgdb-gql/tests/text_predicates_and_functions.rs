@@ -710,6 +710,26 @@ fn composite_literals_compare_three_valued() {
             .collect::<Vec<_>>(),
         vec![truth(false), truth(false)]
     );
+    // A lone operand IN a row column's subscript or slice (List5 [1], [3]):
+    // the left side stops at the IN, so reading it cannot rediscover the
+    // same membership.
+    let result = execute(
+        &prepare(
+            "WITH [[1, 2, 3]] AS list \
+             RETURN 3 IN list[0] AS a, 3 IN list[0][0..1] AS b, 4 IN list[0] AS c",
+        ),
+        &text("x"),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.value[0]
+            .values()
+            .iter()
+            .map(|value| value.as_scalar().unwrap().clone())
+            .collect::<Vec<_>>(),
+        vec![truth(true), truth(false), truth(false)]
+    );
 }
 
 /// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
