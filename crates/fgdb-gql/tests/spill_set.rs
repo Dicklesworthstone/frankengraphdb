@@ -553,7 +553,7 @@ fn values_source_emits_one_metered_unit_without_graph_metadata_or_result_charges
         })
         .unwrap()
         .unwrap();
-    assert_eq!(unit, GraphValueRow::unit());
+    assert_eq!(unit, GraphValueRow::from_owned_values(Vec::new()));
     assert!(
         cursor
             .next_with_control(&mut |event| {
@@ -585,7 +585,7 @@ fn values_source_emits_one_metered_unit_without_graph_metadata_or_result_charges
     }
     assert_eq!(
         staged(&Graph::sample(), &query).unwrap(),
-        vec![GraphValueRow::unit()]
+        vec![GraphValueRow::from_owned_values(Vec::new())]
     );
 }
 
