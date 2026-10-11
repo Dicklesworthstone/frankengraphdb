@@ -265,3 +265,6 @@ fn existing_native_create_and_create_return_paths_are_preserved() {
     assert!(output(&returning).contains("Returned"));
     assert_eq!(row_count(&fixture.query("MATCH (n:Entity) RETURN n.id")), 3);
 }
+
+#[path = "unwind_write/document_roots.rs"]
+mod document_roots;
