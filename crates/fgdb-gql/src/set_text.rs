@@ -29,9 +29,15 @@ pub enum GraphSetTextErrorKind {
     ProjectionBuild(crate::GraphSetProjectionError),
     FilterBuild(crate::GraphSetFilterError),
     AggregateBuild(crate::GraphAggregateBuildError),
+    /// UNION operands must expose the same names, independent of column order.
+    DifferentColumnsInUnion,
+    /// One unparenthesized UNION chain cannot mix ALL and DISTINCT.
+    InvalidClauseComposition,
     IntegerExpression(crate::GraphIntegerBuildError),
     IntegerOperand,
-    IntegerNesting { limit: usize },
+    IntegerNesting {
+        limit: usize,
+    },
 }
 impl core::fmt::Display for GraphSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -817,21 +823,35 @@ impl Node {
                 self.depth = input.depth + 1;
                 first
             }
-            NodeKind::Binary { left, right, .. } => {
+            NodeKind::Binary {
+                operation,
+                left,
+                right,
+                ..
+            } => {
                 let l = left.validate(schemas)?;
                 let r = right.validate(schemas)?;
-                self.depth = 1 + left.depth.max(right.depth);
-                let (left, right) = (&schemas[l].types, &schemas[r].types);
-                if left.len() != right.len() {
+                let (left_schema, right_schema) = (&schemas[l], &schemas[r]);
+                let alignment = (*operation == GraphSetOperation::Union)
+                    .then(|| union_column_order(&left_schema.columns, &right_schema.columns))
+                    .transpose()
+                    .map_err(|()| fail(self.at, GraphSetTextErrorKind::DifferentColumnsInUnion))?;
+                let reorders = alignment
+                    .as_ref()
+                    .is_some_and(|columns| columns.iter().enumerate().any(|(i, &j)| i != j));
+                self.depth = 1 + left.depth.max(right.depth + usize::from(reorders));
+                if left_schema.types.len() != right_schema.types.len() {
                     return Err(fail(
                         self.at,
                         GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnCount {
-                            left: left.len(),
-                            right: right.len(),
+                            left: left_schema.types.len(),
+                            right: right_schema.types.len(),
                         }),
                     ));
                 }
-                for (column, (&left, &right)) in left.iter().zip(right).enumerate() {
+                for (column, &left) in left_schema.types.iter().enumerate() {
+                    let right = right_schema.types
+                        [alignment.as_ref().map_or(column, |columns| columns[column])];
                     if left != right {
                         return Err(fail(
                             self.at,
@@ -912,7 +932,31 @@ impl Node {
                 right,
             } => {
                 let left = left.bind(inputs, arguments)?;
-                let right = right.bind(inputs, arguments)?;
+                let mut right = right.bind(inputs, arguments)?;
+                if *operation == GraphSetOperation::Union && left.columns() != right.columns() {
+                    let columns =
+                        union_column_order(left.columns(), right.columns()).map_err(|()| {
+                            fail(self.at, GraphSetTextErrorKind::DifferentColumnsInUnion)
+                        })?;
+                    let projection = left
+                        .columns()
+                        .iter()
+                        .zip(columns)
+                        .map(|(name, column)| {
+                            crate::GraphSetProjection::new(
+                                name.clone(),
+                                crate::GraphSetValue::Column(column),
+                            )
+                        })
+                        .collect();
+                    // Preserve each arm's own order/page and multiplicity;
+                    // the enclosing UNION owns its ALL/DISTINCT semantics.
+                    right = right
+                        .project(projection, GraphSetQuantifier::All)
+                        .map_err(|kind| {
+                            fail(self.at, GraphSetTextErrorKind::ProjectionBuild(kind))
+                        })?;
+                }
                 left.combine(*operation, *quantifier, right)
                     .map_err(|kind| fail(self.at, GraphSetTextErrorKind::SetBuild(kind)))?
             }
@@ -935,6 +979,20 @@ struct Schema {
     depth: usize,
     /// Per column, `(var, name)` when its RETURN item is exactly `var.name`.
     returned: Vec<Option<(String, String)>>,
+}
+
+fn union_column_order(left: &[String], right: &[String]) -> Result<Vec<usize>, ()> {
+    if left.len() != right.len() {
+        return Err(());
+    }
+    left.iter()
+        .map(|name| {
+            right
+                .iter()
+                .position(|candidate| candidate == name)
+                .ok_or(())
+        })
+        .collect()
 }
 
 /// The terminal RETURN's plain property items, one entry per output column:
@@ -1059,6 +1117,7 @@ impl<'a> Composition<'a> {
             ));
         }
         let mut node = self.intersection(depth)?;
+        let mut union_quantifier = None;
         while self.current().word("UNION") || self.current().word("EXCEPT") {
             let token = self.current();
             let operation = if token.word("UNION") {
@@ -1068,6 +1127,15 @@ impl<'a> Composition<'a> {
             };
             self.advance();
             let quantifier = self.quantifier();
+            if operation == GraphSetOperation::Union {
+                if union_quantifier.is_some_and(|previous| previous != quantifier) {
+                    return Err(fail(
+                        token.at,
+                        GraphSetTextErrorKind::InvalidClauseComposition,
+                    ));
+                }
+                union_quantifier = Some(quantifier);
+            }
             let right = self.intersection(depth)?;
             let height = 1 + node.depth.max(right.depth);
             node = Node::new(
@@ -1433,7 +1501,8 @@ where
 }
 
 /// One immutable compound text definition. MATCH operands retain their own
-/// variables and scopes; positional set output names come from the left side.
+/// variables and scopes. UNION aligns matching output names to the left side;
+/// INTERSECT and EXCEPT retain positional output names from the left side.
 /// Binding never reparses, calls the catalog, reads a database or substitutes
 /// argument values into text. The resulting PreparedGraphSet uses all existing
 /// live/historical/pinned/transaction set-execution entrypoints.
@@ -1460,6 +1529,8 @@ impl core::fmt::Debug for PreparedGraphSetText {
 impl PreparedGraphSetText {
     /// UNION/EXCEPT associate left; INTERSECT binds more tightly. Every set
     /// operator defaults to DISTINCT and may explicitly select ALL/DISTINCT.
+    /// UNION operands must return the same column names, in any order, and one
+    /// unparenthesized UNION chain must use ALL throughout or DISTINCT throughout.
     /// Parentheses preserve operand-local order/page. An unparenthesized final
     /// ORDER BY/SKIP/LIMIT applies to the complete set, never only its last arm.
     /// ORDER BY accepts leftmost output names, ASC/DESC and NULLS FIRST/LAST.

@@ -1,18 +1,20 @@
 //! Compound text on the real Chronicle/Strata and transaction-overlay paths.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, EdgeRecord, GqlError, MemVfs, ReadError, VertexRow, WriteBatch,
-    WriteError, WriteTxnError,
+    Database, DatabaseKeys, EdgeRecord, GqlError, MemVfs, NativeReadClass, PreparedNativeRead,
+    QueryError, QueryResult, ReadError, VertexRow, WriteBatch, WriteError, WriteTxnError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSetExecutionError, GraphSymbol,
-    GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphSetExecutionError,
+    GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalSetTextErrorKind,
+    PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const A: LabelId = LabelId(1);
@@ -122,6 +124,116 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Option<i64>> {
         .skip(1)
         .take(2)
         .collect()
+}
+
+#[test]
+fn native_prepare_keeps_union_semantic_refusals_authoritative_and_source_free() {
+    for (text, facade, kind) in [
+        (
+            "RETURN 1 AS a UNION RETURN 2 AS b",
+            NativeReadClass::Set,
+            GraphSetTextErrorKind::DifferentColumnsInUnion,
+        ),
+        (
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x UNION RETURN 3 AS x",
+            NativeReadClass::Set,
+            GraphSetTextErrorKind::InvalidClauseComposition,
+        ),
+        (
+            "MATCH (n:A) RETURN n AS a UNION MATCH (m:B) RETURN m AS b",
+            NativeReadClass::Set,
+            GraphSetTextErrorKind::DifferentColumnsInUnion,
+        ),
+        (
+            "MATCH (n:A) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS a \
+             UNION MATCH (m:B) RETURN m AS b",
+            NativeReadClass::TemporalSet,
+            GraphSetTextErrorKind::DifferentColumnsInUnion,
+        ),
+        (
+            "MATCH (n:A) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS x \
+             UNION MATCH (m:B) RETURN m AS x UNION ALL MATCH (o:A) RETURN o AS x",
+            NativeReadClass::TemporalSet,
+            GraphSetTextErrorKind::InvalidClauseComposition,
+        ),
+    ] {
+        let calls = Cell::new(0);
+        let error = PreparedNativeRead::prepare(text, &GqlParameters::new(), |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .err()
+        .expect("invalid UNION must refuse during preparation");
+        let QueryError::Refused {
+            facade: actual,
+            source,
+        } = error
+        else {
+            panic!("expected a typed native refusal: {text}");
+        };
+        assert_eq!(actual, facade, "{text}");
+        let (offset, actual) = match *source {
+            QueryError::SetText(error) => (error.offset, error.kind),
+            QueryError::TemporalSetText(error) => {
+                let GraphTemporalSetTextErrorKind::Set(kind) = error.kind else {
+                    panic!("expected temporal UNION refusal: {text}");
+                };
+                (error.offset, kind)
+            }
+            other => panic!("wrong native refusal for {text}: {other:?}"),
+        };
+        assert_eq!(actual, kind, "{text}");
+        assert_eq!(offset, text.rfind("UNION").unwrap(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
+
+#[test]
+fn native_union_aligns_named_identity_and_property_columns_in_live_and_pinned_reads() {
+    let ((), report) = run_async_under_lab(0x5e77_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let view = db.read_session().unwrap();
+        let params = GqlParameters::new();
+        let text = "MATCH (n:A) RETURN n AS node, n.p AS value \
+                    UNION ALL MATCH (n:B) RETURN n.p AS value, n AS node ORDER BY node";
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let expected = QueryResult::Rows {
+            columns: vec!["node".into(), "value".into()],
+            rows: [
+                (1, Some(10)),
+                (3, Some(30)),
+                (4, Some(40)),
+                (5, Some(20)),
+                (6, None),
+            ]
+            .into_iter()
+            .map(|(id, value)| {
+                vec![
+                    GraphAggregateValue::Value(GraphValue::Vertex(VId(id))),
+                    GraphAggregateValue::Value(GraphValue::Scalar(
+                        value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                    )),
+                ]
+            })
+            .collect(),
+        };
+        assert_eq!(
+            prepared.execute(&db, &cx, &params, policy()).unwrap(),
+            expected
+        );
+        drop(db);
+        assert_eq!(
+            prepared
+                .execute_in_view(&view, &cx, &params, policy())
+                .unwrap(),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -316,7 +428,7 @@ fn optional_walks_and_existential_arms_obey_shared_limits_and_authority_fences()
         let basis = seed(&mut db, &commit).await;
         let optional = query(
             "MATCH (a:A) OPTIONAL MATCH WALK (a)-[:R*1..2]->(b) RETURN b.p AS value \
-            UNION ALL MATCH (c:B) RETURN c.p AS other ORDER BY value NULLS FIRST",
+            UNION ALL MATCH (c:B) RETURN c.p AS value ORDER BY value NULLS FIRST",
         );
         let measured = db
             .execute_graph_set_governed(&cx, &optional, policy())
@@ -358,7 +470,7 @@ fn optional_walks_and_existential_arms_obey_shared_limits_and_authority_fences()
         }
         let existence = query(
             "MATCH (a:A) WHERE NOT EXISTS { MATCH WALK (a)-[:R*1..2]->(b) WHERE b.p IN [20,30] } \
-            RETURN a.p AS value UNION MATCH (c:B) WHERE c.p IS NULL RETURN c.p AS other ORDER BY value NULLS FIRST",
+            RETURN a.p AS value UNION MATCH (c:B) WHERE c.p IS NULL RETURN c.p AS value ORDER BY value NULLS FIRST",
         );
         assert_eq!(
             plain(

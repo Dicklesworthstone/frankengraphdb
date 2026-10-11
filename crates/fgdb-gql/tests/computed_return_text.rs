@@ -434,7 +434,7 @@ fn computed_arms_obey_set_precedence_and_parenthesized_local_selection() {
         ((VId(2), P), CanonicalScalar::Int(2)),
     ]);
     let query = prepare(
-        "MATCH (n) RETURN n.p*2 AS value UNION ALL MATCH (m) RETURN m.p+1 AS other \
+        "MATCH (n) RETURN n.p*2 AS value UNION ALL MATCH (m) RETURN m.p+1 AS value \
         INTERSECT MATCH (k) RETURN 2 AS constant ORDER BY value DESC",
     );
     assert_eq!(
@@ -443,7 +443,7 @@ fn computed_arms_obey_set_precedence_and_parenthesized_local_selection() {
     );
     let nested = prepare(
         "(MATCH (n) RETURN n.p*2 AS value ORDER BY value DESC LIMIT 1) \
-        UNION ALL (MATCH (m) RETURN m.p+1 AS other ORDER BY other LIMIT 1) ORDER BY value",
+        UNION ALL (MATCH (m) RETURN m.p+1 AS value ORDER BY value LIMIT 1) ORDER BY value",
     );
     assert_eq!(
         ints(&run(&nested, &[VId(1), VId(2)], &[], &props).unwrap().value),
@@ -470,7 +470,7 @@ fn computed_arms_obey_set_precedence_and_parenthesized_local_selection() {
 #[test]
 fn parameter_contract_and_catalog_cache_span_predicates_outputs_and_all_arms() {
     let text = "MATCH (n) WHERE n.p >= $x RETURN n.p+$x AS value UNION ALL \
-        MATCH (m) RETURN COALESCE(m.p,$x) AS other ORDER BY value LIMIT $limit";
+        MATCH (m) RETURN COALESCE(m.p,$x) AS value ORDER BY value LIMIT $limit";
     let calls = Cell::new(0);
     let template = PreparedGraphSetText::prepare(text, |kind, name| {
         calls.set(calls.get() + 1);
@@ -534,7 +534,7 @@ fn malformed_types_aliases_and_projection_depth_refuse_before_catalog_access() {
         "MATCH (n) RETURN m.p+1 AS x",
         "MATCH (n) RETURN COUNT(n) AS x",
         "MATCH (n) RETURN n.p+1 AS x ORDER BY p",
-        "MATCH (n) RETURN n.p+1 AS x UNION MATCH (m) RETURN m",
+        "MATCH (n) RETURN n.p+1 AS x UNION MATCH (m) RETURN m AS x",
         "MATCH (n) RETURN n.p+$x AS x UNION MATCH (m) RETURN m.p AS x LIMIT $x",
     ] {
         let calls = Cell::new(0);
@@ -569,7 +569,7 @@ fn malformed_types_aliases_and_projection_depth_refuse_before_catalog_access() {
         GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooDeep { .. })
     ));
     assert_eq!(calls.get(), 0);
-    let unicode = "\u{2003}MATCH (n) RETURN 1 AS x UNION MATCH (m) RETURN m.p+$missing AS y";
+    let unicode = "\u{2003}MATCH (n) RETURN 1 AS x UNION MATCH (m) RETURN m.p+$missing AS x";
     let template = PreparedGraphSetText::prepare(unicode, symbols).unwrap();
     assert_eq!(
         template

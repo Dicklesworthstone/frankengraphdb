@@ -13,8 +13,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const A: &str = "MATCH (a:A) RETURN a.p AS value";
-const B: &str = "MATCH (b:B) RETURN b.p AS other";
-const C: &str = "MATCH (c:C) RETURN c.p AS third";
+const B: &str = "MATCH (b:B) RETURN b.p AS value";
+const C: &str = "MATCH (c:C) RETURN c.p AS value";
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "A") => Some(GraphSymbol::Label(LabelId(1))),
@@ -156,6 +156,158 @@ fn precedence_associativity_and_parentheses_match_the_exact_typed_definition() {
 }
 
 #[test]
+fn union_names_bind_corresponding_columns_before_native_set_arithmetic() {
+    for (quantifier, count) in [("", 1), ("DISTINCT", 1), ("ALL", 2)] {
+        let text = format!("RETURN 1 AS a, 2 AS b UNION {quantifier} RETURN 2 AS b, 1 AS a");
+        let bound = query(&text);
+        assert_eq!(bound.columns(), &["a", "b"]);
+        let rows = run(&bound);
+        assert_eq!(rows.len(), count, "{text}");
+        for row in rows {
+            assert_eq!(
+                row.get(0).unwrap().as_scalar(),
+                Some(&CanonicalScalar::Int(1))
+            );
+            assert_eq!(
+                row.get(1).unwrap().as_scalar(),
+                Some(&CanonicalScalar::Int(2))
+            );
+        }
+    }
+    let left = "MATCH (a:A) RETURN a AS vertex, a.p AS value";
+    let right = "MATCH (b:B) RETURN b.p AS value, b AS vertex";
+    let text = format!("{left} UNION ALL ({right} ORDER BY value DESC LIMIT 2)");
+    let expected_right = leaf(right)
+        .with_order_by(&[GraphValueOrder::descending(0)])
+        .unwrap()
+        .with_page(0, Some(2))
+        .nested()
+        .unwrap()
+        .project(
+            vec![
+                fgdb_gql::GraphSetProjection::new("vertex", fgdb_gql::GraphSetValue::Column(1)),
+                fgdb_gql::GraphSetProjection::new("value", fgdb_gql::GraphSetValue::Column(0)),
+            ],
+            Quant::All,
+        )
+        .unwrap();
+    let expected = leaf(left)
+        .combine(Op::Union, Quant::All, expected_right)
+        .unwrap();
+    let bound = query(&text);
+    assert_eq!(bound.canonical_bytes(), expected.canonical_bytes());
+    assert_eq!(run(&bound), run(&expected));
+    assert_eq!(run(&bound).len(), 6);
+}
+
+#[test]
+fn union_column_mismatches_refuse_before_catalog_access_with_redacted_diagnostics() {
+    for text in [
+        "RETURN 1 AS private_left UNION RETURN 2 AS private_right",
+        "RETURN 1 AS private_left UNION ALL RETURN 2 AS private_right LIMIT 0",
+        "RETURN 1 AS a UNION RETURN 2 AS a, 3 AS b",
+        "RETURN 1 AS a UNION RETURN 2 AS A",
+        "MATCH (a:A) RETURN a UNION MATCH (b:B) RETURN b",
+        "MATCH (a:A) RETURN a.p AS value UNION (MATCH (b:B) RETURN b.p AS other)",
+    ] {
+        let calls = Cell::new(0);
+        let error = PreparedGraphSetText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphSetTextErrorKind::DifferentColumnsInUnion,
+            "{text}"
+        );
+        assert_eq!(error.offset, text.find("UNION").unwrap(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+        assert!(!format!("{error:?} {error}").contains("private_"));
+    }
+    let calls = Cell::new(0);
+    let error = PreparedGraphSetText::prepare(
+        "MATCH (a:A) RETURN a AS vertex, a.p AS value \
+         UNION MATCH (b:B) RETURN b AS value, b.p AS vertex",
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType { column: 0, .. })
+    ));
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn union_quantifiers_are_uniform_per_expression_scope() {
+    for (first, second) in [
+        ("", "ALL"),
+        ("ALL", ""),
+        ("DISTINCT", "ALL"),
+        ("ALL", "DISTINCT"),
+    ] {
+        let text = format!(
+            "MATCH (a:A) RETURN a AS x UNION {first} MATCH (b:B) RETURN b AS x \
+             UNION {second} MATCH (c:C) RETURN c AS x"
+        );
+        let calls = Cell::new(0);
+        let error = PreparedGraphSetText::prepare(&text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphSetTextErrorKind::InvalidClauseComposition,
+            "{text}"
+        );
+        assert_eq!(error.offset, text.rfind("UNION").unwrap());
+        assert_eq!(calls.get(), 0);
+    }
+    for (text, expected) in [
+        (
+            "RETURN 1 AS x UNION DISTINCT RETURN 1 AS x UNION RETURN 2 AS x",
+            vec![Some(1), Some(2)],
+        ),
+        (
+            "(RETURN 1 AS x UNION ALL RETURN 1 AS x) UNION RETURN 1 AS x",
+            vec![Some(1)],
+        ),
+        (
+            "RETURN 1 AS x UNION ALL (RETURN 1 AS x UNION RETURN 1 AS x)",
+            vec![Some(1), Some(1)],
+        ),
+    ] {
+        assert_eq!(integers(&run(&query(text))), expected, "{text}");
+    }
+}
+
+#[test]
+fn union_alignment_respects_the_existing_statement_depth_limit_before_resolution() {
+    let text = format!(
+        "MATCH (a:A) RETURN a AS vertex, a.p AS value UNION ALL \
+         {}MATCH (b:B) RETURN b.p AS value, b AS vertex{}",
+        "(".repeat(MAX_GRAPH_SET_DEPTH - 2),
+        ")".repeat(MAX_GRAPH_SET_DEPTH - 2),
+    );
+    let calls = Cell::new(0);
+    let error = PreparedGraphSetText::prepare(&text, |kind, name| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooDeep { .. })
+    ));
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
 fn final_pages_cover_the_whole_set_and_nested_ordering_does_not_replace_inner_selection() {
     let text = format!("{A} UNION ALL {B} ORDER BY value DESC NULLS LAST SKIP 1 LIMIT 2");
     let expected = leaf(A)
@@ -233,7 +385,7 @@ fn all_six_set_forms_obey_independent_multiset_arithmetic_including_null() {
 #[test]
 fn parameters_and_symbols_share_one_contract_without_leaking_arm_variables() {
     let text = "MATCH (a:A) WHERE a.p IN [$x,$x] RETURN a.p AS value UNION ALL \
-        MATCH (b:A) WHERE b.p BETWEEN $lo AND $x RETURN b.p AS other LIMIT $page";
+        MATCH (b:A) WHERE b.p BETWEEN $lo AND $x RETURN b.p AS value LIMIT $page";
     let mut calls = BTreeMap::new();
     let template = PreparedGraphSetText::prepare(text, |kind, name| {
         *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
@@ -275,7 +427,7 @@ fn parameters_and_symbols_share_one_contract_without_leaking_arm_variables() {
     ));
     let calls = Cell::new(0);
     let error = PreparedGraphSetText::prepare(
-        "MATCH (a:A) WHERE a.p=$x RETURN a UNION MATCH (b:A) RETURN b LIMIT $x",
+        "MATCH (a:A) WHERE a.p=$x RETURN a UNION MATCH (b:A) RETURN b AS a LIMIT $x",
         |kind, name| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
@@ -292,7 +444,7 @@ fn parameters_and_symbols_share_one_contract_without_leaking_arm_variables() {
 #[test]
 fn scalar_declarations_and_keyword_looking_literals_are_never_interpolated() {
     let text =
-        "MATCH (a:A) WHERE a.p=$needle RETURN a.p AS value UNION MATCH (b:B) RETURN b.p AS other";
+        "MATCH (a:A) WHERE a.p=$needle RETURN a.p AS value UNION MATCH (b:B) RETURN b.p AS value";
     let template = PreparedGraphSetText::prepare_with_parameter_types(
         text,
         &[(
@@ -332,7 +484,7 @@ fn scalar_declarations_and_keyword_looking_literals_are_never_interpolated() {
         GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })
     ));
     let quoted = "MATCH (union:A) WHERE union.p IN ['x''] UNION MATCH (bad) RETURN bad', 'EXCEPT'] \
-        RETURN union.p AS union UNION MATCH (intersect:B) RETURN intersect.p AS except ORDER BY union";
+        RETURN union.p AS union UNION MATCH (intersect:B) RETURN intersect.p AS union ORDER BY union";
     assert_eq!(
         PreparedGraphSetText::prepare(quoted, symbols)
             .unwrap()
@@ -347,12 +499,12 @@ fn malformed_later_arms_schema_mismatches_and_bad_global_orders_do_not_touch_cat
         "UNION",
         "UNION ALL ALL MATCH (b) RETURN b.p",
         "UNION MATCH (b) RETURN missing",
-        "UNION MATCH (b) RETURN b",
-        "UNION MATCH (b) RETURN b.p,b AS extra",
+        "UNION MATCH (b) RETURN b AS value",
+        "UNION MATCH (b) RETURN b.p AS value,b AS extra",
         "UNION (MATCH (b) RETURN b.p",
         "UNION MATCH (b) WHERE b.p IN [1,] RETURN b.p",
-        "UNION MATCH (b) RETURN b.p ORDER BY missing",
-        "UNION MATCH (b) RETURN b.p ORDER BY value,value",
+        "UNION MATCH (b) RETURN b.p AS value ORDER BY missing",
+        "UNION MATCH (b) RETURN b.p AS value ORDER BY value,value",
         "UNION MATCH (b) RETURN b.p LIMIT -1",
         "UNION MATCH (b) RETURN b.p LIMIT 18446744073709551616",
         "LIMIT 1 UNION MATCH (b) RETURN b.p",
@@ -388,13 +540,12 @@ fn malformed_later_arms_schema_mismatches_and_bad_global_orders_do_not_touch_cat
 #[test]
 fn errors_report_original_utf8_byte_offsets_and_redact_definitions() {
     let text = "\u{2003}MATCH (a:A) WHERE a.p='λ' RETURN a.p AS value UNION \
-        MATCH (private_name:B) WHERE private_name.p=$secret_arg RETURN private_name.p";
+        MATCH (private_name:B) WHERE private_name.p=$secret_arg RETURN private_name.p AS value";
     let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
     let error = template.bind_parameters(&GqlParameters::new()).unwrap_err();
     assert_eq!(error.offset, text.find("$secret_arg").unwrap());
     assert!(!format!("{error:?} {error} {template:?}").contains("secret_arg"));
-    let bad =
-        "\u{2003}MATCH (a:A) RETURN a UNION MATCH (private_name:SecretLabel) RETURN private_name";
+    let bad = "\u{2003}MATCH (a:A) RETURN a UNION MATCH (private_name:SecretLabel) RETURN private_name AS a";
     let error = PreparedGraphSetText::prepare(bad, symbols).unwrap_err();
     assert_eq!(error.offset, bad.find("SecretLabel").unwrap());
     assert!(!format!("{error:?} {error}").contains("SecretLabel"));
@@ -417,7 +568,7 @@ fn statement_wide_limits_and_utf8_prefixes_cannot_be_reset_per_arm() {
         .join(" UNION ALL ");
     assert_eq!(query(&longest).operand_count(), MAX_GRAPH_SET_OPERANDS);
     assert!(matches!(
-        PreparedGraphSetText::prepare(&format!("{longest} UNION {leaf}"), symbols)
+        PreparedGraphSetText::prepare(&format!("{longest} UNION ALL {leaf}"), symbols)
             .unwrap_err()
             .kind,
         GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands { .. })
@@ -436,7 +587,7 @@ fn statement_wide_limits_and_utf8_prefixes_cannot_be_reset_per_arm() {
         error.kind,
         GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::TooManyTokens)
     ));
-    let source = "\u{2003}(MATCH (n:A) WHERE n.p='λ''β' RETURN n.p AS value) UNION MATCH (m:B) RETURN m.p ORDER BY value";
+    let source = "\u{2003}(MATCH (n:A) WHERE n.p='λ''β' RETURN n.p AS value) UNION MATCH (m:B) RETURN m.p AS value ORDER BY value";
     for end in (0..=source.len()).filter(|end| source.is_char_boundary(*end)) {
         let _ = PreparedGraphSetText::prepare(&source[..end], symbols);
     }

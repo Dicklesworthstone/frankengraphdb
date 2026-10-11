@@ -84,6 +84,8 @@ impl PreparedNativeRead {
     /// a system-time clause; otherwise pattern, aggregate, pipeline, then set.
     /// MissingSystemTimeClause is not a candidate. Successful probe order is
     /// unchanged, and selection never parses diagnostic strings.
+    /// A validated UNION schema or quantifier conflict is authoritative: an
+    /// unrelated grammar stopping at the same set token cannot replace it.
     pub fn prepare(
         text: &str,
         params: &GqlParameters,
@@ -170,6 +172,20 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalSet(prepared)),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    GraphTemporalSetTextErrorKind::Set(
+                        GraphSetTextErrorKind::DifferentColumnsInUnion
+                            | GraphSetTextErrorKind::InvalidClauseComposition
+                    )
+                ) =>
+            {
+                return Err(QueryError::Refused {
+                    facade: NativeReadClass::TemporalSet,
+                    source: Box::new(QueryError::TemporalSetText(error)),
+                });
+            }
             Err(error) => {
                 if !matches!(
                     error.kind,
@@ -233,6 +249,18 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::Set(prepared)),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::DifferentColumnsInUnion
+                        | GraphSetTextErrorKind::InvalidClauseComposition
+                ) =>
+            {
+                return Err(QueryError::Refused {
+                    facade: NativeReadClass::Set,
+                    source: Box::new(QueryError::SetText(error)),
+                });
+            }
             Err(error) => consider(
                 error.offset,
                 6,
