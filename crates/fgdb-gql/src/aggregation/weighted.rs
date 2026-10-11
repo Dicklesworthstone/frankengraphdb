@@ -437,8 +437,10 @@ mod tests {
     fn only_the_registered_vertex_support_and_count_profile_is_factored() {
         for text in [
             "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS d,MIN(b) AS lo,MAX(b) AS hi GROUP BY a",
-            "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
+            // Two atoms of one type count homomorphisms only when repeated
+            // edges are admitted (fgdb-vexfr).
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n",
             "MATCH (a)-[:R]->(b) RETURN a.n,MIN(b.n) AS lo,MAX(b.n) AS hi GROUP BY a.n",
             "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
@@ -453,6 +455,10 @@ mod tests {
             "MATCH (a)-[:R]->(b)-[:R]-(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS n",
+            // Under the DIFFERENT EDGES default the same two shapes must not
+            // share an edge, which per-atom weights cannot express.
+            "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
         ] {
             assert!(!eligible(&query(text)), "{text}");
         }
@@ -490,8 +496,10 @@ mod tests {
             "(a)-[:R]->(b) WHERE a.n=7 OR b.n IS NULL",
             "(a)-[:R]->(c)-[:R]->(b) WHERE c.n=-2",
         ] {
+            // Both sides count homomorphisms: the two-atom patterns admit a
+            // repeated edge, as the factored engine does (fgdb-vexfr).
             let prefix = format!(
-                "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+                "MATCH REPEATABLE ELEMENTS {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
             );
             let factored = query(&format!("{prefix} GROUP BY a.n"));
             // A hidden, order-sensitive COLLECT forces ordinary bag visitation.
@@ -585,7 +593,9 @@ mod tests {
 
     #[test]
     fn filtering_and_null_support_precede_overflowed_multiplicities() {
-        let pattern = format!("(a){}", "-[:R]->(a)".repeat(8));
+        // Eight atoms over the same 256 parallel self-loops: homomorphisms,
+        // so repeated edges are admitted (fgdb-vexfr).
+        let pattern = format!("REPEATABLE ELEMENTS (a){}", "-[:R]->(a)".repeat(8));
         // 256 choices on each of eight atoms is 2^64 complete occurrences.
         // Only one vertex assignment is needed; expanding this bag is infeasible.
         let edges = [(VId(0), RelationId(1), VId(0)); 256];

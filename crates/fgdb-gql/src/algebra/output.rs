@@ -589,8 +589,13 @@ mod factorization_tests {
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
     use fgdb_delta_types::RelationId;
 
+    /// The aggregate core factors an identity-free topology, so every law
+    /// here counts homomorphisms: its pattern is read under REPEATABLE
+    /// ELEMENTS. Under the DIFFERENT EDGES default, repeated R and S atoms
+    /// would need edge identities and no core is compiled (fgdb-vexfr).
     fn prepare(text: &str) -> crate::PreparedGraphAggregate {
-        PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+        let text = text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1);
+        PreparedGraphAggregateText::prepare(&text, |kind, name| match kind {
             GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
                 "R" => 1,
                 "S" => 2,
@@ -717,6 +722,36 @@ mod factorization_tests {
 
     #[test]
     fn aggregate_core_preserves_columns_and_cannot_remove_observed_constraints() {
+        fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match kind {
+                GraphSymbolKind::Relation => {
+                    Some(GraphSymbol::Relation(RelationId(if name == "R" {
+                        1
+                    } else {
+                        2
+                    })))
+                }
+                GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
+            }
+        }
+        // Under the DIFFERENT EDGES default the two R atoms must not share an
+        // edge, which an identity-free core cannot express: none is compiled.
+        let default = PreparedGraphAggregateText::prepare(
+            "MATCH (a)-[:R]->(b)-[:S]->(a),(b)-[:R]->(c) RETURN COUNT(*) AS n",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(
+            default
+                .input_pattern()
+                .plan()
+                .aggregate_core(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
         for (text, expected) in [
             (
                 "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n",
@@ -738,20 +773,13 @@ mod factorization_tests {
                 None,
             ),
         ] {
-            let aggregate = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
-                GraphSymbolKind::Relation => {
-                    Some(GraphSymbol::Relation(RelationId(if name == "R" {
-                        1
-                    } else {
-                        2
-                    })))
-                }
-                GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
-                GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
-            })
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
+            // An identity-free core counts homomorphisms (REPEATABLE
+            // ELEMENTS; fgdb-vexfr).
+            let text = text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1);
+            let aggregate = PreparedGraphAggregateText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
             let plan = aggregate.input_pattern().plan();
             let original = plan.canonical_bytes();
             let reduced = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap();

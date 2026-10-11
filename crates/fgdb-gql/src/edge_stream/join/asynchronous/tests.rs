@@ -622,7 +622,10 @@ fn candidate_contract_and_missing_indexes_never_become_successful_eof() {
     assert!(run(cursor.next()).is_none());
     let mut source = Source::new(63);
     source.fail_seek = Some(1);
-    let mut cursor = AsyncEdgeJoinCursor::new(source, plan(CHAIN), policy(), ok);
+    // One row, then the seek fault. The first row binds the self-loop as both
+    // r and s, which only REPEATABLE ELEMENTS admits (fgdb-vexfr).
+    let repeatable = CHAIN.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1);
+    let mut cursor = AsyncEdgeJoinCursor::new(source, plan(&repeatable), policy(), ok);
     assert!(run(cursor.next()).unwrap().is_ok());
     assert!(matches!(
         run(cursor.next()),

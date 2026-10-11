@@ -16,14 +16,22 @@ fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
     }
 }
+/// These kernels read an identity-free topology (a multiplicity per
+/// endpoint triple), so every pattern their laws prepare counts
+/// homomorphisms: REPEATABLE ELEMENTS, the semantics they were written
+/// for. Under the DIFFERENT EDGES default, atoms of one type would need edge
+/// identities this input does not have (fgdb-vexfr).
+fn repeatable(text: &str) -> String {
+    text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1)
+}
 pub(super) fn pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
-    PreparedGraphText::prepare(text, resolve)
+    PreparedGraphText::prepare(&repeatable(text), resolve)
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
 }
 pub(super) fn aggregate(text: &str) -> PreparedGraphAggregate {
-    PreparedGraphAggregateText::prepare(text, resolve)
+    PreparedGraphAggregateText::prepare(&repeatable(text), resolve)
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()

@@ -256,7 +256,9 @@ fn connected_join_fields_use_the_scoped_accessor_not_redacted_topology_propertie
     let mut expected = Vec::new();
     for &(r, a, b) in &EDGES {
         for &(s, from, c) in &EDGES {
-            if b == from {
+            // DIFFERENT EDGES, the textual MATCH default: r and s are both
+            // :R, so a self-loop never serves as both (fgdb-vexfr).
+            if b == from && r != s {
                 expected.push(row(vec![
                     GraphValue::Edge(r),
                     GraphValue::Vertex(a),

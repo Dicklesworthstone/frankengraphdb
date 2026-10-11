@@ -256,9 +256,11 @@ fn oracle(
         let suffixes: Vec<_> = if hops == 1 {
             vec![(None, *end)]
         } else {
+            // DIFFERENT EDGES, the textual MATCH default: the two R hops
+            // never bind one edge (fgdb-vexfr).
             oriented
                 .iter()
-                .filter(|(_, a, _, _)| a == end)
+                .filter(|(id, a, _, _)| a == end && id != root)
                 .map(|(id, _, b, _)| (Some(*id), *b))
                 .collect()
         };

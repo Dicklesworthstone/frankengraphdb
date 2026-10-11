@@ -85,8 +85,8 @@ fn oracle(s: &Source, hops: usize, dir: GlaDirection, grouped: bool) -> Vec<Answ
         for &(from, relation, to) in &atoms[..hops] {
             let matching: Vec<_> = s
                 .edges
-                .values()
-                .filter(|(a, r, b, _)| {
+                .iter()
+                .filter(|(_, (a, r, b, _))| {
                     *r == relation
                         && match dir {
                             GlaDirection::Forward => *a == ids[from] && *b == ids[to],
@@ -100,22 +100,35 @@ fn oracle(s: &Source, hops: usize, dir: GlaDirection, grouped: bool) -> Vec<Answ
                 .collect();
             choices.push(matching);
         }
-        let suffix: usize = choices.iter().skip(1).map(Vec::len).product();
-        if suffix == 0 || choices[0].is_empty() {
+        let endpoint = ids[width as usize - 1];
+        let right = integer(&s.vertices[&endpoint]);
+        let mut occurrences = Vec::new();
+        for (root, edge) in &choices[0] {
+            // DIFFERENT EDGES, the textual MATCH default: the closing R atom
+            // t never binds the edge r binds (fgdb-vexfr). S never overlaps R.
+            let suffix: usize = choices
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(at, matching)| {
+                    matching
+                        .iter()
+                        .filter(|(id, _)| atoms[at].1 != R || id != root)
+                        .count()
+                })
+                .product();
+            let value = integer(&edge.3).zip(right).map(|(a, b)| a * b + 2);
+            occurrences.extend(std::iter::repeat_n(value, suffix));
+        }
+        if occurrences.is_empty() {
             continue;
         }
-        let endpoint = ids[width as usize - 1];
         let key = if grouped {
             vec![GraphValue::Vertex(endpoint)]
         } else {
             vec![]
         };
-        let output = groups.entry(key).or_default();
-        let right = integer(&s.vertices[&endpoint]);
-        for edge in &choices[0] {
-            let value = integer(&edge.3).zip(right).map(|(a, b)| a * b + 2);
-            output.extend(std::iter::repeat_n(value, suffix));
-        }
+        groups.entry(key).or_default().extend(occurrences);
     }
     groups
         .into_iter()

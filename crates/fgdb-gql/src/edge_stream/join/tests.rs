@@ -549,7 +549,9 @@ fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change
         policy(),
         || Ok::<_, ()>(()),
     );
-    c.next().unwrap().unwrap();
+    // The repeated identity is reported where it lands, never skipped. Under
+    // the DIFFERENT EDGES default the self-loop pair that used to come first
+    // is not a row, so it lands on the first call (fgdb-vexfr).
     assert!(matches!(
         c.next(),
         Some(Err(GqlQueryError::Source(

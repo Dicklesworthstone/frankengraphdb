@@ -340,15 +340,23 @@ mod saved_regressions {
                         .collect()
                 })
                 .collect();
-            let suffix = choices
-                .iter()
-                .skip(1)
-                .map(|edges| edges.len() as u64)
-                .product::<u64>();
-            if suffix == 0 {
-                continue;
-            }
             for &(eid, edge) in &choices[0] {
+                // DIFFERENT EDGES, the textual MATCH default: the closing R
+                // atom t never binds the edge r binds (fgdb-vexfr).
+                let suffix = choices
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(at, edges)| {
+                        edges
+                            .iter()
+                            .filter(|&&(other, _)| atoms[at].1 != R || other != eid)
+                            .count() as u64
+                    })
+                    .product::<u64>();
+                if suffix == 0 {
+                    continue;
+                }
                 let key = match key_kind {
                     0 => vec![GraphValue::Vertex(ids[0])],
                     1 => vec![
