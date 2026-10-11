@@ -15,6 +15,14 @@
 //! `graph_candidates`, `graph_weight`). Schema names resolve at prepare time
 //! (`fgdb_gql` symbol arguments), so a prepared call never re-resolves.
 //!
+//! Immutable-snapshot calls also accept `eligible => [vertex, ...]` (vertices
+//! or nonnegative integer IDs). This restricts RESULT endpoints before every
+//! candidate limit, not corpus statistics, authorization or transit vertices.
+//! NULL/omission is unrestricted; an empty list selects no results. Preparation
+//! and membership checks spend the statement's existing work/scratch allowance.
+//! The staged-transaction binder refuses this argument until its overlay host
+//! implements the same filtering contract; it must never silently ignore it.
+//!
 //! Every requested lane is fused by exact RRF (`fusion => 'RRF'`, the only
 //! profile; `vector_weight`/`text_weight` default 1, rank constant 60), so
 //! `score` always means the same thing: the fused Decimal score. Each lane's
@@ -26,14 +34,14 @@
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
 use super::graph;
-use super::{Meter, Options, Scan};
+use super::{Meter, Options, Scan, SharedWork};
 use crate::query::ProcedureError;
-use crate::{GqlError, ReadError, Snapshot};
+use crate::{GqlError, ReadError, Snapshot, VertexRow};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{Projection, ReadError as BeaconReadError, ReadPolicy, VectorEncoding};
 use fgdb_beacon::{
     BeaconError, DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridHit,
-    GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch,
+    GraphHybridQuery, HnswConfig, IndexConfig, TextMatch, VectorSearch, WorkControl,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
@@ -43,6 +51,9 @@ use fgdb_gql::{
 };
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
 use std::cell::{Cell, RefCell};
+
+#[path = "procedure/filter.rs"]
+mod filter;
 
 type Cancel = Box<asupersync::error::Error>;
 
@@ -189,21 +200,46 @@ fn list<'v>(
 }
 
 impl HybridSearch {
-    /// Bind the call's named arguments and YIELD list. `at` pins the read's
-    /// snapshot; `remaining` caps Beacon's own work and staging allowances
-    /// by what the read has left, so retrieval cannot outspend the statement.
+    /// Bind an execution host that has not opted into endpoint filtering.
+    /// In particular the staged overlay must refuse eligible, never accept
+    /// it and then silently execute an unrestricted candidate population.
     pub(crate) fn bind(
         call: &PreparedProcedureCall,
         arguments: &[GraphValue],
         at: CommitSeq,
         remaining: GqlQueryPolicy,
     ) -> Result<Self, HybridCallError> {
+        Self::bind_arguments(call, arguments, at, remaining, false).map(|(search, _)| search)
+    }
+
+    /// Borrow the optional eligible list; allocation and per-ID validation
+    /// happen later under the SAME live meter as source preparation/search.
+    pub(crate) fn bind_filtered<'a>(
+        call: &PreparedProcedureCall,
+        arguments: &'a [GraphValue],
+        at: CommitSeq,
+        remaining: GqlQueryPolicy,
+    ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
+        Self::bind_arguments(call, arguments, at, remaining, true)
+    }
+
+    /// Bind the call's named arguments and YIELD list. `at` pins the read's
+    /// snapshot; `remaining` caps Beacon's own work and staging allowances
+    /// by what the read has left, so retrieval cannot outspend the statement.
+    fn bind_arguments<'a>(
+        call: &PreparedProcedureCall,
+        arguments: &'a [GraphValue],
+        at: CommitSeq,
+        remaining: GqlQueryPolicy,
+        allow_filter: bool,
+    ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
         if call.name() != "search" {
             return Err(HybridCallError::UnknownProcedure(call.name().to_owned()));
         }
         if call.argument_names().len() != arguments.len() {
             return Err(HybridCallError::Positional);
         }
+        let mut eligible = None;
         let mut text = None;
         let mut text_property = None;
         let mut text_match = None;
@@ -227,12 +263,18 @@ impl HybridSearch {
         let mut graph_candidates = None;
         let mut graph_weight = None;
         for (name, value) in call.argument_names().iter().zip(arguments) {
+            if name == "eligible" && !allow_filter {
+                return Err(HybridCallError::Combination(
+                    "eligible requires the filtered immutable-snapshot execution host",
+                ));
+            }
             // A null argument is an absent one, so `vector => $q` with a
             // null $q runs the remaining lanes.
             if matches!(value, GraphValue::Scalar(CanonicalScalar::Null)) {
                 continue;
             }
             match name.as_str() {
+                "eligible" => eligible = Some(list("eligible", value)?),
                 "text" => text = Some(text_value("text", value)?.to_owned()),
                 "text_property" => {
                     text_property = Some(PropertyKeyId(identity("text_property", value)?));
@@ -511,7 +553,7 @@ impl HybridSearch {
                 ..default
             },
         };
-        Ok(Self {
+        Ok((Self {
             options,
             text: text.unwrap_or_default(),
             text_mode,
@@ -536,7 +578,7 @@ impl HybridSearch {
             },
             graph_weight: if graph { graph_weight.unwrap_or(1) } else { 0 },
             outputs,
-        })
+        }, eligible))
     }
 
     pub(crate) fn options(&self) -> &Options {
@@ -579,6 +621,46 @@ impl HybridSearch {
             include_seeds: self.include_seeds,
             limits: ExpansionLimits::default(),
         }
+    }
+
+    /// Both immutable hosts use this body, including the bool-predicate
+    /// refusal latch. Eligibility cannot be lost between binding and execution.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_filtered(
+        &self,
+        eligible: Option<&[GraphValue]>,
+        remaining: GqlQueryPolicy,
+        snapshot: &Snapshot,
+        at: CommitSeq,
+        work: &RefCell<impl WorkControl>,
+        scan: Scan<'_>,
+        admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+        label_allowed: impl FnMut(LabelId) -> bool,
+        property_allowed: impl FnMut(PropertyKeyId) -> bool,
+        relation_allowed: impl FnMut(RelationId) -> bool,
+    ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+        let filter = filter::EndpointFilter::prepare(
+            eligible,
+            self.k,
+            remaining.evaluator.max_scratch_entries,
+            &mut SharedWork(work),
+        )?;
+        let result = graph::evaluate_filtered(
+            snapshot,
+            at,
+            &self.options,
+            self.query(),
+            self.expansion(),
+            work,
+            scan,
+            admit,
+            label_allowed,
+            property_allowed,
+            relation_allowed,
+            || Ok(()),
+            |id| filter.admits(id, work),
+        );
+        filter.finish(result).map(|hits| (hits, filter.scratch_entries()))
     }
 
     /// Fused hits as rows of exactly the YIELD columns, best first.
@@ -638,19 +720,18 @@ pub(crate) fn privileged(
     remaining: GqlQueryPolicy,
     cx: &QueryCx,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
-    let search = HybridSearch::bind(call, arguments, at, remaining).map_err(refuse)?;
+    let (search, eligible) = HybridSearch::bind_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = Cell::new(0_u64);
     let admitted = Cell::new(0_u64);
     let work = RefCell::new(Meter::new(search.options.policy.max_work_units, |units| {
         spent.set(spent.get().saturating_add(units as u64));
         cx.checkpoint()
     }));
-    let result = graph::evaluate(
+    let result = search.execute_filtered(
+        eligible,
+        remaining,
         snapshot,
         at,
-        &search.options,
-        search.query(),
-        search.expansion(),
         &work,
         Scan::Metered,
         |_| {
@@ -661,7 +742,7 @@ pub(crate) fn privileged(
         |_| true,
         |_| true,
     );
-    let hits = work
+    let (hits, filter_entries) = work
         .into_inner()
         .finish::<ReadError, _>(result)
         .map_err(failure)?;
@@ -673,7 +754,7 @@ pub(crate) fn privileged(
         },
         evaluator: GlaExecutionStats {
             work_units: spent.get(),
-            scratch_entries: value.len() as u64,
+            scratch_entries: filter_entries + value.len() as u64,
         },
         value,
     })

@@ -290,7 +290,8 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryError<crate::GqlError, QueryError>,
 > {
     use beacon::procedure::{HybridSearch, failure, refuse};
-    let search = HybridSearch::bind(call, arguments, at, remaining).map_err(refuse)?;
+    let (search, eligible) =
+        HybridSearch::bind_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = core::cell::Cell::new(0_u64);
     let admitted = core::cell::Cell::new(0_u64);
     let work = RefCell::new(Meter::new(
@@ -309,12 +310,11 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
         let polled = execution.borrow_mut().poll();
         polled.map_err(|error| work.borrow_mut().refuse(error))
     };
-    let result = beacon::graph::evaluate(
+    let result = search.execute_filtered(
+        eligible,
+        remaining,
         snapshot,
         at,
-        search.options(),
-        search.query(),
-        search.expansion(),
         &work,
         beacon::Scan::Unmetered(&mut poll),
         |row| {
@@ -332,7 +332,7 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
         |key| scope.allows_property(key),
         |relation| scope.allows_relation(relation),
     );
-    let hits = work
+    let (hits, filter_entries) = work
         .into_inner()
         .finish::<ReadError, _>(result)
         .map_err(failure)?;
@@ -344,7 +344,7 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
         },
         evaluator: fgdb_gql::GlaExecutionStats {
             work_units: spent.get(),
-            scratch_entries: value.len() as u64,
+            scratch_entries: filter_entries + value.len() as u64,
         },
         value,
     })
