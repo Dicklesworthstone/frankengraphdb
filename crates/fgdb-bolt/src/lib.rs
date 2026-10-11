@@ -1,10 +1,11 @@
 //! `fgdb-bolt`: the Bolt-compat subset, `BoltCompatProfileV1` (plan §13.5).
 //!
-//! An explicit negotiated downgrade, never a drop-in-Neo4j claim: read-only
-//! autocommit and read-only explicit transactions. Every RUN is executed
-//! through a capability-authorized read session, which cannot express a
-//! write, so a mutating statement is refused before any graph access. Writes,
-//! subscriptions and the rest of the native surface stay on FGP and HTTP.
+//! An explicit negotiated downgrade, never a drop-in-Neo4j claim. The server
+//! retains read-only explicit transactions and advertises its bounded
+//! no-RETURN autocommit-write extension separately in HELLO metadata.
+//! Execution rights come from signed capabilities, never protocol negotiation.
+//! Returning writes, subscriptions and other native surfaces use FGP/HTTP;
+//! explicit write transactions remain unsupported by the server.
 //!
 //! This crate is the pure protocol: PackStream values, chunk framing,
 //! version negotiation and the typed messages of Bolt 5.0. It performs no

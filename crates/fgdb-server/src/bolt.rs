@@ -1,19 +1,23 @@
 //! The Bolt-compat adapter: `BoltCompatProfileV1` (plan §13.5) over TCP.
 //!
 //! Official Neo4j drivers connect with `bolt://` (or `neo4j://`, answered
-//! by a single-server routing table) and run read-only Cypher/GQL. The
+//! by a single-server routing table) and run Cypher/GQL reads and bounded
+//! no-RETURN autocommit writes. Explicit transactions remain read-only. The
 //! profile is a negotiated downgrade, never a drop-in-Neo4j claim:
 //!
 //! - Authentication is a Warden capability token in HELLO: the hex token as
 //!   the `bearer` credential, or as the password of `basic` auth. A HELLO
 //!   whose token no served database accepts is refused.
-//! - Every RUN executes on a capability-authorized READ session, the same
-//!   path as FGP and HTTP reads. A read session cannot express a write, so a
-//!   mutating statement is refused before any graph access, with
-//!   `Neo.ClientError.Statement.AccessMode`. Writes go over FGP or HTTP.
+//! - Reads use the same capability-authorized READ session as FGP and HTTP.
+//!   Outside BEGIN and without read mode, a write-capable token may queue a
+//!   no-RETURN native write. PULL or DISCARD consumes it as one atomic program
+//!   through the existing authorized writer; RUN alone publishes nothing.
+//!   RESET/disconnect before consumption drops it. Write RETURN uses FGP/HTTP;
+//!   explicit write transactions remain unsupported by the server.
+//!   A lost terminal response never proves rollback and is never auto-replayed.
 //! - An explicit transaction holds one read session from BEGIN to COMMIT,
-//!   so all of its statements read one pinned generation; autocommit RUNs
-//!   each pin their own. No lock is held across network round trips.
+//!   so all of its statements read one pinned generation; autocommit read
+//!   RUNs each pin their own. No lock is held across network round trips.
 //! - The database is RUN/BEGIN's `db`, or the only served database.
 //! - Graph values come back as Bolt nodes, relationships and paths. Labels,
 //!   types, endpoints and properties are read through the same authorized
@@ -24,11 +28,13 @@
 //! - `CALL db.labels()`, `db.relationshipTypes()` and `db.propertyKeys()`
 //!   answer the schema names the token may see (the server's bindings,
 //!   scope-filtered), the same answer as HTTP's schema route.
-//! - Results are the ephemeral class of FGP's snapshot stream: buffered per
+//! - Read results are ephemeral FGP-style snapshot streams: buffered per
 //!   statement and dropped on disconnect, DISCARD or RESET. The exact selected
 //!   issuer's expiry/retirement fence is rechecked before every socket write
 //!   and flush, including delayed PULLs and partial writes. This is the existing
 //!   cooperative Warden fence, not durable audit or revocation evidence.
+
+mod autocommit;
 
 use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
 use crate::recovery::Generation;
@@ -307,6 +313,8 @@ struct Pending<'s> {
     /// read from the server's bindings rather than the graph.
     seq: Option<CommitSeq>,
     generation: Generation,
+    /// Unexecuted, no-RETURN autocommit request; mutually exclusive with rows.
+    write: Option<autocommit::DeferredWrite>,
 }
 
 /// An explicit transaction: one read session, one pinned generation.
@@ -317,7 +325,6 @@ struct Transaction<'s> {
     seq: CommitSeq,
     statements: i64,
 }
-
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
 pub(crate) async fn run(
     cx: &Cx,
@@ -458,6 +465,17 @@ impl<'s> Connection<'s> {
                 parameters,
                 extra,
             } => self.run(cx, &query, &parameters, &extra).await,
+            Request::Pull { n, qid } | Request::Discard { n, qid }
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.write.is_some())
+                    && (n == 0 || n < -1 || qid != -1) =>
+            {
+                Err(Failure::invalid(
+                    "invalid autocommit result identifier or row count",
+                ))
+            }
             Request::Pull { n, .. } => self.pull(cx, io, n, false).await,
             Request::Discard { n, .. } => self.pull(cx, io, n, true).await,
             Request::Begin { extra } => self.begin(cx, &extra).await,
@@ -536,6 +554,7 @@ impl<'s> Connection<'s> {
             ),
             ("hints".to_owned(), Value::Map(Vec::new())),
             ("fgdb_profile".to_owned(), Value::string(fgdb_bolt::PROFILE)),
+            ("fgdb_autocommit_writes".to_owned(), Value::Bool(true)),
         ])
     }
 
@@ -607,7 +626,13 @@ impl<'s> Connection<'s> {
         if let Some((column, kind)) = schema_procedure(query) {
             return self.schema_rows(extra, column, kind);
         }
-        let parameters = statement_parameters(parameters)?;
+        let arguments = statement_parameters(parameters)?;
+        if let Some(metadata) =
+            self.queue_autocommit_write(query, parameters, &arguments, extra)?
+        {
+            return Ok(metadata);
+        }
+        let parameters = arguments;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let query_cx = contexts.query();
         // An autocommit statement pins its own generation; one inside a
@@ -669,6 +694,7 @@ impl<'s> Connection<'s> {
             db,
             seq: Some(seq),
             generation,
+            write: None,
         });
         let mut metadata = vec![
             (
@@ -684,6 +710,15 @@ impl<'s> Connection<'s> {
     }
 
     async fn pull(&mut self, cx: &Cx, io: &mut Io, n: i64, discard: bool) -> Result<Map, Failure> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.write.is_some())
+        {
+            // No output rows: the first valid PULL or DISCARD is terminal.
+            // DISCARD consumes a write; only RESET/disconnect abandons it.
+            return self.finish_autocommit_write(cx).await;
+        }
         let Some(pending) = self.pending.as_mut() else {
             return Err(Failure::invalid("no result to PULL or DISCARD"));
         };
@@ -776,6 +811,7 @@ impl<'s> Connection<'s> {
             db,
             seq,
             generation,
+            write: None,
         });
         Ok(vec![
             (
@@ -787,7 +823,8 @@ impl<'s> Connection<'s> {
     }
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
-    /// is every role. Writes it receives are still refused by the profile.
+    /// is every role. Only no-RETURN autocommit writes are admitted here;
+    /// explicit transactions remain read-only even when routed as WRITE.
     fn route(&mut self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
@@ -864,7 +901,7 @@ fn schema_procedure(query: &str) -> Option<(&'static str, SchemaKind)> {
 fn read_only() -> Failure {
     Failure::new(
         "Neo.ClientError.Statement.AccessMode",
-        "fgdbd's Bolt profile (BoltCompatProfileV1) is read-only: send writes over FGP or HTTP",
+        "Bolt writes require write authority, autocommit and write mode; explicit transactions remain read-only",
     )
 }
 
@@ -872,9 +909,9 @@ fn bookmark(database: &str, seq: CommitSeq) -> String {
     format!("fgdb:{database}:{}", seq.0)
 }
 
-/// Whether refused statement text contains a write clause keyword outside
-/// strings and comments. This only picks the refusal's status code: the
-/// read session already refused the statement, and could not have run it.
+/// A dispatch hint and refusal selector, never execution authority. Both
+/// valid native reads and native write definitions are checked before queuing;
+/// only the native no-RETURN binder can execute a mutation under authority.
 fn looks_like_write(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -886,6 +923,21 @@ fn looks_like_write(text: &str) -> bool {
                     at += if bytes[at] == b'\\' { 2 } else { 1 };
                 }
                 at += 1;
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2;
+                let mut depth = 1_usize;
+                while at < bytes.len() && depth != 0 {
+                    if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+                        depth += 1;
+                        at += 2;
+                    } else if bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/') {
+                        depth -= 1;
+                        at += 2;
+                    } else {
+                        at += 1;
+                    }
+                }
             }
             b'/' if bytes.get(at + 1) == Some(&b'/') => {
                 while at < bytes.len() && bytes[at] != b'\n' {
@@ -918,13 +970,18 @@ fn looks_like_write(text: &str) -> bool {
 /// RUN parameters as statement arguments, through the same conversion and
 /// domain rules as FGP's.
 fn statement_parameters(parameters: &Map) -> Result<GqlParameters, Failure> {
+    let wire = wire_parameters(parameters)?;
+    convert::parameters(&wire, None)
+        .map_err(|error| Failure::new("Neo.ClientError.Statement.ArgumentError", error.to_string()))
+}
+
+fn wire_parameters(parameters: &Map) -> Result<Vec<(String, WireValue)>, Failure> {
     let mut wire = Vec::with_capacity(parameters.len());
     for (name, value) in parameters {
         wire.push((name.clone(), argument(value)?));
     }
     wire.sort_by(|a, b| a.0.cmp(&b.0));
-    convert::parameters(&wire, None)
-        .map_err(|error| Failure::new("Neo.ClientError.Statement.ArgumentError", error.to_string()))
+    Ok(wire)
 }
 
 fn argument(value: &Value) -> Result<WireValue, Failure> {

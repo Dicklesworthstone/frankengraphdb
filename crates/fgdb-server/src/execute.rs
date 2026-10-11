@@ -1,5 +1,5 @@
 //! One statement through a capability-authorized session: the execution
-//! path every surface (FGP and HTTP) shares, so adapters differ only in
+//! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
 mod prepared;
@@ -73,7 +73,27 @@ pub(crate) fn write<'a>(
     token: &'a CapabilityToken,
     statement: &'a Execute,
 ) -> Execution<'a> {
-    Box::pin(write_inner(cx, db, token, statement))
+    Box::pin(write_inner(cx, db, token, statement, None))
+}
+
+/// Consume one deferred no-RETURN request in its original recovery generation.
+/// Its local bookmark is a lower bound, not a historical write snapshot.
+/// This does not turn the queued request into a durable prepared transaction.
+pub(crate) fn write_no_return_at<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    statement: &'a Execute,
+    generation: &'a Generation,
+    minimum_seq: fgdb_types::CommitSeq,
+) -> Execution<'a> {
+    Box::pin(write_inner(
+        cx,
+        db,
+        token,
+        statement,
+        Some((generation, minimum_seq)),
+    ))
 }
 
 /// One finite parameter batch through the same native authorized program as
@@ -209,17 +229,38 @@ async fn write_inner(
     db: &Served,
     token: &CapabilityToken,
     statement: &Execute,
+    deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
 ) -> Result<Answer, Refusal> {
     refuse_element_identity(&statement.statement)?;
-    let _operation = db.db.enter().map_err(Refusal::from)?;
+    let _operation = match deferred {
+        Some((generation, _)) => generation.enter(),
+        None => db.db.enter(),
+    }
+    .map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    if let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)? {
+    if deferred.is_none()
+        && let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)?
+    {
         return write_returning(cx, db, token, returning).await;
     }
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    if let Some((generation, minimum_seq)) = deferred {
+        // Another writer may have fenced the slot while this request waited
+        // for the lock. Check again before binding, allocating or mutating.
+        generation.check().map_err(Refusal::from)?;
+        let frontier = guard
+            .frontier()
+            .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+        if frontier < minimum_seq {
+            return Err(Refusal::new(
+                ErrorCode::Busy,
+                "the local bookmark has not been reached; no write was executed",
+            ));
+        }
+    }
     let generation = guard.generation();
     let symbols = &db.symbols;
     let mut session = guard
@@ -337,7 +378,6 @@ async fn write_batch_inner(
         generation,
     })
 }
-
 /// Created elements one CREATE/INSERT ... RETURN statement may make.
 const MAX_CREATED: u64 = 100_000;
 
