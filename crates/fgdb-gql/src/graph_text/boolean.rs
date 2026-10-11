@@ -36,6 +36,9 @@ struct Parsed<'a> {
     /// property, row column and offset. Valid only as a top-level AND
     /// conjunct, where it is the join key `(q {v: m})` already makes.
     correlations: Vec<(Name<'a>, Name<'a>, usize, usize)>,
+    /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
+    /// each is the label `(v:L)` writes inline in this scope.
+    labels: Vec<(Name<'a>, Name<'a>)>,
 }
 impl<'a> Parsed<'a> {
     fn push(&mut self, item: SyntaxItem<'a>, at: usize) -> Result<(), GraphPatternTextError> {
@@ -54,8 +57,22 @@ impl<'a> Parser<'a> {
             program: Vec::new(),
             extended: false,
             correlations: Vec::new(),
+            labels: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
+        if let Some(&(variable, _)) = parsed.labels.first() {
+            // Under OR, NOT or parentheses a label test is a Boolean leaf the
+            // compound evaluator cannot read; flat, it is an inline label.
+            if parsed.extended {
+                return Err(error(
+                    variable.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a label predicate only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            self.syntax.labels.extend(parsed.labels.iter().copied());
+        }
         if let Some(&(_, _, _, at)) = parsed.correlations.first() {
             // Under OR, NOT or parentheses the equality is no longer a join
             // key, and a row value is not a filter operand in this profile.
@@ -242,6 +259,26 @@ impl<'a> Parser<'a> {
             self.predicates += 1;
             parsed.extended = true;
             return parsed.push(SyntaxItem::Truth(value), at);
+        }
+        // openCypher `v:L1:L2` over a vertex bound in this scope. No program
+        // item: boolean_predicates lowers it or refuses it.
+        if let TokenKind::Word(word) = self.current.kind
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+        {
+            if !self.syntax.variables.iter().any(|name| name.text == word) {
+                return Err(error(at, GraphPatternTextErrorKind::UnknownVariable));
+            }
+            let variable = self.name()?;
+            while self.take(b':')? {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                parsed.labels.push((variable, self.name()?));
+                self.predicates += 1;
+            }
+            return Ok(());
         }
         if self.compound_property_predicate(parsed)? {
             return Ok(());

@@ -489,6 +489,38 @@ fn optional_and_exists_children_use_boolean_selection_before_match_success_and_g
     );
 }
 
+/// openCypher `v:L` in WHERE (TCK MatchWhere1 [1]): a top-level AND conjunct
+/// is the label `(v:L)` writes inline, the same plan byte for byte. Under OR,
+/// NOT or parentheses it refuses, as does a name the scope does not bind.
+#[test]
+fn a_where_label_conjunct_is_the_inline_label() {
+    for (conjunct, inline) in [
+        ("MATCH (a) WHERE a:L RETURN a", "MATCH (a:L) RETURN a"),
+        (
+            "MATCH (a)-[:R]->(b) WHERE b:L AND b.n > 1 RETURN a, b",
+            "MATCH (a)-[:R]->(b:L) WHERE b.n > 1 RETURN a, b",
+        ),
+        (
+            "MATCH (a) WHERE a.n = 2 AND a:L RETURN a",
+            "MATCH (a:L) WHERE a.n = 2 RETURN a",
+        ),
+    ] {
+        assert_eq!(
+            query(conjunct).canonical_bytes(),
+            query(inline).canonical_bytes(),
+            "{conjunct}"
+        );
+    }
+    for text in [
+        "MATCH (a) WHERE NOT a:L RETURN a",
+        "MATCH (a) WHERE a:L OR a.n = 1 RETURN a",
+        "MATCH (a) WHERE (a:L) RETURN a",
+        "MATCH (a) WHERE b:L RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}
+
 #[test]
 fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolution() {
     for statement in [
