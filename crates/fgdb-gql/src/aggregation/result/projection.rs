@@ -270,6 +270,31 @@ fn expression<'g, E, C>(
                 }
             }
         }
+        // A composite coalesce, lazily as the row evaluator reads it.
+        GraphSetValue::Function {
+            function: crate::GraphValueFunction::Coalesce,
+            argument,
+        } => {
+            let arguments = match argument.as_ref() {
+                GraphSetValue::List(arguments) => arguments.as_slice(),
+                single => core::slice::from_ref(single),
+            };
+            let mut first = None;
+            for argument in arguments {
+                let value = expression(argument, input, column, control)?.into_owned(control)?;
+                let value = graph_value(value, column)?;
+                if !value.is_null() {
+                    first = Some(value);
+                    break;
+                }
+            }
+            if first.is_none() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+            OutputValue::Owned(GraphAggregateValue::Value(
+                first.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+            ))
+        }
         // reverse() and split() with the row evaluator's law (fgdb-13l85).
         GraphSetValue::Function { function, argument } => {
             let argument = expression(argument, input, column, control)?.into_owned(control)?;

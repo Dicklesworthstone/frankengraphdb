@@ -201,6 +201,11 @@ pub enum GraphValueFunction {
     /// `left - right` in the same chain: two scalars subtract as the scalar
     /// `-` does; a list operand is a typed error. NULL is NULL.
     Subtract,
+    /// openCypher `coalesce(a, b, ...)` over a composite argument (a list,
+    /// map or element): the first non-NULL argument, read in order, and no
+    /// later argument runs; all NULL is NULL. The scalar COALESCE keeps every
+    /// all-scalar call.
+    Coalesce,
 }
 
 impl GraphValueFunction {
@@ -211,14 +216,16 @@ impl GraphValueFunction {
             Self::Split => 2,
             Self::Add => 3,
             Self::Subtract => 4,
+            Self::Coalesce => 5,
         }
     }
 
-    /// How many arguments a call takes.
-    pub(crate) const fn arity(self) -> usize {
+    /// How many arguments a call takes; `None` for one or more.
+    pub(crate) const fn arity(self) -> Option<usize> {
         match self {
-            Self::Reverse => 1,
-            Self::Split | Self::Add | Self::Subtract => 2,
+            Self::Reverse => Some(1),
+            Self::Split | Self::Add | Self::Subtract => Some(2),
+            Self::Coalesce => None,
         }
     }
 
@@ -796,7 +803,8 @@ fn admit(
             match function {
                 GraphValueFunction::Reverse
                 | GraphValueFunction::Add
-                | GraphValueFunction::Subtract => GraphSetColumnType::Any,
+                | GraphValueFunction::Subtract
+                | GraphValueFunction::Coalesce => GraphSetColumnType::Any,
                 GraphValueFunction::Split => GraphSetColumnType::List,
             }
         }
@@ -1528,6 +1536,10 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(value)
         }
+        GraphSetValue::Function {
+            function: GraphValueFunction::Coalesce,
+            argument,
+        } => coalesce_value(argument, row, column, control, depth, nodes)?,
         GraphSetValue::Function { function, argument } => {
             let argument = operand(argument, row, column, control, depth + 1, nodes)?;
             value_function(*function, argument.as_ref(), column, control)?
@@ -1965,6 +1977,21 @@ pub(crate) fn value_function<E>(
             }
             Ok(GraphValue::List(pieces.into_boxed_slice()))
         }
+        // The evaluators read a coalesce lazily; here its arguments are
+        // already values, so the first non-NULL one is the answer.
+        GraphValueFunction::Coalesce => {
+            let first = match argument.as_list() {
+                Some(arguments) => arguments.iter().find(|value| !value.is_null()),
+                None => (!argument.is_null()).then_some(argument),
+            };
+            match first {
+                Some(value) => copy_value(value, control).map_err(ProjectionFailure::Control),
+                None => {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    Ok(null)
+                }
+            }
+        }
         GraphValueFunction::Add | GraphValueFunction::Subtract => {
             let Some([left, right]) = argument
                 .as_list()
@@ -1981,6 +2008,36 @@ pub(crate) fn value_function<E>(
             )
         }
     }
+}
+
+/// openCypher coalesce over a composite argument: each argument in order
+/// until one is not NULL, which is the answer; no later argument runs. A call
+/// with one argument holds it directly, more hold the list of them.
+fn coalesce_value<E>(
+    arguments: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    depth: usize,
+    nodes: &mut Evaluation,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    let arguments = match arguments {
+        GraphSetValue::List(arguments) => arguments.as_slice(),
+        single => core::slice::from_ref(single),
+    };
+    for argument in arguments {
+        let value = operand(argument, row, column, control, depth + 1, nodes)?;
+        if !value.is_null() {
+            return match value {
+                std::borrow::Cow::Owned(value) => Ok(value),
+                std::borrow::Cow::Borrowed(value) => {
+                    copy_value(value, control).map_err(ProjectionFailure::Control)
+                }
+            };
+        }
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    Ok(GraphValue::Scalar(CanonicalScalar::Null))
 }
 
 /// rand()'s draw (fgdb-13l85): FNV-1a over a domain tag, the call site, the

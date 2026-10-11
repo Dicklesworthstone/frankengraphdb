@@ -273,7 +273,8 @@ impl ReadValueTemplate {
             Self::Function { function, .. } => match function {
                 crate::GraphValueFunction::Reverse
                 | crate::GraphValueFunction::Add
-                | crate::GraphValueFunction::Subtract => GraphSetColumnType::Any,
+                | crate::GraphValueFunction::Subtract
+                | crate::GraphValueFunction::Coalesce => GraphSetColumnType::Any,
                 crate::GraphValueFunction::Split => GraphSetColumnType::List,
             },
             Self::Let { body, .. } => body.column_type(input, parameters),

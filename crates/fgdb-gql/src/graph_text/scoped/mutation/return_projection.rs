@@ -1838,6 +1838,17 @@ impl<'a> Parser<'a> {
             self.advance()?;
             self.punct(b'(', "(")?;
             self.value_function_call(function, inputs.as_deref_mut(), schema, resolve, depth)?
+        } else if self.composite_coalesce(schema)? {
+            // coalesce over a list, map or element: a value function.
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.value_function_call(
+                crate::GraphValueFunction::Coalesce,
+                inputs.as_deref_mut(),
+                schema,
+                resolve,
+                depth,
+            )?
         } else if self.random_call()? {
             self.random_value()?
         } else if self.is_word("SIZE")
@@ -2092,6 +2103,74 @@ impl<'a> Parser<'a> {
         Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
     }
 
+    /// `coalesce(` with a composite argument: a list or map literal, a call
+    /// that makes a list, or a row column that is not a scalar. That call is
+    /// the value function; the scalar COALESCE keeps every all-scalar call.
+    /// Only lexical lookahead: nothing is read or registered.
+    fn composite_coalesce(
+        &self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("COALESCE") {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(false);
+        }
+        let mut depth = 1_usize;
+        let mut first = true;
+        loop {
+            let token = lexer.next()?;
+            if first && depth == 1 {
+                first = false;
+                match token.kind {
+                    TokenKind::Punct(b'[' | b'{') => return Ok(true),
+                    TokenKind::Word(word) => {
+                        let next = lexer.clone().next()?.kind;
+                        let bare = matches!(next, TokenKind::Punct(b',' | b')'));
+                        if bare
+                            && schema.iter().any(|(name, kind)| {
+                                name.text == word && *kind != GraphSetColumnType::Scalar
+                            })
+                        {
+                            return Ok(true);
+                        }
+                        let listing = [
+                            "COLLECT",
+                            "REVERSE",
+                            "SPLIT",
+                            "RANGE",
+                            "TAIL",
+                            "KEYS",
+                            "LABELS",
+                            "NODES",
+                            "RELATIONSHIPS",
+                        ];
+                        if matches!(next, TokenKind::Punct(b'('))
+                            && listing.iter().any(|name| word.eq_ignore_ascii_case(name))
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(false);
+                    }
+                }
+                TokenKind::Punct(b',') if depth == 1 => first = true,
+                TokenKind::End => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+
     /// The arguments and closing parenthesis of a value function call, after
     /// its `(`: one argument is the value, more are the list of them. Out of
     /// line, so the value reader's recursive frame stays as narrow as before.
@@ -2112,10 +2191,11 @@ impl<'a> Parser<'a> {
                 resolve,
                 depth + 1,
             )?);
-            if arguments.len() == function.arity() {
-                break;
+            match function.arity() {
+                Some(arity) if arguments.len() == arity => break,
+                None if !self.is_punct(b',') => break,
+                _ => self.punct(b',', ", and the next argument")?,
             }
-            self.punct(b',', ", and the next argument")?;
         }
         self.punct(b')', ")")?;
         let argument = if arguments.len() == 1 {

@@ -1291,3 +1291,61 @@ fn order_by_a_property_the_return_did_not_project_still_refuses() {
         assert_eq!(calls.get(), 0, "{text}: refused after a catalog call");
     }
 }
+
+/// openCypher coalesce over a list (TCK Quantifier9-12 read
+/// `coalesce(fixedList, list)`): the first non-NULL argument, in order, and
+/// no later argument runs; all NULL is NULL. A quantifier reads the result
+/// as a list. An all-scalar coalesce keeps the scalar COALESCE.
+#[test]
+fn coalesce_over_lists_is_the_first_non_null_argument() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [CanonicalScalar::Int(2)];
+    let first = |text: &str| {
+        let rows = run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows[0].get(0).unwrap().clone()
+    };
+    let list = |items: &[i64]| {
+        GraphValue::List(
+            items
+                .iter()
+                .map(|&n| GraphValue::Scalar(CanonicalScalar::Int(n)))
+                .collect(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH (n) WITH [1, 2] AS a, null AS b RETURN coalesce(b, a) AS r",
+            list(&[1, 2]),
+        ),
+        (
+            "MATCH (n) WITH [1, 2] AS a RETURN coalesce(null, [3], a) AS r",
+            list(&[3]),
+        ),
+        // The second argument never runs: n.p / (n.p - 2) divides by zero.
+        (
+            "MATCH (n) WITH [1] AS a RETURN coalesce(a, [n.p / (n.p - 2)]) AS r",
+            list(&[1]),
+        ),
+        (
+            "MATCH (n) WITH null AS b RETURN coalesce(b, [n.p]) AS r",
+            list(&[2]),
+        ),
+        (
+            "MATCH (n) WITH null AS b RETURN coalesce(b, [1][5]) AS r",
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ),
+        (
+            "MATCH (n) WITH [1, 2] AS a, null AS b WITH coalesce(b, a) AS list \
+             RETURN single(x IN list WHERE x = 2) AS r",
+            GraphValue::Scalar(CanonicalScalar::Bool(true)),
+        ),
+        (
+            "MATCH (n) RETURN coalesce(null, n.p) AS r",
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+        ),
+    ] {
+        assert_eq!(first(text), expected, "{text}");
+    }
+}
