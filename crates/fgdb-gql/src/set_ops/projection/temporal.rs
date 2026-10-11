@@ -303,7 +303,7 @@ pub(crate) fn construct(
         GraphTemporalFunction::Between
         | GraphTemporalFunction::InMonths
         | GraphTemporalFunction::InDays
-        | GraphTemporalFunction::InSeconds => between(function, arguments(argument)?),
+        | GraphTemporalFunction::InSeconds => between(function, arguments(argument)?, zones),
         // A clock read with a timezone argument needs a clock capability
         // the query context does not grant (NULL returned above).
         GraphTemporalFunction::Clock => Err(GraphIntegerErrorKind::IncompatibleOperands),
@@ -352,10 +352,14 @@ fn moment(value: &GraphValue) -> Result<Moment, GraphIntegerErrorKind> {
 /// `inDays` the whole days of the whole span and `inSeconds` all of it as
 /// time. When either lacks a date, only the times of day differ (a date's
 /// is midnight): `between` and `inSeconds` are that difference, and
-/// `inMonths` and `inDays` are zero.
+/// `inMonths` and `inDays` are zero. A side without an offset is read in
+/// the other side's named zone at its own wall time, on that side's date
+/// when it has none, so a span across a daylight saving change counts the
+/// hour the change adds or removes (TCK Temporal10 [8]).
 fn between(
     function: GraphTemporalFunction,
     items: &[GraphValue],
+    zones: Option<&GqlTimeZones>,
 ) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
     let [left, right] = items else {
         return Err(Invalid);
@@ -366,7 +370,19 @@ fn between(
     {
         return Ok(CanonicalScalar::Null);
     }
-    let (from, to) = (moment(left)?, moment(right)?);
+    let (mut from, mut to) = (moment(left)?, moment(right)?);
+    if to.offset.is_none()
+        && let Some(zone) = named_zone(left, zones)
+    {
+        let date = to.date.or(from.date).ok_or(Invalid)?;
+        to.offset = Some(offset_in_zone(zone, date, to.time, zones)?);
+    }
+    if from.offset.is_none()
+        && let Some(zone) = named_zone(right, zones)
+    {
+        let date = from.date.or(to.date).ok_or(Invalid)?;
+        from.offset = Some(offset_in_zone(zone, date, from.time, zones)?);
+    }
     let second = NANOS_PER_SECOND;
     let shift = match (from.offset, to.offset) {
         (Some(from), Some(to)) => i128::from(from) - i128::from(to),
@@ -420,6 +436,33 @@ fn between(
     CanonicalDuration::new(months, days, nanos)
         .map(CanonicalScalar::Duration)
         .map_err(|_| Invalid)
+}
+
+/// The named zone a timestamp carries, when the statement's tzdb has it.
+fn named_zone<'v>(value: &'v GraphValue, zones: Option<&GqlTimeZones>) -> Option<&'v str> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
+            match timestamp_zone(value, zones) {
+                Zone::Named(name) => Some(name),
+                Zone::Offset(_) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The offset `zone` has at the wall time `date` `time`.
+fn offset_in_zone(
+    zone: &str,
+    date: CanonicalDate,
+    time: CanonicalLocalTime,
+    zones: Option<&GqlTimeZones>,
+) -> Result<i32, GraphIntegerErrorKind> {
+    let (_, offset) = zones
+        .ok_or(Invalid)?
+        .local(zone, point(date, time))
+        .ok_or(Invalid)?;
+    Ok(offset)
 }
 
 /// A local date and time as nanoseconds since 1970-01-01T00:00.
@@ -1131,7 +1174,16 @@ fn datetime(
             let time_base = match arguments.time_base {
                 Some(base) => {
                     let (time, offset) = time_part(base)?;
-                    Some((time, offset.map(Zone::Offset)))
+                    // A zoned datetime lends its zone, which resolves at the
+                    // new wall time (TCK Temporal3 [9], [10]); any other
+                    // time base keeps the offset it was written with.
+                    let zone = match base {
+                        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
+                            Some(timestamp_zone(value, zones))
+                        }
+                        _ => offset.map(Zone::Offset),
+                    };
+                    Some((time, zone))
                 }
                 None => both.map(|(value, zone)| (value.time(), zone)),
             };
@@ -1150,8 +1202,13 @@ fn datetime(
                     at_instant(instant, to, zones)
                 }
                 // A time base keeps its time of day, read at the new zone's
-                // offset for that instant.
-                (Some(Zone::Offset(from)), Some(to)) => {
+                // offset for that instant. A zoned base's offset is its
+                // zone's at the new wall time.
+                (Some(from), Some(to)) => {
+                    let from = match from {
+                        Zone::Offset(offset) => offset,
+                        Zone::Named(_) => in_zone(wall, from, zones)?.utc_offset_seconds(),
+                    };
                     let instant = at_offset(wall, from)?.instant_utc_nanos();
                     let to_offset = at_instant(instant, to, zones)?.utc_offset_seconds();
                     let shifted = CanonicalLocalDateTime::new(date, shift(local, to_offset - from));

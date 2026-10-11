@@ -2841,6 +2841,13 @@ impl fgdb_gql::GraphSymbolResolver for ZonedCatalog {
 }
 
 fn zoned(expression: &str) -> Result<fgdb_types::CanonicalTimestamp, String> {
+    match zoned_scalar(expression)? {
+        CanonicalScalar::Timestamp(value) => Ok(value),
+        other => Err(format!("{other:?}")),
+    }
+}
+
+fn zoned_scalar(expression: &str) -> Result<CanonicalScalar, String> {
     let statement = format!("MATCH (n) RETURN {expression} AS value");
     let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
         &statement,
@@ -2851,10 +2858,10 @@ fn zoned(expression: &str) -> Result<fgdb_types::CanonicalTimestamp, String> {
     .bind_parameters(&GqlParameters::new())
     .map_err(|error| format!("{error:?}"))?;
     let result = execute(&query, &CanonicalScalar::Null, policy()).map_err(|_| "execution")?;
-    match result.value[0].values()[0].as_scalar() {
-        Some(CanonicalScalar::Timestamp(value)) => Ok(value.clone()),
-        other => Err(format!("{other:?}")),
-    }
+    result.value[0].values()[0]
+        .as_scalar()
+        .cloned()
+        .ok_or_else(|| "not a scalar".to_owned())
 }
 
 /// fgdb-txbg9: a named zone (`timezone: 'Europe/Stockholm'`, a text value's
@@ -2946,6 +2953,27 @@ fn named_time_zones_resolve_through_the_pinned_tzdb_only() {
             3_600,
             None,
         ),
+        // A zoned time base lends its zone, resolved at the new date: 12:00
+        // on 1984-03-28 is CEST (TCK Temporal3 [9], [10]).
+        (
+            "datetime({year: 1984, month: 3, day: 28, time: datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'})})",
+            second(449_316_000),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        // Moved to another zone, its time of day is read at that new date.
+        (
+            "datetime({year: 1984, month: 3, day: 28, time: datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}), second: 42, timezone: 'Pacific/Honolulu'})",
+            second(449_316_042),
+            -36_000,
+            Some("Pacific/Honolulu"),
+        ),
+        (
+            "datetime({year: 1984, month: 10, day: 11, time: datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}), timezone: '+05:00'})",
+            second(466_340_400),
+            18_000,
+            None,
+        ),
     ] {
         let value = zoned(expression).unwrap_or_else(|error| panic!("{expression}: {error}"));
         assert_eq!(value.instant_utc_nanos(), instant, "{expression}");
@@ -2958,6 +2986,46 @@ fn named_time_zones_resolve_through_the_pinned_tzdb_only() {
         if let Some(zone) = value.zone() {
             assert_eq!(zone.tzdb_oid(), TEST_TZDB, "{expression}");
         }
+    }
+    // A span with one zoned side reads the other side in that zone, at its
+    // own wall time, so it counts the hour a daylight saving change adds
+    // (TCK Temporal10 [8]; 2017-10-29 03:00 CEST is 02:00 CET).
+    let stockholm_midnight =
+        "datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'})";
+    let four_cet =
+        "datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})";
+    for (left, right, hours) in [
+        (
+            stockholm_midnight,
+            "localdatetime({year: 2017, month: 10, day: 29, hour: 4})",
+            5,
+        ),
+        (stockholm_midnight, "localtime({hour: 4})", 5),
+        (
+            "localdatetime({year: 2017, month: 10, day: 29, hour: 0})",
+            four_cet,
+            5,
+        ),
+        ("date({year: 2017, month: 10, day: 29})", four_cet, 5),
+        (
+            stockholm_midnight,
+            "date({year: 2017, month: 10, day: 30})",
+            25,
+        ),
+        // A fixed offset has no change to count.
+        (
+            "datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: '+02:00'})",
+            "localdatetime({year: 2017, month: 10, day: 29, hour: 4})",
+            4,
+        ),
+    ] {
+        let expression = format!("duration.inSeconds({left}, {right})");
+        let expected = fgdb_types::CanonicalDuration::new(0, 0, i128::from(hours) * HOUR).unwrap();
+        assert_eq!(
+            zoned_scalar(&expression),
+            Ok(CanonicalScalar::Duration(expected)),
+            "{expression}"
+        );
     }
     for refused in [
         "datetime({year: 1984, month: 10, day: 11, timezone: 'Frost/Nixon'})",
