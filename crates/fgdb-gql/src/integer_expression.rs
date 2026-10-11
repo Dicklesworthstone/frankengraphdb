@@ -99,6 +99,9 @@ pub enum GraphIntegerOp {
     /// any case to a Boolean; other text is NULL. An integer is FALSE only at
     /// zero. A float or any other value is an error.
     ToBoolean,
+    /// openCypher `base ^ exponent`: always a float, NULL when either operand
+    /// is. The exponent must be integral; see `power` for exactness.
+    Power,
     /// openCypher toFloat, floor, ceil, round and sqrt over a number.
     Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
@@ -205,6 +208,7 @@ impl GraphIntegerOp {
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
             Self::ToBoolean => bytes.push(37),
+            Self::Power => bytes.push(38),
             Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
@@ -258,6 +262,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
             Self::ToBoolean => f.write_str("ToBoolean"),
+            Self::Power => f.write_str("Power"),
             Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
@@ -479,6 +484,7 @@ enum Instruction {
     ToText,
     ToInteger,
     ToBoolean,
+    Power,
     Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
@@ -870,6 +876,12 @@ impl GraphIntegerExpression {
                     let result = to_boolean(value, at, control)?;
                     *value = result.into();
                 }
+                Instruction::Power => {
+                    let exponent = stack.pop().expect("validated exponent operand");
+                    let base = stack.last_mut().expect("validated base operand");
+                    let result = power(base, &exponent).map_err(failure)?;
+                    *base = result.into();
+                }
                 Instruction::Numeric(function) => {
                     let value = stack.last_mut().expect("validated numeric operand");
                     let result = numeric(value, *function, at, control)?;
@@ -1144,6 +1156,7 @@ impl GraphIntegerExpression {
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
                 Instruction::ToBoolean => bytes.push(37),
+                Instruction::Power => bytes.push(38),
                 Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
@@ -1236,6 +1249,77 @@ fn charge_payload<E>(
 /// is not an i64 literal converts to NULL under toInteger, as openCypher
 /// defines it. Decimal, float, timestamp, bytes and average cells are a typed
 /// failure, never a guessed rendering.
+/// openCypher `base ^ exponent` (TCK Precedence2, Return2 [1]): a float, NULL
+/// when either operand is. A Count, wide sum or average, or a non-number, is
+/// an error. The exponent must be integral (a fractional one is NonInteger,
+/// never a host `powf`, whose last bit differs across platforms).
+///
+/// An integer base to a non-negative integer power is computed exactly and
+/// rounded once, so `4 ^ 18` is exactly 68719476736.0. Any other integral
+/// exponent multiplies by squaring with checked binary64 steps: deterministic
+/// on every target, though not always the correctly rounded power. A
+/// non-finite result is Overflow, as every float operation here.
+fn power(
+    base: &ExpressionCell<'_>,
+    exponent: &ExpressionCell<'_>,
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    use fgdb_types::CanonicalF64;
+
+    let number = |cell: &ExpressionCell<'_>| match cell {
+        ExpressionCell::Scalar(value) => match value.as_ref() {
+            CanonicalScalar::Null => Ok(None),
+            CanonicalScalar::Int(value) => {
+                Ok(Some((Some(*value), CanonicalF64::from_i64_rounded(*value))))
+            }
+            CanonicalScalar::Float(value) => Ok(Some((None, *value))),
+            _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+        },
+        _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+    };
+    let (base, exponent) = (number(base)?, number(exponent)?);
+    let (Some((base_int, base)), Some((exponent_int, exponent))) = (base, exponent) else {
+        return Ok(CanonicalScalar::Null);
+    };
+    let exponent = match exponent_int {
+        Some(exponent) => exponent,
+        None => {
+            let value = exponent.get();
+            if !value.is_finite() || value.fract() != 0.0 || value.abs() > f64::from(i32::MAX) {
+                return Err(GraphIntegerErrorKind::NonInteger);
+            }
+            // Integral and within i32, so this conversion is exact.
+            value as i64
+        }
+    };
+    if let (Some(base), Ok(exponent)) = (base_int, u32::try_from(exponent))
+        && let Some(exact) = i128::from(base).checked_pow(exponent)
+    {
+        // Rust rounds an i128 to the nearest binary64, ties to even.
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(exact as f64)));
+    }
+    let overflow = |_| GraphIntegerErrorKind::Overflow;
+    let one = CanonicalF64::from_i64_rounded(1);
+    let (mut result, mut square, mut remaining) = (one, base, exponent.unsigned_abs());
+    while remaining > 0 {
+        if remaining & 1 == 1 {
+            result = result.checked_mul(square).map_err(overflow)?;
+        }
+        remaining >>= 1;
+        if remaining > 0 {
+            square = square.checked_mul(square).map_err(overflow)?;
+        }
+    }
+    if exponent < 0 {
+        result = one.checked_div(result).map_err(|error| match error {
+            fgdb_types::FloatArithmeticError::DivisionByZero => {
+                GraphIntegerErrorKind::DivisionByZero
+            }
+            _ => GraphIntegerErrorKind::Overflow,
+        })?;
+    }
+    Ok(CanonicalScalar::Float(result))
+}
+
 /// openCypher toBoolean (TCK TypeConversion1): NULL stays NULL, a Boolean is
 /// itself, and the text `true` or `false` in any case converts. Any other
 /// text is NULL, untrimmed (`' tru '` is NULL). An integer is FALSE only at

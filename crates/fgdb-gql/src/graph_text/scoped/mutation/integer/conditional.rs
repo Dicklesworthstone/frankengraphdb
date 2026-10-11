@@ -152,7 +152,9 @@ impl<'a> Parser<'a> {
         let next = self.lexer.clone().next()?;
         let scalar_suffix = matches!(
             next.kind,
-            TokenKind::Punct(b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>')
+            TokenKind::Punct(
+                b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'=' | b'!' | b'<' | b'>'
+            )
         ) || matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IS"));
         if !scalar_suffix && (self.is_word("TRUE") || self.is_word("FALSE") || self.is_word("NULL"))
         {
@@ -201,7 +203,7 @@ impl<'a> Parser<'a> {
                         return Ok(matches!(
                             next.kind,
                             TokenKind::Punct(
-                                b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>'
+                                b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'=' | b'!' | b'<' | b'>'
                             )
                         ) || matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IS")));
                     }

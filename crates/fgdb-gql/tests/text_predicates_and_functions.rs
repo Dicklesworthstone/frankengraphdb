@@ -732,6 +732,48 @@ fn composite_literals_compare_three_valued() {
     );
 }
 
+/// openCypher `^` (TCK Precedence2 [2] to [4], Return2 [1]): always a float,
+/// left-associative, tighter than `*`, `/` and `%` and looser than a sign. NULL
+/// propagates. An integer to a non-negative integer power is exact, rounded
+/// once; a fractional exponent is a typed failure, never a host `powf`.
+#[test]
+fn exponentiation_is_a_left_associative_float_power() {
+    let float = |value: f64| CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value));
+    for (expression, expected) in [
+        ("4 ^ 3 * 2 ^ 3", float(512.0)),
+        ("4 ^ (3 * 2) ^ 3", float(68_719_476_736.0)),
+        ("4 ^ 3 / 2 ^ 3", float(8.0)),
+        ("4 ^ 3 % 2 ^ 3", float(0.0)),
+        ("4 ^ (3 % 2) ^ 3", float(64.0)),
+        ("4 ^ 3 + 2 ^ 3", float(72.0)),
+        ("4 ^ 3 - 2 ^ 3", float(56.0)),
+        ("-3 ^ 2", float(9.0)),
+        ("(-3) ^ 2", float(9.0)),
+        ("-(3 ^ 2)", float(-9.0)),
+        ("2 ^ -2", float(0.25)),
+        ("1.5 ^ 2", float(2.25)),
+        ("2 ^ 2.0", float(4.0)),
+        ("0 ^ 0", float(1.0)),
+        // 3^40 = 12157665459056928801, rounded once to the nearest binary64.
+        ("3 ^ 40", float(12_157_665_459_056_928_768.0)),
+        ("5 ^ (6 % null)", CanonicalScalar::Null),
+        (
+            "1 + (2 - (3 * (4 / (5 ^ (6 % null)))))",
+            CanonicalScalar::Null,
+        ),
+    ] {
+        assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
+    }
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN 2 ^ 0.5 AS value"),
+            &text("x"),
+            policy()
+        )
+        .is_err()
+    );
+}
+
 /// A comparison chain compares neighbours, as openCypher defines it: `a < b
 /// <= c` is `a < b AND b <= c`, three-valued (TCK Comparison3 [1] to [9],
 /// Comparison4 [1]), never `(a < b) <= c`.

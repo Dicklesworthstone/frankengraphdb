@@ -110,6 +110,7 @@ fn prepare_root(
             | Op::Or
             | Op::Xor
             | Op::Concat
+            | Op::Power
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains => 2,
@@ -276,7 +277,7 @@ fn prepare_root(
             Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
                 Kind::Text
             }
-            Op::Numeric(_) => Kind::Float,
+            Op::Numeric(_) | Op::Power => Kind::Float,
             _ => Kind::Integer,
         };
         let numeric_arithmetic = !integer_root
@@ -299,7 +300,7 @@ fn prepare_root(
                     | CanonicalScalar::Timestamp(_)
                     | CanonicalScalar::Duration(_)
             ),
-            Op::Numeric(_) => true,
+            Op::Numeric(_) | Op::Power => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
             Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
@@ -448,6 +449,7 @@ fn prepare_root(
                     Op::Or => Some(Instruction::Or),
                     Op::Xor => Some(Instruction::Xor),
                     Op::Concat => Some(Instruction::Concat),
+                    Op::Power => Some(Instruction::Power),
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
                     Op::Contains => Some(Instruction::Contains),
@@ -514,6 +516,7 @@ fn prepare_root(
                     | Op::Numeric(_)
                     | Op::Matches(_)
                     | Op::Concat
+                    | Op::Power
                     | Op::StartsWith
                     | Op::EndsWith
                     | Op::Contains => unreachable!("operator emitted above"),

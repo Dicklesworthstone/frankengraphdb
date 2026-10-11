@@ -1036,6 +1036,9 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
         self.integer_unary(columns, depth, program)?;
+        if self.is_punct(b'^') {
+            self.power_tail(columns, depth, program)?;
+        }
         loop {
             let at = self.current.at;
             let op = if self.take(b'*')? {
@@ -1048,7 +1051,30 @@ impl<'a> Parser<'a> {
                 break;
             };
             self.integer_unary(columns, depth, program)?;
+            if self.is_punct(b'^') {
+                self.power_tail(columns, depth, program)?;
+            }
             emit(program, ParsedOp::Binary(op), at)?;
+        }
+        Ok(())
+    }
+
+    /// openCypher `^` after a unary operand, left-associative and binding
+    /// tighter than `*`, `/` and `%`, looser than a sign: `-3 ^ 2` is
+    /// `(-3) ^ 2`, `4 ^ 3 ^ 2` is `(4 ^ 3) ^ 2` (TCK Precedence2). Out of line,
+    /// and entered only at a `^`, so the per-parenthesis frames are unchanged.
+    #[inline(never)]
+    fn power_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
+        while self.is_punct(b'^') {
+            let at = self.current.at;
+            self.advance()?;
+            self.integer_unary(columns, depth, program)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::Power), at)?;
         }
         Ok(())
     }

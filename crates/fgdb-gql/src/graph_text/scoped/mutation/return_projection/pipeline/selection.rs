@@ -500,7 +500,7 @@ impl<'a> Parser<'a> {
         }
         Ok(match lexer.next()?.kind {
             TokenKind::Punct(
-                b'+' | b'-' | b'*' | b'/' | b'%' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
             ) => true,
             TokenKind::Word(word) => ["IS", "IN", "BETWEEN", "NOT", "STARTS", "ENDS", "CONTAINS"]
                 .iter()

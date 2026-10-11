@@ -414,7 +414,7 @@ impl<'a> Parser<'a> {
                         return Ok(true);
                     }
                 }
-                TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
+                TokenKind::Punct(b'+' | b'*' | b'/' | b'%' | b'^') => arithmetic = true,
                 TokenKind::Parameter(_)
                     if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
                 {
