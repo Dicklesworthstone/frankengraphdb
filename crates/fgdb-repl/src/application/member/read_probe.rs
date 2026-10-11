@@ -4,6 +4,8 @@
 //! snapshot or moves an application cursor. The host must still use try_read
 //! to wait for application/audit visibility and pin the verified visible cut.
 
+mod batch;
+
 use core::convert::Infallible;
 
 use fgdb_order::{ReadIndexAck, ReadIndexError, ReadIndexProbe};
