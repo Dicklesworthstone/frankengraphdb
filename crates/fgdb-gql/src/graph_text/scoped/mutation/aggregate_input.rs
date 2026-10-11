@@ -88,7 +88,11 @@ impl<'a> Parser<'a> {
             false
         } else if let TokenKind::Word(word) = self.current.kind {
             let next = self.lexer.clone().next()?;
+            // `r IS NULL` is a scalar predicate over the element, which the
+            // scalar compiler reads (element_null_operand).
             !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
+                && !matches!(next.kind,
+                    TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
                     || self.syntax.path.is_some_and(|path| path.text == word)
                     || self.syntax.visible_edge(word).is_some()
