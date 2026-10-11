@@ -5,6 +5,8 @@ use super::*;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{FnxWeightSpec, MissingWeightPolicy};
 
+/// A registered kernel and its inseparable input recipe. Existing executors
+/// borrow the kernel, and obtain options from this complete binding.
 pub(crate) struct BoundProcedure {
     spec: FnxCallSpec,
     options: FnxReadOptions,
@@ -78,46 +80,17 @@ pub(crate) fn bind_procedure<C>(
             }
         }
     }
-    let mut supplied = Vec::with_capacity(kernel_arguments.len());
-    for (index, value) in kernel_arguments.iter().enumerate() {
-        let argument = match value {
-            GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
-            GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
-            GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
-            GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
-            GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
-            _ => return Err(invalid(args_index.unwrap_or(index), "no Prism argument domain")),
-        };
-        supplied.push(argument);
-    }
-    let yields: Vec<(&str, &str)> = call
-        .outputs()
-        .iter()
-        .map(|name| (name.as_str(), name.as_str()))
-        .collect();
-    let spec = FnxCallSpec::from_arguments(call.namespace(), call.name(), &supplied, &yields)
-        .map_err(|mut error| {
+    let spec = bind_kernel(call, kernel_arguments).map_err(|error| match error {
+        GqlQueryError::Source(GqlError::Procedure(ProcedureError::Bind(mut error))) => {
             if let Some(index) = args_index
                 && matches!(error.site, FnxCallSite::Argument(_))
             {
                 error.site = FnxCallSite::Argument(index);
             }
             refuse(ProcedureError::Bind(error))
-        })?;
-    for &index in call.vertex_outputs() {
-        let vertex = spec
-            .outputs()
-            .get(index)
-            .is_some_and(|column| matches!(column.field, FnxOutput::Vertex | FnxOutput::Component));
-        if !vertex {
-            return Err(refuse(ProcedureError::Bind(FnxCallError {
-                site: FnxCallSite::Yield(index),
-                kind: FnxBindErrorKind::Expected(
-                    "a vertex output where the statement reads a vertex",
-                ),
-            })));
         }
-    }
+        other => other,
+    })?;
     let mut options = FnxReadOptions::whole_graph_for(&spec, None);
     let mut weight = None;
     let mut missing = MissingWeightPolicy::Reject;
@@ -180,14 +153,8 @@ pub(crate) fn procedure_options(
     as_of: CommitSeq,
     remaining: GqlQueryPolicy,
 ) -> FnxReadOptions {
-    let mut options = spec.options;
-    options.as_of = Some(as_of);
-    if let Some(records) = remaining.rows.max_snapshot_records() {
-        options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);
-    }
-    options.execution_limits.max_estimated_work = options
-        .execution_limits
-        .max_estimated_work
-        .min(usize::try_from(remaining.evaluator.max_work_units).unwrap_or(usize::MAX));
+    let mut options = kernel_options(&spec.spec, as_of, remaining);
+    options.selection = spec.options.selection;
+    options.projection = spec.options.projection;
     options
 }
