@@ -52,12 +52,23 @@ impl Parser<'_> {
                         })
                     })
             };
+            // A property of an element RETURN projects bare is a function of
+            // that element: rows equal on the element are equal on it, so its
+            // hidden sort cell cannot change which rows DISTINCT keeps
+            // (openCypher `RETURN DISTINCT a ORDER BY a.name`).
+            let dependent = property.is_some()
+                && function.is_none()
+                && self.syntax.columns.iter().any(|column| {
+                    column.property.is_none()
+                        && column.variable.text == name.text
+                        && matches!(column.path, None | Some(GraphPathFunction::Edge))
+                });
             let column = if let Some(column) = resolved {
                 column
-            } else if self.syntax.distinct {
-                // DISTINCT deduplicates whole evaluation rows; a hidden sort
-                // cell would change which occurrences survive. Refuse typed
-                // instead of silently picking survivors.
+            } else if self.syntax.distinct && !dependent {
+                // DISTINCT deduplicates whole evaluation rows; any other
+                // hidden sort cell would change which occurrences survive.
+                // Refuse typed instead of silently picking survivors.
                 return Err(error(
                     name.at,
                     GraphPatternTextErrorKind::Expected(

@@ -308,6 +308,70 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
 }
 
 #[test]
+fn distinct_elements_order_by_their_own_unprojected_property() {
+    // openCypher ReturnOrderBy2 [4], [5], [10]: a property of an element
+    // DISTINCT returns bare is equal on rows equal on the element, so its
+    // hidden sort cell cannot change which rows survive.
+    let input = [VId(3), VId(0), VId(1), VId(0), VId(2), VId(3)];
+    let scores = [
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(9),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(5),
+    ];
+    for (statement, expected) in [
+        (
+            "MATCH (x) RETURN DISTINCT x ORDER BY x.score DESC",
+            [VId(1), VId(3), VId(0), VId(2)],
+        ),
+        (
+            "MATCH (x) RETURN DISTINCT x AS owner ORDER BY x.score",
+            [VId(0), VId(3), VId(1), VId(2)],
+        ),
+    ] {
+        let rows = text(statement)
+            .plan()
+            .execute_with_properties_control(
+                input,
+                [],
+                |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
+                |vid, _| Ok(Some(&scores[vid.0 as usize])),
+                |_| Ok(()),
+            )
+            .unwrap();
+        let visible: Vec<Vec<VId>> = rows
+            .iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|value| value.as_vertex().unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            visible,
+            expected.map(|vid| vec![vid]).to_vec(),
+            "{statement}"
+        );
+    }
+    // Anything else would pick DISTINCT survivors by a hidden cell.
+    for statement in [
+        "MATCH (x) RETURN DISTINCT x.score AS rank ORDER BY x.payload",
+        "MATCH (x)-[:R]->(y) RETURN DISTINCT x ORDER BY y.score",
+    ] {
+        assert_eq!(
+            PreparedGraphText::prepare(statement, symbols)
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::Expected(
+                "projected ORDER BY expression or alias under DISTINCT"
+            ),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
 fn optional_nulls_and_parallel_rows_are_ranked_after_scope_completion() {
     let query = text(
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b.score AS rank ORDER BY rank DESC NULLS FIRST",
