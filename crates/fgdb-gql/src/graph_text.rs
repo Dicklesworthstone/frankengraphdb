@@ -642,6 +642,10 @@ struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
     reads: Vec<(&'a str, Name<'a>, usize)>,
+    /// Native metadata of an unchanged carried element or captured path.
+    /// Kept separate from property names so a property named `labels` or
+    /// `type` cannot alias a function read.
+    functions: Vec<(&'a str, GraphPathFunction, usize)>,
     grouped: Vec<(&'a str, &'a str, Name<'a>, usize)>,
 }
 

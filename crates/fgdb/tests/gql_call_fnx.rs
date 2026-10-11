@@ -1406,7 +1406,7 @@ fn distances(expected: &[(u128, f64)]) -> Vec<Vec<GraphValue>> {
 #[test]
 fn inline_projection_controls_weights_direction_and_parallel_edges_in_every_read_host() {
     run_transaction(async |commit, cx, txcx| {
-        let db = projected_database(commit).await;
+        let mut db = projected_database(commit).await;
         let view = db.read_session().unwrap();
         let txn = db.begin(txcx).unwrap();
         let params = GqlParameters::new();

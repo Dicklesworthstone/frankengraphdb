@@ -103,6 +103,76 @@ pub(super) fn property_map_source<'a>(
     Ok(None)
 }
 
+/// A complete native metadata call over one named graph binding. Map
+/// functions are deliberately excluded: their arguments may be ordinary
+/// map-valued rows, and must not be inferred to be vertices.
+pub(super) fn metadata_source<'a>(
+    word: &'a str,
+    at: usize,
+    lexer: &Lexer<'a>,
+) -> Result<Option<(Name<'a>, GraphPathFunction)>, GraphPatternTextError> {
+    let Ok(function) = Parser::path_function(Name { text: word, at }) else {
+        return Ok(None);
+    };
+    if !matches!(
+        function,
+        GraphPathFunction::Labels
+            | GraphPathFunction::Type
+            | GraphPathFunction::Length
+            | GraphPathFunction::Nodes
+            | GraphPathFunction::Edges
+    ) {
+        return Ok(None);
+    }
+    let mut lookahead = lexer.clone();
+    if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'(')) {
+        return Ok(None);
+    }
+    let argument = lookahead.next()?;
+    if let TokenKind::Word(text) = argument.kind
+        && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+    {
+        return Ok(Some((
+            Name {
+                text,
+                at: argument.at,
+            },
+            function,
+        )));
+    }
+    Ok(None)
+}
+
+/// Metadata reads may cross a row boundary only through an unchanged value
+/// of the required graph domain. Scalars, maps and computed projections do
+/// not acquire a graph binding merely because their alias has the same name.
+fn boundary_metadata_binding<'a>(
+    head: &GraphProjectionHead<'a>,
+    offset: usize,
+    alias: &str,
+    function: GraphPathFunction,
+) -> Option<Name<'a>> {
+    let (_, ReadValueTemplate::Column(column)) =
+        head.outputs.iter().find(|(name, _)| name.text == alias)?
+    else {
+        return None;
+    };
+    let input = head.inputs.get(column.checked_sub(offset)?)?;
+    if input.property.is_some() {
+        return None;
+    }
+    matches!(
+        (function, input.path),
+        (GraphPathFunction::Labels, None)
+            | (GraphPathFunction::Type, Some(GraphPathFunction::Edge))
+            | (
+                GraphPathFunction::Length | GraphPathFunction::Nodes | GraphPathFunction::Edges,
+                Some(GraphPathFunction::Value)
+            )
+    )
+    .then_some(input.variable)
+}
+
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
     GraphSetTextError {
         offset: at,
@@ -165,8 +235,9 @@ impl<'a> Parser<'a> {
     /// `WITH n.p AS x` makes. Only `alias.property` resolves it, never its
     /// private name. The hidden columns are projected away before a later
     /// stage or another MATCH part can see them, and `*` never does. A
-    /// property is a function of its element, so hidden columns never change
-    /// DISTINCT or multiplicity. Reads in later stages or through computed or
+    /// property or metadata value is a function of its graph identity, so
+    /// hidden columns never change DISTINCT or multiplicity. Reads in later
+    /// stages or through computed or
     /// carried values stay refused as before; a page after the RETURN belongs
     /// to the set parser, which addresses the RETURN's own columns. `offset`
     /// is where this head's graph inputs start in its column space.
@@ -187,6 +258,7 @@ impl<'a> Parser<'a> {
         }
         let visible = head.outputs.len();
         let mut reads = Vec::new();
+        let mut functions = Vec::new();
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
@@ -209,6 +281,42 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 TokenKind::Word(word) if !after_dot => {
+                    if let Some((source, function)) = metadata_source(word, token.at, &lexer)?
+                        && let Some(variable) =
+                            boundary_metadata_binding(head, offset, source.text, function)
+                        && !functions.iter().any(|&(alias, known, _)| {
+                            alias == source.text && known == function
+                        })
+                    {
+                        let name = BOUNDARY_READ_NAMES
+                            .iter()
+                            .copied()
+                            .find(|name| {
+                                head.outputs.iter().all(|(output, _)| output.text != *name)
+                            })
+                            .ok_or_else(|| {
+                                expected(
+                                    source.at,
+                                    "at most 16 carried-element reads after a WITH",
+                                )
+                            })?;
+                        let input = self.projection_slot(
+                            &mut head.inputs,
+                            Projection {
+                                variable,
+                                property: None,
+                                path: Some(function),
+                            },
+                        )?;
+                        head.outputs.push((
+                            Name {
+                                text: name,
+                                at: token.at,
+                            },
+                            ReadValueTemplate::Column(offset + input),
+                        ));
+                        functions.push((source.text, function, head.outputs.len() - 1));
+                    }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
                         && let Some(variable) = boundary_binding(head, offset, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
@@ -281,11 +389,12 @@ impl<'a> Parser<'a> {
             }
             window = [window[1], window[2], Some(token.kind)];
         }
-        if !reads.is_empty() {
+        if !reads.is_empty() || !functions.is_empty() {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: head.outputs.len(),
                 reads,
+                functions,
                 grouped: Vec::new(),
             });
         }
@@ -294,7 +403,12 @@ impl<'a> Parser<'a> {
 
     /// The output name of an unaliased hidden read in a RETURN over a row of
     /// `width`: `n.p` is named `p`, exactly as a graph RETURN names it.
-    pub(super) fn boundary_key(&self, width: usize, column: usize) -> Option<Name<'a>> {
+    pub(super) fn boundary_key(
+        &self,
+        width: usize,
+        column: usize,
+        expression: Name<'a>,
+    ) -> Option<Name<'a>> {
         let boundary = self.boundary_reads.as_ref()?;
         if boundary.width != width {
             return None;
@@ -304,11 +418,18 @@ impl<'a> Parser<'a> {
             .iter()
             .find(|&&(_, _, read)| read == column)
             .map(|&(_, key, _)| key)
+            .or_else(|| {
+                boundary
+                    .functions
+                    .iter()
+                    .any(|&(_, _, read)| read == column)
+                    .then_some(expression)
+            })
     }
 
-    /// Resolve `alias.property` at the current token to its hidden boundary
-    /// column when `width` is the boundary row, consuming all three tokens;
-    /// `None` consumes nothing.
+    /// Resolve a carried property or native metadata function to its hidden
+    /// source column when `width` is the boundary row. The complete expression
+    /// is consumed on success; `None` consumes nothing.
     pub(in crate::graph_text) fn boundary_read(
         &mut self,
         width: usize,
@@ -318,6 +439,22 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         if boundary.width != width {
+            return Ok(None);
+        }
+        if let Some((source, function)) = metadata_source(alias, self.current.at, &self.lexer)? {
+            if self.elements.contains(&source.text) {
+                return Ok(None);
+            }
+            if let Some(&(_, _, column)) = boundary
+                .functions
+                .iter()
+                .find(|&&(read, known, _)| read == source.text && known == function)
+            {
+                for _ in 0..4 {
+                    self.advance()?;
+                }
+                return Ok(Some(column));
+            }
             return Ok(None);
         }
         let mut lookahead = self.lexer.clone();
@@ -555,7 +692,7 @@ impl<'a> Parser<'a> {
                     (name, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
                     let name = self
-                        .boundary_key(schema.len(), *column)
+                        .boundary_key(schema.len(), *column, self.source_name(at, end))
                         .unwrap_or(schema[*column].0);
                     (name, returning.then(|| self.source_name(at, end)))
                 } else {
@@ -733,12 +870,15 @@ impl<'a> Parser<'a> {
     }
 
     /// `CALL ... YIELD n, score RETURN n.name, score` (fgdb-luq0b): the CALL
-    /// outputs the first scope after the leading stages reads as `n.p`, in
+    /// outputs the first scope after the leading stages reads as `n.p` or
+    /// `labels(n)`, in
     /// first-read order. That scope is its WHERE, pages and RETURN, or the
     /// items of a WITH that directly follows (the graph-to-row boundary, as
     /// after MATCH). Each is read through the identity `MATCH (n)` the
     /// statement could have written; the host refuses a non-vertex output.
     /// UNWIND columns are never implied: no host types their values.
+    /// Map functions/projections stay row operations unless another graph
+    /// demand establishes the binding; a procedure may legitimately yield a map.
     pub(in crate::graph_text) fn implied_call_vertices(
         &self,
         schema: &[(Name<'a>, GraphSetColumnType)],
@@ -771,14 +911,21 @@ impl<'a> Parser<'a> {
                     if depth == 0 && ends_boundary_scope(word, previous) {
                         break;
                     }
-                    if yielded.iter().any(|(name, _)| name.text == word)
-                        && !implied.iter().any(|seen| seen.text == word)
-                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
-                    {
-                        implied.push(Name {
+                    let source = if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
+                        Some(Name {
                             text: word,
                             at: token.at,
-                        });
+                        })
+                    } else {
+                        metadata_source(word, token.at, &lexer)?
+                            .filter(|(_, function)| *function == GraphPathFunction::Labels)
+                            .map(|(source, _)| source)
+                    };
+                    if let Some(source) = source
+                        && yielded.iter().any(|(name, _)| name.text == source.text)
+                        && !implied.iter().any(|seen| seen.text == source.text)
+                    {
+                        implied.push(source);
                     }
                 }
                 _ => {}

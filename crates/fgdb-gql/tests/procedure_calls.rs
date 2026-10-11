@@ -6,12 +6,12 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
-    PreparedGraphSetText, PreparedProcedureCall,
-    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
+    GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    PreparedGraphSet, PreparedGraphSetText, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight,
+    ProcedureParallelEdges, ProcedureSelfLoops, ReverseSymbolCatalog,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::RefCell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -752,4 +752,368 @@ fn a_property_read_of_a_yielded_output_implies_its_identity_match() {
     }
     let unwound = PreparedGraphSetText::prepare("UNWIND [1, 2] AS x RETURN x.p", symbols).unwrap();
     assert_eq!(unwound.columns(), ["x.p"]);
+}
+
+
+#[derive(Clone, Copy)]
+struct MetadataCatalog;
+impl GraphSymbolResolver for MetadataCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(1))),
+            _ => None,
+        }
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_property(P, "p");
+        catalog.insert_relation(RelationId(1), "R");
+        catalog.insert_label(LabelId(1), "Person");
+        Some(catalog)
+    }
+}
+
+struct MetadataGraph {
+    properties: [CanonicalScalar; 5],
+    maps: Vec<GraphValue>,
+    labels: Vec<GraphValue>,
+    edge_type: CanonicalScalar,
+    visible: Vec<VId>,
+}
+
+impl MetadataGraph {
+    fn new(visible: Vec<VId>) -> Self {
+        let properties = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+        let maps = properties
+            .iter()
+            .cloned()
+            .map(|value| GraphValue::map(vec![("p".into(), GraphValue::Scalar(value))]).unwrap())
+            .collect();
+        Self {
+            properties,
+            maps,
+            labels: vec![GraphValue::Scalar(CanonicalScalar::Text("Person".into()))],
+            edge_type: CanonicalScalar::Text("R".into()),
+            visible,
+        }
+    }
+
+    fn source(
+        &self,
+        pattern: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Rows {
+        let edges = [
+            (EId(11), VId(1), RelationId(1), VId(2)),
+            (EId(12), VId(2), RelationId(1), VId(3)),
+        ];
+        pattern.plan().execute_governed_with_element_maps(
+            self.visible.len() as u64 + edges.len() as u64,
+            self.visible.iter().copied(),
+            edges.into_iter().filter(|(_, source, _, destination)| {
+                self.visible.contains(source) && self.visible.contains(destination)
+            }),
+            |vid, predicates| {
+                Ok::<_, &'static str>(predicates.iter().all(|predicate| {
+                    predicate.matches(
+                        &[LabelId(1)],
+                        &[(P, self.properties[vid.0 as usize].clone())],
+                    )
+                }))
+            },
+            |vid, _| Ok(Some(&self.properties[vid.0 as usize])),
+            |_, _| Ok(None),
+            |_| Ok(Some(self.labels.as_slice())),
+            |_| Ok(Some(&self.edge_type)),
+            |vid| Ok(Some(&self.maps[vid.0 as usize])),
+            |_| Ok(None),
+            policy,
+            || Ok::<_, usize>(()),
+        )
+    }
+
+    fn query(
+        &self,
+        text: &str,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, Fault> {
+        PreparedGraphSetText::prepare(text, MetadataCatalog)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .execute_governed_with_procedures(
+                policy,
+                |pattern, remaining| self.source(pattern, remaining),
+                |call, arguments, _| host(call, arguments),
+                || Ok(()),
+            )
+    }
+}
+
+#[test]
+fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
+    let graph = MetadataGraph::new((0..5).map(VId).collect());
+    let prefix = "CALL t.scores() YIELD vertex AS n, score ";
+    let suffix = "RETURN labels(n) AS tags, properties(n) AS props, keys(n) AS keys, \
+        n{.*,score:score} AS entry ORDER BY score";
+    let implied = format!("{prefix}{suffix}");
+    let written = format!("{prefix}MATCH (n) {suffix}");
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, MetadataCatalog)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    assert_eq!(template(&implied), template(&written));
+    let result = graph.query(&implied, wide()).unwrap().value;
+    assert_eq!(result, graph.query(&written, wide()).unwrap().value);
+    assert_eq!(result.len(), 4);
+    for (row, (vertex, score)) in result.iter().zip([(1, 1), (3, 2), (2, 3), (4, 5)]) {
+        assert_eq!(row.values()[0].as_list().unwrap(), graph.labels);
+        assert_eq!(row.values()[1], graph.maps[vertex]);
+        assert_eq!(
+            row.values()[2].as_list().unwrap(),
+            [GraphValue::Scalar(CanonicalScalar::Text("p".into()))],
+        );
+        assert_eq!(
+            row.values()[3],
+            GraphValue::map(vec![
+                ("p".into(), int((vertex as i64 + 1) * 10)),
+                ("score".into(), int(score)),
+            ])
+            .unwrap(),
+        );
+    }
+    for projection in ["n,score", "*"] {
+        let carried = format!("{prefix}WITH {projection} {suffix}");
+        assert_eq!(result, graph.query(&carried, wide()).unwrap().value);
+    }
+    let projected = format!(
+        "{prefix}WITH labels(n) AS tags,properties(n) AS props,score \
+         RETURN tags,props ORDER BY score"
+    );
+    assert_eq!(
+        column(&result, 1),
+        column(&graph.query(&projected, wide()).unwrap().value, 1),
+    );
+    let renamed = PreparedGraphSetText::prepare(
+        "CALL t.scores() YIELD vertex AS n WHERE size(labels(n)) > 0 RETURN LABELS(n)",
+        MetadataCatalog,
+    )
+    .unwrap();
+    assert_eq!(renamed.columns(), ["LABELS(n)"]);
+    assert_eq!(
+        graph
+            .query(
+                "CALL t.scores() YIELD vertex AS n WHERE size(labels(n)) > 0 \
+                 RETURN LABELS(n)",
+                wide(),
+            )
+            .unwrap()
+            .value
+            .len(),
+        4,
+    );
+}
+
+#[test]
+fn procedure_metadata_preserves_source_masks_budgets_and_scalar_refusals() {
+    let statement =
+        "CALL t.scores() YIELD vertex AS n,score RETURN labels(n),properties(n),score";
+    let graph = MetadataGraph::new((0..5).map(VId).collect());
+    let visible = MetadataGraph::new(vec![VId(0), VId(1), VId(3)]);
+    let full = graph.query(statement, wide()).unwrap();
+    let masked = visible.query(statement, wide()).unwrap().value;
+    assert_eq!(masked.len(), 2);
+    assert_eq!(column(&masked, 2), [int(1), int(2)]);
+    assert_ne!(masked, full.value);
+    assert_eq!(
+        visible
+            .query(
+                "CALL t.scores() YIELD vertex AS n,score MATCH (n) \
+                 RETURN labels(n),properties(n),score",
+                wide(),
+            )
+            .unwrap()
+            .value,
+        masked,
+    );
+    assert!(
+        graph
+            .query(
+                statement,
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, 0, u64::MAX),
+            )
+            .is_err(),
+    );
+
+    let query = prepare(
+        "CALL t.scores() YIELD score RETURN labels(score) LIMIT 0",
+        &GqlParameters::new(),
+    );
+    let result = query.execute_governed_with_procedures(
+        wide(),
+        |_, _| panic!("an invalid graph output must fail at procedure admission"),
+        |call, _, _| {
+            assert_eq!(call.vertex_outputs(), [0]);
+            Err(GqlQueryError::Source("score is not a vertex"))
+        },
+        || Ok::<_, usize>(()),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn generic_map_outputs_remain_values_and_metadata_scope_does_not_escape() {
+    for expression in ["properties(m)", "keys(m)", "m{.*}"] {
+        let text = format!("CALL t.echo({{p:7}}) YIELD m RETURN {expression} AS value");
+        let query = prepare(&text, &GqlParameters::new());
+        let result = query
+            .execute_governed_with_procedures(
+                wide(),
+                no_graph,
+                |call, arguments, _| {
+                    assert!(call.vertex_outputs().is_empty());
+                    host(call, arguments)
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(result.value.len(), 1, "{text}");
+    }
+    for statement in [
+        "CALL t.scores() YIELD vertex AS n WITH n WITH n RETURN labels(n)",
+        "MATCH (n) WITH n WITH n RETURN labels(n)",
+        "MATCH (n) WITH n.p AS n RETURN labels(n)",
+        "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, MetadataCatalog).is_err(),
+            "{statement}",
+        );
+    }
+}
+
+#[test]
+fn carried_vertex_edge_and_path_metadata_matches_direct_native_projection() {
+    let graph = MetadataGraph::new((0..5).map(VId).collect());
+    for (direct, carried) in [
+        (
+            "MATCH (n) RETURN labels(n) AS tags",
+            "MATCH (n) WITH n AS owner RETURN labels(owner) AS tags",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN type(r) AS kind",
+            "MATCH (a)-[r:R]->(b) WITH r AS relationship RETURN type(relationship) AS kind",
+        ),
+        (
+            "MATCH p = (a)-[:R*1..2]->(b) \
+             RETURN length(p) AS hops,nodes(p) AS vertices,relationships(p) AS edges",
+            "MATCH p = (a)-[:R*1..2]->(b) WITH p AS path \
+             RETURN length(path) AS hops,nodes(path) AS vertices,relationships(path) AS edges",
+        ),
+    ] {
+        let expected = graph.query(direct, wide()).unwrap().value;
+        assert!(!expected.is_empty(), "{direct}");
+        assert_eq!(
+            graph.query(carried, wide()).unwrap().value,
+            expected,
+            "{carried}",
+        );
+    }
+}
+
+
+#[test]
+fn fnx_projection_schema_names_bind_once_before_procedure_execution() {
+    let text = "CALL fnx.pagerank(label=>'Scoped',relation=>'LINK',weight=>'weight') \
+                YIELD score RETURN score";
+    let mut resolved = Vec::new();
+    let prepared = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+        resolved.push((kind, name.to_owned()));
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Scoped") => Some(GraphSymbol::Label(LabelId(7))),
+            (GraphSymbolKind::Relation, "LINK") => Some(GraphSymbol::Relation(RelationId(11))),
+            (GraphSymbolKind::Property, "weight") => {
+                Some(GraphSymbol::Property(PropertyKeyId(13)))
+            }
+            _ => None,
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        resolved,
+        [
+            (GraphSymbolKind::Label, "Scoped".to_owned()),
+            (GraphSymbolKind::Relation, "LINK".to_owned()),
+            (GraphSymbolKind::Property, "weight".to_owned()),
+        ],
+    );
+    for _ in 0..2 {
+        let result = prepared
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .execute_governed_with_procedures(
+                wide(),
+                no_graph,
+                |call, arguments, _| {
+                    assert_eq!(call.namespace(), "fnx");
+                    assert_eq!(call.name(), "pagerank");
+                    assert_eq!(call.argument_names(), ["label", "relation", "weight"]);
+                    assert_eq!(arguments, [int(7), int(11), int(13)]);
+                    rows(vec![vec![int(3)]])
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(column(&result.value, 0), [int(3)]);
+    }
+
+    // An ordinary procedure's named values are not catalog selectors.
+    let generic = PreparedGraphSetText::prepare(
+        "CALL t.echo(label=>'Scoped',relation=>'LINK',weight=>'weight') \
+         YIELD a,b,c RETURN a,b,c",
+        |_, _| panic!("generic named arguments must not touch the catalog"),
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let result = call(&generic).unwrap();
+    assert_eq!(
+        result[0].values(),
+        ["Scoped", "LINK", "weight"]
+            .map(|value| GraphValue::Scalar(CanonicalScalar::Text(value.into()))),
+    );
+}
+
+#[test]
+fn invalid_fnx_projection_schema_selectors_refuse_during_preparation() {
+    for argument in ["label", "relation", "weight"] {
+        for value in ["7", "$selector", "'Sco' + 'ped'", "NULL", "{name:'Scoped'}"] {
+            let text = format!("CALL fnx.pagerank({argument}=>{value}) YIELD score RETURN score");
+            let mut lookups = 0;
+            assert!(
+                PreparedGraphSetText::prepare(&text, |_, _| {
+                    lookups += 1;
+                    None
+                })
+                .is_err(),
+                "{text}",
+            );
+            assert_eq!(lookups, 0, "{text}");
+        }
+        let text = format!("CALL fnx.pagerank({argument}=>'missing') YIELD score RETURN score");
+        assert!(PreparedGraphSetText::prepare(&text, |_, _| None).is_err());
+        assert!(
+            PreparedGraphSetText::prepare(&text, |kind, _| {
+                Some(match kind {
+                    GraphSymbolKind::Label => GraphSymbol::Relation(RelationId(1)),
+                    _ => GraphSymbol::Label(LabelId(1)),
+                })
+            })
+            .is_err(),
+            "{text}",
+        );
+    }
 }

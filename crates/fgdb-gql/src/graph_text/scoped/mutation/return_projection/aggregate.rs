@@ -284,7 +284,7 @@ impl PreparedGraphPipelineAggregateText {
                 } else {
                     // A carried `n.p` key is named `p`, never its private name.
                     let name = parser
-                        .boundary_key(schema.len(), column)
+                        .boundary_key(schema.len(), column, parser.source_name(at, end))
                         .unwrap_or(schema[column].0);
                     (name, Some(parser.source_name(at, end)))
                 };
