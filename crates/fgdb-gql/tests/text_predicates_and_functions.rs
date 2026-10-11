@@ -732,6 +732,46 @@ fn composite_literals_compare_three_valued() {
     );
 }
 
+/// A comparison chain compares neighbours, as openCypher defines it: `a < b
+/// <= c` is `a < b AND b <= c`, three-valued (TCK Comparison3 [1] to [9],
+/// Comparison4 [1]), never `(a < b) <= c`.
+#[test]
+fn comparison_chains_compare_each_neighbouring_pair() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    for (expression, expected) in [
+        ("1 < 2 < 3", truth(true)),
+        ("1 < 3 < 2", truth(false)),
+        ("3 > 2 >= 2", truth(true)),
+        ("1 < 2 > 1", truth(true)),
+        ("1 = 1 = 1", truth(true)),
+        ("1 < 2 < 3 < 4 <= 4", truth(true)),
+        ("1 < 2 < 3 < 4 < 4", truth(false)),
+        // FALSE AND UNKNOWN is FALSE; TRUE AND UNKNOWN is UNKNOWN.
+        ("2 < 1 < null", truth(false)),
+        ("1 < 2 < null", CanonicalScalar::Null),
+        ("'a' < n.text < 'c'", truth(true)),
+        ("'a' < n.text <= 'b'", truth(true)),
+        ("'c' < n.text", truth(false)),
+        // The chain is one operand of the Boolean operators around it.
+        ("NOT 1 < 2 < 3", truth(false)),
+        ("1 < 2 < 3 AND 1 = 2", truth(false)),
+    ] {
+        assert_eq!(scalar(expression, &text("b")), expected, "{expression}");
+    }
+    // The TCK's WHERE forms, over a vertex whose property is 2, 5, then 1.
+    // A chain that starts at a property takes the scalar compiler too.
+    for text in [
+        "MATCH (n) WHERE 1 < n.text < 3 RETURN n.text AS v",
+        "MATCH (n) WHERE n.text >= n.text > 1 AND n.text <> 5 RETURN n.text AS v",
+    ] {
+        let query = prepare(text);
+        for (input, rows) in [(2, 1), (5, 0), (1, 0)] {
+            let result = execute(&query, &CanonicalScalar::Int(input), policy()).unwrap();
+            assert_eq!(result.value.len(), rows, "{text}: {input}");
+        }
+    }
+}
+
 /// openCypher dynamic map access `map[key]` (TCK Map2): a text key reads its
 /// entry case-sensitively, an absent key or a NULL key is NULL, and a key that
 /// is not text is a typed failure at execution.

@@ -800,9 +800,11 @@ impl<'a> Parser<'a> {
     }
 
     /// openCypher's comparison level: `=`, `<>`, `<`, `>`, `<=`, `>=` between
-    /// predicate-level operands, folded left. The string, list and null
-    /// predicates bind tighter, so `a = b IS NULL` is `a = (b IS NULL)` and
-    /// `a = b IN [..]` is `a = (b IN [..])` (TCK Precedence1 [8], [11]).
+    /// predicate-level operands. A chain compares neighbours: `a < b <= c` is
+    /// `a < b AND b <= c` (TCK Comparison3, Comparison4 [1]). The string, list
+    /// and null predicates bind tighter, so `a = b IS NULL` is `a = (b IS
+    /// NULL)` and `a = b IN [..]` is `a = (b IN [..])` (TCK Precedence1 [8],
+    /// [11]).
     fn scalar_comparison(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
@@ -810,19 +812,59 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
         self.scalar_predicate(columns, depth, program)?;
+        // Where the previous comparison's right operand starts, once one has
+        // been read: a chained comparison reads it again as its left operand.
+        let mut previous = None;
         while matches!(
             self.current.kind,
             TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
         ) {
             let at = self.current.at;
+            let chained = previous.is_some();
+            if let Some(start) = previous {
+                self.chained_operand(columns, depth, program, start)?;
+            }
             let comparison = self.comparison()?;
+            previous = Some(self.current.at);
             self.scalar_predicate(columns, depth, program)?;
             emit(
                 program,
                 ParsedOp::Bound(GraphIntegerOp::Compare(comparison)),
                 at,
             )?;
+            if chained {
+                emit(program, ParsedOp::Bound(GraphIntegerOp::And), at)?;
+            }
         }
+        Ok(())
+    }
+
+    /// The left operand of a chained comparison: the previous comparison's
+    /// right operand, read again from `start`, its first token. The text is
+    /// the same, so the reading ends where it ended before, at this
+    /// comparison's operator, and the token count is left as it was. Out of
+    /// line: scalar_comparison repeats once per nested parenthesis.
+    #[inline(never)]
+    fn chained_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        start: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let (resume, tokens) = (self.current.at, self.lexer.tokens);
+        self.lexer = crate::graph_text::Lexer {
+            text: self.lexer.text,
+            at: start,
+            tokens,
+        };
+        self.current = self.lexer.next()?;
+        self.scalar_predicate(columns, depth, program)?;
+        debug_assert_eq!(
+            self.current.at, resume,
+            "a reread operand ends where it did"
+        );
+        self.lexer.tokens = tokens;
         Ok(())
     }
 

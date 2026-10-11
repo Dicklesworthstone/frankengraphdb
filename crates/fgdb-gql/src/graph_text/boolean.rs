@@ -396,6 +396,10 @@ impl<'a> Parser<'a> {
         let mut operand_end = false;
         let mut after_dot = false;
         let property_compound = self.starts_compound_property_predicate()?;
+        // A comparison chain (`a.p < b.q = c.r`) needs the scalar compiler;
+        // `<=`, `<>`, `>=` and `!=` each count once.
+        let mut comparisons = 0_usize;
+        let mut comparing = false;
         loop {
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b'{' | b'}') => break,
@@ -404,6 +408,12 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b')') => depth -= 1,
                 // `||` concatenation and `=~` matching need the scalar compiler.
                 TokenKind::Punct(b'|' | b'~') => return Ok(true),
+                TokenKind::Punct(b'<' | b'>' | b'=' | b'!') if depth == 0 && !comparing => {
+                    comparisons += 1;
+                    if comparisons > 1 {
+                        return Ok(true);
+                    }
+                }
                 TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
                 TokenKind::Parameter(_)
                     if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
@@ -484,6 +494,7 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
+            comparing = matches!(token.kind, TokenKind::Punct(b'<' | b'>' | b'=' | b'!'));
             token = lexer.next()?;
         }
         Ok(arithmetic)
