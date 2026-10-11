@@ -1809,24 +1809,29 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         // attributed to the parent directory whose sync makes it durable.
         // Recording only after our create succeeds avoids claiming a racing
         // creator's namespace operation as ours.
-        let mut components: Vec<&Path> = path
+        // Stop at the first existing directory. An absolute path inside a
+        // confined VFS need not grant access to its host ancestors (for
+        // example, MemVfs's private shadow root is below the host /tmp).
+        let mut components = Vec::new();
+        for component in path
             .ancestors()
             .filter(|candidate| !candidate.as_os_str().is_empty())
-            .collect();
-        components.reverse();
-        for component in components {
+        {
             match self.backing.metadata(component).await {
-                Ok(metadata) if metadata.file_type().is_dir() => continue,
+                Ok(metadata) if metadata.file_type().is_dir() => break,
                 Ok(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         format!("{} exists and is not a directory", component.display()),
                     ));
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    components.push(component);
+                }
                 Err(error) => return Err(error),
             }
-
+        }
+        for component in components.into_iter().rev() {
             let parent = self.namespace_parent(component).await?;
             match self.backing.create_dir(component).await {
                 Ok(()) => self.record_namespace(

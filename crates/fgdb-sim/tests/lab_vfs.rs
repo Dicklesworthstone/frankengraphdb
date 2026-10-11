@@ -720,6 +720,60 @@ fn directory_aliases_settle_the_same_debt_but_each_ancestor_still_needs_a_sync()
 }
 
 #[test]
+fn absolute_directory_creation_stays_inside_the_backing_namespace_and_requires_ancestor_sync() {
+    for sync_root in [false, true] {
+        run_and_expect_lab_green(0xfa07, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            let root = backing.canonicalize(Path::new(".")).await.unwrap();
+            let parent = root.join("absolute");
+            let nested = parent.join("nested");
+            let vfs = FaultVfs::new(
+                backing,
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            vfs.create_dir_all(&nested)
+                .await
+                .expect("absolute descendants are inside the backing namespace");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            vfs.create_dir_all(&nested)
+                .await
+                .expect("an existing directory is an idempotent success");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            sync_dir(&vfs, &parent)
+                .await
+                .expect("fence the nested name");
+            assert_eq!(vfs.pending_dirent_ops(), 1);
+            if sync_root {
+                sync_dir(&vfs, &root)
+                    .await
+                    .expect("fence the ancestor name");
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with every loss armed");
+            if sync_root {
+                assert!(vfs.metadata(&nested).await.unwrap().is_dir());
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.metadata(&nested)
+                        .await
+                        .expect_err("the unfenced ancestor and its subtree are lost")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, parent);
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+            }
+        });
+    }
+}
+
+#[test]
 fn created_and_removed_files_accept_directory_alias_barriers() {
     run_and_expect_lab_green(0xfa05, |_| async move {
         let vfs = FaultVfs::new(
