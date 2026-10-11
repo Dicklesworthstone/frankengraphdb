@@ -295,6 +295,168 @@ fn add_months(point: i128, months: i64) -> Result<i128, GraphIntegerErrorKind> {
     Ok(i128::from(date.epoch_day()) * day + time)
 }
 
+/// Whether `value` is a temporal value, a duration among them.
+fn is_temporal(value: &CanonicalScalar) -> bool {
+    matches!(
+        value,
+        CanonicalScalar::Date(_)
+            | CanonicalScalar::LocalTime(_)
+            | CanonicalScalar::Time(_)
+            | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Timestamp(_)
+            | CanonicalScalar::Duration(_)
+    )
+}
+
+/// openCypher arithmetic on temporal values (TCK Temporal8): a temporal
+/// value plus or minus a duration, a duration plus a temporal value,
+/// durations added and subtracted component by component, and a duration
+/// times or divided by an Int or Float. `None` when neither operand is
+/// temporal, so ordinary arithmetic runs; any other combination with a
+/// temporal operand is IncompatibleOperands, and a NULL operand is NULL.
+pub(crate) fn arithmetic(
+    op: crate::GraphIntegerBinary,
+    left: &CanonicalScalar,
+    right: &CanonicalScalar,
+) -> Result<Option<CanonicalScalar>, GraphIntegerErrorKind> {
+    use crate::GraphIntegerBinary::{Add, Divide, Multiply, Subtract};
+    use CanonicalScalar::{Duration, Null};
+    if !is_temporal(left) && !is_temporal(right) {
+        return Ok(None);
+    }
+    if matches!(left, Null) || matches!(right, Null) {
+        return Ok(Some(Null));
+    }
+    let overflow = |_| GraphIntegerErrorKind::Overflow;
+    Ok(Some(match (op, left, right) {
+        (Add, Duration(a), Duration(b)) => Duration(a.checked_add(*b).map_err(overflow)?),
+        (Subtract, Duration(a), Duration(b)) => Duration(
+            a.checked_add(b.checked_neg().map_err(overflow)?)
+                .map_err(overflow)?,
+        ),
+        (Add, value, Duration(duration)) | (Add, Duration(duration), value) => {
+            plus(value, *duration)?
+        }
+        (Subtract, value, Duration(duration)) => {
+            plus(value, duration.checked_neg().map_err(overflow)?)?
+        }
+        (Multiply, Duration(duration), factor) | (Multiply, factor, Duration(duration)) => {
+            let (numerator, denominator) = ratio(factor)?;
+            Duration(
+                duration
+                    .checked_scale(numerator, denominator)
+                    .map_err(overflow)?,
+            )
+        }
+        (Divide, Duration(duration), divisor) => {
+            // Dividing by p / q multiplies by q / p, the sign moved up.
+            let (numerator, denominator) = ratio(divisor)?;
+            if numerator == 0 {
+                return Err(GraphIntegerErrorKind::DivisionByZero);
+            }
+            let (numerator, denominator) = if numerator < 0 {
+                (-denominator, -numerator)
+            } else {
+                (denominator, numerator)
+            };
+            Duration(
+                duration
+                    .checked_scale(numerator, denominator)
+                    .map_err(overflow)?,
+            )
+        }
+        _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
+    }))
+}
+
+/// A number as an exact ratio with a positive denominator. A finite
+/// binary64 is a binary fraction, doubled until whole (each doubling is
+/// exact); one that needs more than 62 fraction bits, or is not finite,
+/// overflows rather than round.
+fn ratio(value: &CanonicalScalar) -> Result<(i128, i128), GraphIntegerErrorKind> {
+    match value {
+        CanonicalScalar::Int(value) => Ok((i128::from(*value), 1)),
+        CanonicalScalar::Float(value) => {
+            let mut scaled = value.get();
+            if !scaled.is_finite() {
+                return Err(GraphIntegerErrorKind::Overflow);
+            }
+            let mut denominator: i128 = 1;
+            while scaled.fract() != 0.0 {
+                if denominator >= 1 << 62 {
+                    return Err(GraphIntegerErrorKind::Overflow);
+                }
+                scaled *= 2.0;
+                denominator *= 2;
+            }
+            if scaled.abs() >= 2_f64.powi(100) {
+                return Err(GraphIntegerErrorKind::Overflow);
+            }
+            Ok((scaled as i128, denominator))
+        }
+        _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+    }
+}
+
+/// `value` moved by `duration`: calendar months first (the day clamped to
+/// the month), then days, then the time part. A date keeps only the whole
+/// days of the time part and a time of day only the time part, around the
+/// clock; a datetime keeps its offset. A timestamp in a named zone would
+/// need the zone database, so it refuses as incompatible.
+fn plus(
+    value: &CanonicalScalar,
+    duration: CanonicalDuration,
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    let day = i128::from(NANOS_PER_DAY);
+    let calendar = |start: i128, keep_time: bool| -> Result<i128, GraphIntegerErrorKind> {
+        let mut days = i128::from(duration.days());
+        if !keep_time {
+            // Truncated toward zero: a date minus 16 hours is the same date.
+            days += duration.nanos() / day;
+        }
+        let moved = add_months(start, duration.months())?
+            .checked_add(days.checked_mul(day).ok_or(Invalid)?)
+            .ok_or(Invalid)?;
+        if keep_time {
+            moved.checked_add(duration.nanos()).ok_or(Invalid)
+        } else {
+            Ok(moved)
+        }
+    };
+    let local = |point: i128| -> Result<CanonicalLocalDateTime, GraphIntegerErrorKind> {
+        let epoch_day = i64::try_from(point.div_euclid(day)).map_err(|_| Invalid)?;
+        let nanos = u64::try_from(point.rem_euclid(day)).map_err(|_| Invalid)?;
+        Ok(CanonicalLocalDateTime::new(
+            CanonicalDate::from_epoch_day(epoch_day).map_err(|_| Invalid)?,
+            CanonicalLocalTime::from_nanos_of_day(nanos).map_err(|_| Invalid)?,
+        ))
+    };
+    let clock = |time: CanonicalLocalTime| -> Result<CanonicalLocalTime, GraphIntegerErrorKind> {
+        let nanos = (i128::from(time.nanos_of_day()) + duration.nanos()).rem_euclid(day);
+        CanonicalLocalTime::from_nanos_of_day(u64::try_from(nanos).map_err(|_| Invalid)?)
+            .map_err(|_| Invalid)
+    };
+    Ok(match value {
+        CanonicalScalar::Date(date) => CanonicalScalar::Date(
+            local(calendar(point(*date, CanonicalLocalTime::MIDNIGHT), false)?)?.date(),
+        ),
+        CanonicalScalar::LocalTime(time) => CanonicalScalar::LocalTime(clock(*time)?),
+        CanonicalScalar::Time(time) => CanonicalScalar::Time(
+            CanonicalTime::new(clock(time.local())?, time.offset_seconds()).map_err(|_| Invalid)?,
+        ),
+        CanonicalScalar::LocalDateTime(value) => CanonicalScalar::LocalDateTime(local(calendar(
+            point(value.date(), value.time()),
+            true,
+        )?)?),
+        CanonicalScalar::Timestamp(value) if value.zone().is_none() => {
+            let wall = wall_clock(value)?;
+            let moved = local(calendar(point(wall.date(), wall.time()), true)?)?;
+            CanonicalScalar::Timestamp(at_offset(moved, value.utc_offset_seconds())?)
+        }
+        _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
+    })
+}
+
 /// The whole calendar months from `start` that do not pass `end`, toward it.
 fn whole_months(start: i128, end: i128) -> Result<i64, GraphIntegerErrorKind> {
     let day = i128::from(NANOS_PER_DAY);

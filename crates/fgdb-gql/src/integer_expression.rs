@@ -738,6 +738,18 @@ impl GraphIntegerExpression {
                             at += 1;
                             continue;
                         }
+                        // A temporal operand takes openCypher's temporal
+                        // arithmetic (TCK Temporal8) before the binary64 kernel.
+                        if let (ExpressionCell::Scalar(a), ExpressionCell::Scalar(b)) =
+                            (&*left, &right)
+                            && let Some(result) =
+                                crate::set_ops::temporal_arithmetic(*op, a.as_ref(), b.as_ref())
+                                    .map_err(failure)?
+                        {
+                            *left = result.into();
+                            at += 1;
+                            continue;
+                        }
                         if let Some(result) = numeric::binary(*op, left, &right).map_err(failure)? {
                             *left = result.into();
                             at += 1;

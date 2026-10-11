@@ -217,6 +217,15 @@ fn prepare_root(
                 CanonicalScalar::Float(_) => Kind::Float,
                 CanonicalScalar::Bool(_) => Kind::Boolean,
                 CanonicalScalar::Text(_) => Kind::Text,
+                // A temporal parameter is resolved per row like a property
+                // load: arithmetic and comparison check it when they run
+                // (fgdb-txbg9).
+                CanonicalScalar::Date(_)
+                | CanonicalScalar::LocalTime(_)
+                | CanonicalScalar::Time(_)
+                | CanonicalScalar::LocalDateTime(_)
+                | CanonicalScalar::Timestamp(_)
+                | CanonicalScalar::Duration(_) => Kind::Dynamic,
                 _ => return Err(wrong()),
             },
             Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
@@ -277,7 +286,18 @@ fn prepare_root(
         // load, but a Boolean/text fallback still refuses an arithmetic use.
         let may_float = match op {
             Op::ScalarColumn(_) | Op::Local(_) => true,
-            Op::Scalar(value) => matches!(value.value(), CanonicalScalar::Float(_)),
+            // A temporal literal or parameter takes the dynamic arithmetic
+            // path too, where temporal arithmetic runs (fgdb-txbg9).
+            Op::Scalar(value) => matches!(
+                value.value(),
+                CanonicalScalar::Float(_)
+                    | CanonicalScalar::Date(_)
+                    | CanonicalScalar::LocalTime(_)
+                    | CanonicalScalar::Time(_)
+                    | CanonicalScalar::LocalDateTime(_)
+                    | CanonicalScalar::Timestamp(_)
+                    | CanonicalScalar::Duration(_)
+            ),
             Op::Numeric(_) => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,

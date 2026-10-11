@@ -1850,6 +1850,148 @@ fn duration_between_follows_the_tck() {
     );
 }
 
+/// fgdb-txbg9: temporal arithmetic as TCK Temporal8 [1]-[7] states it. A
+/// value plus or minus a duration moves by months (the day clamped), then
+/// days, then the time part: a date keeps only whole days of the time part,
+/// a time of day only the time part, and an offset stays. Durations add and
+/// subtract component by component, and a duration times or divided by a
+/// number cascades what each whole count leaves down, truncated.
+#[test]
+fn temporal_arithmetic_follows_the_tck() {
+    let x = text("x");
+    let as_text = |expression: &str| scalar(&format!("toString({expression})"), &x);
+    let durations = [
+        "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})",
+        "duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})",
+        "duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, \
+         nanoseconds: 3})",
+    ];
+    let local_time = [
+        ("04:44:24.000000003", "20:18:03.999999999"),
+        ("04:20:24.000000001", "20:42:04.000000001"),
+        ("22:29:27.500000004", "02:33:00.499999998"),
+    ];
+    let local_datetime = [
+        (
+            "1997-03-26T04:44:24.000000003",
+            "1972-04-26T20:18:03.999999999",
+        ),
+        (
+            "1984-10-29T04:20:24.000000001",
+            "1984-09-24T20:42:04.000000001",
+        ),
+        (
+            "1997-10-11T22:29:27.500000004",
+            "1971-10-12T02:33:00.499999998",
+        ),
+    ];
+    let clock = "hour: 12, minute: 31, second: 14, nanosecond: 1";
+    let day = "year: 1984, month: 10, day: 11";
+    for (at, duration) in durations.iter().enumerate() {
+        let (date_sum, date_difference) = [
+            ("1997-03-25", "1972-04-27"),
+            ("1984-10-28", "1984-09-25"),
+            ("1997-10-11", "1971-10-12"),
+        ][at];
+        let (time_sum, time_difference) = local_time[at];
+        let (moment_sum, moment_difference) = local_datetime[at];
+        for (base, sum, difference) in [
+            (
+                format!("date({{{day}}})"),
+                date_sum.to_owned(),
+                date_difference.to_owned(),
+            ),
+            (
+                format!("localtime({{{clock}}})"),
+                time_sum.to_owned(),
+                time_difference.to_owned(),
+            ),
+            (
+                format!("time({{{clock}, timezone: '+01:00'}})"),
+                format!("{time_sum}+01:00"),
+                format!("{time_difference}+01:00"),
+            ),
+            (
+                format!("localdatetime({{{day}, {clock}}})"),
+                moment_sum.to_owned(),
+                moment_difference.to_owned(),
+            ),
+            (
+                format!("datetime({{{day}, {clock}, timezone: '+01:00'}})"),
+                format!("{moment_sum}+01:00"),
+                format!("{moment_difference}+01:00"),
+            ),
+        ] {
+            for (operator, expected) in [("+", &sum), ("-", &difference)] {
+                let expression = format!("{base} {operator} {duration}");
+                assert_eq!(as_text(&expression), text(expected), "{expression}");
+            }
+        }
+        // A duration on the left of + adds the same way.
+        let expression = format!("{duration} + date({{{day}}})");
+        assert_eq!(as_text(&expression), text(date_sum), "{expression}");
+    }
+    let one = "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, \
+               nanoseconds: 1})";
+    for (other, sum, difference) in [
+        (one, "P24Y10M28DT32H26M20.000000002S", "PT0S"),
+        (
+            durations[1],
+            "P12Y6MT32H2M20.000000001S",
+            "P12Y4M28DT24M0.000000001S",
+        ),
+        (
+            durations[2],
+            "P25Y4M43DT50H11M23.500000004S",
+            "P-6M-15DT-17H-45M-3.500000002S",
+        ),
+    ] {
+        assert_eq!(as_text(&format!("{one} + {other}")), text(sum), "{other}");
+        assert_eq!(
+            as_text(&format!("{one} - {other}")),
+            text(difference),
+            "{other}"
+        );
+    }
+    for (number, product, quotient) in [
+        (
+            "1",
+            "P12Y5M14DT16H13M10.000000001S",
+            "P12Y5M14DT16H13M10.000000001S",
+        ),
+        ("2", "P24Y10M28DT32H26M20.000000002S", "P6Y2M22DT13H21M8S"),
+        ("0.5", "P6Y2M22DT13H21M8S", "P24Y10M28DT32H26M20.000000002S"),
+    ] {
+        assert_eq!(
+            as_text(&format!("{one} * {number}")),
+            text(product),
+            "{number}"
+        );
+        assert_eq!(
+            as_text(&format!("{one} / {number}")),
+            text(quotient),
+            "{number}"
+        );
+    }
+    assert_eq!(scalar(&format!("{one} + null"), &x), CanonicalScalar::Null);
+    for (expression, kind) in [
+        ("date('2015-07-21') + 1", "IncompatibleOperands"),
+        (
+            "date('2015-07-21') + date('2015-07-22')",
+            "IncompatibleOperands",
+        ),
+        ("1 - duration('P1D')", "IncompatibleOperands"),
+        ("duration('P1D') / 0", "DivisionByZero"),
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains(kind),
+            "{expression}: {error:?}"
+        );
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

@@ -107,6 +107,51 @@ impl CanonicalDuration {
         )
     }
 
+    /// The duration times the exact ratio `numerator / denominator`, as
+    /// openCypher multiplies and divides a duration by a number: each
+    /// component is scaled, and what a whole count leaves over cascades down,
+    /// a fraction of a month into days and time by the average month and a
+    /// fraction of a day into time, each step truncated toward zero. The
+    /// ratio is exact, so the result never depends on binary64 rounding.
+    ///
+    /// # Errors
+    ///
+    /// [`DurationError::OutOfRange`] when `denominator` is not positive or a
+    /// component overflows.
+    pub fn checked_scale(self, numerator: i128, denominator: i128) -> Result<Self, DurationError> {
+        const DAY_NANOS: i128 = 86_400 * NANOS_PER_SECOND;
+        const MONTH_NANOS: i128 = SECONDS_PER_AVERAGE_MONTH as i128 * NANOS_PER_SECOND;
+        let out = || DurationError::OutOfRange;
+        if denominator <= 0 {
+            return Err(out());
+        }
+        let months = i128::from(self.months)
+            .checked_mul(numerator)
+            .ok_or_else(out)?;
+        let (whole_months, left_months) = (months / denominator, months % denominator);
+        // Everything below the months is counted in nanoseconds over the
+        // same denominator, so no step rounds before its own truncation.
+        let day_nanos = i128::from(self.days)
+            .checked_mul(numerator)
+            .and_then(|days| days.checked_mul(DAY_NANOS))
+            .and_then(|days| days.checked_add(left_months.checked_mul(MONTH_NANOS)?))
+            .ok_or_else(out)?;
+        let day_unit = denominator.checked_mul(DAY_NANOS).ok_or_else(out)?;
+        let whole_days = day_nanos / day_unit;
+        let left_nanos = day_nanos - whole_days * day_unit;
+        let time = self
+            .nanos
+            .checked_mul(numerator)
+            .and_then(|nanos| nanos.checked_add(left_nanos))
+            .ok_or_else(out)?
+            / denominator;
+        Self::new(
+            i64::try_from(whole_months).map_err(|_| out())?,
+            i64::try_from(whole_days).map_err(|_| out())?,
+            time,
+        )
+    }
+
     /// The duration with every component negated.
     ///
     /// # Errors
@@ -562,6 +607,35 @@ mod tests {
         assert_eq!(
             CanonicalDuration::new(0, 0, MAX_TIME_NANOS + 1),
             Err(OutOfRange)
+        );
+    }
+
+    /// TCK Temporal8 [7]: a duration times 1, 2 and 1/2. Half of 149 months
+    /// leaves half an average month, 15 days and 18,873 seconds, which joins
+    /// the halved days and time; the half nanosecond truncates. A negative
+    /// ratio truncates toward zero as well, so it is the exact negation.
+    #[test]
+    fn scaling_follows_the_tck_and_truncates_each_cascade_toward_zero() {
+        let base = CanonicalDuration::parse_iso("P12Y5M14DT16H13M10.000000001S").unwrap();
+        for (numerator, denominator, expected) in [
+            (1, 1, "P12Y5M14DT16H13M10.000000001S"),
+            (2, 1, "P24Y10M28DT32H26M20.000000002S"),
+            (1, 2, "P6Y2M22DT13H21M8S"),
+            (-1, 2, "P-6Y-2M-22DT-13H-21M-8S"),
+            (0, 7, "PT0S"),
+        ] {
+            assert_eq!(
+                base.checked_scale(numerator, denominator)
+                    .map(|duration| duration.to_string()),
+                Ok(expected.to_owned()),
+                "{numerator}/{denominator}"
+            );
+        }
+        assert_eq!(base.checked_scale(1, 0), Err(DurationError::OutOfRange));
+        assert_eq!(base.checked_scale(1, -2), Err(DurationError::OutOfRange));
+        assert_eq!(
+            base.checked_scale(i128::MAX, 1),
+            Err(DurationError::OutOfRange)
         );
     }
 }
