@@ -2347,6 +2347,198 @@ fn searched(db: &TestDb, args: &[&str]) -> (u64, Vec<String>, SearchRows) {
     (seq, columns, rows)
 }
 
+#[test]
+fn search_eligible_precedes_candidate_limits_keeps_transit_and_pins_history() {
+    let db = TestDb::new("search-eligible");
+    db.create();
+    let first = db.write(&[
+        "INSERT (a:Person {name:'A', team:'graph graph graph graph', born:0}),\
+         (b:Person {name:'B', team:'graph graph graph', born:1}),\
+         (c:Person {name:'C', team:'graph graph', born:2}),\
+         (d:Person {name:'D', team:'graph padding padding padding', born:9}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(d)",
+    ]);
+    let ids = vertex_ids(&db);
+    let vertex = |name: &str| ("vertex".to_owned(), ids[name].clone());
+    let one = ("int".to_owned(), "1".to_owned());
+    let distance = ("float".to_owned(), "81".to_owned());
+    let absent = ("null".to_owned(), String::new());
+    let text = ["--text", "graph", "--text-property", "team"];
+    let vector_args = ["--vector", "0", "--vector-property", "born"];
+
+    // D is the weakest text match and the farthest vector. Use unrestricted
+    // raw BM25 solely to check that eligibility preserves corpus statistics.
+    let mut all_text_args = text.to_vec();
+    all_text_args.extend(["--vertex-label", "Person", "--k", "4"]);
+    let (seq, _, all_text) = searched(&db, &all_text_args);
+    assert_eq!(seq, first);
+    assert_eq!(
+        all_text
+            .iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        [vertex("A"), vertex("B"), vertex("C"), vertex("D")]
+    );
+    let bm25 = all_text[3][1].clone();
+    let mut ann_args = vector_args.to_vec();
+    ann_args.extend(["--ann", "16"]);
+    // Duplicates and surrounding whitespace describe the same endpoint set.
+    let eligible = format!(" {}, {} ", ids["D"], ids["D"]);
+    for (lane, mut args, expected_columns, expected_score) in [
+        ("text", text.to_vec(), ["vertex", "score"], bm25.clone()),
+        (
+            "exact vector",
+            vector_args.to_vec(),
+            ["vertex", "distance"],
+            distance.clone(),
+        ),
+        (
+            "ANN vector",
+            ann_args,
+            ["vertex", "distance"],
+            distance.clone(),
+        ),
+    ] {
+        args.extend(["--vertex-label", "Person", "--k", "1"]);
+        let (_, _, unrestricted) = searched(&db, &args);
+        assert_eq!(unrestricted.len(), 1, "{lane}");
+        assert_eq!(unrestricted[0][0], vertex("A"), "{lane}");
+        args.extend(["--eligible", &eligible]);
+        let (seq, columns, rows) = searched(&db, &args);
+        assert_eq!(seq, first, "{lane}");
+        assert_eq!(columns, expected_columns, "{lane}");
+        assert_eq!(rows, vec![vec![vertex("D"), expected_score]], "{lane}");
+        if lane == "text" {
+            *args.last_mut().unwrap() = "";
+            let (_, empty_columns, empty) = searched(&db, &args);
+            assert_eq!(empty_columns, columns);
+            assert!(empty.is_empty(), "an empty set differs from omission");
+        }
+    }
+
+    let hybrid_columns = [
+        "vertex",
+        "score",
+        "vector_rank",
+        "text_rank",
+        "vector_distance",
+        "text_score",
+    ];
+    let graph_columns = [
+        "vertex",
+        "score",
+        "vector_rank",
+        "text_rank",
+        "graph_rank",
+        "vector_distance",
+        "text_score",
+        "graph_hops",
+    ];
+    let mut historical_graph = None;
+    for ann in [false, true] {
+        let mut args = text.to_vec();
+        args.extend(vector_args);
+        args.extend(["--vertex-label", "Person", "--k", "1", "--candidates", "1"]);
+        if ann {
+            args.extend(["--ann", "16"]);
+        } else {
+            let (_, _, unrestricted) = searched(&db, &args);
+            assert_eq!(unrestricted.len(), 1);
+            assert_eq!(unrestricted[0][0], vertex("A"));
+        }
+        args.extend(["--eligible", &eligible]);
+        let (seq, columns, rows) = searched(&db, &args);
+        assert_eq!(seq, first);
+        assert_eq!(columns, hybrid_columns);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], vertex("D"));
+        assert_eq!(rows[0][1].0, "decimal");
+        assert_eq!(
+            &rows[0][2..],
+            &[one.clone(), one.clone(), distance.clone(), bm25.clone()],
+            "both candidate lists must admit D before their depth-one cut; ANN={ann}",
+        );
+
+        // Rejected B and C remain transit vertices. D must be the first
+        // eligible graph candidate despite being three hops from A.
+        args.extend([
+            "--expand-from",
+            &ids["A"],
+            "--expand-relation",
+            "KNOWS",
+            "--max-hops",
+            "3",
+            "--graph-candidates",
+            "1",
+        ]);
+        let (seq, columns, rows) = searched(&db, &args);
+        assert_eq!(seq, first);
+        assert_eq!(columns, graph_columns);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], vertex("D"));
+        assert_eq!(rows[0][1].0, "decimal");
+        assert_eq!(
+            &rows[0][2..],
+            &[
+                one.clone(),
+                one.clone(),
+                one.clone(),
+                distance.clone(),
+                bm25.clone(),
+                ("int".to_owned(), "3".to_owned()),
+            ],
+            "each of the three lanes must rank eligible D first; ANN={ann}",
+        );
+        if !ann {
+            historical_graph = Some((args, rows));
+        }
+    }
+
+    let (graph_args, before) = historical_graph.unwrap();
+    let mut empty_args = graph_args.clone();
+    let eligible_value = empty_args
+        .iter()
+        .position(|arg| *arg == "--eligible")
+        .unwrap()
+        + 1;
+    empty_args[eligible_value] = "";
+    let (_, columns, empty) = searched(&db, &empty_args);
+    assert_eq!(columns, graph_columns);
+    assert!(empty.is_empty(), "no modality may emit a rejected endpoint");
+
+    // Mutate both modalities that can change D's historical result. The
+    // current graph cannot reach D, but its text/vector candidates still can.
+    db.write(&["MATCH (p:Person) WHERE p.name='D' SET p.born=4"]);
+    let later = db.write(&["MATCH (a)-[e:KNOWS]->(b) WHERE a.name='C' AND b.name='D' DELETE e"]);
+    let (seq, columns, now) = searched(&db, &graph_args);
+    assert_eq!(seq, later);
+    assert_eq!(columns, graph_columns);
+    assert_eq!(now.len(), 1);
+    assert_eq!(now[0][0], vertex("D"));
+    assert_eq!(
+        &now[0][2..],
+        &[
+            one.clone(),
+            one,
+            absent.clone(),
+            ("float".to_owned(), "16".to_owned()),
+            bm25,
+            absent,
+        ],
+    );
+    assert_ne!(now, before);
+    let first_text = first.to_string();
+    let mut historical_args = graph_args;
+    historical_args.extend(["--as-of", &first_text]);
+    let (seq, columns, then) = searched(&db, &historical_args);
+    assert_eq!(seq, first);
+    assert_eq!(columns, graph_columns);
+    assert_eq!(
+        then, before,
+        "all lanes must use the requested historical cut"
+    );
+}
+
 /// `fgdb search` returns exactly what the library's `Database::beacon_search`
 /// returns over the same committed generation, for every lane and mode, and
 /// `--as-of` pins history (fgdb-fwzqa). The library is the oracle.
@@ -3669,7 +3861,6 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
     }
 }
 
-
 #[test]
 fn inline_prism_projection_matches_explicit_flags_and_replays_after_reopen() {
     let db = TestDb::new("prism-inline-projection");
@@ -3680,12 +3871,26 @@ fn inline_prism_projection_matches_explicit_flags_and_replays_after_reopen() {
          (b)-[:KNOWS {born:3}]->(c),(c)-[:KNOWS {born:4}]->(a),\
          (c)-[:KNOWS {born:true}]->(c)",
     ]);
-    let expected = analytics(&db, &[
-        "--graph-label", "Person", "--graph-relation", "KNOWS",
-        "--weight", "born", "--missing-weight", "reject", "--direction", "directed",
-        "--parallel-edges", "min", "--self-loops", "drop",
-        "CALL fnx.pagerank(0.85,100,1e-9,true) YIELD vertex,score",
-    ]);
+    let expected = analytics(
+        &db,
+        &[
+            "--graph-label",
+            "Person",
+            "--graph-relation",
+            "KNOWS",
+            "--weight",
+            "born",
+            "--missing-weight",
+            "reject",
+            "--direction",
+            "directed",
+            "--parallel-edges",
+            "min",
+            "--self-loops",
+            "drop",
+            "CALL fnx.pagerank(0.85,100,1e-9,true) YIELD vertex,score",
+        ],
+    );
     let query = "CALL fnx.pagerank(\
         {labels:['Person'], relations:['KNOWS'], weight:'born', missing:'reject', \
          direction:'directed', parallel:'min', self_loops:'drop'}, \
@@ -3700,18 +3905,22 @@ fn inline_prism_projection_matches_explicit_flags_and_replays_after_reopen() {
     let certificate_path = certificate.to_str().unwrap();
     let certified = db.command("query", &["--certify-to", certificate_path, query]);
     assert_eq!(certified.sequence("rows"), certified_seq);
-    db.write(&[
-        "MATCH (a:Person {name:'A'}),(c:Person {name:'C'}) \
-         INSERT (a)-[:KNOWS {born:20}]->(c)",
-    ]);
-    assert_ne!(analytics(&db, &[query]), expected, "control: the live ranking moved");
+    db.write(&["MATCH (a:Person {name:'A'}),(c:Person {name:'C'}) \
+         INSERT (a)-[:KNOWS {born:20}]->(c)"]);
+    assert_ne!(
+        analytics(&db, &[query]),
+        expected,
+        "control: the live ranking moved"
+    );
     let replayed = db.command("replay", &["--certificate", certificate_path]);
     assert_eq!(replayed.sequence("replayed"), certified_seq);
     assert_eq!(
         &replayed.events[..replayed.events.len() - 1],
         &certified.events[..certified.events.len() - 1],
     );
-    db.command("query", &[
-        "CALL fnx.pagerank({relations:['Unbound']}) YIELD vertex RETURN vertex",
-    ]).failure(3, "query");
+    db.command(
+        "query",
+        &["CALL fnx.pagerank({relations:['Unbound']}) YIELD vertex RETURN vertex"],
+    )
+    .failure(3, "query");
 }
