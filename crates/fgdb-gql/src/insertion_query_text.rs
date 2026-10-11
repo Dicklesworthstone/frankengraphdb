@@ -18,13 +18,14 @@ pub(crate) struct InsertReturnTemplate {
     pub offset: ReadPageNumber,
     pub count: Option<ReadPageNumber>,
     pub at: usize,
+    pub property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
 }
 
 /// One standalone, MATCH-selected or leading-UNWIND CREATE/INSERT with RETURN.
 /// Each source occurrence retains its own created vertex/edge identities and
 /// frozen properties. Matched bindings and source-only properties share the
 /// same input row as creation; they are not recovered by a later graph scan.
-/// RETURN accepts native scalar/CASE/list expressions, grouped COUNT/SUM/AVG/
+/// RETURN accepts native scalar/CASE/list/map expressions, grouped COUNT/SUM/AVG/
 /// MIN/MAX/COLLECT, argument DISTINCT, output DISTINCT, ordering, SKIP and LIMIT.
 /// Grouping uses frozen occurrence values; a keyless aggregate over an empty
 /// source still returns its native zero/null/empty-list group. Paging never
@@ -34,6 +35,11 @@ pub(crate) struct InsertReturnTemplate {
 /// `type` and captured-path functions use the same native source projections
 /// as read queries. Metadata keeps the source adapter's catalog and visibility
 /// requirements; none of these functions performs a post-write graph scan.
+/// `properties`, `keys`, and wildcard/selective map projections of created
+/// vertices and edges read the collector's already checked scalar fields.
+/// Complete maps use a trusted reverse property catalog, admitted before any
+/// identity allocation. Matched element maps use the original admitted source;
+/// explicit overrides and aggregate inputs use the same row value evaluator.
 ///
 /// The ordinary row domain applies to grouped output: wide integer overflow
 /// and nonnull exact rational averages are typed refusals. Aggregate-in-value

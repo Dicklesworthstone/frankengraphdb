@@ -874,3 +874,226 @@ fn authorized_write_return_maps_exclude_hidden_fields_and_preserve_them_in_stora
         });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn creation_return_maps_describe_the_durable_fields_before_projection_overrides() {
+    let ((), report) = run_async_under_lab(0x6d61_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        for keyword in ["CREATE", "INSERT"] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let before = db.frontier().unwrap();
+            let statement = format!(
+                "{keyword} (a:Thing {{score:2,name:'created',`edge-note`:NULL}}),\
+                 (b:Thing),(a)-[r:R {{score:3}}]->(b) \
+                 RETURN a,b,r,properties(a) AS node,b{{.*}} AS empty,\
+                 properties(r) AS edge,keys(a) AS names,a{{.*,score:a.score+1}} AS projected"
+            );
+            let returned = cells(
+                db.query_write_engine(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &statement,
+                    &GqlParameters::new(),
+                    Catalog::Full,
+                    R,
+                    write_policy(),
+                )
+                .await
+                .unwrap(),
+            );
+            let [row] = returned.as_slice() else {
+                panic!("one creation occurrence")
+            };
+            let [
+                GraphValue::Vertex(a),
+                GraphValue::Vertex(b),
+                GraphValue::Edge(r),
+                ..,
+            ] = row.as_slice()
+            else {
+                panic!("the maps retain their created element identities")
+            };
+            assert_eq!(
+                &row[3..],
+                &[
+                    map(&[
+                        ("edge-note", null()),
+                        ("name", text("created")),
+                        ("score", int(2))
+                    ]),
+                    map(&[]),
+                    map(&[("score", int(3))]),
+                    list(&["edge-note", "name", "score"]),
+                    map(&[
+                        ("edge-note", null()),
+                        ("name", text("created")),
+                        ("score", int(3))
+                    ]),
+                ],
+            );
+            let fields = vec![
+                (SCORE, CanonicalScalar::Int(2)),
+                (NAME, CanonicalScalar::ucs_basic_text("created").unwrap()),
+                (NOTE, CanonicalScalar::Null),
+            ];
+            assert_eq!(db.vertex(*a).unwrap().unwrap().props, fields);
+            assert!(db.vertex(*b).unwrap().unwrap().props.is_empty());
+            let edge = db.edge(*r).unwrap().unwrap();
+            assert_eq!((edge.entry.src, edge.entry.dst), (*a, *b));
+            assert_eq!(edge.props, vec![(SCORE, CanonicalScalar::Int(3))]);
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.vertex(*a).unwrap().unwrap().props, fields);
+            assert_eq!(db.edge(*r).unwrap().unwrap(), edge);
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn insertion_return_maps_preserve_imported_rows_and_the_transaction_source() {
+    let ((), report) = run_async_under_lab(0x6d61_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = seed(&mut db, &commit, false).await;
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(20)));
+        prefix.set_vertex_property(VId(1), NAME, None);
+        prefix.set_edge_property(EId(1), SCORE, Some(CanonicalScalar::Int(4)));
+        transaction.write(&mut db, prefix).unwrap();
+        let result = transaction
+            .query_write_engine(
+                &mut db,
+                &cx,
+                "UNWIND [{bump:2},{bump:3}] AS input UNWIND [input.bump] AS bump \
+                 MATCH (a:Thing)-[r:R]->(b:Thing) \
+                 CREATE (c:Thing {score:a.score+bump}),\
+                 (c)-[fresh:R {score:r.score}]->(a) \
+                 RETURN properties(a) AS source,properties(r) AS old,\
+                 properties(c) AS created,properties(fresh) AS fresh,\
+                 properties(input) AS input ORDER BY created",
+                &GqlParameters::new(),
+                Catalog::Full,
+                R,
+                write_policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            cells(result),
+            [2, 3]
+                .into_iter()
+                .map(|bump| vec![
+                    map(&[("score", int(20))]),
+                    map(&[
+                        ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                        ("score", int(4))
+                    ]),
+                    map(&[("score", int(20 + bump))]),
+                    map(&[("score", int(4))]),
+                    map(&[("bump", int(bump))]),
+                ])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(transaction.vertices(&db).unwrap().len(), 4);
+        assert_eq!(transaction.edges(&db).unwrap().len(), 3);
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(db.frontier().unwrap(), before);
+        transaction.abort();
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(10)
+        );
+        assert_eq!(
+            db.edge(EId(1)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(3)
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn insertion_map_catalog_and_late_return_failures_keep_prior_staging_intact() {
+    let ((), report) = run_async_under_lab(0x6d61_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = seed(&mut db, &commit, false).await;
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(20)));
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let vertices = transaction.vertices(&db).unwrap();
+        let edges = transaction.edges(&db).unwrap();
+        let params = GqlParameters::new();
+        for catalog in [Catalog::MissingScore, Catalog::DuplicateName] {
+            assert!(
+                transaction
+                    .query_write(
+                        &mut db,
+                        &cx,
+                        "CREATE (n:Thing {score:1}) RETURN properties(n) AS props LIMIT 0",
+                        &params,
+                        catalog,
+                        R,
+                        write_policy(),
+                        |_| -> Result<fgdb_delta_types::ElementId, ()> {
+                            panic!("catalog admission must precede identity allocation")
+                        },
+                    )
+                    .is_err()
+            );
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        }
+        for (statement, budget) in [
+            (
+                "UNWIND [1,0] AS value CREATE (n:Thing {score:value}) \
+                 RETURN n{.*,inverse:10/n.score} AS props LIMIT 0",
+                write_policy(),
+            ),
+            (
+                "CREATE (n:Thing {score:1}) RETURN properties(n) AS props",
+                GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 0),
+                    100_000,
+                    100_000,
+                    100_000,
+                ),
+            ),
+        ] {
+            assert!(
+                transaction
+                    .query_write_engine(&mut db, &cx, statement, &params, Catalog::Full, R, budget)
+                    .is_err(),
+                "{statement}"
+            );
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap(), vertices);
+            assert_eq!(transaction.edges(&db).unwrap(), edges);
+            assert_eq!(db.frontier().unwrap(), before);
+        }
+        transaction.abort();
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+            CanonicalScalar::Int(10)
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

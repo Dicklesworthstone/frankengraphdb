@@ -320,8 +320,39 @@ semantics. A deleted target refuses property-map access. Projection failures,
 catalog failures and budget refusals stage no part of the statement, while
 `LIMIT 0` suppresses only output rows. The same behavior is available through
 the library's `query_write` and `query_write_engine`, the CLI's `write`, and
-FGP write execution. Complete graph maps in `CREATE`/`INSERT` and `MERGE`
-`RETURN` remain outside this mutation slice.
+FGP write execution.
+
+`CREATE` and `INSERT ... RETURN` support maps for newly created vertices and
+relationships and for already matched source elements. For example:
+
+```text
+MATCH (person:Person)
+CREATE (copy:Person {name:person.name}),
+       (person)-[relationship:KNOWS {weight:1}]->(copy)
+RETURN properties(person) AS original,
+       copy{.*, display_name:'Copy'} AS created,
+       keys(relationship) AS relationship_keys
+```
+
+The insertion collector freezes each created map from the same checked fields
+used by its intents, before requesting element identities. It does not rescan
+the graph or re-evaluate creation expressions. Matched maps use the original
+selection, including staged transaction changes and capability masking;
+imported `UNWIND` rows keep their own input columns. Grouping and aggregates
+consume these frozen occurrences through the existing write-RETURN owner.
+Explicit projection overrides affect only the result, not stored fields.
+Missing names for known creation fields and duplicate reverse names refuse
+during preparation, including an empty input or `LIMIT 0`. Expression,
+allocation, cancellation and quota failures publish no part of the statement
+and preserve earlier staged work; identities already issued by an allocator
+may remain spent. Names and map payloads use the existing cumulative work and
+scratch limits. Low-level callers can supply the catalog with
+`PreparedGraphInsertQuery::prepare_with_property_catalog`.
+
+Complete graph maps in `MERGE RETURN` remain outside these write slices.
+Map-projection syntax on a generic imported `UNWIND` MAP row also remains
+outside the insertion slice; ordinary `properties(row)` and `keys(row)` use
+the existing row-value evaluator.
 
 Nullable imported bindings across multipart `OPTIONAL MATCH` boundaries also
 refuse; project their maps before that boundary. Mixed row/graph multipart
@@ -330,8 +361,9 @@ outside this slice.
 Low-level callers need the map-aware element accessor APIs;
 an omitted map source is a typed refusal rather than an empty map.
 
-Regression sources are `crates/fgdb/tests/graph_property_maps.rs`, the native
-GQL projection laws, and the CLI and FGP loopback suites. These additions have
+Regression sources are `crates/fgdb/tests/graph_property_maps.rs`,
+`crates/fgdb-gql/tests/insertion_property_maps.rs`, the native GQL projection
+laws, and the CLI and FGP loopback suites. These additions have
 source review and pinned formatter checks here; compilation and Rust test
 execution remain **unverified** in this workspace.
 

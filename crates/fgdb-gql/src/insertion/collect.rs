@@ -239,11 +239,46 @@ fn property_binding<E, A, C>(
     Ok(GraphValue::Scalar(CanonicalScalar::Null))
 }
 
+/// Every field expression has already run once. Freeze a named map of those
+/// same scalar values before any created identity is requested or published.
+fn properties_binding<E, A, C>(
+    properties: &Fields,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    let mut named = std::collections::BTreeMap::new();
+    for (key, value) in properties {
+        control(GlaExecutionEvent::Work)?;
+        let name = catalog
+            .and_then(|catalog| catalog.properties.get(key))
+            .expect("created-map property names are admitted before execution");
+        control(GlaExecutionEvent::ScratchEntry)?;
+        named.insert(name.as_str(), value);
+    }
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut keys = Vec::<Box<str>>::new();
+    let mut values = Vec::new();
+    for (name, value) in named {
+        control(GlaExecutionEvent::Work)?;
+        for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let value = copy_scalar(value, control)?;
+        keys.push(name.into());
+        values.push(GraphValue::Scalar(value));
+    }
+    Ok(GraphValue::Map {
+        keys: keys.into_boxed_slice(),
+        values: values.into_boxed_slice(),
+    })
+}
+
 fn freeze_bindings<E, A, C>(
     bindings: &[GraphInsertBinding],
     row: &[GraphValue],
     vertices: &[Fields],
     edges: &[EdgeDraft],
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
 ) -> ResultOf<Vec<GraphValue>, E, A, C> {
     control(GlaExecutionEvent::ScratchEntry)?;
@@ -257,6 +292,12 @@ fn freeze_bindings<E, A, C>(
             }
             GraphInsertBinding::EdgeProperty { edge, key } => {
                 property_binding(&edges[edge].properties, key, control)?
+            }
+            GraphInsertBinding::VertexProperties(vertex) => {
+                properties_binding(&vertices[vertex], property_catalog, control)?
+            }
+            GraphInsertBinding::EdgeProperties(edge) => {
+                properties_binding(&edges[edge].properties, property_catalog, control)?
             }
             GraphInsertBinding::CreatedVertex(_) | GraphInsertBinding::CreatedEdge(_) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -303,6 +344,7 @@ pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
     mut source: impl FnMut(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
@@ -464,6 +506,7 @@ pub(super) fn execute<E, A, C>(
                 row,
                 &vertices,
                 &edges,
+                property_catalog,
                 &mut |event| meter.event(event),
             )?);
         }

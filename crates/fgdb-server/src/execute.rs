@@ -451,7 +451,7 @@ impl Returning {
                 text,
                 db.write_relation,
                 &declarations,
-                |kind, name| db.symbols.resolve(kind, name),
+                db.symbols.clone(),
             )
             .map_err(|e| refusal(&e))?;
             return template

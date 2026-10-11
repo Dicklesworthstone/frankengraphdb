@@ -182,7 +182,7 @@ fn query_parameter_table_is_shared_once_across_creation_return_and_paging() {
         statement,
         R,
         &[("tail", GqlParameterType::List)],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -265,7 +265,7 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "CREATE (:Copy) RETURN *",
     ] {
         let calls = Cell::new(0);
-        let result = PreparedGraphInsertQueryText::prepare(statement, R, |kind, name| {
+        let result = PreparedGraphInsertQueryText::prepare(statement, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         });
@@ -291,7 +291,7 @@ fn return_parent_depth_is_admitted_before_catalog_resolution() {
     assert!(PreparedGraphInsertText::prepare(&statement, R, symbols).is_ok());
     statement.push_str(" RETURN n");
     let calls = Cell::new(0);
-    let error = PreparedGraphInsertQueryText::prepare(&statement, R, |kind, name| {
+    let error = PreparedGraphInsertQueryText::prepare(&statement, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -419,7 +419,7 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
          CREATE (c:Copy {p:a.p+$step}),(a)-[e:R {q:$step}]->(c) \
          RETURN a,b,c,e,a.p AS source,c.p AS copied,b.q AS return_only",
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -706,7 +706,7 @@ fn imported_parameters_are_shared_and_null_or_wrong_kind_keys_never_match() {
         "UNWIND $keys AS x MATCH (a {p:x}) WHERE a.q > $floor \
          CREATE (c {q:a.q+$floor}) RETURN x,c.q AS q,$keys AS original",
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -779,7 +779,7 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -795,7 +795,7 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
     text.push_str("MATCH (a {p:x0}) CREATE (c) RETURN c");
     let calls = Cell::new(0);
     assert!(
-        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name| {
+        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })

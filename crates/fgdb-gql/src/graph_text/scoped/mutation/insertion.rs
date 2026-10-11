@@ -600,7 +600,7 @@ impl PreparedGraphInsertText {
     pub fn prepare(
         statement: &str,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
@@ -614,7 +614,7 @@ impl PreparedGraphInsertText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         Self::prepare_definition(statement, relation, declarations, resolve, false)
             .map(|(insertion, _)| insertion)
@@ -624,7 +624,7 @@ impl PreparedGraphInsertText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl GraphSymbolResolver,
         returning: bool,
     ) -> Result<
         (
@@ -728,7 +728,8 @@ impl PreparedGraphInsertText {
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
             }
-            let value = resolve(kind, name.text)
+            let value = resolve
+                .resolve_symbol(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
                 return Err(error(
@@ -786,10 +787,10 @@ impl PreparedGraphInsertText {
                 properties: resolve_properties(edge.properties, &mut symbol)?,
             });
         }
-        let returning = returning
+        let mut returning = returning
             .map(|returning| returning.resolve(&mut symbol))
             .transpose()?;
-        let (input, shape) = if let Some((builder, filters, scopes)) = matching {
+        let (mut input, shape) = if let Some((builder, filters, scopes)) = matching {
             let mut columns = Vec::new();
             for (index, projection) in parsed.projections.into_iter().enumerate() {
                 let key = if let Some(name) = projection.property {
@@ -863,6 +864,45 @@ impl PreparedGraphInsertText {
                 None,
             )
         };
+        let created_maps = returning.as_ref().is_some_and(|returning| {
+            returning.bindings.iter().any(|binding| {
+                matches!(
+                    binding,
+                    crate::GraphInsertBinding::VertexProperties(_)
+                        | crate::GraphInsertBinding::EdgeProperties(_)
+                )
+            })
+        });
+        let selection = match &mut input {
+            InsertTextInput::Match(selection) => Some(selection),
+            InsertTextInput::Relation { input, .. } => input.selection.as_mut(),
+            InsertTextInput::Unit { .. } => None,
+        };
+        let source_metadata = selection.as_ref().is_some_and(|selection| {
+            selection.columns.iter().any(|column| {
+                matches!(
+                    column.path,
+                    Some(
+                        GraphPathFunction::Labels
+                            | GraphPathFunction::Type
+                            | GraphPathFunction::Properties
+                    )
+                )
+            })
+        });
+        if created_maps || source_metadata {
+            let catalog =
+                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement));
+            if let Some(selection) = selection {
+                selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
+            }
+            if created_maps {
+                returning
+                    .as_mut()
+                    .expect("created maps belong to RETURN")
+                    .property_catalog = Some(catalog);
+            }
+        }
         let template = Self {
             input,
             relation,

@@ -86,7 +86,7 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         CREATE (copy:Copy {q: CASE WHEN n.p IS NOT NULL THEN n.p+$step ELSE 1/0 END,p:n.p}), \
         (n)-[:R {q:$step}]->(copy),(copy)-[:R]->(m)";
     let calls = Cell::new(0);
-    let template = PreparedGraphInsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -246,7 +246,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -264,7 +264,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         PreparedGraphInsertText::prepare(
             &format!("MATCH (n) CREATE {declarations}"),
             R,
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             }
@@ -298,15 +298,18 @@ fn creation_relations_are_independent_of_defaults_and_catalog_key_aliases_fail_c
             },
         ]
     );
-    let alias =
-        PreparedGraphInsertText::prepare("MATCH (n) CREATE (x {p:1,q:2})", R, |kind, name| {
+    let alias = PreparedGraphInsertText::prepare(
+        "MATCH (n) CREATE (x {p:1,q:2})",
+        R,
+        |kind, name: &str| {
             if kind == GraphSymbolKind::Property {
                 Some(GraphSymbol::Property(P))
             } else {
                 symbols(kind, name)
             }
-        })
-        .unwrap_err();
+        },
+    )
+    .unwrap_err();
     assert!(matches!(
         alias.kind,
         GraphInsertTextErrorKind::Build(GraphInsertBuildError::DuplicateProperty { .. })
@@ -525,7 +528,7 @@ fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
         text,
         R,
         &[("payload", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -625,7 +628,7 @@ fn connected_creation_caps_count_new_declarations_not_node_references() {
         format!("{chain}-[:R]->(n0)"),
     ] {
         let calls = Cell::new(0);
-        let error = PreparedGraphInsertText::prepare(&too_large, R, |kind, name| {
+        let error = PreparedGraphInsertText::prepare(&too_large, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })
@@ -790,7 +793,7 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
     use fgdb_gql::algebra::GraphValue;
     let text = "UNWIND $items AS x CREATE (:Copy {p:x,q:$offset+x})";
     let calls = Cell::new(0);
-    let template = PreparedGraphInsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -891,7 +894,7 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -906,7 +909,7 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
             "UNWIND [1] AS x CREATE (:Copy {p:x})",
             R,
             &[("unused", GqlParameterType::Int64)],
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             }

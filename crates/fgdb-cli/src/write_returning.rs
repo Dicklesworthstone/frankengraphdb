@@ -103,7 +103,7 @@ pub(super) fn prepare_statement(
             statement,
             options.coordinate,
             &declarations,
-            |kind, name| options.resolve(kind, name),
+            options,
         )
         .map_err(Failure::query)?;
         return template

@@ -216,7 +216,7 @@ fn parameterized_unwind_endpoint_pages_do_not_suppress_creation() {
         "UNWIND $items AS x CREATE (a {p:x})<-[e:R]-() \
         RETURN startNode(e) AS source,endNode(e) AS target,x ORDER BY target LIMIT $cap",
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -290,7 +290,7 @@ fn endpoint_arguments_and_result_domains_are_checked_before_catalog_callbacks() 
         "MATCH (a) CREATE (n) RETURN startNode(a)",
     ] {
         let calls = Cell::new(0);
-        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         });
@@ -403,7 +403,7 @@ fn matched_metadata_and_path_argument_errors_precede_catalog_resolution() {
         "MATCH (a) CREATE (copy) RETURN labels(a,a)",
     ] {
         let calls = Cell::new(0);
-        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+        let result = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         });

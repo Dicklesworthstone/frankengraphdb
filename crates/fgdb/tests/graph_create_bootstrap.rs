@@ -115,7 +115,7 @@ fn empty_database_bootstrap_and_dependent_match_publish_once_and_reopen_with_his
         let basis = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
         let calls = Cell::new(0);
-        let template = PreparedGraphInsertText::prepare(BOOTSTRAP, R, |kind, name| {
+        let template = PreparedGraphInsertText::prepare(BOOTSTRAP, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })

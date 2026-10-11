@@ -1,7 +1,7 @@
 //! RETURN binds the identities and fields frozen by the native CREATE
 //! collector. These names are compiler scope, never a later graph lookup.
 
-use super::super::mutation_query::{self, ReturnLeaves};
+use super::super::mutation_query::{self, ReturnLeaves, ReturnMapInput};
 use super::*;
 use crate::algebra::GraphValueOrder;
 use crate::insertion_query_text::{InsertReturnTemplate, PreparedGraphInsertQueryText};
@@ -16,13 +16,17 @@ enum Binding<'a> {
     VertexProperty(usize, Name<'a>),
     Edge(usize),
     EdgeProperty(usize, Name<'a>),
+    VertexProperties(usize),
+    EdgeProperties(usize),
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
         match (self, other) {
             (Self::Input(a), Self::Input(b))
             | (Self::Vertex(a), Self::Vertex(b))
-            | (Self::Edge(a), Self::Edge(b)) => a == b,
+            | (Self::Edge(a), Self::Edge(b))
+            | (Self::VertexProperties(a), Self::VertexProperties(b))
+            | (Self::EdgeProperties(a), Self::EdgeProperties(b)) => a == b,
             (Self::VertexProperty(a, ak), Self::VertexProperty(b, bk))
             | (Self::EdgeProperty(a, ak), Self::EdgeProperty(b, bk)) => {
                 a == b && ak.text == bk.text
@@ -52,6 +56,16 @@ struct InsertLeaves<'r, 'a> {
 impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         self.returning.leaf(parser, self.syntax, self.source)
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        self.returning
+            .map_input(parser, self.syntax, self.source, source, input)
     }
 
     fn name(&self, column: usize) -> Name<'a> {
@@ -122,6 +136,39 @@ impl<'a> ParsedReturn<'a> {
             text: word,
             at: parser.current.at,
         };
+        if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let mut lookahead = parser.lexer.clone();
+            lookahead.next()?;
+            if let TokenKind::Word(variable) = lookahead.next()?.kind
+                && !parser.elements.contains(&variable)
+                && (syntax
+                    .vertices
+                    .iter()
+                    .any(|v| v.name.is_some_and(|name| name.text == variable))
+                    || syntax
+                        .edges
+                        .iter()
+                        .any(|e| e.name.is_some_and(|name| name.text == variable))
+                    || matches!(
+                        parser.insertion_match_kind(variable),
+                        Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                    ))
+                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+            {
+                parser.advance()?;
+                parser.punct(b'(', "(")?;
+                let variable = parser.name()?;
+                parser.punct(b')', ")")?;
+                return self
+                    .map_input(parser, syntax, source, variable, ReturnMapInput::Properties)
+                    .map(Some);
+            }
+            // MAP/NULL arguments remain ordinary row values; only actual
+            // graph bindings require a creation/source property-map leaf.
+            return Ok(None);
+        }
         if let Ok(function) = Parser::path_function(name)
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -157,40 +204,81 @@ impl<'a> ParsedReturn<'a> {
             return Ok(None);
         }
         let name = parser.name()?;
-        let property = if parser.take(b'.')? {
-            Some(parser.name()?)
+        let input = if parser.take(b'.')? {
+            ReturnMapInput::Property(parser.name()?)
         } else {
-            None
+            ReturnMapInput::Identity
+        };
+        self.map_input(parser, syntax, source, name, input)
+            .map(Some)
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        syntax: &mut InsertionSyntax<'a>,
+        source: &[(Name<'a>, GraphSetColumnType)],
+        name: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let vertex = syntax
+            .vertices
+            .iter()
+            .position(|vertex| vertex.name.is_some_and(|old| old.text == name.text));
+        let edge = syntax
+            .edges
+            .iter()
+            .position(|edge| edge.name.is_some_and(|old| old.text == name.text));
+        let imported = source.iter().position(|(old, _)| old.text == name.text);
+        let matched = parser.insertion_match_kind(name.text);
+        let property = match input {
+            ReturnMapInput::Property(key) => Some(key),
+            _ => None,
         };
         let (binding, alias, kind) = if let Some(vertex) = vertex {
-            match property {
-                Some(key) => (
+            match input {
+                ReturnMapInput::Property(key) => (
                     Binding::VertexProperty(vertex, key),
                     key,
                     GraphSetColumnType::Scalar,
                 ),
-                None => (Binding::Vertex(vertex), name, GraphSetColumnType::Vertex),
+                ReturnMapInput::Properties => (
+                    Binding::VertexProperties(vertex),
+                    name,
+                    GraphSetColumnType::Any,
+                ),
+                ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                    (Binding::Vertex(vertex), name, GraphSetColumnType::Vertex)
+                }
             }
         } else if let Some(edge) = edge {
-            match property {
-                Some(key) => (
+            match input {
+                ReturnMapInput::Property(key) => (
                     Binding::EdgeProperty(edge, key),
                     key,
                     GraphSetColumnType::Scalar,
                 ),
-                None => (Binding::Edge(edge), name, GraphSetColumnType::Edge),
+                ReturnMapInput::Properties => {
+                    (Binding::EdgeProperties(edge), name, GraphSetColumnType::Any)
+                }
+                ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                    (Binding::Edge(edge), name, GraphSetColumnType::Edge)
+                }
             }
-        } else if let Some(input) = input {
-            if property.is_some() {
+        } else if let Some(imported) = imported {
+            if !matches!(input, ReturnMapInput::Identity) {
                 return Err(error(
                     name.at,
-                    GraphPatternTextErrorKind::Expected("a scalar or list UNWIND binding"),
+                    GraphPatternTextErrorKind::Expected(
+                        "a created or matched graph property binding",
+                    ),
                 ));
             }
-            (Binding::Input(input), name, source[input].1)
+            (Binding::Input(imported), name, source[imported].1)
         } else {
-            let kind = matched.expect("one admitted CREATE result binding");
-            if property.is_some()
+            let kind = matched
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownVariable))?;
+            if !matches!(input, ReturnMapInput::Identity)
                 && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
             {
                 return Err(error(
@@ -201,18 +289,31 @@ impl<'a> ParsedReturn<'a> {
             // RETURN-only source fields must join the same selection used by
             // CREATE. An index into the visible alias list is NOT a projection
             // column: creation may already have projected other properties.
-            let input = parser.mutation_projection(&mut syntax.projections, name, property)?;
+            let column = if matches!(input, ReturnMapInput::Properties) {
+                parser.projection_slot(
+                    &mut syntax.projections,
+                    Projection {
+                        variable: name,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                    },
+                )?
+            } else {
+                parser.mutation_projection(&mut syntax.projections, name, property)?
+            };
             (
-                Binding::Input(source.len() + input),
+                Binding::Input(source.len() + column),
                 property.unwrap_or(name),
-                if property.is_some() {
+                if matches!(input, ReturnMapInput::Properties) {
+                    GraphSetColumnType::Any
+                } else if property.is_some() {
                     GraphSetColumnType::Scalar
                 } else {
                     kind
                 },
             )
         };
-        self.column(binding, alias, kind).map(Some)
+        self.column(binding, alias, kind)
     }
 
     /// Endpoint identities are already in the native occurrence: created
@@ -281,6 +382,8 @@ impl<'a> ParsedReturn<'a> {
                 Binding::Input(column) => GraphInsertBinding::Input(column),
                 Binding::Vertex(vertex) => GraphInsertBinding::CreatedVertex(vertex),
                 Binding::Edge(edge) => GraphInsertBinding::CreatedEdge(edge),
+                Binding::VertexProperties(vertex) => GraphInsertBinding::VertexProperties(vertex),
+                Binding::EdgeProperties(edge) => GraphInsertBinding::EdgeProperties(edge),
                 Binding::VertexProperty(vertex, name) => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
                     else {
@@ -306,6 +409,7 @@ impl<'a> ParsedReturn<'a> {
             offset: self.offset,
             count: self.count,
             at: self.at,
+            property_catalog: None,
         })
     }
 }
@@ -452,6 +556,7 @@ impl InsertReturnTemplate {
                 .as_ref()
                 .map(|group| group.bind(values))
                 .transpose()?,
+            self.property_catalog.clone(),
         )
         .map_err(|kind| GraphInsertTextError {
             offset: self.at,
@@ -573,7 +678,7 @@ impl PreparedGraphInsertQueryText {
     pub fn prepare(
         statement: &str,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
@@ -582,7 +687,7 @@ impl PreparedGraphInsertQueryText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         let body = statement_body(statement)?;
         let (insertion, returning) = PreparedGraphInsertText::prepare_definition(

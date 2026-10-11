@@ -19,18 +19,38 @@ use fgdb_delta_types::{ElementId, PropertyKeyId};
 pub enum GraphInsertBinding {
     Input(usize),
     CreatedVertex(usize),
-    VertexProperty { vertex: usize, key: PropertyKeyId },
+    VertexProperty {
+        vertex: usize,
+        key: PropertyKeyId,
+    },
     CreatedEdge(usize),
-    EdgeProperty { edge: usize, key: PropertyKeyId },
+    EdgeProperty {
+        edge: usize,
+        key: PropertyKeyId,
+    },
+    /// Complete checked CREATE fields, named by the query's property catalog.
+    VertexProperties(usize),
+    EdgeProperties(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphInsertQueryBuildError {
-    Binding { binding: usize },
-    TooManyBindings { limit: usize, observed: usize },
+    Binding {
+        binding: usize,
+    },
+    TooManyBindings {
+        limit: usize,
+        observed: usize,
+    },
     Projection(RowProjectionBuildError),
     Aggregate(crate::GraphAggregateBuildError),
     InputDepth(GraphSetBuildError),
+    /// A property of a returned created element has no trusted output name.
+    UnmappedProperty {
+        binding: usize,
+    },
+    /// Distinct property IDs cannot share one output name.
+    PropertyMapCatalog,
 }
 impl core::fmt::Display for GraphInsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -104,6 +124,7 @@ pub struct PreparedGraphInsertQuery {
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
 }
 impl core::fmt::Debug for PreparedGraphInsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -120,7 +141,27 @@ impl PreparedGraphInsertQuery {
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
     ) -> Result<Self, GraphInsertQueryBuildError> {
-        Self::prepare_with_grouping(insertion, bindings, projection, quantifier, None)
+        Self::prepare_with_grouping(insertion, bindings, projection, quantifier, None, None)
+    }
+
+    /// Complete maps of newly created elements use these trusted property
+    /// names. Names and their uniqueness are admitted before source access or
+    /// identity allocation; names are never guessed from creation text.
+    pub fn prepare_with_property_catalog(
+        insertion: PreparedGraphInsert,
+        bindings: Vec<GraphInsertBinding>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+        catalog: crate::ReverseSymbolCatalog,
+    ) -> Result<Self, GraphInsertQueryBuildError> {
+        Self::prepare_with_grouping(
+            insertion,
+            bindings,
+            projection,
+            quantifier,
+            None,
+            Some(std::sync::Arc::new(catalog)),
+        )
     }
 
     pub(crate) fn prepare_with_grouping(
@@ -129,6 +170,7 @@ impl PreparedGraphInsertQuery {
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
         grouping: Option<crate::set_ops::WriteReturnGroupSpec>,
+        property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     ) -> Result<Self, GraphInsertQueryBuildError> {
         let limit = crate::algebra::MAX_PATTERN_VERTICES;
         if bindings.len() > limit {
@@ -160,9 +202,45 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::EdgeProperty { edge, .. } => {
                     (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Scalar)
                 }
+                GraphInsertBinding::VertexProperties(vertex) => {
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Any)
+                }
+                GraphInsertBinding::EdgeProperties(edge) => {
+                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Any)
+                }
             };
             input_types.push(kind.ok_or(GraphInsertQueryBuildError::Binding { binding: at })?);
         }
+        let property_catalog = if bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                GraphInsertBinding::VertexProperties(_) | GraphInsertBinding::EdgeProperties(_)
+            )
+        }) {
+            if let Some(catalog) = &property_catalog {
+                let mut names = std::collections::BTreeSet::new();
+                if !catalog.properties.values().all(|name| names.insert(name)) {
+                    return Err(GraphInsertQueryBuildError::PropertyMapCatalog);
+                }
+            }
+            for (at, binding) in bindings.iter().enumerate() {
+                if let Some(keys) = insertion.return_property_keys(*binding) {
+                    for key in keys {
+                        if !property_catalog
+                            .as_ref()
+                            .is_some_and(|catalog| catalog.properties.contains_key(key))
+                        {
+                            return Err(GraphInsertQueryBuildError::UnmappedProperty {
+                                binding: at,
+                            });
+                        }
+                    }
+                }
+            }
+            property_catalog
+        } else {
+            None
+        };
         let grouping = grouping
             .map(|group| group.prepare(input_types.clone()))
             .transpose()
@@ -188,6 +266,7 @@ impl PreparedGraphInsertQuery {
             order: Vec::new(),
             offset: 0,
             count: None,
+            property_catalog,
         })
     }
 
@@ -260,6 +339,7 @@ impl PreparedGraphInsertQuery {
             .execute_returning(
                 creation_policy,
                 &self.bindings,
+                self.property_catalog.as_deref(),
                 source,
                 allocate,
                 &mut checkpoint,
@@ -312,6 +392,8 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::VertexProperty { vertex, key } => (2, vertex, Some(key)),
                 GraphInsertBinding::CreatedEdge(edge) => (3, edge, None),
                 GraphInsertBinding::EdgeProperty { edge, key } => (4, edge, Some(key)),
+                GraphInsertBinding::VertexProperties(vertex) => (5, vertex, None),
+                GraphInsertBinding::EdgeProperties(edge) => (6, edge, None),
             };
             bytes.push(tag);
             bytes.extend_from_slice(&(index as u64).to_be_bytes());
@@ -336,6 +418,17 @@ impl PreparedGraphInsertQuery {
         }
         if let Some(grouping) = &self.grouping {
             grouping.append_canonical_bytes(&mut bytes);
+        }
+        if self.bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                GraphInsertBinding::VertexProperties(_) | GraphInsertBinding::EdgeProperties(_)
+            )
+        }) {
+            crate::algebra::append_property_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
         }
         bytes
     }

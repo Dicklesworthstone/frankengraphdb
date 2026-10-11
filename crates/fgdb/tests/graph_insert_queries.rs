@@ -148,7 +148,7 @@ fn creation_consumes_staged_values_publishes_once_and_survives_compaction_and_re
         prior.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(11)));
         txn.write(&mut db, prior).unwrap();
         let calls = Cell::new(0);
-        let template = PreparedGraphInsertText::prepare(TEXT, R, |kind, name| {
+        let template = PreparedGraphInsertText::prepare(TEXT, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })

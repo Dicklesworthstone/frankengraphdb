@@ -3152,6 +3152,78 @@ fn graph_property_maps_use_declared_names_and_render_lossless_robot_cells() {
 }
 
 #[test]
+fn create_and_insert_return_named_node_edge_and_wildcard_maps() {
+    for verb in ["CREATE", "INSERT"] {
+        let db = TestDb::new(&format!("insert-return-property-maps-{verb}"));
+        let basis = db.create();
+        let statement = format!(
+            "{verb} (a:Person {{name:'Ann',born:1980}}),(b:Person),\
+             (a)-[r:KNOWS {{name:'friend',active:true}}]->(b) \
+             RETURN properties(a) AS props, keys(a) AS names, \
+             properties(r) AS edge_props, keys(r) AS edge_names, \
+             a{{.*,name:'view'}} AS projected, r{{.*,active:false}} AS edge_projected, \
+             b{{.*}} AS empty"
+        );
+        let created = db.command("write", &[&statement]);
+        // The declared IDs are name=1, born=2, active=4. Maps and keys must
+        // instead use canonical property-name order at every output boundary.
+        assert_rows(
+            &created,
+            r#"[[{"type":"map","value":{"born":{"type":"int","value":"1980"},"name":{"type":"text","value":"Ann"}}},
+                 {"type":"list","value":[{"type":"text","value":"born"},{"type":"text","value":"name"}]},
+                 {"type":"map","value":{"active":{"type":"bool","value":true},"name":{"type":"text","value":"friend"}}},
+                 {"type":"list","value":[{"type":"text","value":"active"},{"type":"text","value":"name"}]},
+                 {"type":"map","value":{"born":{"type":"int","value":"1980"},"name":{"type":"text","value":"view"}}},
+                 {"type":"map","value":{"active":{"type":"bool","value":false},"name":{"type":"text","value":"friend"}}},
+                 {"type":"map","value":{}}]]"#,
+        );
+        assert_eq!(created.sequence("written"), basis + 1);
+        let reopened = db.command(
+            "query",
+            &["MATCH (a)-[r:KNOWS]->(b) RETURN properties(a) AS props, \
+               properties(r) AS edge_props, properties(b) AS empty"],
+        );
+        assert_rows(
+            &reopened,
+            r#"[[{"type":"map","value":{"born":{"type":"int","value":"1980"},"name":{"type":"text","value":"Ann"}}},
+                 {"type":"map","value":{"active":{"type":"bool","value":true},"name":{"type":"text","value":"friend"}}},
+                 {"type":"map","value":{}}]]"#,
+        );
+        assert_eq!(reopened.sequence("rows"), basis + 1);
+    }
+}
+
+#[test]
+fn late_insert_map_return_failure_publishes_no_rows_or_creations_even_with_limit_zero() {
+    let db = TestDb::new("late-insert-return-map-failure");
+    let basis = db.create();
+    for verb in ["CREATE", "INSERT"] {
+        for suffix in ["", " LIMIT 0"] {
+            let statement = format!(
+                "UNWIND [2,0] AS x {verb} (n:Person {{born:x}})-[r:KNOWS {{born:x}}]->(n) \
+                 RETURN properties(n) AS props, properties(r) AS edge_props, \
+                 n{{.*,ratio:10/x}} AS projected{suffix}"
+            );
+            // The first occurrence's maps are valid. Failure in the later
+            // overlay must discard the whole write and every output frame.
+            db.command("write", &[&statement]).failure(3, "query");
+            let current = db.command("query", &["MATCH (n:Person) RETURN count(n) AS count"]);
+            assert_rows(&current, r#"[[{"type":"count","value":"0"}]]"#);
+            assert_eq!(current.sequence("rows"), basis);
+        }
+    }
+    let valid = db.command(
+        "write",
+        &["INSERT (n:Person {name:'kept',born:10}) RETURN n{.*} AS props"],
+    );
+    assert_rows(
+        &valid,
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"10"},"name":{"type":"text","value":"kept"}}}]]"#,
+    );
+    assert_eq!(valid.sequence("written"), basis + 1);
+}
+
+#[test]
 fn write_return_maps_use_post_statement_values_and_preserve_unmentioned_fields() {
     let db = TestDb::new("write-return-property-maps");
     db.create();

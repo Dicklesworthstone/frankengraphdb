@@ -429,7 +429,7 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })

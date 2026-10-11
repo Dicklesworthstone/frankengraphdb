@@ -510,6 +510,23 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    pub(crate) fn return_property_keys(
+        &self,
+        binding: crate::GraphInsertBinding,
+    ) -> Option<&[PropertyKeyId]> {
+        match binding {
+            crate::GraphInsertBinding::VertexProperties(vertex) => self
+                .vertices
+                .get(vertex)
+                .map(|vertex| vertex.properties.keys.as_slice()),
+            crate::GraphInsertBinding::EdgeProperties(edge) => self
+                .edges
+                .get(edge)
+                .map(|edge| edge.properties.keys.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
     /// The source callback is not called for standalone or source-free relational
@@ -535,13 +552,15 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
-        collect::execute(self, policy, None, source, allocate, checkpoint).map(|(batch, _)| batch)
+        collect::execute(self, policy, None, None, source, allocate, checkpoint)
+            .map(|(batch, _)| batch)
     }
 
     pub(crate) fn execute_returning<E, A, C>(
         &self,
         policy: GraphInsertPolicy,
         bindings: &[crate::insertion_query::GraphInsertBinding],
+        property_catalog: Option<&crate::ReverseSymbolCatalog>,
         source: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
@@ -549,7 +568,15 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> ReturningInsert<E, A, C> {
-        collect::execute(self, policy, Some(bindings), source, allocate, checkpoint)
+        collect::execute(
+            self,
+            policy,
+            Some(bindings),
+            property_catalog,
+            source,
+            allocate,
+            checkpoint,
+        )
     }
 
     /// Application definition, not a durable effect encoding or allocation log.
