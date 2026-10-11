@@ -8,7 +8,7 @@ use asupersync::{Budget, Cx};
 use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
-use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
+use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, PreparedReadMode, WireValue};
 use fgdb_protocol::client::{Client, ClientError};
 use fgdb_server::{
     DatabaseConfig, Server, ServerLimits, Symbols, attenuate_token, issue_token, issuer,
@@ -2980,6 +2980,7 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
         let cancelled = owner
             .execute_prepared_streaming(
                 cx,
+                PreparedReadMode::Buffered,
                 handle,
                 vec![("min".into(), WireValue::Int(1))],
                 |_| {},

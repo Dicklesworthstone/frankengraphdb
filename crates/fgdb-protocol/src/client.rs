@@ -11,7 +11,7 @@
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
     ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
-    Prepare, Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
+    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd,
     SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
@@ -417,6 +417,7 @@ impl Client {
         let outcome = self
             .execute_prepared_streaming(
                 cx,
+                PreparedReadMode::Buffered,
                 handle,
                 parameters,
                 |names| columns = names.to_vec(),
@@ -433,12 +434,19 @@ impl Client {
         })
     }
 
-    /// Rebind real typed operands and stream a prepared read. A callback
-    /// refusal sends QUERY_CANCEL and drains its terminal before returning,
-    /// so a later execution cannot consume the cancelled result's frames.
+    /// Rebind real typed operands and deliver a prepared read to callbacks.
+    /// `SourceStream` makes flow credit drive the native source, retaining one
+    /// pinned generation and execution allowance. It admits the same row and
+    /// aggregate profiles as `ExecuteMode::ReadStream`; unsupported profiles
+    /// refuse without falling back to buffered execution. `Buffered` retains
+    /// the broader native read profile and chunks its completed answer.
+    ///
+    /// A callback refusal sends QUERY_CANCEL and drains its terminal before
+    /// returning, so later execution cannot consume cancelled result frames.
     pub async fn execute_prepared_streaming(
         &mut self,
         cx: &Cx,
+        mode: PreparedReadMode,
         handle: PreparedHandle,
         mut parameters: Vec<(String, WireValue)>,
         on_columns: impl FnMut(&[String]),
@@ -453,7 +461,11 @@ impl Client {
                 cx,
                 FrameKind::ExecutePrepared,
                 StreamId::CONTROL,
-                &ExecutePrepared { handle, parameters },
+                &ExecutePrepared {
+                    handle,
+                    mode,
+                    parameters,
+                },
             )
             .await?;
         let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
@@ -1375,6 +1387,7 @@ mod tests {
                 let stopped = client
                     .execute_prepared_streaming(
                         &root,
+                        PreparedReadMode::SourceStream,
                         handle,
                         vec![("value".into(), WireValue::Int(1))],
                         |_| {},
@@ -1416,6 +1429,8 @@ mod tests {
                 );
                 let first = ExecutePrepared::decode(frames[4].payload()).unwrap();
                 let second = ExecutePrepared::decode(frames[6].payload()).unwrap();
+                assert_eq!(first.mode, PreparedReadMode::SourceStream);
+                assert_eq!(second.mode, PreparedReadMode::Buffered);
                 assert_eq!(first.parameters, [("value".into(), WireValue::Int(1))]);
                 assert_eq!(second.parameters, [("value".into(), WireValue::Int(20))]);
                 assert_eq!(frames[5].header().stream_id(), StreamId([5; 16]));
@@ -1484,6 +1499,7 @@ mod tests {
                 let error = client
                     .execute_prepared_streaming(
                         &root,
+                        PreparedReadMode::SourceStream,
                         handle,
                         vec![],
                         |_| {},

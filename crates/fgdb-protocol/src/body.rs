@@ -268,7 +268,7 @@ pub enum WireValue {
     List(Vec<WireValue>),
     /// Keys strictly ascending by UTF-8 bytes, as the engine stores a map.
     Map(Vec<(String, WireValue)>),
-    /// An aggregate count.
+    /// An aggregate count, or a top-level unsigned query operand.
     Count(u64),
     /// A wide aggregate integer (an exact `sum`).
     WideInt(i128),
@@ -928,10 +928,21 @@ pub struct Prepared {
     pub handle: PreparedHandle,
 }
 
+/// Select the physical delivery contract for a prepared read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedReadMode {
+    /// Execute the full admitted native profile before chunking its answer.
+    Buffered,
+    /// Pull an admitted native row or aggregate cursor under FGP flow credit.
+    /// Unsupported source profiles refuse without an eager retry.
+    SourceStream,
+}
+
 /// Rebind and execute at the current visible frontier under live authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutePrepared {
     pub handle: PreparedHandle,
+    pub mode: PreparedReadMode,
     pub parameters: Vec<(String, WireValue)>,
 }
 
@@ -1052,13 +1063,23 @@ body!(
     |s, out| {
         s.handle.check()?;
         out.array(&s.handle.0);
+        out.u8(match s.mode {
+            PreparedReadMode::Buffered => 0,
+            PreparedReadMode::SourceStream => 1,
+        });
         put_parameters(&mut out, &s.parameters)?;
     },
     |input| {
         let handle = PreparedHandle(input.array()?);
         handle.check()?;
+        let mode = match input.u8()? {
+            0 => PreparedReadMode::Buffered,
+            1 => PreparedReadMode::SourceStream,
+            _ => return Err(BodyError::Noncanonical),
+        };
         ExecutePrepared {
             handle,
+            mode,
             parameters: get_parameters(&mut input)?,
         }
     }
@@ -1684,8 +1705,32 @@ mod tests {
         assert_eq!(release.encode().unwrap(), [0x31; 16]);
         every_prefix_refuses::<ReleasePrepared>(&release.encode().unwrap());
 
+        for (mode, tag) in [
+            (PreparedReadMode::Buffered, 0),
+            (PreparedReadMode::SourceStream, 1),
+        ] {
+            let execution = ExecutePrepared {
+                handle,
+                mode,
+                parameters: vec![],
+            };
+            let mut expected = vec![0x31; 16];
+            expected.extend_from_slice(&[tag, 0, 0, 0, 0]);
+            let bytes = execution.encode().unwrap();
+            assert_eq!(bytes, expected);
+            assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
+            every_prefix_refuses::<ExecutePrepared>(&bytes);
+        }
+        let mut unknown_mode = vec![0x31; 16];
+        unknown_mode.extend_from_slice(&[2, 0, 0, 0, 0]);
+        assert_eq!(
+            ExecutePrepared::decode(&unknown_mode),
+            Err(BodyError::Noncanonical)
+        );
+
         let execution = ExecutePrepared {
             handle,
+            mode: PreparedReadMode::SourceStream,
             parameters: vec![
                 ("a".into(), sample_value()),
                 ("b".into(), WireValue::Int(9)),
@@ -1725,6 +1770,7 @@ mod tests {
         assert_eq!(
             ExecutePrepared {
                 handle,
+                mode: PreparedReadMode::Buffered,
                 parameters: duplicate
             }
             .encode(),
@@ -1732,6 +1778,7 @@ mod tests {
         );
         // Independent malformed bytes: two null arguments named "a".
         let mut duplicate_bytes = vec![0x31; 16];
+        duplicate_bytes.push(1);
         duplicate_bytes.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 1, b'a', 0]);
         assert_eq!(
             ExecutePrepared::decode(&duplicate_bytes),

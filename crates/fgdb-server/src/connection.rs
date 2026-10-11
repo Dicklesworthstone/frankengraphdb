@@ -20,7 +20,7 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
-    Prepared, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
+    Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
     WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
@@ -114,6 +114,7 @@ enum Statement {
     Batch(ExecuteBatch),
     Prepared {
         definition: Result<Arc<PreparedRead>, Refusal>,
+        mode: PreparedReadMode,
         parameters: Vec<(String, WireValue)>,
     },
 }
@@ -616,6 +617,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 };
                 let statement = Statement::Prepared {
                     definition: prepared_reads.get(statement.handle),
+                    mode: statement.mode,
                     parameters: statement.parameters,
                 };
                 match lane
@@ -986,11 +988,28 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
-        if let Statement::Native(statement) = &statement
-            && statement.mode == ExecuteMode::ReadStream
-        {
+        let source = match &statement {
+            Statement::Native(statement) if statement.mode == ExecuteMode::ReadStream => {
+                Some((
+                    source_stream::SourceStatement::Text(statement.statement.as_str()),
+                    statement.parameters.as_slice(),
+                ))
+            }
+            Statement::Prepared {
+                definition: Ok(definition),
+                mode: PreparedReadMode::SourceStream,
+                parameters,
+            } => Some((
+                source_stream::SourceStatement::Prepared(definition),
+                parameters.as_slice(),
+            )),
+            _ => None,
+        };
+        if let Some((source, parameters)) = source {
             let delivered = self
-                .source_read(cx, waiter, db, token, request, stream, binding, statement)
+                .source_read(
+                    cx, waiter, db, token, request, stream, binding, source, parameters,
+                )
                 .await;
             let delivered = match delivered {
                 Err(Stop::Recovery(error)) => {
@@ -1018,6 +1037,7 @@ impl Lane {
             Statement::Prepared {
                 definition,
                 parameters,
+                ..
             } => match definition {
                 Ok(definition) => read_prepared(cx, db, token, &definition, &parameters).await,
                 Err(refusal) => Err(refusal),

@@ -72,7 +72,7 @@ impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for &mut CachingResolv
 /// written. Only that final terminator is removed: `;;` or an interior `;`
 /// still reaches the grammar and refuses there. No other offset moves.
 /// The shared lexer of fgdb-one-lexer-one-dispatch-285i2 is its final home.
-fn without_terminator(text: &str) -> &str {
+pub(crate) fn without_terminator(text: &str) -> &str {
     text.trim_end().strip_suffix(';').unwrap_or(text)
 }
 

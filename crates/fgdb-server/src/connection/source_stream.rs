@@ -5,8 +5,13 @@
 //! same delivery path without rescanning or collecting the source graph.
 
 use super::*;
-use crate::execute::read_session;
+use crate::execute::{read_prepared_session, read_session};
 use fgdb_types::PurposeContexts;
+
+pub(super) enum SourceStatement<'a> {
+    Text(&'a str),
+    Prepared(&'a PreparedRead),
+}
 
 struct Chunks {
     columns: Option<Vec<String>>,
@@ -101,6 +106,7 @@ impl Chunks {
 }
 
 impl Lane {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn source_read(
         &mut self,
         cx: &Cx,
@@ -110,9 +116,10 @@ impl Lane {
         request: u64,
         stream: StreamId,
         binding: Binding,
-        statement: &Execute,
+        statement: SourceStatement<'_>,
+        parameters: &[(String, WireValue)],
     ) -> Result<(), Stop> {
-        let parameters = match crate::convert::parameters(&statement.parameters, None) {
+        let parameters = match crate::convert::parameters(parameters, None) {
             Ok(parameters) => parameters,
             Err(error) => {
                 return self
@@ -127,7 +134,23 @@ impl Lane {
                     .await;
             }
         };
-        let (mut session, _) = match read_session(cx, db, token).await {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let query = contexts.query();
+        let opened = match statement {
+            SourceStatement::Text(text) => match read_session(cx, db, token).await {
+                Ok((mut session, _)) => {
+                    self.send_generation = Some(session.generation());
+                    session
+                        .prepare(&query, text, &parameters)
+                        .map(|prepared| (session, prepared))
+                }
+                Err(error) => Err(error),
+            },
+            SourceStatement::Prepared(prepared) => {
+                read_prepared_session(cx, db, token, prepared).await
+            }
+        };
+        let (mut session, prepared) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 return self
@@ -136,9 +159,7 @@ impl Lane {
             }
         };
         self.send_generation = Some(session.generation());
-        let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query = contexts.query();
-        let mut source = match session.stream(&query, &statement.statement, &parameters) {
+        let mut source = match session.stream_prepared(&query, &prepared, &parameters) {
             Ok(source) => source,
             Err(error) => {
                 return self
@@ -388,6 +409,115 @@ mod tests {
             );
             drop(source);
             drop(session);
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_source_open_waits_for_credit_and_refuses_unsupported_profiles_before_scan() {
+        let ((), report) = run_async_under_lab(0x79a0_0514, |root| async move {
+            let (server, _, _) = served(&root, "prepared-zero-credit").await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let token = db
+                .authority
+                .issue_at(
+                    &Grant::read_only(
+                        crate::TRUNK,
+                        u64::MAX / 2,
+                        QueryLimits {
+                            max_nodes: 0,
+                            max_work: 100_000,
+                            max_rows: 4,
+                        },
+                    ),
+                    crate::unix_millis(),
+                )
+                .unwrap();
+            let query = contexts.query();
+            let parameters = GqlParameters::new();
+            for text in [
+                "MATCH (n) RETURN n",
+                "MATCH (n) RETURN count(*) AS n",
+            ] {
+                let definition = accepted(crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        statement: text.into(),
+                        parameters: vec![],
+                    },
+                )
+                .await);
+                let (mut session, prepared) =
+                    accepted(read_prepared_session(&root, db, &token, &definition).await);
+                let mut source =
+                    accepted(session.stream_prepared(&query, &prepared, &parameters));
+                let mut chunks = Chunks::new(source.columns().to_vec());
+                let mut pull = || source.next().map(|row| (row, source.exhausted()));
+                let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
+                assert!(metadata.rows.is_empty());
+                assert!(accepted(chunks.next(128, 0, 128, &mut pull)).is_none());
+                assert!(accepted(chunks.next(0, 1, 128, &mut pull)).is_none());
+                assert_eq!(
+                    chunks.next(128, 1, 128, &mut pull).err().unwrap().code,
+                    ErrorCode::Budget,
+                    "{text}"
+                );
+                assert!(!chunks.done());
+            }
+            let definition = accepted(crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    statement: "MATCH (n) RETURN 1 AS value".into(),
+                    parameters: vec![],
+                },
+            )
+            .await);
+            let (mut session, prepared) =
+                accepted(read_prepared_session(&root, db, &token, &definition).await);
+            assert_eq!(
+                session
+                    .stream_prepared(&query, &prepared, &parameters)
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Statement,
+                "profile refusal must precede the zero-node execution limit"
+            );
+            drop(session);
+            for text in [
+                "MATCH (n) RETURN id(n)",
+                "MATCH (n) RETURN elementId(n)",
+            ] {
+                assert_eq!(
+                    crate::execute::prepare_read(
+                        &root,
+                        db,
+                        &token,
+                        &Prepare {
+                            statement: text.into(),
+                            parameters: vec![],
+                        },
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                    ErrorCode::PermissionDenied
+                );
+            }
             server.join_database_workers(&root).await;
         });
         assert!(report.lab_test_passed(), "{report:?}");

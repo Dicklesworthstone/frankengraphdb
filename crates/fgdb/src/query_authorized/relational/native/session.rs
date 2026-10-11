@@ -61,8 +61,8 @@ pub struct AuthorizedReadSession<'a, Resolver, Clock> {
 /// binds new argument values and checks current credentials on each execution.
 pub struct AuthorizedPreparedRead {
     owner: Arc<()>,
-    selector: PreparedGraphBranchText,
-    native: PreparedNativeRead,
+    selector: Arc<PreparedGraphBranchText>,
+    native: Arc<PreparedNativeRead>,
 }
 
 impl core::fmt::Debug for AuthorizedPreparedRead {
@@ -292,8 +292,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             Ok((
                 AuthorizedPreparedRead {
                     owner,
-                    selector,
-                    native: native?,
+                    selector: Arc::new(selector),
+                    native: Arc::new(native?),
                 },
                 0,
             ))
@@ -431,6 +431,60 @@ impl<R, C> AuthorizedReadSession<'_, R, C> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Bind a retained host-prepared template to a fresh authorized read pin.
+    /// The immutable selector and native template are shared without parsing
+    /// or catalog callbacks. This privileged Database constructor is the only
+    /// attachment seam; the narrowed session cannot accept an arbitrary plan.
+    /// Its returned handle remains bound to this exact session.
+    ///
+    /// The host must validate that the template's catalog belongs to this
+    /// database, branch and trusted resolver, just as for raw
+    /// PreparedNativeRead::execute_authorized. Matching source text proves
+    /// selector/template coherence, not catalog identity. Server hosts must
+    /// additionally preserve their connection, authentication-generation and
+    /// recovery fences before using this constructor.
+    ///
+    /// Signature, namespace and read-rights checks precede template inspection.
+    /// Mismatched source refuses as WrongAuthority; identity-reading templates
+    /// retain the native authorization refusal. Current scope and live permits
+    /// still govern every execution. The fresh pin sees the current frontier,
+    /// never a generation retained when the template was prepared. A failed
+    /// constructor releases its new pin; the shared templates pin no graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+    ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
+        let mut session =
+            self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
+        let owner = Arc::clone(&session.owner);
+        let prepared = session.run(cx, |_, _, _, _, _, _| {
+            if crate::query::explain::without_terminator(selector.statement()) != native.statement() {
+                return Err(QueryError::Authorization(
+                    AuthorizationError::WrongAuthority,
+                ));
+            }
+            refuse_element_identity(selector.statement())?;
+            Ok((
+                AuthorizedPreparedRead {
+                    owner,
+                    selector,
+                    native,
+                },
+                0,
+            ))
+        })?;
+        Ok((session, prepared))
+    }
+
     /// Narrow a newly admitted immutable generation into an owned read-only
     /// session. The host, not a token holder, chooses all authority inputs.
     /// Signature/namespace/rights checks precede the read pin and any catalog

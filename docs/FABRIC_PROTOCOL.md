@@ -166,7 +166,7 @@ redacted from `Debug`.
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
 | PREPARED | nonzero connection-owned `handle [16]` |
-| EXECUTE_PREPARED | `handle [16]`, execution `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered, 1 native source stream), execution `parameters [(name text, value)]` (names strictly ascending) |
 | RELEASE_PREPARED / PREPARED_RELEASED | `handle [16]` |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
@@ -283,7 +283,21 @@ application output is admitted.
   existing authorized native executor with fresh scope, expiry and signed
   execution budgets at the current frontier (or the query's explicit historical
   selector). Branch selectors remain restricted to the selected trunk. Writes
-  refuse during preparation.
+  and capability-prohibited `id()`/`elementId()` refuse during preparation.
+
+  Execution mode is explicit: `PreparedReadMode::Buffered` (wire 0) uses the
+  broader eager native profile; `PreparedReadMode::SourceStream` (wire 1)
+  opens the same credit-driven row or aggregate source as native read-stream
+  execution below. Unsupported source profiles refuse without an eager retry.
+  Each source execution imports shared immutable catalog bindings into a fresh
+  authorized session and rebinds its operands without reparsing or re-resolving
+  names. Its new snapshot and cumulative permit last through every credit pause.
+  The retained template owns neither that snapshot nor execution arguments.
+
+  The execution body now requires this mode byte immediately after the handle.
+  Clients and servers using the earlier handle-plus-parameters body must be
+  updated together; an unknown mode is noncanonical. The callback client API
+  likewise takes the mode immediately after `cx`.
 
   A connection retains at most 64 templates and 4 MiB of original statement
   bytes; those are template-count/source-text ceilings, not an allocator-wide
@@ -319,6 +333,30 @@ application output is admitted.
   ).await?;
   client.release_prepared(cx, handle).await?;
   ```
+
+  To make prepared execution pull its native source under credit:
+
+  ```rust
+  let handle = client.prepare_read(
+      cx,
+      "MATCH (n:Person) WHERE n.age >= $min RETURN n AS id, n.age AS age",
+      vec![("min".into(), WireValue::Int(0))],
+  ).await?;
+  let outcome = client.execute_prepared_streaming(
+      cx,
+      PreparedReadMode::SourceStream,
+      handle,
+      vec![("min".into(), WireValue::Int(18))],
+      |columns| println!("{columns:?}"),
+      |row| { println!("{row:?}"); Ok(()) },
+  ).await?;
+  client.release_prepared(cx, handle).await?;
+  ```
+
+  A top-level `WireValue::Count(u64)` binds an exact `UInt64` operand, including
+  `FOR SYSTEM_TIME AS OF SEQ $cut`, `SKIP $skip` and `LIMIT $limit`.
+  `WireValue::Int(i64)` remains a signed operand. Counts inside lists/maps,
+  wide sums and exact averages are not graph scalar arguments.
 - **Native source streams.** `EXECUTE` mode 3 (`ExecuteMode::ReadStream`)
   opens one authorized native cursor and lets row and byte credit drive its
   source. The immutable generation, native source position and one signed
@@ -347,8 +385,10 @@ application output is admitted.
   active throughout accumulation.
   Unsupported projections, orders, compound facades and source shapes return
   a statement refusal before candidate reads. Ordinary `Read` and prepared
-  reads retain their broader eager execution semantics.
-  Using a row callback with those modes changes delivery, not source execution.
+  `Buffered` reads retain their broader eager execution semantics.
+  `execute_prepared` selects `Buffered`; callback execution selects its mode
+  explicitly. Only `ReadStream` and prepared `SourceStream` make transport
+  credit drive native source execution.
 
   The adapter retains at most a negotiated frame of rows and one pending row
   whose encoded size is known but awaits byte credit. A row exceeding the frame
@@ -575,14 +615,25 @@ and a subscription receiving its baseline, an insert delta, a ten-row batch
 through a four-row window, a progress-only delta, an exact retraction, its
 END on cancel, and a scoped token's refusal).
 
-Prepared-read regression sources additionally cover canonical handles and
-operand bodies, client reply binding, cancellation draining, live parameter
-rebinding, cache ownership, recovery fencing and authority narrowing:
+Prepared-read regression sources cover canonical handles/modes and operands,
+client reply binding, cancellation draining, live parameter rebinding, cache
+ownership, recovery fencing and authority narrowing. Native session laws cover
+shared templates with fresh pins, exact session ownership, every constructor
+expiry cut and selector/template coherence. Server and loopback sources cover
+zero-credit admission, row/aggregate allowances, writer progress during a pinned
+read, masked results and unsigned historical/branch/window rebinding:
 `crates/fgdb-protocol/src/{body,client}.rs`,
-`crates/fgdb-protocol/tests/protocol.rs`,
-`crates/fgdb-server/src/connection/prepared_tests.rs` and
-`crates/fgdb-server/tests/loopback.rs`. These newly added tests have not run in
-this session because the local compiler/process service is unavailable.
+`crates/fgdb/src/query_authorized/relational/native/session/failure_tests.rs`,
+`crates/fgdb-server/src/connection/{prepared_tests,source_stream}.rs` and
+`crates/fgdb-server/tests/loopback{,/source_stream}.rs`.
+
+On 2026-10-11, `cargo test -p fgdb-protocol --locked -j1` passed all 27
+protocol-core tests and core Clippy passed with warnings denied in the earlier
+workspace. Those commands did not enable the transport feature. The pinned
+foundation dependency had previously been OOM-killed before first-party engine
+diagnostics. The executor subsequently went offline; saved edits were recovered
+and later integration/tests were reviewed through GitHub. The final integrated
+tree, native/server/transport tests, formatting and full gates remain unverified.
 
 Subscription regressions in
 `crates/fgdb-server/src/execute/subscription/tests.rs` and

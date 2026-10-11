@@ -5,10 +5,11 @@ use super::*;
 use fgdb::PreparedNativeRead;
 use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::Prepare;
+use std::sync::Arc;
 
 pub(crate) struct PreparedRead {
-    selector: PreparedGraphBranchText,
-    native: PreparedNativeRead,
+    selector: Arc<PreparedGraphBranchText>,
+    native: Arc<PreparedNativeRead>,
     pub(crate) generation: Generation,
     pub(crate) source_bytes: usize,
 }
@@ -63,6 +64,7 @@ pub(crate) async fn prepare_read(
             .bind_parameters(&parameters)
             .map_err(branch_error)?;
         authorized_branch(&selected)?;
+        refuse_element_identity(selected.statement())?;
         let native = PreparedNativeRead::prepare(
             selected.statement(),
             selected.parameters(),
@@ -82,11 +84,42 @@ pub(crate) async fn prepare_read(
     generation.check().map_err(Refusal::from)?;
     let (selector, native) = definition?;
     Ok(PreparedRead {
-        selector,
-        native,
+        selector: Arc::new(selector),
+        native: Arc::new(native),
         generation,
         source_bytes: request.statement.len(),
     })
+}
+
+/// Reuse trusted catalog bindings in a fresh, capability-governed session.
+/// Only immutable templates are retained by the connection; every execution
+/// gets its own snapshot, owner identity and cumulative native read allowance.
+pub(crate) async fn read_prepared_session<'a>(
+    cx: &Cx,
+    db: &'a Served,
+    token: &CapabilityToken,
+    prepared: &PreparedRead,
+) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = contexts.query();
+    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    let generation = guard.generation();
+    let admitted = guard.authorized_prepared_read_session(
+        &query,
+        &db.authority,
+        token,
+        TRUNK,
+        db.symbols.clone(),
+        db.query_policy,
+        unix_millis as fn() -> u64,
+        Arc::clone(&prepared.selector),
+        Arc::clone(&prepared.native),
+    );
+    prepared.generation.check().map_err(Refusal::from)?;
+    let (native, template) = admitted.map_err(query_refusal)?;
+    Ok((ReadSession { native, generation }, template))
 }
 
 pub(crate) fn read_prepared<'a>(

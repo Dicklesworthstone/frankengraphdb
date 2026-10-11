@@ -4,7 +4,7 @@
 
 mod prepared;
 mod subscription;
-pub(crate) use prepared::{PreparedRead, prepare_read, read_prepared};
+pub(crate) use prepared::{PreparedRead, prepare_read, read_prepared, read_prepared_session};
 pub(crate) use subscription::{poll, subscribe};
 
 use crate::recovery::{Generation, Unavailable};
@@ -219,17 +219,38 @@ impl ReadSession<'_> {
         result.map_err(SessionError::Query)
     }
 
+    pub(crate) fn prepare(
+        &mut self,
+        cx: &fgdb_types::QueryCx,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<fgdb::AuthorizedPreparedRead, Refusal> {
+        let generation = self.generation.clone();
+        let _operation = generation.enter().map_err(Refusal::from)?;
+        let prepared = self.native.prepare(cx, text, parameters);
+        generation.check().map_err(Refusal::from)?;
+        prepared.map_err(query_refusal)
+    }
+
+    #[cfg(test)]
     pub(crate) fn stream<'q>(
         &'q mut self,
         cx: &'q fgdb_types::QueryCx,
         text: &str,
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<ReadCursor<'q>, Refusal> {
+        let prepared = self.prepare(cx, text, parameters)?;
+        self.stream_prepared(cx, &prepared, parameters)
+    }
+
+    pub(crate) fn stream_prepared<'q>(
+        &'q mut self,
+        cx: &'q fgdb_types::QueryCx,
+        prepared: &fgdb::AuthorizedPreparedRead,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<ReadCursor<'q>, Refusal> {
         let generation = self.generation.clone();
         let _operation = generation.enter().map_err(Refusal::from)?;
-        let prepared = self.native.prepare(cx, text, parameters);
-        generation.check().map_err(Refusal::from)?;
-        let prepared = prepared.map_err(query_refusal)?;
         // Classification selects exactly one existing physical compiler. A
         // refused aggregate profile never falls back to eager materialization.
         let cursor = match prepared.facade_class() {
@@ -237,11 +258,11 @@ impl ReadSession<'_> {
             | fgdb::NativeReadClass::TemporalAggregate
             | fgdb::NativeReadClass::PipelineAggregate => self
                 .native
-                .stream_aggregate_send(cx, &prepared, parameters)
+                .stream_aggregate_send(cx, prepared, parameters)
                 .map(ReadSource::Aggregate),
             _ => self
                 .native
-                .stream_send(cx, &prepared, parameters)
+                .stream_send(cx, prepared, parameters)
                 .map(ReadSource::Rows),
         };
         generation.check().map_err(Refusal::from)?;
