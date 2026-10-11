@@ -104,6 +104,9 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) input: BoundReadInput,
     pub(crate) keys: Vec<usize>,
     pub(crate) output_keys: Vec<usize>,
+    /// Each projected key's first RETURN alias, by evaluation key position,
+    /// where it differs from the input column's name (fgdb-cxjqp).
+    pub(crate) key_aliases: Vec<(usize, String)>,
     pub(crate) summaries: Vec<PipelineSummary>,
     pub(crate) output_distinct: bool,
     pub(crate) names: Vec<String>,

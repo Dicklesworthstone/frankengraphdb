@@ -394,6 +394,7 @@ impl PreparedGraphPipelineAggregateText {
         let mut names = Vec::new();
         let mut slots = Vec::new();
         let mut output_keys = Vec::new();
+        let mut key_aliases = Vec::new();
         let mut having_columns = Vec::new();
         let mut output_schema = Vec::new();
         for item in returned {
@@ -410,6 +411,11 @@ impl PreparedGraphPipelineAggregateText {
                     } else {
                         let index = output_keys.len();
                         output_keys.push(key);
+                        // The first alias names the key's cell, so the
+                        // physical key reports the result column's name.
+                        if inputs.is_computed(input) || schema[input].0.text != item.name.text {
+                            key_aliases.push((key, item.name.text.to_owned()));
+                        }
                         index
                     };
                     let slot = GraphAggregateTextSlot::GroupKey(public);
@@ -507,6 +513,7 @@ impl PreparedGraphPipelineAggregateText {
             input,
             keys,
             output_keys,
+            key_aliases,
             summaries,
             output_distinct,
             names,
@@ -541,6 +548,8 @@ impl PreparedGraphPipelineAggregateText {
                 .as_ref()
                 .map(|value| pipeline::page_value(value, &values)),
         )
+        .map_err(|kind| build(self.aggregate_at, kind))?
+        .with_key_aliases(&self.key_aliases)
         .map_err(|kind| build(self.aggregate_at, kind))?
         .with_key_output_columns(&self.output_keys)
         .map_err(|kind| build(self.aggregate_at, kind))?

@@ -224,6 +224,8 @@ impl PreparedGraphPipelineAggregateText {
                 .map(|value| pipeline::page_value(value, &values)),
         )
         .map_err(|kind| build(self.aggregate_at, kind))?
+        .with_key_aliases(&self.key_aliases)
+        .map_err(|kind| build(self.aggregate_at, kind))?
         .with_key_output_columns(&self.output_keys)
         .map_err(|kind| build(self.aggregate_at, kind))?
         .with_distinct_output(self.output_distinct)

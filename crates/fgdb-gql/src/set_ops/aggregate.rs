@@ -134,6 +134,14 @@ impl PreparedGraphSetAggregate {
         self.summary = self.summary.with_key_output_columns(columns)?;
         Ok(self)
     }
+    /// See [`PreparedGraphAggregate::with_key_aliases`].
+    pub fn with_key_aliases(
+        mut self,
+        aliases: &[(usize, String)],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_key_aliases(aliases)?;
+        Ok(self)
+    }
     pub fn with_aggregate_output_prefix(
         mut self,
         count: usize,

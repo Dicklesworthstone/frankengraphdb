@@ -815,6 +815,44 @@ impl PreparedGraphAggregate {
         Ok(self)
     }
 
+    /// Name grouping keys by the RETURN aliases that show them (fgdb-cxjqp).
+    /// Each pair renames evaluation key `at`; every other key keeps its input
+    /// column's name. Only names change, never which cells group, evaluate,
+    /// order or appear, and names are not part of the canonical bytes. So an
+    /// aliased key reports the name its result column has, as a hidden-free
+    /// graph aggregate already does. An alias may not repeat or name a summary.
+    pub fn with_key_aliases(
+        mut self,
+        aliases: &[(usize, String)],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        for (index, (at, alias)) in aliases.iter().enumerate() {
+            if *at >= self.keys.len() {
+                return Err(GraphAggregateBuildError::UnknownOutputColumn {
+                    column: GraphAggregateColumn::GroupKey(*at),
+                });
+            }
+            if !crate::algebra::valid_column_name(alias) {
+                return Err(GraphAggregateBuildError::InvalidName);
+            }
+            if aliases[..index]
+                .iter()
+                .any(|(earlier, name)| earlier == at || name == alias)
+                || self.aggregate_names.contains(alias)
+            {
+                return Err(GraphAggregateBuildError::DuplicateName);
+            }
+        }
+        for (at, alias) in aliases {
+            self.key_names[*at] = alias.clone();
+        }
+        if let Some(projection) = &mut self.key_output {
+            projection.names = (projection.columns.iter())
+                .map(|column| self.key_names[*column].clone())
+                .collect();
+        }
+        Ok(self)
+    }
+
     /// Select DISTINCT over the visible keys and aggregate prefix. Filtering
     /// and complete group ordering precede duplicate elimination; pagination
     /// follows it. Equal output tuples retain their first ranked group, even

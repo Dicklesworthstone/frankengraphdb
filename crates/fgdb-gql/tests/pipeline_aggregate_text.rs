@@ -907,6 +907,56 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
     assert_eq!(row.values()[1].as_integer(), Some(8));
 }
 
+/// fgdb-cxjqp: a projected key reports the name of its first RETURN alias,
+/// the name its result column has. Hosts that match the physical definition
+/// against the visible columns (the buffered spill and streamed aggregate
+/// layout checks) therefore accept an aliased or computed key. Only names
+/// change: the definition's bytes equal those of the unaliased form.
+#[test]
+fn a_projected_key_reports_the_name_of_its_return_alias() {
+    let relation = |text: &str| {
+        let template = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+        let bound = template
+            .bind_relation_parameters(&GqlParameters::new())
+            .unwrap();
+        (template, bound)
+    };
+    for (text, keys) in [
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x AS b, SUM(x) AS t GROUP BY x",
+            &["b"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x % 2 AS b, SUM(x) AS t GROUP BY x % 2",
+            &["b"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x, SUM(x) AS t GROUP BY x",
+            &["x"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x AS a, x AS b, SUM(x) AS t",
+            &["a"][..],
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS y RETURN y AS x, x AS y, COUNT(*) AS n GROUP BY x, y",
+            &["x", "y"][..],
+        ),
+    ] {
+        let (template, bound) = relation(text);
+        assert_eq!(bound.key_columns(), keys, "{text}");
+        assert_eq!(&template.columns()[..1], &keys[..1], "{text}");
+    }
+    assert_eq!(
+        relation("UNWIND [1, 2, 3] AS x RETURN x AS b, SUM(x) AS t GROUP BY x")
+            .1
+            .canonical_bytes(),
+        relation("UNWIND [1, 2, 3] AS x RETURN x, SUM(x) AS t GROUP BY x")
+            .1
+            .canonical_bytes()
+    );
+}
+
 #[test]
 fn existing_group_names_and_private_projection_names_cannot_be_captured() {
     // Swapping public output aliases must not reinterpret a previously valid
