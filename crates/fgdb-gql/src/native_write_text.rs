@@ -192,8 +192,8 @@ mod tests {
         let text = "CREATE (n); CREATE (m)";
         BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| None)
             .unwrap();
-        let bound = BoundNativeGraphWrite::bind(text, &arguments, RelationId(1), |_, _| None)
-            .unwrap();
+        let bound =
+            BoundNativeGraphWrite::bind(text, &arguments, RelationId(1), |_, _| None).unwrap();
         assert_eq!(bound.program().statements().len(), 2);
         assert_eq!(bound.input_records(), None);
     }
@@ -205,12 +205,9 @@ mod tests {
             GqlParameters::new(),
             GqlParameters::new().with_list("rows", Vec::new()).unwrap(),
         ] {
-            BoundNativeGraphWrite::probe_definition(
-                text,
-                &arguments,
-                RelationId(1),
-                |_, _| panic!("lexical UNWIND probing must not resolve row-dependent symbols"),
-            )
+            BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| {
+                panic!("lexical UNWIND probing must not resolve row-dependent symbols")
+            })
             .unwrap();
             // A successful probe is not a bound program: missing and empty
             // sources must still fail the ordinary all-rows binding boundary.
@@ -226,12 +223,9 @@ mod tests {
         let arguments = GqlParameters::new();
         for text in ["RETURN 1", "CREATE (n) RETURN n", "CREATE ("] {
             assert!(
-                BoundNativeGraphWrite::probe_definition(
-                    text,
-                    &arguments,
-                    RelationId(1),
-                    |_, _| None,
-                )
+                BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| {
+                    None
+                },)
                 .is_err(),
                 "{text}",
             );

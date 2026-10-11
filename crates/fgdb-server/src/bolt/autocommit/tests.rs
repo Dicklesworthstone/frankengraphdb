@@ -103,7 +103,10 @@ fn malformed_foreign_and_overflowing_bookmarks_are_not_ignored() {
         )];
         assert!(write_options(&options, "social").is_err(), "{bookmark}");
     }
-    for value in [Value::string("fgdb:social:1"), Value::List(vec![Value::Int(1)])] {
+    for value in [
+        Value::string("fgdb:social:1"),
+        Value::List(vec![Value::Int(1)]),
+    ] {
         assert!(write_options(&vec![("bookmarks".into(), value)], "social").is_err());
     }
 }
@@ -293,7 +296,11 @@ fn future_bookmarks_and_invalid_pull_identifiers_never_execute_the_queue() {
             .unwrap();
         let mut wire = io();
         assert_eq!(
-            client.pull(&root, &mut wire, -1, false).await.unwrap_err().code,
+            client
+                .pull(&root, &mut wire, -1, false)
+                .await
+                .unwrap_err()
+                .code,
             "Neo.TransientError.General.DatabaseUnavailable",
         );
         assert_eq!(frontier(&root, db).await, CommitSeq(0));

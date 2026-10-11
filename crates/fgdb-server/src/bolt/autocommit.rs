@@ -73,8 +73,12 @@ fn is_native_read(db: &Served, text: &str, parameters: &GqlParameters) -> bool {
     let Ok(selected) = selector.bind_parameters(parameters) else {
         return false;
     };
-    PreparedNativeRead::prepare(selected.statement(), selected.parameters(), db.symbols.clone())
-        .is_ok()
+    PreparedNativeRead::prepare(
+        selected.statement(),
+        selected.parameters(),
+        db.symbols.clone(),
+    )
+    .is_ok()
 }
 
 /// Admission probes native definitions, not expanded rows. The resolver
@@ -89,18 +93,15 @@ fn is_native_write(
     if is_native_read(db, text, parameters) {
         return false;
     }
-    BoundNativeGraphWrite::probe_definition(
-        text,
-        parameters,
-        db.write_relation,
-        |kind, name| {
-            db.symbols.resolve(kind, name).filter(|symbol| match symbol {
+    BoundNativeGraphWrite::probe_definition(text, parameters, db.write_relation, |kind, name| {
+        db.symbols
+            .resolve(kind, name)
+            .filter(|symbol| match symbol {
                 GraphSymbol::Label(label) => scope.allows_label(*label),
                 GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
                 GraphSymbol::Property(property) => scope.allows_property(*property),
             })
-        },
-    )
+    })
     .is_ok()
 }
 

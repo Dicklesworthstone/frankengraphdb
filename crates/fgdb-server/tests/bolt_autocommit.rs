@@ -222,7 +222,10 @@ async fn finish(
 async fn login(address: SocketAddr, grant: &Grant) -> Bolt {
     let (mut client, version) = Bolt::connect(address).await;
     assert_eq!(version, [0, 0, 0, 5]);
-    let hex: String = token(grant).iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = token(grant)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let ready = client
         .expect(
             0x01,
@@ -233,7 +236,10 @@ async fn login(address: SocketAddr, grant: &Grant) -> Bolt {
             SUCCESS,
         )
         .await;
-    assert_eq!(get(&ready, "fgdb_autocommit_writes"), Some(&Value::Bool(true)));
+    assert_eq!(
+        get(&ready, "fgdb_autocommit_writes"),
+        Some(&Value::Bool(true))
+    );
     client
 }
 
@@ -242,7 +248,11 @@ fn request(
     parameters: Vec<(String, Value)>,
     extra: Vec<(String, Value)>,
 ) -> Vec<Value> {
-    vec![Value::string(query), Value::Map(parameters), Value::Map(extra)]
+    vec![
+        Value::string(query),
+        Value::Map(parameters),
+        Value::Map(extra),
+    ]
 }
 
 fn consume() -> Vec<Value> {
@@ -268,7 +278,11 @@ fn bolt_document_upserts_publish_on_pull_and_discard_honors_the_returned_bookmar
         let document = Value::Map(vec![
             (
                 "members".into(),
-                Value::List(vec![person("Ann", 1), person(hostile, 10), person("Ann", 9)]),
+                Value::List(vec![
+                    person("Ann", 1),
+                    person(hostile, 10),
+                    person("Ann", 9),
+                ]),
             ),
             (
                 "ignored".into(),
@@ -518,7 +532,10 @@ fn bolt_write_admission_keeps_read_queries_with_write_spelling_on_the_read_path(
         let (_, address, shutdown, serving) = start_both(cx, "read-dispatch").await;
         let mut client = login(address, &grant(Rights::ReadWrite)).await;
         for (query, expected) in [
-            ("RETURN 'CREATE ()' AS text", vec![vec![Value::string("CREATE ()")]]),
+            (
+                "RETURN 'CREATE ()' AS text",
+                vec![vec![Value::string("CREATE ()")]],
+            ),
             (
                 "UNWIND [1,2] AS create RETURN create",
                 vec![vec![Value::Int(1)], vec![Value::Int(2)]],

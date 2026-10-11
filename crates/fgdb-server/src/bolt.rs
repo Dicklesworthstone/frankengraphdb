@@ -630,9 +630,7 @@ impl<'s> Connection<'s> {
             return self.schema_rows(extra, column, kind);
         }
         let arguments = statement_parameters(parameters)?;
-        if let Some(metadata) =
-            self.queue_autocommit_write(query, parameters, &arguments, extra)?
-        {
+        if let Some(metadata) = self.queue_autocommit_write(query, parameters, &arguments, extra)? {
             return Ok(metadata);
         }
         let parameters = arguments;
