@@ -639,6 +639,9 @@ struct Parser<'a> {
     /// An aggregate function's argument is being read. openCypher refuses a
     /// non-constant rand() there (Return6 [15], NonConstantExpression).
     aggregate_argument: bool,
+    /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
+    /// key belongs to the HAVING test, not to the key expression.
+    having_operand: bool,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -703,6 +706,7 @@ impl<'a> Parser<'a> {
             projected_sources: None,
             random_sites: 0,
             aggregate_argument: false,
+            having_operand: false,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
