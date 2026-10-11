@@ -474,6 +474,7 @@ coverage_of() {
     # then exits 1 with unregistered_marker for each appended FG-ZZZ-99 in
     # an isolated source copy. This covers marker resolution, not prose truth.
     docs/atomic_relation_writes.md|\
+    docs/bolt-autocommit-writes.md|\
     docs/bounded_gla_execution.md|\
     docs/graph_patterns.md|\
     docs/FABRIC_PROTOCOL.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;

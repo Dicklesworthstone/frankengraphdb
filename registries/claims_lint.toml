@@ -82,6 +82,7 @@ scan = [
   "docs/TRANSACTION_GQL.md",
   "docs/WORKSPACE_TOPOLOGY.md",
   "docs/atomic_relation_writes.md",
+  "docs/bolt-autocommit-writes.md",
   "docs/bounded_gla_execution.md",
   "docs/graph_patterns.md",
   "docs/FABRIC_PROTOCOL.md",
