@@ -205,8 +205,12 @@ fn typed_plan_bytes_keep_the_existing_transcript_and_cannot_alias_any() {
     assert_eq!(any.plan().edge_relations(), None);
     assert!(EdgeRelation::Any.matches(RelationId(0)));
     assert!(EdgeRelation::Any.matches(RelationId(u64::MAX)));
+    // openCypher and GQL `<-->` match either direction: the same plan as `--`.
+    assert_eq!(
+        prepare("MATCH (a)<-->(b) RETURN a,b").canonical_bytes(),
+        prepare("MATCH (a)--(b) RETURN a,b").canonical_bytes()
+    );
     for invalid in [
-        "MATCH (a)<-->(b) RETURN a",
         "MATCH (a)-[:]->(b) RETURN a",
         "MATCH (a)-[*]->(b) RETURN a",
         "MATCH (a)-[*1..]->(b) RETURN a",

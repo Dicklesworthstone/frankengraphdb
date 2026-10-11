@@ -2480,7 +2480,6 @@ mod tests {
             "",
             "MATCH",
             "MATCH () RETURN *",
-            "MATCH (a)<-[:R]->(b) RETURN a",
             "MATCH (a)-[:R]->(b) RETURN DISTINCT ALL a",
             "MATCH (a)-[:R]->(b) RETURN missing",
             "MATCH (a) RETURN a;",

@@ -638,7 +638,6 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_EDGES,
                     PatternLimitDimension::Edges,
                 )?;
-                let edge_at = self.current.at;
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 let (variable, relation, walk) = if self.take(b'[')? {
@@ -660,13 +659,8 @@ impl<'a> Parser<'a> {
                 };
                 let bound_at = self.current.at;
                 self.punct(b'-', "-")?;
+                // openCypher `<-->` matches either direction, as `--` does.
                 let outgoing = self.take(b'>')?;
-                if incoming && outgoing {
-                    return Err(error(
-                        edge_at,
-                        GraphPatternTextErrorKind::Expected("one edge direction"),
-                    ));
-                }
                 let walk = self.relationship_walk_bounds(walk)?;
                 if selected && walk.is_none() {
                     return Err(error(
@@ -684,12 +678,10 @@ impl<'a> Parser<'a> {
                     source: left,
                     relation,
                     destination: right,
-                    direction: if incoming {
-                        GlaDirection::Reverse
-                    } else if outgoing {
-                        GlaDirection::Forward
-                    } else {
-                        GlaDirection::Undirected
+                    direction: match (incoming, outgoing) {
+                        (true, false) => GlaDirection::Reverse,
+                        (false, true) => GlaDirection::Forward,
+                        _ => GlaDirection::Undirected,
                     },
                     walk,
                     search,

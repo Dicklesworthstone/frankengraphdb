@@ -402,7 +402,6 @@ mod tests {
             "-[:R]->{1,2",
             "-[:R*1..2]->{1,2}",
             "-[:R]->{1,2}{1,2}",
-            "<-[:R]->{1,2}",
         ] {
             let text = format!("MATCH (a){relationship}(b) RETURN b LIMIT 0");
             let mut resolutions = 0;
