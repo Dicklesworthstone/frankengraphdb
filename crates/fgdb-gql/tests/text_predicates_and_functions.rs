@@ -679,6 +679,13 @@ fn composite_literals_compare_three_valued() {
         // the literal's own postfix reads.
         ("[1] = [1] AND [2] <> [3]", truth(true)),
         ("NOT [1] = [2]", truth(true)),
+        // IN binds tighter than the comparison (Precedence3 [6]): the right
+        // operand is the membership, unless parentheses say otherwise.
+        ("[1, 2] = [3, 4] IN [true, false]", null.clone()),
+        ("[1, 2] = ([3, 4] IN [true, false])", null.clone()),
+        ("([1, 2] = [3, 4]) IN [true, false]", truth(true)),
+        ("[1, 2] = [1, 2] IN [false]", null.clone()),
+        ("[1] IN [[1]] = true", truth(true)),
         ("[1, 2][0] = 1", truth(true)),
         ("{k: 1}.k = 1", truth(true)),
         // A graph property inside the literal reads the matched row.

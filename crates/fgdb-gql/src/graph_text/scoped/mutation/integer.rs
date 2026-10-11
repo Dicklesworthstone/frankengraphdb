@@ -339,7 +339,17 @@ impl<'a> Parser<'a> {
             (value, false)
         } else {
             let negate = self.comparison()? == IntegerComparison::NotEqual;
-            let right = self.composite_value(columns, nesting, at)?;
+            let mut right = self.composite_value(columns, nesting, at)?;
+            // IN binds tighter than a comparison, as in the scalar grammar:
+            // `[1, 2] = [3, 4] IN l` compares with the membership
+            // (openCypher Precedence3 [6]).
+            while self.take_word("IN")? {
+                let list = self.composite_value(columns, nesting, at)?;
+                right = ReadValueTemplate::In {
+                    value: Box::new(right),
+                    list: Box::new(list),
+                };
+            }
             let value = ReadValueTemplate::Equal {
                 left: Box::new(left),
                 right: Box::new(right),
