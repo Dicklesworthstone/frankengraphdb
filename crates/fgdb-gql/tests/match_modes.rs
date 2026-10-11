@@ -437,3 +437,26 @@ fn unbounded_quantifiers_end_by_their_repetition_rule() {
         assert_eq!(calls, 0, "{refused}");
     }
 }
+
+/// openCypher's reversed variable-length interval (`*2..1`, `*1..0`, `*..0`;
+/// TCK Match5 [11]-[13]) matches nothing, unlike a zero-hop `*0..0`, which
+/// binds the destination to the source.
+#[test]
+fn a_reversed_cypher_interval_matches_nothing() {
+    let cycle = [
+        (EId(11), VId(1), R, VId(2)),
+        (EId(12), VId(2), R, VId(3)),
+        (EId(13), VId(3), R, VId(1)),
+    ];
+    for text in [
+        "MATCH (a:A)-[:R*2..1]->(b) RETURN b",
+        "MATCH (a:A)-[:R*1..0]->(b) RETURN b",
+        "MATCH (a:A)-[:R*..0]->(b) RETURN b",
+        "MATCH (a:A)-[r:R*2..1]->(b) RETURN b",
+    ] {
+        assert!(run(text, &cycle).is_empty(), "{text}");
+    }
+    let zero = run("MATCH (a:A)-[:R*0..0]->(b) RETURN b", &cycle);
+    assert_eq!(zero.len(), 1);
+    assert!(matches!(zero[0].get(0), Some(GraphValue::Vertex(VId(1)))));
+}

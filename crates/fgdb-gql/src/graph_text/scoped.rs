@@ -838,6 +838,10 @@ impl<'a> Parser<'a> {
         };
         let minimum = minimum.unwrap_or(1);
         match maximum {
+            // openCypher: a reversed interval matches nothing.
+            Some(maximum) if minimum > maximum && minimum <= crate::MAX_GRAPH_WALK_HOPS => {
+                Ok(crate::GraphWalkBounds::empty())
+            }
             Some(maximum) => crate::GraphWalkBounds::new(minimum, maximum),
             None => crate::GraphWalkBounds::unbounded(minimum),
         }

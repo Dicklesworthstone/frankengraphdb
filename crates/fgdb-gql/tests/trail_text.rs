@@ -199,7 +199,7 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
         "MATCH TRAIL (a) RETURN a",
         "MATCH TRAIL (a)-[:R]->(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1025]->(b) RETURN b",
-        "MATCH TRAIL (a)-[:R*3..2]->(b) RETURN b",
+        "MATCH TRAIL (a)-[:R]->{3,2}(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1]->(b)-[:R*1]->(c) RETURN c",
         "MATCH TRAIL (a)-[:R*1]->(b),(c) RETURN b",
         "MATCH ANY SHORTEST TRAIL (a)-[:R*1..3]->(b) RETURN b",

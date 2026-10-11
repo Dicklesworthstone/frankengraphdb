@@ -70,6 +70,17 @@ impl GraphWalkBounds {
     pub const fn is_bounded(self) -> bool {
         self.maximum != UNBOUNDED
     }
+    /// The interval of no walk: openCypher's reversed `*m..n` (m > n), which
+    /// matches nothing (TCK Match5 [11]-[13]). Its minimum exceeds its
+    /// maximum, so no depth is emitted and the source never expands. GQL's
+    /// reversed `{m,n}` is a syntax error and never builds this.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            minimum: 1,
+            maximum: 0,
+        }
+    }
     pub const fn new(minimum: u32, maximum: u32) -> Result<Self, GraphWalkBoundsError> {
         if minimum > maximum {
             return Err(GraphWalkBoundsError::Reversed);

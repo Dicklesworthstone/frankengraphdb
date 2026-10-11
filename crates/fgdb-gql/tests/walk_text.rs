@@ -137,8 +137,10 @@ fn unsafe_ambiguous_or_unending_quantifiers_refuse_before_any_catalog_call() {
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*]->(b) RETURN a",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*..]->(b) RETURN a",
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..]->(b) RETURN a",
-        "MATCH WALK (a)-[:R*2..1]->(b) RETURN a",
-        "MATCH WALK (a)-[:R*..0]->(b) RETURN a",
+        // A reversed GQL interval is a syntax error; Cypher's reversed `*m..n`
+        // is the empty interval (match_modes).
+        "MATCH WALK (a)-[:R]->{2,1}(b) RETURN a",
+        "MATCH WALK (a)-[:R]->{1,0}(b) RETURN a",
         "MATCH WALK (a)-[:R*-1..2]->(b) RETURN a",
         "MATCH WALK (a)-[:R*1...2]->(b) RETURN a",
         "MATCH WALK (a)-[:R*1,2]->(b) RETURN a",
