@@ -568,6 +568,35 @@ fn plain_delete_proposes_one_non_detaching_intent_per_element() {
     ));
 }
 
+/// A leading OPTIONAL MATCH binds as the unit relation left-joined with the
+/// pattern. No witness leaves one NULL row and no intent; a witness is
+/// written exactly as under MATCH.
+#[test]
+fn a_leading_optional_match_is_a_left_joined_write_source() {
+    let plan = prepare("OPTIONAL MATCH (a) WHERE a.p = 20 DELETE a");
+    assert!(plan.input_relation().is_some());
+    let none = run(&plan, &[VId(1)], &[], &props(), policy()).unwrap();
+    assert!(none.intents().is_empty());
+    let one = run(&plan, &[VId(1), VId(2)], &[], &props(), policy()).unwrap();
+    assert_eq!(
+        one.intents(),
+        &[GraphMutationIntent::Delete { vertex: VId(2) }]
+    );
+    // Only OPTIONAL scopes may follow an optional root.
+    assert!(
+        PreparedGraphMutationText::prepare("OPTIONAL MATCH (a) MATCH (b) DELETE b", R, symbols)
+            .is_err()
+    );
+    assert!(
+        PreparedGraphMutationText::prepare(
+            "OPTIONAL MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) SET b.p = 1",
+            R,
+            symbols
+        )
+        .is_ok()
+    );
+}
+
 #[test]
 fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses() {
     let text = "MATCH (a) WHERE a.p >= $n SET a.q=$n,a.text=$t,a:Updated REMOVE a.old";

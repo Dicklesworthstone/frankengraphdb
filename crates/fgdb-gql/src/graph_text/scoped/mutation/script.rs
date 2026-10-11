@@ -224,6 +224,24 @@ fn classify(
             ))
         };
     }
+    // A leading OPTIONAL MATCH is a write source only for SET, REMOVE and
+    // either DELETE: the mutation compiler left-joins it with the unit row.
+    if parser.is_word("OPTIONAL") {
+        parser.parse_mutation_match_prefix()?;
+        return if ["SET", "REMOVE", "DETACH", "DELETE"]
+            .iter()
+            .any(|word| parser.is_word(word))
+        {
+            Ok(Kind::Mutation)
+        } else {
+            Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "SET, REMOVE, DELETE or DETACH DELETE after a leading OPTIONAL MATCH",
+                ),
+            ))
+        };
+    }
     let matched = parser.is_word("MATCH");
     if matched {
         parser.parse_match_prefix()?;

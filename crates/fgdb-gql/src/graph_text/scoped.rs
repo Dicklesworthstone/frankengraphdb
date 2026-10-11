@@ -572,6 +572,31 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// A mutation may begin with OPTIONAL MATCH (openCypher Delete1, Set4,
+    /// Remove1): the unit relation left-joined with the pattern, so the
+    /// writes see its witnesses or exactly one row whose variables are all
+    /// NULL. Only OPTIONAL scopes may follow such a root; a required MATCH
+    /// would have to run against that NULL row, outside the one pattern.
+    pub(super) fn parse_mutation_match_prefix(&mut self) -> Result<bool, GraphPatternTextError> {
+        let optional = self.take_word("OPTIONAL")?;
+        self.parse_match_prefix()?;
+        if optional
+            && self
+                .syntax
+                .scopes
+                .iter()
+                .any(|scope| matches!(scope.kind, ScopeKind::Required))
+        {
+            return Err(error(
+                self.syntax.return_at,
+                GraphPatternTextErrorKind::Expected(
+                    "OPTIONAL MATCH after a leading OPTIONAL MATCH",
+                ),
+            ));
+        }
+        Ok(optional)
+    }
+
     fn starts_path_binding(&self) -> Result<bool, GraphPatternTextError> {
         Ok(matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))

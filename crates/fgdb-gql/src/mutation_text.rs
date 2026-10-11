@@ -80,6 +80,9 @@ pub struct PreparedGraphMutationText {
     pub(crate) selection: PreparedGraphText,
     pub(crate) relation: RelationId,
     pub(crate) actions: Vec<MutationActionTemplate>,
+    /// A leading OPTIONAL MATCH: binding left-joins the unit relation with
+    /// the selection, so an empty match still yields one all-NULL row.
+    pub(crate) optional_root: bool,
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

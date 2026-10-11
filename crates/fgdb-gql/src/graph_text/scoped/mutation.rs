@@ -444,7 +444,7 @@ impl PreparedGraphMutationText {
         returning: bool,
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        parser.parse_match_prefix()?;
+        let optional_root = parser.parse_mutation_match_prefix()?;
         let (mut projections, parsed_actions) = parser.mutation_actions()?;
         let returning = if returning {
             let scope = mutation_query::ReturnScope {
@@ -636,6 +636,7 @@ impl PreparedGraphMutationText {
                 selection,
                 relation,
                 actions,
+                optional_root,
             },
             returning,
         ))
@@ -686,7 +687,26 @@ impl PreparedGraphMutationText {
                 },
             });
         }
-        PreparedGraphMutation::prepare(selection, self.relation, actions)
+        if !self.optional_root {
+            return PreparedGraphMutation::prepare(selection, self.relation, actions)
+                .map_err(|error| build_error(at, error));
+        }
+        // The unit relation left-joined with the pattern: its witnesses, or
+        // one NULL-extended row. The left side is zero-width, so every action
+        // still addresses the pattern's own column.
+        let input = crate::PreparedGraphSet::from(selection);
+        let spec = crate::row_join::RowJoinSpec::cross(&[], input.column_types())
+            .map_err(|_| {
+                error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("a bounded OPTIONAL MATCH write source"),
+                )
+            })?
+            .with_kind(crate::row_join::RowJoinKind::Left);
+        let input = crate::PreparedGraphSet::singleton()
+            .join(input, spec)
+            .map_err(|error| build_error(at, GraphMutationBuildError::RelationalInput(error)))?;
+        PreparedGraphMutation::prepare_relation(input, self.relation, actions)
             .map_err(|error| build_error(at, error))
     }
 }

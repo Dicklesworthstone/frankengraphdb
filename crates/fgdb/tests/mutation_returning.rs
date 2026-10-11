@@ -350,6 +350,64 @@ fn plain_and_detaching_deletes_do_not_mix() {
     }
 }
 
+/// A leading OPTIONAL MATCH (openCypher Delete1, Remove1, Remove2, Set1) is
+/// the unit row left-joined with its pattern: no match leaves one all-NULL
+/// row, whose writes are ignored and whose RETURN reads NULL; a match writes
+/// as MATCH would. A required MATCH may not follow it.
+#[test]
+fn a_leading_optional_match_writes_its_witnesses_or_returns_one_null_row() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        for text in [
+            "OPTIONAL MATCH (a:Seen) SET a.p = 42 RETURN a",
+            "OPTIONAL MATCH (a:Seen) SET a:Item RETURN a",
+            "OPTIONAL MATCH (a:Seen) REMOVE a.p RETURN a",
+            "OPTIONAL MATCH (a:Seen) DELETE a RETURN a",
+            "OPTIONAL MATCH (:Seen)-[r:R]-() DELETE r RETURN r",
+        ] {
+            let (stats, result) = txn
+                .execute_graph_mutation_query_governed(&mut db, cx, &prepare(text), policy())
+                .expect(text);
+            assert_eq!(stats.effects, 0, "{text}");
+            assert_eq!(result.value, rows(vec![vec![null()]]), "{text}");
+        }
+        let (stats, result) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare("OPTIONAL MATCH (a:Item {p: 2}) SET a.q = 5 RETURN a.q AS q"),
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(stats.effects, 1);
+        assert_eq!(result.value, rows(vec![vec![int(5)]]));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) WHERE n.q IS NOT NULL RETURN n.p AS p, n.q AS q ORDER BY p"
+            ),
+            vec![vec![int(2), int(5)], vec![int(4), int(10)]]
+        );
+    });
+    let mut calls = 0;
+    let refused = PreparedGraphMutationQueryText::prepare(
+        "OPTIONAL MATCH (a:Seen) MATCH (b:Item) SET b.p = 1 RETURN b",
+        R,
+        |kind, name: &str| {
+            calls += 1;
+            symbols(kind, name)
+        },
+    );
+    assert!(refused.is_err());
+    assert_eq!(calls, 0);
+}
+
 /// Reads whose post-statement value the statement cannot know are refused
 /// at preparation, before any catalog callback runs.
 #[test]
