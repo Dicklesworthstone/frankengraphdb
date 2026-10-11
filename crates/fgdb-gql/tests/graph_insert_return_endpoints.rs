@@ -126,13 +126,13 @@ fn anonymous_created_endpoints_follow_physical_direction_without_graph_access() 
 #[test]
 fn endpoint_aliases_do_not_depend_on_which_equivalent_binding_was_seen_first() {
     let query = prepare("CREATE (a)-[e:R]->(a) RETURN startNode(e),endNode(e),a");
-    assert_eq!(query.columns(), &["startNode", "endNode", "a"]);
+    assert_eq!(query.columns(), &["startNode(e)", "endNode(e)", "a"]);
     assert_eq!(
         values(&run(&query).unwrap()),
         vec![vec![GraphValue::Vertex(VId(100)); 3]]
     );
     let query = prepare("CREATE (a)-[e:R]->(a) RETURN a,endNode(e),startNode(e)");
-    assert_eq!(query.columns(), &["a", "endNode", "startNode"]);
+    assert_eq!(query.columns(), &["a", "endNode(e)", "startNode(e)"]);
     assert_eq!(
         values(&run(&query).unwrap()),
         vec![vec![GraphValue::Vertex(VId(100)); 3]]

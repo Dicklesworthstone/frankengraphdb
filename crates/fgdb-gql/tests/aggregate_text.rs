@@ -269,8 +269,8 @@ fn grouping_argument_reuse_and_count_only_do_not_create_accidental_distinct_chil
     assert_eq!(empty.value.len(), 1);
     assert_eq!(empty.value[0].get(0).unwrap().as_count(), Some(0));
     for (text, expected_rows) in [
-        ("MATCH (n) RETURN COUNT(*) HAVING count > 1", 0),
-        ("MATCH (n) RETURN COUNT(*) ORDER BY count", 1),
+        ("MATCH (n) RETURN COUNT(*) AS count HAVING count > 1", 0),
+        ("MATCH (n) RETURN COUNT(*) AS count ORDER BY count", 1),
     ] {
         let result = prepare(text)
             .execute_governed(
@@ -910,16 +910,51 @@ fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
     }
 }
 
+/// fgdb-aw8lm (owner ruling 2026-09-30): an unaliased RETURN item is named by
+/// its exact source text, spacing and case included (TCK Return4 [7]
+/// `aVg(    n.aGe     )`), whatever its siblings; an alias is kept as
+/// written, and two equal names still refuse.
+#[test]
+fn unaliased_items_are_named_by_their_exact_source_text() {
+    for (text, columns) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN a.n, aVg(    b.n     ), COUNT(*)",
+            &["a.n", "aVg(    b.n     )", "COUNT(*)"][..],
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.n, sum(a.n) AS total",
+            &["b.n", "total"][..],
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN a, count(b)",
+            &["a", "count(b)"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+    }
+    for text in [
+        "MATCH (a)-[:R]->(b) RETURN a.n, a.n, count(*)",
+        "MATCH (a)-[:R]->(b) RETURN count(*), count(*)",
+        "MATCH (a)-[:R]->(b) RETURN a.n AS x, count(*) AS x",
+    ] {
+        assert!(
+            PreparedGraphAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 /// A projected function as a grouping key is that function, not its
 /// variable: `type(r)` grouped by the edge `r` (one group per edge), and
-/// `labels(n)` by the vertex. It is named by the function, as in the pattern
-/// facade, and repeats of one function share one key.
+/// `labels(n)` by the vertex. Unaliased, it is named by its source text, as
+/// in openCypher, and repeats of one function share one key.
 #[test]
 fn projected_function_keys_group_by_the_function_value_not_the_variable() {
     for (text, columns) in [
         (
             "MATCH (a)-[r:R]->(b) RETURN type(r), count(*)",
-            &["type", "count"][..],
+            &["type(r)", "count(*)"][..],
         ),
         (
             "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS c",
@@ -927,7 +962,7 @@ fn projected_function_keys_group_by_the_function_value_not_the_variable() {
         ),
         (
             "MATCH (n) RETURN labels(n), count(*)",
-            &["labels", "count"][..],
+            &["labels(n)", "count(*)"][..],
         ),
     ] {
         let prepared = PreparedGraphAggregateText::prepare(text, symbols).unwrap();

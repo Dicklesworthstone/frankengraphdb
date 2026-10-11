@@ -84,14 +84,13 @@ shared compiler schedules connected atoms. Truly disconnected definitions
 refuse instead of dropping a component or inserting a Cartesian product.
 
 RETURN selects named vertices and canonical vertex properties, with optional
-AS aliases. An unaliased vertex uses its variable name; an unaliased property
-uses the property name, and an unaliased aggregate its function name. A derived
-name that repeats another derived name falls back to each item's source text,
-as openCypher names columns (`RETURN a.title, b.title` yields `a.title` and
-`b.title`; `count(a), count(b)` yields `count(a)` and `count(b)`), and an
-unaliased computed RETURN value is named by its text (`size(a.title)`). An
-explicit alias is never renamed: two equal explicit aliases, or the same
-item twice, still refuse. WITH bindings keep requiring AS for computed values.
+AS aliases. An unaliased item is named by its exact source text, as openCypher
+names columns, and never by its siblings: `RETURN a` yields `a`,
+`RETURN a.title` yields `a.title`, `count(*)` yields `count(*)`, and
+`size(a.title)` yields `size(a.title)` (owner ruling on fgdb-aw8lm, 2026-09-30).
+An explicit alias is never renamed: two equal names, explicit or not, or the
+same item twice, still refuse. WITH bindings keep requiring AS for computed
+values.
 A column name is any nonempty text of at most 128 bytes without control
 characters, so delimited identifiers (`` AS `total due` ``) are column names;
 names that introduce variables (UNWIND and YIELD aliases) stay identifiers.

@@ -202,7 +202,7 @@ fn a_kept_binding_reads_its_properties_after_the_grouping() {
         symbols,
     )
     .unwrap();
-    assert_eq!(query.columns(), &["p", "q", "c"]);
+    assert_eq!(query.columns(), &["a.p", "a.q", "c"]);
     // The same answer as re-matching the kept vertex by identity.
     assert_eq!(
         execute("MATCH (a)-[e:R]->(b) WITH a, count(e) AS c MATCH (a) RETURN a.p, a.q, c").0,

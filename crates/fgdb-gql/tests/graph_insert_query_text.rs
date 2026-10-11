@@ -125,7 +125,7 @@ fn standalone_return_reads_exact_created_vertex_edge_and_frozen_properties() {
     );
     assert_eq!(batch.returning().rows.snapshot_records, 0);
     assert_eq!(batch.returning().rows.result_rows, 1);
-    assert_eq!(prepare("CREATE (n {p:1}) RETURN n.p").columns(), &["p"]);
+    assert_eq!(prepare("CREATE (n {p:1}) RETURN n.p").columns(), &["n.p"]);
 }
 
 #[test]

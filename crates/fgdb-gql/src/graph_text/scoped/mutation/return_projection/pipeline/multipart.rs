@@ -583,8 +583,6 @@ impl<'a> Parser<'a> {
                 outputs.push((variable, ReadValueTemplate::Column(width + column)));
             }
         } else {
-            // Source text of each derived output; see graph_projection_head.
-            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     outputs.len(),
@@ -659,42 +657,19 @@ impl<'a> Parser<'a> {
                     Ok(Some(width + column))
                 }, 0)?;
                 let end = self.current.at;
-                let (mut alias, source) = if self.take_word("AS")? {
-                    (self.name()?, None)
+                let alias = if self.take_word("AS")? {
+                    self.name()?
                 } else if with {
-                    let name = implicit
+                    implicit
                         .filter(|(_, boundary)| {
                             *boundary == end && matches!(value, ReadValueTemplate::Column(_))
                         })
                         .map(|(name, _)| name)
-                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?;
-                    (name, None)
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    let name = if *column < width {
-                        incoming[*column].0
-                    } else {
-                        let input = inputs[*column - width];
-                        input.property.unwrap_or(input.variable)
-                    };
-                    (name, Some(self.source_name(at, end)))
+                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?
                 } else {
-                    let source = self.source_name(at, end);
-                    (source, Some(source))
+                    // An unaliased RETURN item is named by its exact text.
+                    self.source_name(at, end)
                 };
-                if let Some(source) = source
-                    && let Some(previous) =
-                        outputs
-                            .iter()
-                            .position(|(name, _): &(Name<'a>, ReadValueTemplate)| {
-                                name.text == alias.text
-                            })
-                {
-                    if let Some(earlier) = sources[previous] {
-                        outputs[previous].0 = earlier;
-                    }
-                    alias = source;
-                }
-                sources.push(source);
                 if outputs
                     .iter()
                     .any(|(name, _): &(Name<'a>, ReadValueTemplate)| name.text == alias.text)

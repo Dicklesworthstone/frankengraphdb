@@ -72,13 +72,13 @@ pub(crate) struct PipelineSummary {
 /// Grouping keys and aggregate arguments accept the shared row expressions:
 /// typed parameters, literals, checked integer arithmetic, conditionals and
 /// lists. COUNT(*), COUNT, SUM/SUM_INT, AVG/AVG_INT, MIN, MAX, COLLECT and argument
-/// DISTINCT use the existing exact engine. AS is optional for direct aggregates;
-/// native default names are count/sum/avg/min/max/collect and must be unique.
+/// DISTINCT use the existing exact engine. An unaliased item is named by its
+/// source text, as in openCypher (`count(*)`, `n.p`); names must be unique.
 ///
 /// Without GROUP BY, distinct whole nonaggregate RETURN expressions are keys
 /// in first-use order. Explicit GROUP BY remains authoritative and may include
 /// hidden keys. It accepts input expressions and unshadowed RETURN key aliases;
-/// existing WITH aliases retain their meaning. Computed RETURN keys require AS.
+/// existing WITH aliases retain their meaning.
 /// Repeated key expressions share storage while retaining their output slots.
 /// HAVING is three-valued Boolean over returned aliases and
 /// literals/parameters; ORDER BY also uses returned aliases. Keys may be renamed

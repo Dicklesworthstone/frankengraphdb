@@ -388,20 +388,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The output name of an unaliased hidden read in a RETURN over a row of
-    /// `width`: `n.p` is named `p`, exactly as a graph RETURN names it.
-    pub(super) fn boundary_key(&self, width: usize, column: usize) -> Option<Name<'a>> {
-        let boundary = self.boundary_reads.as_ref()?;
-        if boundary.width != width {
-            return None;
-        }
-        boundary
-            .reads
-            .iter()
-            .find(|&&(_, _, read)| read == column)
-            .map(|&(_, key, _)| key)
-    }
-
     /// Resolve `alias.property` at the current token to its hidden boundary
     /// column when `width` is the boundary row, consuming all three tokens;
     /// `None` consumes nothing.
@@ -738,9 +724,6 @@ impl<'a> Parser<'a> {
                 next_schema.push((name, kind));
             }
         } else {
-            // Source text of each derived RETURN name: a repeated derived name
-            // (`a.title, b.title` over carried bindings) falls back to it.
-            let mut sources = Vec::<Option<Name<'a>>>::new();
             loop {
                 self.capacity(
                     projection.len(),
@@ -755,37 +738,20 @@ impl<'a> Parser<'a> {
                 };
                 let value = self.read_row_value(schema, 0)?;
                 let end = self.current.at;
-                let (mut alias, source) = if self.take_word("AS")? {
-                    (self.name()?, None)
+                let alias = if self.take_word("AS")? {
+                    self.name()?
                 } else if !returning {
-                    let name = implicit
+                    implicit
                         .filter(|(_, boundary)| {
                             *boundary == end && matches!(value, ReadValueTemplate::Column(_))
                         })
                         .map(|(name, _)| name)
-                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?;
-                    (name, None)
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    let name = self
-                        .boundary_key(schema.len(), *column)
-                        .unwrap_or(schema[*column].0);
-                    (name, returning.then(|| self.source_name(at, end)))
+                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?
                 } else {
-                    let source = self.source_name(at, end);
-                    (source, Some(source))
+                    // An unaliased RETURN item is named by its exact text,
+                    // as in openCypher: `n.p` over a carried `n` is "n.p".
+                    self.source_name(at, end)
                 };
-                if let Some(source) = source
-                    && let Some(previous) = next_schema
-                        .iter()
-                        .position(|(name, _)| name.text == alias.text)
-                {
-                    if let Some(earlier) = sources[previous] {
-                        next_schema[previous].0 = earlier;
-                        projection[previous].name = earlier.text.to_owned();
-                    }
-                    alias = source;
-                }
-                sources.push(source);
                 if next_schema.iter().any(|(name, _)| name.text == alias.text) {
                     return Err(error(
                         alias.at,

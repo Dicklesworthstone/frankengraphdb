@@ -853,7 +853,7 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
         "a UNION arm after a boundary RETURN"
     );
     for (text, columns) in [
-        ("MATCH (n) WITH n RETURN n.p", &["p"][..]),
+        ("MATCH (n) WITH n RETURN n.p", &["n.p"][..]),
         ("MATCH (n) WITH n AS m RETURN m, m.p AS q", &["m", "q"][..]),
         ("MATCH (n) WITH n ORDER BY n.p RETURN *", &["n"][..]),
     ] {
@@ -1189,9 +1189,9 @@ fn full_pipeline_shares_exact_resource_limits_and_all_interruption_points() {
 }
 
 /// fgdb-2t30i. After a WITH, `ORDER BY v.p` names the RETURN item that is
-/// exactly `v.p`, aliased or not. It is the same statement as ordering by that
-/// item's output name: identical template bytes and rows, including DESC and
-/// NULLS placement. Before, the key stopped at `v` and the statement refused
+/// exactly `v.p`, aliased or not (an unaliased one is the column "v.p"). With
+/// an alias it is the same statement as ordering by that alias: identical
+/// template bytes and rows, including DESC and NULLS placement. Before, the key stopped at `v` and the statement refused
 /// with Expected("end of compound statement").
 #[test]
 fn order_by_a_returned_property_after_with_is_its_output_column() {
@@ -1209,14 +1209,14 @@ fn order_by_a_returned_property_after_with_is_its_output_column() {
     };
     for (qualified, named, column, expected) in [
         (
-            "MATCH (n) WITH n RETURN n.p ORDER BY n.p",
-            "MATCH (n) WITH n RETURN n.p ORDER BY p",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY n.p",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY p",
             0,
             vec![Some(1), Some(2), Some(3), None, None],
         ),
         (
-            "MATCH (n) WITH n RETURN n.p ORDER BY n.p DESC NULLS FIRST",
-            "MATCH (n) WITH n RETURN n.p ORDER BY p DESC NULLS FIRST",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY n.p DESC NULLS FIRST",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY p DESC NULLS FIRST",
             0,
             vec![None, None, Some(3), Some(2), Some(1)],
         ),

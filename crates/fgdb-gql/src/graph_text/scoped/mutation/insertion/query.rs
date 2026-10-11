@@ -70,10 +70,6 @@ impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
             .map_input(parser, self.syntax, self.source, source, input)
     }
 
-    fn name(&self, column: usize) -> Name<'a> {
-        self.returning.bindings[column].1
-    }
-
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.returning
             .bindings
@@ -96,9 +92,7 @@ impl<'a> ParsedReturn<'a> {
             .position(|(old, _, _)| old.same(binding))
         {
             // A graph function and a bare variable can denote the same
-            // vertex. Reuse its value slot, but keep the current spelling for
-            // an implicit output alias (e.g. startNode(e), endNode(e) on a loop).
-            self.bindings[column].1 = name;
+            // vertex (startNode(e), endNode(e) on a loop): one value slot.
             return Ok(column);
         }
         if self.bindings.len() == MAX_PATTERN_VERTICES {

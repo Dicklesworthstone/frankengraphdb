@@ -78,8 +78,6 @@ pub(super) trait ReturnLeaves<'a> {
             GraphPatternTextErrorKind::Expected("map projection over a readable write binding"),
         ))
     }
-    /// The implicit output name of a binding column.
-    fn name(&self, column: usize) -> Name<'a>;
     /// Every binding column's type, in column order.
     fn types(&self) -> Vec<GraphSetColumnType>;
 }
@@ -107,7 +105,6 @@ impl<'a> Parser<'a> {
             output: Vec::new(),
             spellings: Vec::new(),
         };
-        let mut sources = Vec::<Option<Name<'a>>>::new();
         let mut functions = Vec::new();
         loop {
             self.capacity(
@@ -179,29 +176,13 @@ impl<'a> Parser<'a> {
             };
             let end = self.current.at;
             items.spellings.push(self.source_name(at, end));
-            let (mut name, derived) = if self.take_word("AS")? {
-                (self.name()?, None)
-            } else if aggregate.is_none()
-                && let ReadValueTemplate::Column(column) = &value
-            {
-                (leaves.name(*column), Some(self.source_name(at, end)))
+            // An unaliased item is named by its exact text, as in openCypher
+            // (`n.p`, `count(*)`, `labels(n)`).
+            let name = if self.take_word("AS")? {
+                self.name()?
             } else {
-                let derived = self.source_name(at, end);
-                (derived, Some(derived))
+                self.source_name(at, end)
             };
-            if let Some(derived) = derived
-                && let Some(previous) = items
-                    .output
-                    .iter()
-                    .position(|(old, _)| old.text == name.text)
-            {
-                if let Some(earlier) = sources[previous] {
-                    items.output[previous].0 = earlier;
-                    items.projection[previous].name = earlier.text.to_owned();
-                }
-                name = derived;
-            }
-            sources.push(derived);
             if items.output.iter().any(|(old, _)| old.text == name.text) {
                 return Err(error(
                     name.at,
@@ -349,9 +330,6 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         self.returning
             .map_input(parser, self.columns, self.scope, source, input)
     }
-    fn name(&self, column: usize) -> Name<'a> {
-        self.returning.bindings[column].1
-    }
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.returning.types()
     }
@@ -391,8 +369,6 @@ impl<'a> ParsedMutationReturn<'a> {
             .iter()
             .position(|(old, _, _)| old.same(binding))
         {
-            // Keep the current spelling for an implicit output alias.
-            self.bindings[column].1 = name;
             return Ok(column);
         }
         if self.bindings.len() == MAX_PATTERN_VERTICES {

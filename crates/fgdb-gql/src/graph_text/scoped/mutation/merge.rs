@@ -849,9 +849,6 @@ impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
         self.column(binding, alias, kind)
     }
 
-    fn name(&self, column: usize) -> Name<'a> {
-        self.bindings[column].1
-    }
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.bindings.iter().map(|(_, _, kind)| *kind).collect()
     }
@@ -876,7 +873,6 @@ impl<'a> ParsedVertexReturn<'a> {
                 _ => false,
             })
         {
-            self.bindings[column].1 = alias;
             return Ok(column);
         }
         if self.bindings.len() == MAX_PATTERN_VERTICES {

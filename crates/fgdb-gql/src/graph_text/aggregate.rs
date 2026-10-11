@@ -92,7 +92,8 @@ impl Summary {
 ///
 /// Arguments and grouping keys support the same literals, typed parameters,
 /// checked i64 arithmetic, ABS, NULLIF and COALESCE as computed read projections.
-/// A computed nonaggregate RETURN key requires AS. Repeated expressions share
+/// An unaliased RETURN item is named by its source text, as in openCypher
+/// (`n.p`, `count(*)`, `n.p + 1`). Repeated expressions share
 /// a projection slot; repeated aggregate calls share their existing summary.
 /// Plain column inputs retain the ordinary streaming path and transcript.
 /// Computed inputs use bounded materialization, not spill or numeric coercion.
@@ -179,19 +180,7 @@ impl PreparedGraphAggregateText {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            let mut item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
-            // A derived name that repeats an earlier name takes its source
-            // text (`count(a)`, `count(b)`); so does an earlier derived one.
-            if let Some(source) = item.source
-                && let Some(previous) = returned
-                    .iter_mut()
-                    .find(|previous: &&mut ReturnItem<'_>| previous.alias.text == item.alias.text)
-            {
-                if let Some(earlier) = previous.source {
-                    previous.alias = earlier;
-                }
-                item.alias = source;
-            }
+            let item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
             if returned
                 .iter()
                 .any(|previous: &ReturnItem<'_>| previous.alias.text == item.alias.text)
@@ -957,9 +946,6 @@ struct ReturnItem<'a> {
     function: Option<GraphAggregateFunction>,
     alias: Name<'a>,
     output: Option<ReadValueTemplate>,
-    /// The item's source text when its name was derived (no AS): its
-    /// openCypher name, used when a derived name would repeat another.
-    source: Option<Name<'a>>,
 }
 /// Shared first-use registry for explicit nonreturned aggregate calls. Its
 /// entries retain source offsets; aliases are assigned only after parsing.
@@ -1262,18 +1248,16 @@ impl<'a> Parser<'a> {
             ));
         }
         let end = self.current.at;
-        let (alias, source) = if self.take_word("AS")? {
-            (self.name()?, None)
+        let alias = if self.take_word("AS")? {
+            self.name()?
         } else {
-            let source = self.source_name(at, end);
-            (source, Some(source))
+            self.source_name(at, end)
         };
         Ok(ReturnItem {
             expression: None,
             function: None,
             alias,
             output: Some(value),
-            source,
         })
     }
 
@@ -1286,70 +1270,27 @@ impl<'a> Parser<'a> {
         if self.return_contains_aggregate()? {
             return self.aggregate_output_item(computed, output_leaves);
         }
-        let (expression, function, default_alias) = if self.starts_aggregate_call()? {
+        let (expression, function) = if self.starts_aggregate_call()? {
             let name = self.name()?;
             self.punct(b'(', "(")?;
             let (expression, function) = self.aggregate_call(name, computed)?;
-            let alias = match function {
-                GraphAggregateFunction::CountRows
-                | GraphAggregateFunction::Count
-                | GraphAggregateFunction::CountDistinct => "count",
-                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => "sum",
-                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    "avg"
-                }
-                GraphAggregateFunction::Min => "min",
-                GraphAggregateFunction::Max => "max",
-                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
-                    "collect"
-                }
-            };
-            (
-                expression,
-                Some(function),
-                Some(Name {
-                    text: alias,
-                    at: name.at,
-                }),
-            )
+            (expression, Some(function))
         } else {
-            let expression = self.aggregate_item_key(computed)?;
-            // A projected function is named by the function, as the pattern
-            // facade names `type(r)` `type`; a reference by its property or
-            // variable.
-            let function = expression.path.is_some_and(|path| {
-                !matches!(path, GraphPathFunction::Edge | GraphPathFunction::Value)
-            });
-            let default = if function {
-                let text = self.lexer.text[at..self.current.at]
-                    .split('(')
-                    .next()
-                    .unwrap_or("")
-                    .trim_end();
-                Some(Name { text, at })
-            } else {
-                expression
-                    .computed
-                    .is_none()
-                    .then_some(expression.property.unwrap_or(expression.variable))
-            };
-            (Some(expression), None, default)
+            (Some(self.aggregate_item_key(computed)?), None)
         };
         let end = self.current.at;
-        let (alias, source) = if self.take_word("AS")? {
-            (self.name()?, None)
+        // An unaliased item is named by its exact source text, as in
+        // openCypher (`count(*)`, `a.title`, `type(r)`).
+        let alias = if self.take_word("AS")? {
+            self.name()?
         } else {
-            // GQL derives a property's or function's name; openCypher names
-            // anything else by its text, which also resolves collisions.
-            let source = self.source_name(at, end);
-            (default_alias.unwrap_or(source), Some(source))
+            self.source_name(at, end)
         };
         Ok(ReturnItem {
             expression,
             function,
             alias,
             output: None,
-            source,
         })
     }
 

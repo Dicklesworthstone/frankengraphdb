@@ -1138,8 +1138,8 @@ fn opens_pipeline(tokens: &[TextToken<'_>], at: usize) -> bool {
 /// The terminal RETURN's plain property items, one entry per output column:
 /// `(var, name)` for an item that is exactly `var.name`, with or without an
 /// alias. An entry is kept only when the item's position names the column it
-/// should (its alias, else the default `name`), so a RETURN this cannot read
-/// item by item yields no entries rather than a misaligned one.
+/// should (its alias, else its source text `var.name`), so a RETURN this
+/// cannot read item by item yields no entries rather than a misaligned one.
 fn returned_properties(
     tokens: &[TextToken<'_>],
     columns: &[String],
@@ -1190,15 +1190,15 @@ fn returned_properties(
                 rest @ ..,
             ] => {
                 let named = match rest {
-                    [] => *p,
+                    [] => format!("{v}.{p}"),
                     [TextKind::Word(as_), TextKind::Word(alias)]
                         if as_.eq_ignore_ascii_case("AS") =>
                     {
-                        *alias
+                        (*alias).to_owned()
                     }
                     _ => return None,
                 };
-                (named == column.as_str()).then(|| ((*v).to_owned(), (*p).to_owned()))
+                (named == *column).then(|| ((*v).to_owned(), (*p).to_owned()))
             }
             _ => None,
         })
@@ -1677,7 +1677,8 @@ impl PreparedGraphSetText {
     /// Leaf syntax is the shared graph-pattern profile, including WALK,
     /// OPTIONAL and EXISTS. RETURN also accepts scalar literals, parameters and
     /// checked nullable i64 arithmetic (+ - * / %, signs, ABS, NULLIF, COALESCE).
-    /// Computed expressions require AS aliases. They evaluate before DISTINCT,
+    /// An unaliased RETURN item is named by its source text, as in openCypher
+    /// (`n.p`, `count(*)`, `n.p + 1`). Computed values evaluate before DISTINCT,
     /// ordering and pagination; all selected property inputs retain eager source
     /// error behavior. Constants preserve match multiplicity. Use this same
     /// entrypoint for a single MATCH with computed outputs or a compound set.

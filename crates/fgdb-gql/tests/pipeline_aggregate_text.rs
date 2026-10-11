@@ -635,8 +635,10 @@ fn whole_expression_grouping_supports_explicit_aliases_and_repeated_output_keys(
     assert!(run(&compact, &[], wide()).value.is_empty());
 }
 
+/// An unaliased summary is named by its source text (openCypher), and the
+/// ALL, `*` and extremum DISTINCT spellings are one plan.
 #[test]
-fn optional_summary_aliases_and_all_star_keep_native_default_names() {
+fn summary_names_are_source_text_and_all_star_spellings_share_one_plan() {
     let implicit = PreparedGraphPipelineAggregateText::prepare(
         "MATCH (n) WITH n.p AS x RETURN COUNT(ALL *),SUM(x+1),AVG(x+1),MIN(x+1),MAX(x+1),COLLECT(x+1)",
         symbols,
@@ -644,15 +646,26 @@ fn optional_summary_aliases_and_all_star_keep_native_default_names() {
     .unwrap();
     assert_eq!(
         implicit.columns(),
-        &["count", "sum", "avg", "min", "max", "collect"]
+        &[
+            "COUNT(ALL *)",
+            "SUM(x+1)",
+            "AVG(x+1)",
+            "MIN(x+1)",
+            "MAX(x+1)",
+            "COLLECT(x+1)"
+        ]
+    );
+    let plain = query(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(ALL *) AS count,SUM(x+1) AS sum, \
+         AVG(x+1) AS avg,MIN(x+1) AS min,MAX(x+1) AS max,COLLECT(x+1) AS collect",
     );
     let explicit = query(
         "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS count,SUM(ALL x+1) AS sum, \
          AVG(x+1) AS avg,MIN(DISTINCT x+1) AS min,MAX(DISTINCT x+1) AS max, \
          COLLECT(x+1) AS collect",
     );
+    assert_eq!(plain.canonical_bytes(), explicit.canonical_bytes());
     let bound = implicit.bind_parameters(&GqlParameters::new()).unwrap();
-    assert_eq!(bound.canonical_bytes(), explicit.canonical_bytes());
     let input = [1, 1, 3].map(CanonicalScalar::Int);
     let rows = run(&bound, &input, wide()).value;
     assert_eq!(rows.len(), 1);
@@ -799,7 +812,7 @@ fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by()
         symbols,
     )
     .unwrap();
-    assert_eq!(template.columns(), &["p", "c"]);
+    assert_eq!(template.columns(), &["n.p", "c"]);
     for text in [
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(__fg_boundary_0) AS c",
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c GROUP BY __fg_boundary_0",
@@ -890,7 +903,7 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
         ),
         (
             "MATCH (n) WITH n.p AS x RETURN SUM(x),COUNT(*)",
-            &["sum", "count"][..],
+            &["SUM(x)", "COUNT(*)"][..],
         ),
     ] {
         let prepared = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();

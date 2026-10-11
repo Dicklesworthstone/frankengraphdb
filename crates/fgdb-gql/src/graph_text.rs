@@ -269,26 +269,6 @@ struct Name<'a> {
     at: usize,
 }
 
-/// Whether a RETURN column's name is the GQL-derived name of a property
-/// reference: the property name itself, at the property's own position.
-fn derived_property_alias(column: &Column<'_>) -> bool {
-    column.property.is_some_and(|property| {
-        property.at == column.alias.at && property.text == column.alias.text
-    })
-}
-
-/// The full source text of a property reference, from its variable through
-/// its property name (`a.title`): openCypher's name for an unaliased column.
-fn reference_text<'a>(statement: &'a str, variable: Name<'a>, property: Name<'a>) -> Name<'a> {
-    let end = property.at + property.text.len();
-    match statement.get(variable.at..end) {
-        Some(text) if variable.at < property.at => Name {
-            text,
-            at: variable.at,
-        },
-        _ => property,
-    }
-}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind<'a> {
     Word(&'a str),
@@ -1303,6 +1283,7 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
+                let at = self.current.at;
                 let expression = self.name()?;
                 let start = expression.text.eq_ignore_ascii_case("startNode");
                 let (variable, property, path) = if self.is_punct(b'(')
@@ -1361,41 +1342,14 @@ impl<'a> Parser<'a> {
                     };
                     (expression, property, None)
                 };
-                let mut alias = if self.take_word("AS")? {
+                // An unaliased item is named by its exact source text, as in
+                // openCypher (`a.title`, `labels(p)`): never by its siblings.
+                let end = self.current.at;
+                let alias = if self.take_word("AS")? {
                     self.name()?
                 } else {
-                    let derived = property.unwrap_or(expression);
-                    // openCypher compatibility: an unaliased property reference
-                    // is named by its property (GQL's derived name), unless
-                    // that repeats an earlier derived name; then every such
-                    // column is named by its full text (`a.title`, `b.title`).
-                    match self.syntax.columns.iter().position(|column| {
-                        column.alias.text == derived.text && derived_property_alias(column)
-                    }) {
-                        Some(earlier) if property.is_some() => {
-                            let earlier = &mut self.syntax.columns[earlier];
-                            earlier.alias =
-                                reference_text(self.lexer.text, earlier.variable, earlier.alias);
-                            reference_text(self.lexer.text, expression, derived)
-                        }
-                        _ => derived,
-                    }
+                    self.source_name(at, end)
                 };
-                if property.is_some()
-                    && derived_property_alias(&Column {
-                        variable,
-                        property,
-                        path,
-                        alias,
-                    })
-                    && self.syntax.columns.iter().any(|column| {
-                        column.alias.text == alias.text && !derived_property_alias(column)
-                    })
-                {
-                    // A derived name that repeats an explicit alias takes its
-                    // full text instead of refusing.
-                    alias = reference_text(self.lexer.text, expression, alias);
-                }
                 if self
                     .syntax
                     .columns
@@ -2117,13 +2071,14 @@ mod tests {
 
     #[test]
     fn element_name_functions_prepare_and_lower_positively() {
-        for (function, expected_col) in [("labels(p)", "labels"), ("type(r)", "type")] {
+        // An unaliased call is named by its source text, as in openCypher.
+        for function in ["labels(p)", "type(r)"] {
             let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
             let template = PreparedGraphText::prepare(&text, symbols).expect("positive prepare");
             let pattern = template
                 .bind_parameters(&GqlParameters::new())
                 .expect("bind");
-            assert_eq!(pattern.columns(), &[expected_col]);
+            assert_eq!(pattern.columns(), &[function]);
             assert!(pattern.plan().reverse_catalog.is_some());
         }
     }
@@ -2748,9 +2703,9 @@ mod tests {
             query("match (a)-[:R]->(b) return b.n as value").columns(),
             &["value"]
         );
-        assert_eq!(query("MATCH (a)-[:R]->(b) RETURN b.n").columns(), &["n"]);
-        // A derived name that repeats another derived name takes its source
-        // text, as openCypher names it; an explicit alias is never renamed.
+        // An unaliased item is named by its source text, as openCypher names
+        // it, whatever its siblings; an explicit alias is never renamed.
+        assert_eq!(query("MATCH (a)-[:R]->(b) RETURN b.n").columns(), &["b.n"]);
         assert_eq!(
             query("MATCH (a)-[:R]->(b) RETURN a.n,b.n").columns(),
             &["a.n", "b.n"]

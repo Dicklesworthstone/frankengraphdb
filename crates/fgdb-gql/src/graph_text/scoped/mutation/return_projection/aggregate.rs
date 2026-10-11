@@ -43,18 +43,6 @@ struct Returned<'a> {
     value: ReturnedValue,
 }
 
-fn summary_name(function: GraphAggregateFunction) -> &'static str {
-    use GraphAggregateFunction as F;
-    match function {
-        F::CountRows | F::Count | F::CountDistinct => "count",
-        F::SumInt | F::SumIntDistinct => "sum",
-        F::AverageInt | F::AverageIntDistinct => "avg",
-        F::Min => "min",
-        F::Max => "max",
-        F::Collect | F::CollectDistinct => "collect",
-    }
-}
-
 fn declaration(summary: &PipelineSummary) -> GraphAggregate<'_> {
     use GraphAggregateFunction as F;
     match (summary.function, summary.column) {
@@ -244,9 +232,6 @@ impl PreparedGraphPipelineAggregateText {
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();
         let mut inputs = inputs::Inputs::new(schema.len());
-        // Source text of each derived RETURN name (no AS): a repeated derived
-        // name falls back to it, as `count(a), count(b)` does in openCypher.
-        let mut sources = Vec::new();
         loop {
             parser.capacity(
                 returned.len(),
@@ -254,59 +239,28 @@ impl PreparedGraphPipelineAggregateText {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = parser.current.at;
-            let (mut name, value, source) = if parser.starts_pipeline_summary()? {
+            let value = if parser.starts_pipeline_summary()? {
                 let (function, column) = parser.pipeline_summary(&schema, &mut inputs)?;
-                let end = parser.current.at;
-                let (name, source) = if parser.take_word("AS")? {
-                    (parser.name()?, None)
-                } else {
-                    let name = Name {
-                        text: summary_name(function),
-                        at,
-                    };
-                    (name, Some(parser.source_name(at, end)))
-                };
-                let index = summaries.len();
                 summaries.push(PipelineSummary {
-                    name: name.text.to_owned(),
+                    name: String::new(),
                     function,
                     column,
                 });
-                (name, ReturnedValue::Summary(index), source)
+                ReturnedValue::Summary(summaries.len() - 1)
             } else {
-                let column = inputs.read(&mut parser, &schema)?;
-                let end = parser.current.at;
-                let (name, source) = if parser.take_word("AS")? {
-                    (parser.name()?, None)
-                } else if inputs.is_computed(column) {
-                    let source = parser.source_name(at, end);
-                    (source, Some(source))
-                } else {
-                    // A carried `n.p` key is named `p`, never its private name.
-                    let name = parser
-                        .boundary_key(schema.len(), column)
-                        .unwrap_or(schema[column].0);
-                    (name, Some(parser.source_name(at, end)))
-                };
-                (name, ReturnedValue::Key(column), source)
+                ReturnedValue::Key(inputs.read(&mut parser, &schema)?)
             };
-            if let Some(source) = source
-                && let Some(previous) = returned
-                    .iter()
-                    .position(|previous| previous.name.text == name.text)
-            {
-                if let Some(earlier) = sources[previous] {
-                    returned[previous].name = earlier;
-                    if let ReturnedValue::Summary(index) = returned[previous].value {
-                        summaries[index].name = earlier.text.to_owned();
-                    }
-                }
-                name = source;
-                if let ReturnedValue::Summary(index) = value {
-                    summaries[index].name = source.text.to_owned();
-                }
+            let end = parser.current.at;
+            // An unaliased item is named by its exact text, as in openCypher
+            // (`count(*)`, and `n.p` for a carried `n`, never a private name).
+            let name = if parser.take_word("AS")? {
+                parser.name()?
+            } else {
+                parser.source_name(at, end)
+            };
+            if let ReturnedValue::Summary(index) = value {
+                summaries[index].name = name.text.to_owned();
             }
-            sources.push(source);
             if returned
                 .iter()
                 .any(|previous| previous.name.text == name.text)

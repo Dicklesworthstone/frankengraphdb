@@ -381,13 +381,13 @@ fn a_return_reads_a_correlated_vertex_properties_without_a_with() {
     let named = run("CALL t.scores() YIELD vertex AS n, score MATCH (n) \
          RETURN n.p AS p, score ORDER BY score");
     assert_eq!(column(&named, 0), [20, 40, 30, 50].map(int));
-    // Unaliased, `n.p` is named `p`, exactly as a MATCH-first RETURN names it.
+    // Unaliased, `n.p` is named by its text, as a MATCH-first RETURN names it.
     let query = PreparedGraphSetText::prepare(
         "CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN n.p, score ORDER BY score DESC",
         symbols,
     )
     .unwrap();
-    assert_eq!(query.columns(), ["p", "score"]);
+    assert_eq!(query.columns(), ["n.p", "score"]);
     // The correlated column is carried as the vertex itself, and the hidden
     // property read stays out of RETURN *.
     let star = run("CALL t.scores() YIELD vertex AS n, score MATCH (n) RETURN * ORDER BY score");
