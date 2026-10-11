@@ -29,7 +29,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn one_parameter_table_spans_merge_key_and_both_action_branches() {
     let text = "MERGE (n:Person {p:$p}) ON MATCH SET n.q=$matched,n:Seen ON CREATE SET n.q=$created,n:Created";
     let calls = Cell::new(0);
-    let template = PreparedGraphVertexUpsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphVertexUpsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })

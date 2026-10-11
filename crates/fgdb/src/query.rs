@@ -293,7 +293,7 @@ fn prepare_mutation_return(
 fn prepare_vertex_upsert_return(
     text: &str,
     params: &GqlParameters,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    resolver: impl GraphSymbolResolver,
     relation: RelationId,
 ) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
     let declarations = write_return_declarations(params);
@@ -455,13 +455,8 @@ impl<V: Vfs + Clone> Database<V> {
         if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::VertexUpsertText)?
         {
-            let query = prepare_vertex_upsert_return(
-                text,
-                params,
-                |kind, name| resolver.resolve_symbol(kind, name),
-                relation,
-            )
-            .map_err(QueryWriteError::VertexUpsertText)?;
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
             let (_, _, rows, _) = self
                 .execute_graph_vertex_upsert_query_autocommit_governed(
@@ -560,13 +555,8 @@ impl WriteTxn {
         if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::VertexUpsertText)?
         {
-            let query = prepare_vertex_upsert_return(
-                text,
-                params,
-                |kind, name| resolver.resolve_symbol(kind, name),
-                relation,
-            )
-            .map_err(QueryWriteError::VertexUpsertText)?;
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
             let (_, _, rows) = self
                 .execute_graph_vertex_upsert_query_governed(

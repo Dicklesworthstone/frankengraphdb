@@ -150,7 +150,7 @@ fn malformed_expression_scopes_and_declared_types_refuse_before_catalog_callback
             text,
             R,
             &[("s", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
-            |kind, name| {
+            |kind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             },

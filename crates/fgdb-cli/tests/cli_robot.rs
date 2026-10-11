@@ -3224,6 +3224,40 @@ fn late_insert_map_return_failure_publishes_no_rows_or_creations_even_with_limit
 }
 
 #[test]
+fn merge_return_maps_cover_both_branches_and_keep_late_failures_atomic() {
+    let db = TestDb::new("merge-return-property-maps");
+    let basis = db.create();
+    let statement = "MERGE (n:Person {name:'Ann'}) ON CREATE SET n.born=1 \
+        ON MATCH SET n.born=n.born+1 SET n.born=n.born+10 \
+        RETURN properties(n) AS props,keys(n) AS names,n{.*,born:n.born+100} AS view";
+    let expected = [
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"11"},"name":{"type":"text","value":"Ann"}}},
+             {"type":"list","value":[{"type":"text","value":"born"},{"type":"text","value":"name"}]},
+             {"type":"map","value":{"born":{"type":"int","value":"111"},"name":{"type":"text","value":"Ann"}}}]]"#,
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"22"},"name":{"type":"text","value":"Ann"}}},
+             {"type":"list","value":[{"type":"text","value":"born"},{"type":"text","value":"name"}]},
+             {"type":"map","value":{"born":{"type":"int","value":"122"},"name":{"type":"text","value":"Ann"}}}]]"#,
+    ];
+    for (index, expected) in expected.into_iter().enumerate() {
+        let result = db.command("write", &[statement]);
+        assert_rows(&result, expected);
+        assert_eq!(result.sequence("written"), basis + index as u64 + 1);
+    }
+    for statement in [
+        "MERGE (n:Person {name:'Lost'}) ON CREATE SET n.born=99 RETURN n{.*,failed:1/0} AS props LIMIT 0",
+        "MERGE (n:Person {name:'Ann'}) ON MATCH SET n.born=99 RETURN n{.*,failed:1/0} AS props",
+    ] {
+        db.command("write", &[statement]).failure(3, "query");
+        let persisted = db.command("query", &["MATCH (n:Person) RETURN properties(n) AS props"]);
+        assert_rows(
+            &persisted,
+            r#"[[{"type":"map","value":{"born":{"type":"int","value":"22"},"name":{"type":"text","value":"Ann"}}}]]"#,
+        );
+        assert_eq!(persisted.sequence("rows"), basis + 2);
+    }
+}
+
+#[test]
 fn write_return_maps_use_post_statement_values_and_preserve_unmentioned_fields() {
     let db = TestDb::new("write-return-property-maps");
     db.create();

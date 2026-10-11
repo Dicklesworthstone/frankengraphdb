@@ -1709,7 +1709,13 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             .await
             .unwrap();
         owner.select(cx, "social").await.unwrap();
-        let statement = "MERGE (p:Person {name:'Ann'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = p.age + 1 SET p.age = p.age + 10 RETURN p, p.age AS age";
+        let properties = |age| {
+            WireValue::Map(vec![
+                ("age".into(), WireValue::Int(age)),
+                ("name".into(), text("Ann")),
+            ])
+        };
+        let statement = "MERGE (p:Person {name:'Ann'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = p.age + 1 SET p.age = p.age + 10 RETURN p, p.age AS age, properties(p) AS props, keys(p) AS names, p{.*,age:p.age+100} AS projected";
         let first = owner
             .execute(cx, ExecuteMode::Write, statement, vec![])
             .await
@@ -1717,7 +1723,16 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
         assert_eq!(first.rows.len(), 1);
         let vertex = first.rows[0][0].clone();
         assert!(matches!(vertex, WireValue::Vertex(_)));
-        assert_eq!(first.rows[0], [vertex.clone(), WireValue::Int(11)]);
+        assert_eq!(
+            first.rows[0],
+            [
+                vertex.clone(),
+                WireValue::Int(11),
+                properties(11),
+                WireValue::List(vec![text("age"), text("name")]),
+                properties(111)
+            ]
+        );
         assert!(matches!(
             first.outcome,
             Outcome::WriteCommitted {
@@ -1729,7 +1744,16 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             .execute(cx, ExecuteMode::Write, statement, vec![])
             .await
             .unwrap();
-        assert_eq!(second.rows, [vec![vertex.clone(), WireValue::Int(22)]]);
+        assert_eq!(
+            second.rows,
+            [vec![
+                vertex.clone(),
+                WireValue::Int(22),
+                properties(22),
+                WireValue::List(vec![text("age"), text("name")]),
+                properties(122)
+            ]]
+        );
         assert!(matches!(
             second.outcome,
             Outcome::WriteCommitted { seq: 2, .. }
@@ -1738,12 +1762,15 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             .execute(
                 cx,
                 ExecuteMode::Write,
-                "MERGE (p:Person {name:'Ann'}) RETURN p, p.age AS age",
+                "MERGE (p:Person {name:'Ann'}) RETURN p, p.age AS age, properties(p) AS props",
                 vec![],
             )
             .await
             .unwrap();
-        assert_eq!(matched.rows, [vec![vertex, WireValue::Int(22)]]);
+        assert_eq!(
+            matched.rows,
+            [vec![vertex, WireValue::Int(22), properties(22)]]
+        );
         assert!(matches!(
             matched.outcome,
             Outcome::ReadClosed { seq: 2, .. }
@@ -1752,7 +1779,7 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             .execute(
                 cx,
                 ExecuteMode::Write,
-                "MERGE (p:Person {name:'Lost'}) ON CREATE SET p.age = 99 RETURN 1 / 0",
+                "MERGE (p:Person {name:'Lost'}) ON CREATE SET p.age = 99 RETURN p{.*,failed:1/0} AS props LIMIT 0",
                 vec![],
             )
             .await
@@ -1769,12 +1796,20 @@ fn merge_returning_preserves_the_selected_vertex_and_atomic_failure_over_fgp() {
             .execute(
                 cx,
                 ExecuteMode::Write,
-                "MERGE (p:Person {name:'Ann'}) RETURN p.name AS name, p.age AS age",
+                "MERGE (p:Person {name:'Ann'}) RETURN p.name AS name, p.age AS age, properties(p) AS props, keys(p) AS names",
                 vec![],
             )
             .await
             .unwrap();
-        assert_eq!(answer.rows, [vec![text("Ann"), WireValue::Null]]);
+        assert_eq!(
+            answer.rows,
+            [vec![
+                text("Ann"),
+                WireValue::Null,
+                WireValue::Map(vec![("name".into(), text("Ann"))]),
+                WireValue::List(vec![text("name")])
+            ]]
+        );
         let refused = scoped
             .execute(
                 cx,

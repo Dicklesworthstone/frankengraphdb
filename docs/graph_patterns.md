@@ -349,7 +349,33 @@ may remain spent. Names and map payloads use the existing cumulative work and
 scratch limits. Low-level callers can supply the catalog with
 `PreparedGraphInsertQuery::prepare_with_property_catalog`.
 
-Complete graph maps in `MERGE RETURN` remain outside these write slices.
+Single-vertex `MERGE ... RETURN` supports the same maps, keys, projections and
+terminal aggregates after the selected `ON CREATE`/`ON MATCH` clause and every
+trailing `SET`:
+
+```text
+MERGE (person:Person {name:'Ada'})
+ON CREATE SET person.visits=1
+ON MATCH SET person.visits=person.visits+1
+RETURN person{.*} AS person
+```
+
+The host borrows the selected vertex's historical fields and applies the
+prepared transaction effects, then invokes the same governed map collector.
+It enumerates actual effective fields, including those outside the MERGE key
+and assignments, without copying the complete unmasked vertex or repeating
+the match. Both basis fields and staged edits are masked before naming or
+payload admission. An existing full-element read dependency covers the
+property domain, including an empty map and keys added by a concurrent writer;
+this keeps the transaction's conservative conflict-observation contract.
+All map construction and final projection remain inside the original rollback
+workspace and, for authorized execution, its one ReadWrite permit. A missing
+visible name, invalid map, cancellation, quota refusal or late RETURN failure
+restores the complete MERGE statement while retaining earlier staged work.
+Low-level callers provide names through
+`PreparedGraphVertexUpsertQuery::prepare_with_property_catalog`; their
+`Properties` input binding must contain a canonical map of scalar fields.
+Relationship-pattern and multi-row `MERGE RETURN` remain outside this map slice.
 Map-projection syntax on a generic imported `UNWIND` MAP row also remains
 outside the insertion slice; ordinary `properties(row)` and `keys(row)` use
 the existing row-value evaluator.
@@ -362,10 +388,11 @@ Low-level callers need the map-aware element accessor APIs;
 an omitted map source is a typed refusal rather than an empty map.
 
 Regression sources are `crates/fgdb/tests/graph_property_maps.rs`,
-`crates/fgdb-gql/tests/insertion_property_maps.rs`, the native GQL projection
-laws, and the CLI and FGP loopback suites. These additions have
-source review and pinned formatter checks here; compilation and Rust test
-execution remain **unverified** in this workspace.
+`crates/fgdb-gql/tests/insertion_property_maps.rs`,
+`crates/fgdb-gql/tests/vertex_upsert_property_maps.rs`, the native GQL projection
+and MERGE point-projection laws, and the CLI and FGP loopback suites. These
+additions have source review and pinned formatter checks here; compilation
+and Rust test execution remain **unverified** in this workspace.
 
 ## UNION column semantics
 

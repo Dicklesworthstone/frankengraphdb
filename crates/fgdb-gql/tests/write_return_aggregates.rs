@@ -455,7 +455,7 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
         PreparedGraphVertexUpsertQueryText::prepare(
             "MERGE (n:Item {p:1}) RETURN count(DISTINCT *)",
             R,
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             },

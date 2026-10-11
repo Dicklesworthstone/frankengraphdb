@@ -19,6 +19,139 @@ fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 
+struct PropertyMapCatalog;
+impl fgdb_gql::GraphSymbolResolver for PropertyMapCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_property(P, "p");
+        catalog.insert_property(Q, "q");
+        // SECRET deliberately has no name. A capability-hidden field must
+        // not become a naming refusal or add payload charges.
+        Some(catalog)
+    }
+}
+
+fn prepared_map(text: &str) -> PreparedGraphVertexUpsertQuery {
+    PreparedGraphVertexUpsertQueryText::prepare(text, R, PropertyMapCatalog)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+}
+
+#[test]
+fn merge_returning_whole_maps_mask_before_naming_and_preserve_atomic_authority() {
+    lab(0xb966, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let statement = prepared_map(
+            "MERGE (n:Visible {p:7}) ON MATCH SET n.q=12 \
+             RETURN properties(n) AS props, keys(n) AS names, n{.*,q:13} AS projected",
+        );
+        let named = |q| GraphValue::map(vec![("p".into(), int(7)), ("q".into(), int(q))]).unwrap();
+        let names = GraphValue::List(
+            ["p", "q"]
+                .into_iter()
+                .map(|name| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap()))
+                .collect(),
+        );
+        let mut observed = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut fields = vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(2))];
+            if hidden {
+                fields.push((SECRET, CanonicalScalar::bytes(vec![0x75; 2_048]).unwrap()));
+            }
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], fields);
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let (_, outcome, rows, completion) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    upsert_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(1)));
+            assert_eq!(
+                rows.value[0].values(),
+                &[named(12), names.clone(), named(13)]
+            );
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { .. }
+            ));
+            observed.push((rows.value, rows.evaluator));
+            let fields = db.vertex(VId(1)).unwrap().unwrap().props;
+            assert!(fields.contains(&(Q, CanonicalScalar::Int(12))));
+            assert_eq!(fields.iter().any(|(key, _)| *key == SECRET), hidden);
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            for text in [
+                "MERGE (n:Visible {p:7}) SET n.q=90 RETURN n{.*,failed:1/0} AS props LIMIT 0",
+                "MERGE (n:Visible {p:7}) SET n.secret=1 RETURN properties(n) AS props",
+            ] {
+                assert!(
+                    db.execute_graph_vertex_upsert_query_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &prepared_map(text),
+                        upsert_policy(),
+                        || NOW,
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            }
+            if hidden {
+                let mut full = grant();
+                full.properties = Scope::All;
+                let full = authority.issue_at(&full, NOW).unwrap();
+                let failed = db
+                    .execute_graph_vertex_upsert_query_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &full,
+                        "main",
+                        &statement,
+                        upsert_policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    failed,
+                    GqlQueryError::Source(fgdb_gql::GraphVertexUpsertError::Staging(
+                        WriteTxnError::Read(crate::ReadError::UnmappedProperty(SECRET))
+                    ))
+                ));
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(observed[0], observed[1]);
+    });
+}
+
 #[test]
 fn merge_returning_projects_one_chosen_vertex_after_all_action_clauses() {
     lab(0xb961, |contexts| async move {

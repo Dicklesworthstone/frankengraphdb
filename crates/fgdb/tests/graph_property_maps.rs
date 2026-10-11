@@ -10,8 +10,9 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, GraphWriteProgramPolicy, PreparedGraphMutationQueryText,
-    PreparedGraphText, ReverseSymbolCatalog,
+    GraphSymbolKind, GraphSymbolResolver, GraphVertexMergePolicy, GraphVertexUpsertPolicy,
+    GraphWriteProgramPolicy, PreparedGraphMutationQueryText, PreparedGraphText,
+    PreparedGraphVertexUpsertQueryText, ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
@@ -73,6 +74,9 @@ fn policy() -> GqlQueryPolicy {
 }
 fn write_policy() -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)
+}
+fn upsert_policy() -> GraphVertexUpsertPolicy {
+    GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(policy()), 100_000)
 }
 fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
@@ -1093,6 +1097,311 @@ fn insertion_map_catalog_and_late_return_failures_keep_prior_staging_intact() {
             db.vertex(VId(1)).unwrap().unwrap().props[0].1,
             CanonicalScalar::Int(10)
         );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_return_maps_follow_both_branches_and_the_final_set_clause() {
+    let ((), report) = run_async_under_lab(0x6d61_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let before = db.frontier().unwrap();
+        let params = GqlParameters::new();
+        for score in [1, 11] {
+            let returned = db
+                .query_write_engine(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "MERGE (n:Thing {name:'merge-key'}) \
+                     ON CREATE SET n.score=1 ON MATCH SET n.score=n.score+10 \
+                     SET n.`edge-note`=n.score+1 \
+                     RETURN properties(n) AS props,n{.*,score:n.score+100} AS view,\
+                     keys(n) AS names,count(*) AS hits",
+                    &params,
+                    Catalog::Full,
+                    R,
+                    write_policy(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                cells(returned),
+                vec![vec![
+                    map(&[
+                        ("edge-note", int(score + 1)),
+                        ("name", text("merge-key")),
+                        ("score", int(score))
+                    ]),
+                    map(&[
+                        ("edge-note", int(score + 1)),
+                        ("name", text("merge-key")),
+                        ("score", int(score + 100))
+                    ]),
+                    list(&["edge-note", "name", "score"]),
+                    int(1),
+                ]],
+            );
+            let vertices = db.vertices().unwrap();
+            let [vertex] = vertices.as_slice() else {
+                panic!("both MERGE branches choose the same vertex")
+            };
+            assert_eq!(
+                vertex.props,
+                vec![
+                    (SCORE, CanonicalScalar::Int(score)),
+                    (NAME, CanonicalScalar::ucs_basic_text("merge-key").unwrap()),
+                    (NOTE, CanonicalScalar::Int(score + 1)),
+                ],
+            );
+        }
+        let returned = db
+            .query_write_engine(
+                &txcx,
+                &cx,
+                &commit,
+                "MERGE (n:Thing {name:'merge-key'}) SET n.score=22 \
+                 RETURN properties(n) AS props LIMIT 0",
+                &params,
+                Catalog::Full,
+                R,
+                write_policy(),
+            )
+            .await
+            .unwrap();
+        assert!(cells(returned).is_empty());
+        assert_eq!(db.frontier().unwrap().0, before.0 + 3);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            cells(
+                db.query(
+                    &cx,
+                    "MATCH (n:Thing) RETURN properties(n) AS props",
+                    &params,
+                    Catalog::Full,
+                    policy()
+                )
+                .unwrap()
+            ),
+            vec![vec![map(&[
+                ("edge-note", int(12)),
+                ("name", text("merge-key")),
+                ("score", int(22))
+            ])]],
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_map_return_reads_prior_overlay_and_rolls_back_every_failing_clause() {
+    let ((), report) = run_async_under_lab(0x6d61_0014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = seed(&mut db, &commit, false).await;
+        let params = GqlParameters::new();
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.set_vertex_property(VId(1), NAME, None);
+        prefix.set_vertex_property(VId(1), NOTE, Some(CanonicalScalar::Int(5)));
+        transaction.write(&mut db, prefix).unwrap();
+        let result = transaction
+            .query_write_engine(
+                &mut db,
+                &cx,
+                "MERGE (n:Thing {score:10}) ON MATCH SET n.`edge-note`=n.`edge-note`+1 \
+                 RETURN properties(n) AS props,n{.name,.score} AS selected",
+                &params,
+                Catalog::Full,
+                R,
+                write_policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            cells(result),
+            vec![vec![
+                map(&[("edge-note", int(6)), ("score", int(10))]),
+                map(&[("name", null()), ("score", int(10))])
+            ]],
+        );
+        let digest = transaction.staged_effect_digest().unwrap();
+        let vertices = transaction.vertices(&db).unwrap();
+        for (statement, catalog, budget) in [
+            (
+                "MERGE (n:Thing {score:10}) SET n.`edge-note`=99 RETURN properties(n) AS props LIMIT 0",
+                Catalog::MissingScore,
+                write_policy(),
+            ),
+            (
+                "MERGE (n:Thing {score:10}) SET n.`edge-note`=99 RETURN properties(n) AS props",
+                Catalog::DuplicateName,
+                write_policy(),
+            ),
+            (
+                "MERGE (n:Thing {score:10}) SET n.`edge-note`=99 RETURN n{.*,failed:1/0} AS props LIMIT 0",
+                Catalog::Full,
+                write_policy(),
+            ),
+            (
+                "MERGE (n:Thing {score:999}) ON CREATE SET n.`edge-note`=99 RETURN n{.*,failed:1/0} AS props",
+                Catalog::Full,
+                write_policy(),
+            ),
+            (
+                "MERGE (n:Thing {score:10}) SET n.`edge-note`=99 RETURN properties(n) AS props",
+                Catalog::Full,
+                GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 0),
+                    100_000,
+                    100_000,
+                    100_000,
+                ),
+            ),
+        ] {
+            assert!(
+                transaction
+                    .query_write_engine(&mut db, &cx, statement, &params, catalog, R, budget)
+                    .is_err(),
+                "{statement}"
+            );
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap(), vertices);
+            assert_eq!(db.frontier().unwrap(), before);
+        }
+        transaction.abort();
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (SCORE, CanonicalScalar::Int(10)),
+                (NAME, CanonicalScalar::ucs_basic_text("one").unwrap())
+            ]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_merge_maps_mask_final_fields_and_preserve_hidden_storage() {
+    let ((), report) = run_async_under_lab(0x6d61_0015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x6d61_0021),
+            NS,
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 10_000_000,
+                max_rows: 100_000,
+            },
+        );
+        grant.rights = Rights::ReadWrite;
+        grant.labels = Scope::only([THING]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([SCORE, NOTE]);
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        let params = GqlParameters::new();
+        let statement = PreparedGraphVertexUpsertQueryText::prepare(
+            "MERGE (n:Thing {score:10}) ON MATCH SET n.score=n.score+1 SET n.`edge-note`=NULL \
+             RETURN properties(n) AS props,keys(n) AS names,n{.*,score:n.score*10} AS view",
+            R,
+            Catalog::Full,
+        )
+        .unwrap()
+        .bind_parameters(&params)
+        .unwrap();
+        let forbidden = PreparedGraphVertexUpsertQueryText::prepare(
+            "MERGE (n:Thing {score:11}) SET n.name='changed' RETURN properties(n) AS props",
+            R,
+            Catalog::Full,
+        )
+        .unwrap()
+        .bind_parameters(&params)
+        .unwrap();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = seed(&mut db, &commit, hidden).await;
+            let (_, _, returned, _) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &statement,
+                    upsert_policy(),
+                    || 100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                returned
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                vec![vec![
+                    map(&[("edge-note", null()), ("score", int(11))]),
+                    list(&["edge-note", "score"]),
+                    map(&[("edge-note", null()), ("score", int(110))]),
+                ]]
+            );
+            let props = db.vertex(VId(1)).unwrap().unwrap().props;
+            assert!(props.contains(&(NAME, CanonicalScalar::ucs_basic_text("one").unwrap())));
+            assert!(props.contains(&(NOTE, CanonicalScalar::Null)));
+            assert_eq!(props.len(), if hidden { 23 } else { 3 });
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            let after = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            assert!(
+                db.execute_graph_vertex_upsert_query_authorized(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &forbidden,
+                    upsert_policy(),
+                    || 100,
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                after
+            );
+        }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

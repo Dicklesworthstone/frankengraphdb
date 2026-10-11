@@ -74,6 +74,8 @@ impl WriteTxn {
     /// clause, recorded as read witnesses like the clauses' own reads and
     /// charged to the same evaluator allowance. A RETURN failure restores
     /// the workspace prefix, so a refused statement stages nothing.
+    /// Complete property maps borrow the effective row and retain a full
+    /// element witness, covering additions of keys that were absent at read.
     /// Only final projected rows consume the result-row allowance; LIMIT 0
     /// still selects, creates or updates the vertex under the source limits.
     pub fn execute_graph_vertex_upsert_query_governed<V: Vfs + Clone, A>(
@@ -105,6 +107,20 @@ impl WriteTxn {
                         &*database,
                         outcome.vertex(),
                         key,
+                        control,
+                    )
+                },
+                |control| {
+                    vertex_upsert_properties(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        query.property_catalog(),
+                        |_| true,
+                        || {
+                            cx.checkpoint()
+                                .map_err(fgdb_gql::GqlQueryError::Interrupted)
+                        },
                         control,
                     )
                 },
@@ -163,6 +179,9 @@ fn vertex_upsert_returning<E, A, C>(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
+    mut properties: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
 ) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
 {
     use fgdb_gql::algebra::GraphValue;
@@ -207,6 +226,7 @@ fn vertex_upsert_returning<E, A, C>(
                 GraphVertexReturnBinding::Property(key) => {
                     GraphValue::Scalar(property(*key, &mut control)?)
                 }
+                GraphVertexReturnBinding::Properties => properties(&mut control)?,
             });
         }
     }
@@ -397,4 +417,70 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
     let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
     attempt.accepted = true;
     Ok(value)
+}
+
+// Whole maps observe the full element, including currently absent keys. The
+// conservative witness is necessary even for an empty map; present-key point
+// witnesses alone would permit a concurrent property insertion to go unseen.
+fn vertex_upsert_properties<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    catalog: Option<&fgdb_gql::ReverseSymbolCatalog>,
+    mut visible: impl FnMut(fgdb_delta_types::PropertyKeyId) -> bool,
+    mut poll: impl FnMut() -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
+    control(GlaExecutionEvent::Work)?;
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut source_control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+    };
+    let source_error = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+    let projected = transaction.vertex_properties_with_control(
+        database,
+        vertex,
+        &mut visible,
+        &mut poll,
+        &mut source_control,
+        &source_error,
+    )?;
+    // Admission applies on every read, including a warm/empty witness. No
+    // callback runs while the observation set is borrowed. Failure in naming,
+    // payload admission, copying or later RETURN retains this witness too.
+    source_control(SourceEvent::ScratchEntry)?;
+    transaction.read_set.borrow_mut().insert(element);
+    let value = match projected {
+        Some(projected) => crate::gql_exec::property_maps::collect(
+            projected.effective_properties(),
+            catalog,
+            visible,
+            &mut source_control,
+            &|error| source_error(WriteTxnError::Read(error)),
+        )?,
+        None => {
+            source_control(SourceEvent::ScratchEntry)?;
+            GraphValue::Scalar(CanonicalScalar::Null)
+        }
+    };
+    attempt.accepted = true;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod vertex_upsert_property_maps_tests {
+    include!("vertex_upsert_property_maps_tests.rs");
 }

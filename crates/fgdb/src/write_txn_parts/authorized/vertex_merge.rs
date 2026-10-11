@@ -6,7 +6,7 @@ use crate::write_txn::authorized::{
     WriteTxnError, selection, stage,
 };
 use crate::write_txn::{
-    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_property,
+    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_properties, vertex_upsert_property,
     vertex_upsert_query_selection_policy, vertex_upsert_returning,
 };
 use fgdb_gql::insertion::GraphInsertIntent;
@@ -30,8 +30,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// The authorized reducer chooses one visible vertex exactly once. Every
     /// original write passes before/after image authorization; RETURN then
     /// reads the chosen vertex from that same private overlay, after all clauses.
-    /// Hidden properties yield NULL before lookup, source admission or witness
-    /// creation. No unmasked read or rematch is used to construct the result.
+    /// Hidden scalar fields yield NULL before lookup, source admission or
+    /// field-witness creation. Whole maps omit hidden fields before naming,
+    /// payload inspection or charges, and conservatively witness the selected
+    /// vertex including absent keys. Neither projection rematches the graph.
     ///
     /// The native evaluator allowance spans actions and projection. Only final
     /// projected rows consume the signed result allowance, so LIMIT 0 still
@@ -99,6 +101,7 @@ impl<V: Vfs + Clone> Database<V> {
                 )?;
                 let result = query_cx.with_restriction(|| {
                     let controls = RefCell::new(&mut execution);
+                    let transaction = &*workspace.transaction();
                     vertex_upsert_returning(
                         query,
                         stats,
@@ -114,10 +117,30 @@ impl<V: Vfs + Clone> Database<V> {
                                 return Ok(fgdb_types::CanonicalScalar::Null);
                             }
                             vertex_upsert_property(
-                                workspace.transaction(),
+                                transaction,
                                 self,
                                 outcome.vertex(),
                                 key,
+                                control,
+                            )
+                        },
+                        |control| {
+                            vertex_upsert_properties(
+                                transaction,
+                                self,
+                                outcome.vertex(),
+                                query.property_catalog(),
+                                |key| verified.predicates().allows_property(key),
+                                || {
+                                    query_cx
+                                        .checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
                                 control,
                             )
                         },

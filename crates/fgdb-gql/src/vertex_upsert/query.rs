@@ -18,13 +18,22 @@ pub enum GraphVertexReturnBinding {
     Vertex,
     /// A field of the chosen vertex after every clause; missing reads NULL.
     Property(PropertyKeyId),
+    /// Every visible property of the chosen vertex after every staged clause.
+    /// The host enumerates its actual fields and uses `property_catalog()` to
+    /// name them; an absent or unknown catalog entry is never an omitted field.
+    Properties,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphVertexUpsertQueryBuildError {
-    TooManyBindings { limit: usize, observed: usize },
+    TooManyBindings {
+        limit: usize,
+        observed: usize,
+    },
     Projection(RowProjectionBuildError),
     Aggregate(crate::GraphAggregateBuildError),
+    /// Distinct property IDs cannot share one output name.
+    PropertyMapCatalog,
 }
 impl core::fmt::Display for GraphVertexUpsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -45,6 +54,7 @@ pub struct PreparedGraphVertexUpsertQuery {
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
 }
 impl core::fmt::Debug for PreparedGraphVertexUpsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -61,7 +71,27 @@ impl PreparedGraphVertexUpsertQuery {
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
     ) -> Result<Self, GraphVertexUpsertQueryBuildError> {
-        Self::prepare_with_grouping(upsert, bindings, projection, quantifier, None)
+        Self::prepare_with_grouping(upsert, bindings, projection, quantifier, None, None)
+    }
+
+    /// Trusted names for complete property-map bindings. The source still
+    /// enumerates the chosen vertex's actual, visible properties, including
+    /// fields introduced by the selected ON clause and trailing SET.
+    pub fn prepare_with_property_catalog(
+        upsert: PreparedGraphVertexUpsert,
+        bindings: Vec<GraphVertexReturnBinding>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+        catalog: crate::ReverseSymbolCatalog,
+    ) -> Result<Self, GraphVertexUpsertQueryBuildError> {
+        Self::prepare_with_grouping(
+            upsert,
+            bindings,
+            projection,
+            quantifier,
+            None,
+            Some(std::sync::Arc::new(catalog)),
+        )
     }
 
     pub(crate) fn prepare_with_grouping(
@@ -70,6 +100,7 @@ impl PreparedGraphVertexUpsertQuery {
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
         grouping: Option<crate::set_ops::WriteReturnGroupSpec>,
+        property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     ) -> Result<Self, GraphVertexUpsertQueryBuildError> {
         let limit = crate::algebra::MAX_PATTERN_VERTICES;
         if bindings.len() > limit {
@@ -83,8 +114,21 @@ impl PreparedGraphVertexUpsertQuery {
             .map(|binding| match binding {
                 GraphVertexReturnBinding::Vertex => GraphSetColumnType::Vertex,
                 GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Scalar,
+                GraphVertexReturnBinding::Properties => GraphSetColumnType::Any,
             })
             .collect();
+        let property_catalog = if bindings.contains(&GraphVertexReturnBinding::Properties) {
+            if let Some(catalog) = &property_catalog {
+                let mut names = std::collections::BTreeSet::new();
+                if !catalog.properties.values().all(|name| names.insert(name)) {
+                    return Err(GraphVertexUpsertQueryBuildError::PropertyMapCatalog);
+                }
+            }
+            property_catalog
+        } else {
+            // Unused host metadata does not change existing query identity.
+            None
+        };
         let grouping = grouping
             .map(|group| group.prepare(input_types.clone()))
             .transpose()
@@ -108,6 +152,7 @@ impl PreparedGraphVertexUpsertQuery {
             order: Vec::new(),
             offset: 0,
             count: None,
+            property_catalog,
         })
     }
 
@@ -118,6 +163,12 @@ impl PreparedGraphVertexUpsertQuery {
     #[must_use]
     pub fn bindings(&self) -> &[GraphVertexReturnBinding] {
         &self.bindings
+    }
+    /// Trusted output names for the complete-map source callback. A missing
+    /// catalog is valid only when no visible property requires a name.
+    #[must_use]
+    pub fn property_catalog(&self) -> Option<&crate::ReverseSymbolCatalog> {
+        self.property_catalog.as_deref()
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -159,14 +210,58 @@ impl PreparedGraphVertexUpsertQuery {
     /// Project the one input row the host read for `bindings()` after every
     /// clause was staged. `selection` and `evaluator` are the upsert's own
     /// cumulative counters, so the result counters cover the whole statement.
+    /// Complete property-map inputs must contain bounded, canonical maps of
+    /// scalar fields, even when grouping or LIMIT would discard their values.
     pub fn project_governed<E, C>(
         &self,
         row: Vec<GraphValue>,
         selection: GqlExecutionStats,
-        evaluator: GlaExecutionStats,
+        mut evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        if self
+            .bindings
+            .contains(&GraphVertexReturnBinding::Properties)
+        {
+            let invalid =
+                || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
+            let mut work = || -> Result<(), GqlQueryError<GraphSetExecutionError<E>, C>> {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                let observed = u128::from(evaluator.work_units) + 1;
+                if observed > u128::from(policy.evaluator.max_work_units) {
+                    return Err(GqlQueryError::Evaluator(crate::GlaLimitExceeded {
+                        dimension: crate::GlaLimitDimension::WorkUnits,
+                        limit: policy.evaluator.max_work_units,
+                        observed,
+                    }));
+                }
+                evaluator.work_units = observed as u64;
+                Ok(())
+            };
+            work()?;
+            if row.len() != self.bindings.len() {
+                return Err(invalid());
+            }
+            for (binding, value) in self.bindings.iter().zip(&row) {
+                if *binding != GraphVertexReturnBinding::Properties {
+                    continue;
+                }
+                work()?;
+                let (keys, values) = value.as_map().ok_or_else(invalid)?;
+                if keys.len() != values.len() || keys.len() >= GraphValue::MAX_LIST_NODES {
+                    return Err(invalid());
+                }
+                for (at, (key, value)) in keys.iter().zip(values).enumerate() {
+                    work()?;
+                    if !matches!(value, GraphValue::Scalar(_))
+                        || at != 0 && keys[at - 1].as_bytes() >= key.as_bytes()
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+        }
         let mut returning = GqlQueryExecution {
             value: vec![GraphValueRow::from_owned_values(row)],
             rows: selection,
@@ -206,6 +301,7 @@ impl PreparedGraphVertexUpsertQuery {
                     bytes.push(1);
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
+                GraphVertexReturnBinding::Properties => bytes.push(2),
             }
         }
         bytes.extend_from_slice(&(self.projection.len() as u64).to_be_bytes());
@@ -225,6 +321,15 @@ impl PreparedGraphVertexUpsertQuery {
         }
         if let Some(grouping) = &self.grouping {
             grouping.append_canonical_bytes(&mut bytes);
+        }
+        if self
+            .bindings
+            .contains(&GraphVertexReturnBinding::Properties)
+        {
+            crate::algebra::append_property_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
         }
         bytes
     }

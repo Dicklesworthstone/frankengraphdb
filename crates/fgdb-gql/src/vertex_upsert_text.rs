@@ -131,6 +131,7 @@ pub(crate) struct VertexReturnTemplate {
     pub offset: crate::set_text::ReadPageNumber,
     pub count: Option<crate::set_text::ReadPageNumber>,
     pub at: usize,
+    pub property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
 }
 
 /// `MERGE (n ...) [ON MATCH SET ...] [ON CREATE SET ...] [SET ...] RETURN ...`.
@@ -139,7 +140,10 @@ pub(crate) struct VertexReturnTemplate {
 /// staged transaction state, plus expressions, DISTINCT, ordering and paging
 /// over them, including grouped COUNT/SUM/AVG/MIN/MAX/COLLECT with argument
 /// DISTINCT. A MERGE with no SET clause is accepted here. Grouped output keeps
-/// the ordinary row numeric domain; `labels(n)` remains outside this shape.
+/// the ordinary row numeric domain. `properties(n)`, `keys(n)`, and selective
+/// or wildcard map projections read the final staged vertex through the same
+/// governed owner; complete maps require trusted reverse property names.
+/// `labels(n)` remains outside this shape.
 #[derive(Clone)]
 pub struct PreparedGraphVertexUpsertQueryText {
     pub(crate) statement: String,

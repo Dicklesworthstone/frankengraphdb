@@ -8,6 +8,37 @@ struct PointProjection<'a> {
     label: bool,
 }
 
+/// A whole-property sibling of the scalar point projection. It borrows the
+/// selected historical row and canonical staged values; it never clones a
+/// vertex, inspects a hidden payload, or enumerates the host's known keys.
+struct PointProperties<'a> {
+    base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)],
+    edits: std::collections::BTreeMap<fgdb_delta_types::PropertyKeyId, Option<&'a CanonicalScalar>>,
+}
+
+impl<'a> PointProperties<'a> {
+    fn new(base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)]) -> Self {
+        Self {
+            base,
+            edits: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn effective_properties(
+        &self,
+    ) -> impl Iterator<Item = (fgdb_delta_types::PropertyKeyId, &CanonicalScalar)> {
+        self.base
+            .iter()
+            .filter(|(key, _)| !self.edits.contains_key(key))
+            .map(|(key, value)| (*key, value))
+            .chain(
+                self.edits
+                    .iter()
+                    .filter_map(|(key, value)| value.map(|value| (*key, value))),
+            )
+    }
+}
+
 // A controlled binary search over canonical sorted fields. No property value
 // is inspected or copied to locate its key; each comparison is cancellable.
 fn point_find<'a, T, K: Ord + Copy, E>(
@@ -116,6 +147,70 @@ impl<'a> PointProjection<'a> {
 }
 
 impl WriteTxn {
+    /// Borrow the selected vertex's effective fields from the same admitted
+    /// basis and NET effects as individual point projections. Visibility must
+    /// also be supplied to the final property-map collector: the historical
+    /// slice is borrowed intact, and only visible edits are retained here.
+    fn vertex_properties_with_control<'a, V: Vfs + Clone, E>(
+        &'a self,
+        database: &'a Database<V>,
+        vertex: VId,
+        visible: &mut impl FnMut(fgdb_delta_types::PropertyKeyId) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<PointProperties<'a>>, E> {
+        use crate::gql_exec::source::{SourceEvent, find_vertex};
+        use fgdb_delta_types::DeltaRow;
+        let snapshot = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let mut properties = match find_vertex(snapshot, vertex, self.basis, control)? {
+            Some(row) => {
+                control(SourceEvent::SnapshotRecord)?;
+                Some(PointProperties::new(&row.props))
+            }
+            None => None,
+        };
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                poll()?;
+                for effect in &coordinate.rows {
+                    poll()?;
+                    // Scan only identity/key metadata before visibility. A
+                    // hidden staged field must not add a per-field charge or
+                    // own its payload, even when it is the coordinate's only
+                    // effect. The uncharged poll still makes traversal of
+                    // hidden/unrelated prefixes cancellable. These are
+                    // canonical net rows, never raw intents.
+                    match effect {
+                        DeltaRow::CreateVertex { vid, props, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            properties = Some(PointProperties::new(props));
+                        }
+                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            properties = None;
+                        }
+                        DeltaRow::Property {
+                            elem: ElementId::Vertex(vid),
+                            property,
+                            after,
+                            ..
+                        } if *vid == vertex && visible(*property) => {
+                            control(SourceEvent::Work)?;
+                            if let Some(properties) = &mut properties {
+                                control(SourceEvent::ScratchEntry)?;
+                                properties.edits.insert(*property, after.as_ref());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(properties)
+    }
+
     fn point_projection<'a, V: Vfs + Clone>(
         &'a self,
         database: &'a Database<V>,
