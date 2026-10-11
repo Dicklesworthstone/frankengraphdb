@@ -1331,7 +1331,7 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
         let commit = contexts.commit();
         let cx = contexts.query();
         let vfs = fixture(&commit).await;
-        assert!(ITEMS * PAYLOAD_BYTES > SCRATCH_BYTES);
+        const { assert!(ITEMS * PAYLOAD_BYTES > SCRATCH_BYTES) };
         let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
         let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
         let mut view = view(&commit, &vfs, &source_pool).await;
