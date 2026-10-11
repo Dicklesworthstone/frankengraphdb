@@ -270,3 +270,101 @@ fn retirement_in_successful_or_failing_catalog_callback_closes_in_the_same_call(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn result_snapshot_metadata_tracks_temporal_binding_and_the_session_pin() {
+    let ((), report) = run_async_under_lab(0x5ec0_6005, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let issuer = issuer(640);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut pinned = db
+            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        let value = |n| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(n)));
+        let expected = |first| QueryResult::Rows {
+            columns: vec!["p".to_owned()],
+            rows: vec![vec![value(first)], vec![value(30)]],
+        };
+        let plain = "MATCH (n) RETURN n.p AS p";
+        let params = GqlParameters::new();
+        assert_eq!(
+            pinned.query_with_snapshot(&cx, plain, &params).unwrap(),
+            (expected(10), CommitSeq(1))
+        );
+
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(
+            pinned.query_with_snapshot(&cx, plain, &params).unwrap(),
+            (expected(10), CommitSeq(1)),
+            "ordinary result metadata belongs to the pin, not the live writer"
+        );
+        let mut current = db
+            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        assert_eq!(
+            current.query_with_snapshot(&cx, plain, &params).unwrap(),
+            (expected(99), CommitSeq(2))
+        );
+
+        let temporal =
+            "AT BRANCH $route MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p";
+        let arguments = |at| {
+            GqlParameters::new()
+                .with_text("route", BRANCH)
+                .unwrap()
+                .with_uint64("at", at)
+                .unwrap()
+        };
+        let prepared = current.prepare(&cx, temporal, &arguments(2)).unwrap();
+        for (at, first) in [(1, 10), (2, 99), (1, 10)] {
+            let arguments = arguments(at);
+            let answer = (expected(first), CommitSeq(at));
+            assert_eq!(
+                current
+                    .query_with_snapshot(&cx, temporal, &arguments)
+                    .unwrap(),
+                answer
+            );
+            assert_eq!(
+                current
+                    .execute_with_snapshot(&cx, &prepared, &arguments)
+                    .unwrap(),
+                answer
+            );
+        }
+        assert!(matches!(
+            pinned.query_with_snapshot(&cx, temporal, &arguments(2)),
+            Err(QueryError::Read(ReadError::BeyondFrontier {
+                asked: CommitSeq(2),
+                frontier: CommitSeq(1)
+            }))
+        ));
+        assert!(matches!(
+            current.execute_with_snapshot(&cx, &prepared, &arguments(3)),
+            Err(QueryError::Read(ReadError::BeyondFrontier {
+                asked: CommitSeq(3),
+                frontier: CommitSeq(2)
+            }))
+        ));
+        refusal(
+            pinned.execute_with_snapshot(&cx, &prepared, &arguments(1)),
+            AuthorizationError::WrongAuthority,
+        );
+
+        let (_, explained_at) = current
+            .query_with_snapshot(&cx, "EXPLAIN MATCH (n) RETURN n.p AS p", &params)
+            .unwrap();
+        assert_eq!(explained_at, CommitSeq(2));
+        current.close();
+        refusal(
+            current.query_with_snapshot(&cx, temporal, &arguments(1)),
+            AuthorizationError::ExecutionStopped,
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

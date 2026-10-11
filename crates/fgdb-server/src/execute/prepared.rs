@@ -139,14 +139,27 @@ async fn read_prepared_inner(
         unix_millis,
     );
     prepared.generation.check().map_err(Refusal::from)?;
-    match result.map_err(query_refusal)? {
+    let result = result.map_err(query_refusal)?;
+    // Use the successful execution's bound temporal cut, not the frontier
+    // sampled when this request acquired its read guard. Branch-only arguments
+    // were removed by the same selector used for execution above.
+    let snapshot = contexts
+        .query()
+        .with_restriction(|| {
+            prepared
+                .native
+                .bound_snapshot_seq(selected.parameters(), frontier)
+        })
+        .map_err(query_refusal)?;
+    prepared.generation.check().map_err(Refusal::from)?;
+    match result {
         QueryResult::Rows { columns, rows } => Ok(Answer {
             columns,
             rows: rows
                 .iter()
                 .map(|row| row.iter().map(convert::cell).collect())
                 .collect(),
-            outcome: Outcome::Rows { seq: frontier.0 },
+            outcome: Outcome::Rows { seq: snapshot.0 },
             generation: prepared.generation.clone(),
         }),
         QueryResult::Write { .. } => Err(Refusal::new(

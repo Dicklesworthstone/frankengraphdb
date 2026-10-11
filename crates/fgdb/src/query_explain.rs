@@ -683,10 +683,21 @@ impl core::fmt::Display for ReplayRefusal {
 impl core::error::Error for ReplayRefusal {}
 
 impl PreparedNativeRead {
-    fn snapshot_seq<V: Vfs + Clone>(
+    /// Resolve the snapshot selected by this template's bound parameters.
+    ///
+    /// Temporal templates return their exact AS OF sequence; other read
+    /// classes use the caller's already admitted generation. This binds the
+    /// existing native template without reparsing text, resolving symbols or
+    /// acquiring a new snapshot. Branch-only arguments must first be consumed
+    /// by the branch selector, just as they are before execution.
+    ///
+    /// The returned sequence is request metadata, not proof of authorization
+    /// or retained history. Execution still validates both before returning
+    /// rows. A server must report it only together with successful execution.
+    pub fn bound_snapshot_seq(
         &self,
-        db: &Database<V>,
         params: &GqlParameters,
+        default: CommitSeq,
     ) -> Result<CommitSeq, QueryError> {
         match self {
             Self::TemporalPattern(prepared) => Ok(prepared
@@ -701,6 +712,20 @@ impl PreparedNativeRead {
                 .bind_parameters(params)
                 .map_err(QueryError::TemporalText)?
                 .as_of()),
+            _ => Ok(default),
+        }
+    }
+
+    fn snapshot_seq<V: Vfs + Clone>(
+        &self,
+        db: &Database<V>,
+        params: &GqlParameters,
+    ) -> Result<CommitSeq, QueryError> {
+        match self {
+            // Temporal binding does not consult the default frontier.
+            Self::TemporalPattern(_) | Self::TemporalSet(_) | Self::TemporalAggregate(_) => {
+                self.bound_snapshot_seq(params, CommitSeq(0))
+            }
             _ => db.frontier().map_err(|error| QueryError::Unsupported {
                 diagnostics: vec![error.to_string()],
             }),

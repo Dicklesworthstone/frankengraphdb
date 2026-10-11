@@ -133,7 +133,10 @@ fn terminal<T>(result: &Result<T, QueryError>) -> bool {
         ))
     )
 }
-fn result_rows(result: QueryResult) -> Result<(QueryResult, usize), QueryError> {
+fn result_rows(
+    result: QueryResult,
+    snapshot_seq: CommitSeq,
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     let count = match &result {
         QueryResult::Rows { rows, .. } => rows.len(),
         QueryResult::Write { .. } => {
@@ -142,7 +145,7 @@ fn result_rows(result: QueryResult) -> Result<(QueryResult, usize), QueryError> 
             });
         }
     };
-    Ok((result, count))
+    Ok(((result, snapshot_seq), count))
 }
 
 type Live<'cx, 'permit, 'clock> = RefCell<Execution<'cx, 'permit, &'clock mut dyn FnMut() -> u64>>;
@@ -240,6 +243,23 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         text: &str,
         params: &GqlParameters,
     ) -> Result<QueryResult, QueryError> {
+        self.query_with_snapshot(cx, text, params)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute a read and return the exact sequence selected for its rows.
+    ///
+    /// The result and sequence share one preparation, pinned generation and
+    /// signed execution permit. A temporal selector may choose an older cut;
+    /// an ordinary read uses this session's frontier even if the writer has
+    /// advanced. EXPLAIN reports this frontier without reading graph rows.
+    /// Neither metadata nor rows escape a failed execution or final check.
+    pub fn query_with_snapshot(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
         self.run(cx, |view, branch, scope, resolver, policy, execution| {
             text_at(
                 view, branch, scope, resolver, policy, execution, text, params,
@@ -289,6 +309,19 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         prepared: &AuthorizedPreparedRead,
         params: &GqlParameters,
     ) -> Result<QueryResult, QueryError> {
+        self.execute_with_snapshot(cx, prepared, params)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute an exact-session template with its bound snapshot metadata.
+    /// Rebinding a temporal argument changes both rows and sequence together;
+    /// the template never captures the sequence from its preparation call.
+    pub fn execute_with_snapshot(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
             prepared_at(
@@ -310,19 +343,22 @@ fn text_at<R: GraphSymbolResolver>(
     execution: &Live<'_, '_, '_>,
     text: &str,
     params: &GqlParameters,
-) -> Result<(QueryResult, usize), QueryError> {
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
     let selected = selector.bind_parameters(params).map_err(selector_error)?;
     check_branch(&selected, branch)?;
     refuse_element_identity(selected.statement())?;
     execution.borrow_mut().checkpoint()?;
     if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
-        return result_rows(explain_authorized(
-            explain,
-            selected.parameters(),
-            BorrowedResolver(resolver),
-            || execution.borrow_mut().checkpoint(),
-        )?);
+        return result_rows(
+            explain_authorized(
+                explain,
+                selected.parameters(),
+                BorrowedResolver(resolver),
+                || execution.borrow_mut().checkpoint(),
+            )?,
+            view.frontier(),
+        );
     }
     let prepared = PreparedNativeRead::prepare(
         selected.statement(),
@@ -330,15 +366,20 @@ fn text_at<R: GraphSymbolResolver>(
         BorrowedResolver(resolver),
     );
     execution.borrow_mut().checkpoint()?;
-    result_rows(native_at(
-        &prepared?,
-        selected.parameters(),
-        &view.snapshot,
-        view.frontier(),
-        scope,
-        execution,
-        policy,
-    )?)
+    let prepared = prepared?;
+    let at = prepared.bound_snapshot_seq(selected.parameters(), view.frontier())?;
+    result_rows(
+        native_at(
+            &prepared,
+            selected.parameters(),
+            &view.snapshot,
+            at,
+            scope,
+            execution,
+            policy,
+        )?,
+        at,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -351,7 +392,7 @@ fn prepared_at(
     owner: &Arc<()>,
     prepared: &AuthorizedPreparedRead,
     params: &GqlParameters,
-) -> Result<(QueryResult, usize), QueryError> {
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     if !Arc::ptr_eq(owner, &prepared.owner) {
         return Err(QueryError::Authorization(
             AuthorizationError::WrongAuthority,
@@ -362,15 +403,21 @@ fn prepared_at(
         .bind_parameters(params)
         .map_err(selector_error)?;
     check_branch(&selected, branch)?;
-    result_rows(native_at(
-        &prepared.native,
-        selected.parameters(),
-        &view.snapshot,
-        view.frontier(),
-        scope,
-        execution,
-        policy,
-    )?)
+    let at = prepared
+        .native
+        .bound_snapshot_seq(selected.parameters(), view.frontier())?;
+    result_rows(
+        native_at(
+            &prepared.native,
+            selected.parameters(),
+            &view.snapshot,
+            at,
+            scope,
+            execution,
+            policy,
+        )?,
+        at,
+    )
 }
 impl<R, C> AuthorizedReadSession<'_, R, C> {
     /// Release the generation and trusted state, with no source reads or clock

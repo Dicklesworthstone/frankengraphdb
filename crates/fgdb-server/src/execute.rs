@@ -201,8 +201,18 @@ impl ReadSession<'_> {
         text: &str,
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<QueryResult, SessionError> {
+        self.query_with_snapshot(cx, text, parameters)
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) fn query_with_snapshot(
+        &mut self,
+        cx: &fgdb_types::QueryCx,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<(QueryResult, fgdb_types::CommitSeq), SessionError> {
         let _operation = self.generation.enter().map_err(SessionError::Unavailable)?;
-        let result = self.native.query(cx, text, parameters);
+        let result = self.native.query_with_snapshot(cx, text, parameters);
         // A concurrently fenced write invalidates this source result even
         // when its immutable snapshot remains readable in the engine.
         self.generation.check().map_err(SessionError::Unavailable)?;
@@ -288,18 +298,18 @@ async fn read_inner(
     let query = contexts.query();
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    let (mut session, frontier) = read_session(cx, db, token).await?;
-    match session.query(&query, &statement.statement, &parameters) {
-        Ok(QueryResult::Rows { columns, rows }) => Ok(Answer {
+    let (mut session, _) = read_session(cx, db, token).await?;
+    match session.query_with_snapshot(&query, &statement.statement, &parameters) {
+        Ok((QueryResult::Rows { columns, rows }, snapshot)) => Ok(Answer {
             columns,
             rows: rows
                 .iter()
                 .map(|row| row.iter().map(convert::cell).collect())
                 .collect(),
-            outcome: Outcome::Rows { seq: frontier.0 },
+            outcome: Outcome::Rows { seq: snapshot.0 },
             generation: session.generation(),
         }),
-        Ok(QueryResult::Write { .. }) => Err(Refusal::new(
+        Ok((QueryResult::Write { .. }, _)) => Err(Refusal::new(
             ErrorCode::Statement,
             "a write statement cannot execute as a read",
         )),
