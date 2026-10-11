@@ -124,6 +124,15 @@ const fn weeks_in_week_year(week_year: i64) -> u8 {
     ((week_one_monday(week_year + 1) - week_one_monday(week_year)) / 7) as u8
 }
 
+/// 52 or 53: the ISO weeks in `week_year`; `None` more than one year outside
+/// the supported range, where no supported day can fall in that week year.
+#[must_use]
+pub fn iso_week_count(week_year: i64) -> Option<u8> {
+    (MIN_YEAR - 1..=MAX_YEAR + 1)
+        .contains(&week_year)
+        .then(|| weeks_in_week_year(week_year))
+}
+
 /// The ISO week date `(week_year, week, weekday)` of a supported day number.
 /// The week year can differ from the civil year near January 1, and lies
 /// one year outside the civil range at its two ends.
