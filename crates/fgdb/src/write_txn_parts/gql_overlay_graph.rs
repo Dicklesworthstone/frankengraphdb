@@ -519,6 +519,16 @@ mod query_source {
                 None
             };
             let edge_scan = logical.is_some_and(GlaPlan::scans_edges);
+            // An edge root does not imply an endpoint-only vertex domain.
+            // Independent components and uncorrelated probes can scan every
+            // vertex, including isolates. Admit that table once, as the native
+            // snapshot source does, and apply staged effects to the same rows.
+            let vertex_scan = !edge_scan
+                || logical.is_some_and(|plan| {
+                    plan.operators().iter().any(|operator| {
+                        matches!(operator, fgdb_gql::algebra::GlaOperator::ScanVertices)
+                    })
+                });
             let reads_edges = logical.is_none_or(GlaPlan::reads_edges);
             // Typed edges retain per-relation witnesses. An untyped atom can
             // see a relation created after this read, so it needs the complete
@@ -534,8 +544,10 @@ mod query_source {
                     None => self.scanned_edges.set(true),
                 }
             }
-            if !edge_scan && scan_observation.is_none() {
-                if let Some(label) = required_vertex_label {
+            if vertex_scan && scan_observation.is_none() {
+                // An edge endpoint's label cannot constrain an independent
+                // vertex root. Keep its insertion gap even for empty results.
+                if let Some(label) = required_vertex_label.filter(|_| !edge_scan) {
                     control(SourceEvent::ScratchEntry)?;
                     self.scanned_vertex_labels.borrow_mut().insert(label);
                 } else {
@@ -620,7 +632,7 @@ mod query_source {
                     },
                 )?;
             }
-            if !edge_scan {
+            if vertex_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
                     let view = VertexView::new(&row.labels, &row.props);
                     let selected = match predicates {
@@ -645,7 +657,7 @@ mod query_source {
                     control(SourceEvent::Work)?;
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
-                        if !edge_scan {
+                        if vertex_scan {
                             if (scan_observation.is_some() || witness_label.is_some())
                                 && let Some(vid) = super::VertexScanRead::target(effect)
                             {
@@ -712,14 +724,14 @@ mod query_source {
                                 _ => {}
                             }
                         }
-                        if edge_scan && is_vertex_effect(effect) {
+                        if !vertex_scan && is_vertex_effect(effect) {
                             control(SourceEvent::ScratchEntry)?;
                             vertex_effects.push(effect);
                         }
                     }
                 }
             }
-            if edge_scan && logical.is_some_and(GlaPlan::needs_vertex_values) {
+            if !vertex_scan && logical.is_some_and(GlaPlan::needs_vertex_values) {
                 let mut candidates = BTreeSet::new();
                 for &(src, relation, dst, _) in edges.values() {
                     control(SourceEvent::Work)?;
@@ -750,7 +762,7 @@ mod query_source {
             let mut vertex_rows = Vec::new();
             for (vid, row) in vertices {
                 control(SourceEvent::Work)?;
-                if !edge_scan {
+                if vertex_scan {
                     control(SourceEvent::SnapshotRecord)?;
                 }
                 control(SourceEvent::ScratchEntry)?;
@@ -763,7 +775,7 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?;
                 edge_rows.push(((eid, src, relation, dst), props));
             }
-            let snapshot_records = edge_rows.len() + if edge_scan { 0 } else { vertex_rows.len() };
+            let snapshot_records = edge_rows.len() + if vertex_scan { vertex_rows.len() } else { 0 };
             Ok(OverlayGraphTables {
                 vertices: vertex_rows,
                 edges: edge_rows,
