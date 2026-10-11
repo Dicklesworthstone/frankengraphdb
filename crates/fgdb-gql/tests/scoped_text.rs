@@ -360,12 +360,12 @@ fn pattern_predicates_are_their_exists_spelling() {
             "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->() } RETURN a",
         ),
         (
-            "MATCH (a) WHERE (a)<-[:S]-(src:L) RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+            "MATCH (a) WHERE (a)<-[:S]-(:L) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(:L) } RETURN a",
         ),
         (
-            "MATCH (a) WHERE (a:L)-[:R]-(m {n: 2}) RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-(m {n: 2}) } RETURN a",
+            "MATCH (a) WHERE (a:L)-[:R]-({n: 2}) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-({n: 2}) } RETURN a",
         ),
         (
             "MATCH (a) WHERE a.n > 1 AND (a)-[:R]->() AND NOT (a)-[:S]->() RETURN a",
@@ -427,6 +427,39 @@ fn pattern_predicates_are_their_exists_spelling() {
     ] {
         assert!(PreparedGraphText::prepare(text, symbols).is_ok(), "{text}");
     }
+    // A pattern predicate tests bindings and introduces none (openCypher
+    // UndefinedVariable, TCK Pattern1 [10]). The first new named vertex or
+    // edge is refused at its own offset, bare, under NOT and in exists(...).
+    // Anonymous nodes and edges bind nothing, and the EXISTS { MATCH ... }
+    // spelling still declares existential locals.
+    for (text, at) in [
+        ("MATCH (a) WHERE (a)-[r]->(b) RETURN a", "r]"),
+        ("MATCH (a) WHERE (b)-->(a) RETURN a", "b)"),
+        ("MATCH (a) WHERE ()-[r]-() RETURN a", "r]"),
+        ("MATCH (a) WHERE NOT (a)-[:R]->(m:L) RETURN a", "m:"),
+        ("MATCH (a) WHERE exists((a)<-[r {}]-()) RETURN a", "r {"),
+        (
+            "MATCH (a) WHERE (a)-[:R]->(:L)<-[s:S]-(b {n: 5}) RETURN a",
+            "s:",
+        ),
+    ] {
+        let error = PreparedGraphText::prepare(text, symbols).unwrap_err();
+        assert_eq!(
+            (error.kind, error.offset),
+            (
+                GraphPatternTextErrorKind::UnknownVariable,
+                text.find(at).unwrap()
+            ),
+            "{text}"
+        );
+    }
+    assert!(
+        PreparedGraphText::prepare(
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[r]->(b) } RETURN a",
+            symbols
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -668,8 +701,8 @@ fn exists_function_on_a_pattern_is_the_pattern_predicate() {
             "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } RETURN a",
         ),
         (
-            "MATCH (a) WHERE NOT exists((a)<-[:S]-(src:L)) RETURN a",
-            "MATCH (a) WHERE NOT EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+            "MATCH (a) WHERE NOT exists((a)<-[:S]-(:L)) RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)<-[:S]-(:L) } RETURN a",
         ),
         (
             "MATCH (a) WHERE a.n > 1 AND EXISTS((a)-[:R]->()) RETURN a",

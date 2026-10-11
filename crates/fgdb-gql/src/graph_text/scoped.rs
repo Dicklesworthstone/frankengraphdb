@@ -1012,6 +1012,23 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.positive_pattern()?;
+            if !clause {
+                // An openCypher pattern predicate tests the bindings it names
+                // and cannot introduce one (UndefinedVariable). Only the
+                // EXISTS { MATCH ... } spelling declares existential locals.
+                let vertices = (self.syntax.variables.iter().copied()).filter(|name| {
+                    !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                        && !outer.variables.iter().any(|seen| seen.text == name.text)
+                });
+                let edges =
+                    (self.syntax.edges.iter().filter_map(|edge| edge.variable)).filter(|name| {
+                        !(outer.edges.iter().filter_map(|edge| edge.variable))
+                            .any(|seen| seen.text == name.text)
+                    });
+                if let Some(name) = vertices.chain(edges).min_by_key(|name| name.at) {
+                    return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+                }
+            }
             let matched_variables = self.syntax.variables.len();
             if clause && self.take_word("WHERE")? {
                 // The positive pattern is complete. Temporarily expose the
