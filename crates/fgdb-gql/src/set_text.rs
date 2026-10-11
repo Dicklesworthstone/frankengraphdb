@@ -176,6 +176,12 @@ pub(crate) enum ReadValueTemplate {
         function: crate::GraphValueFunction,
         argument: Box<ReadValueTemplate>,
     },
+    /// A searched CASE whose results may be composite (fgdb-13l85): the
+    /// first TRUE condition selects its value, else `otherwise` or NULL.
+    Case {
+        arms: Vec<(ReadValueTemplate, ReadValueTemplate)>,
+        otherwise: Option<Box<ReadValueTemplate>>,
+    },
 }
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
@@ -224,6 +230,11 @@ impl ReadValueTemplate {
             Self::Temporal { argument, .. } | Self::Function { argument, .. } => {
                 argument.binds_elements()
             }
+            Self::Case { arms, otherwise } => {
+                arms.iter()
+                    .any(|(condition, value)| condition.binds_elements() || value.binds_elements())
+                    || otherwise.as_deref().is_some_and(Self::binds_elements)
+            }
             Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
                 false
             }
@@ -257,7 +268,7 @@ impl ReadValueTemplate {
                 crate::GraphValueFunction::Split => GraphSetColumnType::List,
             },
             Self::Let { body, .. } => body.column_type(input, parameters),
-            Self::Local(_) => GraphSetColumnType::Any,
+            Self::Local(_) | Self::Case { .. } => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. } => {
                 GraphSetColumnType::parameter_domain(parameters[*index].parameter_type)
@@ -449,6 +460,15 @@ impl ReadValueTemplate {
                 bytes.extend_from_slice(&[22, comparison.tag()]);
                 left.append_template_transcript(bytes);
                 right.append_template_transcript(bytes);
+            }
+            Self::Case { arms, otherwise } => {
+                bytes.push(24);
+                ordinal(bytes, arms.len());
+                for (condition, value) in arms {
+                    condition.append_template_transcript(bytes);
+                    value.append_template_transcript(bytes);
+                }
+                optional(bytes, otherwise.as_deref());
             }
         }
     }

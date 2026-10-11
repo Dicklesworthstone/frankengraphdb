@@ -351,6 +351,21 @@ impl PreparedGraphAggregateText {
                     .collect::<Result<_, _>>()?,
                 body: Box::new(Self::bind_input_value(body, values)?),
             }),
+            ReadValueTemplate::Case { arms, otherwise } => Ok(GraphSetValue::Case {
+                arms: arms
+                    .iter()
+                    .map(|(condition, value)| -> Result<_, GraphPatternTextError> {
+                        Ok((
+                            Self::bind_input_value(condition, values)?,
+                            Self::bind_input_value(value, values)?,
+                        ))
+                    })
+                    .collect::<Result<_, _>>()?,
+                otherwise: otherwise
+                    .as_deref()
+                    .map(|value| Self::bind_input_value(value, values).map(Box::new))
+                    .transpose()?,
+            }),
         }
     }
 }

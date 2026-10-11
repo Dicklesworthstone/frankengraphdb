@@ -241,6 +241,31 @@ fn expression<'g, E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))
         }
+        // A composite CASE with the row evaluator's law (fgdb-13l85): the
+        // first TRUE condition selects, and no later arm executes.
+        GraphSetValue::Case { arms, otherwise } => {
+            let mut selected = otherwise.as_deref();
+            for (condition, value) in arms {
+                let truth = match expression(condition, input, column, control)?.cell() {
+                    cell if cell.is_null() => false,
+                    Cell::Value(ValueRef::Scalar(CanonicalScalar::Bool(truth))) => *truth,
+                    _ => return Err(failure(column, GraphIntegerErrorKind::NonBoolean)),
+                };
+                if truth {
+                    selected = Some(value);
+                    break;
+                }
+            }
+            match selected {
+                Some(value) => expression(value, input, column, control)?,
+                None => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Null,
+                    )))
+                }
+            }
+        }
         // reverse() and split() with the row evaluator's law (fgdb-13l85).
         GraphSetValue::Function { function, argument } => {
             let argument = expression(argument, input, column, control)?.into_owned(control)?;

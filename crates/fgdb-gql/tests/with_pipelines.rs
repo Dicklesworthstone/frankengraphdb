@@ -394,6 +394,22 @@ fn plus_concatenates_list_columns_after_with() {
     );
     let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
     assert_eq!(ints(&rows, 0), [1, 2, 11, 12].map(Some));
+    // The Quantifier9 to 12 shape (fgdb-13l85): a CASE choosing between a
+    // list column and its reverse, then appending a scalar column.
+    let query = prepare(
+        "MATCH (n) WITH [n.p, n.p + 1] AS list, n.p AS x \
+         RETURN CASE WHEN x > 1 THEN reverse(list) ELSE list END + x AS joined \
+         ORDER BY joined",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    let joined: Vec<_> = rows.iter().map(|row| row.get(0).unwrap().clone()).collect();
+    assert_eq!(
+        joined,
+        [
+            GraphValue::List(vec![int(1), int(2), int(1)].into()),
+            GraphValue::List(vec![int(3), int(2), int(2)].into()),
+        ]
+    );
 }
 
 /// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'

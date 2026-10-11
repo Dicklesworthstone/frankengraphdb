@@ -157,6 +157,16 @@ pub enum GraphSetValue {
         function: GraphValueFunction,
         argument: Box<GraphSetValue>,
     },
+    /// A searched CASE whose results may be composite (fgdb-13l85), such as
+    /// `CASE WHEN c THEN reverse(list) ELSE list END`. Arms run in order: the
+    /// first condition that is TRUE selects its value, a FALSE or NULL one
+    /// moves on, and a non-Boolean one is a typed error. Nothing after the
+    /// selected arm executes. Without a selected arm the value is
+    /// `otherwise`, or NULL when there is none.
+    Case {
+        arms: Vec<(GraphSetValue, GraphSetValue)>,
+        otherwise: Option<Box<GraphSetValue>>,
+    },
 }
 
 /// The openCypher value functions over lists and text (fgdb-13l85).
@@ -874,6 +884,20 @@ fn admit(
             }
             admit(body, types, column, depth + 1, nodes, locals + values.len())?
         }
+        // Each arm's result may be a list, a map or a scalar.
+        GraphSetValue::Case { arms, otherwise } => {
+            if arms.is_empty() {
+                return Err(Error::InvalidValue { column });
+            }
+            for (condition, value) in arms {
+                admit(condition, types, column, depth + 1, nodes, locals)?;
+                admit(value, types, column, depth + 1, nodes, locals)?;
+            }
+            if let Some(otherwise) = otherwise {
+                admit(otherwise, types, column, depth + 1, nodes, locals)?;
+            }
+            GraphSetColumnType::Any
+        }
     })
 }
 
@@ -1073,6 +1097,15 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             bytes.extend_from_slice(&[22, comparison.tag()]);
             append_value_transcript(left, bytes);
             append_value_transcript(right, bytes);
+        }
+        GraphSetValue::Case { arms, otherwise } => {
+            bytes.push(24);
+            bytes.extend_from_slice(&(arms.len() as u64).to_be_bytes());
+            for (condition, value) in arms {
+                append_value_transcript(condition, bytes);
+                append_value_transcript(value, bytes);
+            }
+            append_optional_transcript(otherwise.as_deref(), bytes);
         }
     }
 }
@@ -1697,6 +1730,28 @@ fn evaluate_value_at<E>(
                 scope.set_from_end(slot, value);
             }
             evaluate_value_at(body, &scope, column, control, depth + 1, nodes)?
+        }
+        GraphSetValue::Case { arms, otherwise } => {
+            let mut selected = otherwise.as_deref();
+            for (condition, value) in arms {
+                let truth =
+                    match evaluate_value_at(condition, row, column, control, depth + 1, nodes)? {
+                        GraphValue::Scalar(CanonicalScalar::Bool(truth)) => truth,
+                        GraphValue::Scalar(CanonicalScalar::Null) => false,
+                        _ => return Err(failure(GraphIntegerErrorKind::NonBoolean)),
+                    };
+                if truth {
+                    selected = Some(value);
+                    break;
+                }
+            }
+            match selected {
+                Some(value) => evaluate_value_at(value, row, column, control, depth + 1, nodes)?,
+                None => {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                }
+            }
         }
     };
     Ok(result)

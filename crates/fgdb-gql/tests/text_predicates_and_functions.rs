@@ -2312,6 +2312,37 @@ fn plus_concatenates_lists_and_appends_or_prepends_values() {
     ] {
         assert_eq!(value(expression), expected, "{expression}");
     }
+    // A searched CASE with a list result is a value (fgdb-13l85): the first
+    // TRUE condition selects, FALSE and NULL move on, no ELSE is NULL, and
+    // an unselected result never executes.
+    for (expression, expected) in [
+        (
+            "CASE WHEN n.text = 'ab' THEN [1, 2] ELSE [3] END",
+            ints(&[1, 2]),
+        ),
+        (
+            "CASE WHEN n.text = 'x' THEN [1, 2] ELSE [3] END",
+            ints(&[3]),
+        ),
+        ("CASE WHEN n.text = 'x' THEN [1] END", null.clone()),
+        (
+            "CASE WHEN null THEN [1] WHEN true THEN reverse([1, 2]) END",
+            ints(&[2, 1]),
+        ),
+        (
+            "CASE WHEN true THEN [1] ELSE [1 / (size(n.text) - 2)] END",
+            ints(&[1]),
+        ),
+        ("CASE WHEN true THEN [1] ELSE [2] END + 3", ints(&[1, 3])),
+        ("size(CASE WHEN true THEN [1, 2] ELSE [] END)", int(2)),
+        ("CASE WHEN false THEN [1] ELSE 5 + 1 END", int(6)),
+    ] {
+        assert_eq!(value(expression), expected, "{expression}");
+    }
+    let unselected_fails = prepare(
+        "MATCH (n) RETURN CASE WHEN false THEN [1] ELSE [1 / (size(n.text) - 2)] END AS value",
+    );
+    assert!(execute(&unselected_fails, &text("ab"), policy()).is_err());
     // A list never subtracts.
     for expression in ["[1] - 1", "1 - [1]", "[1] + 2 - 3"] {
         let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));

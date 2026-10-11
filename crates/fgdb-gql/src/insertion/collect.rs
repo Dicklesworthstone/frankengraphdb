@@ -169,6 +169,7 @@ fn fields<E, A, C>(
             | GraphSetValue::Ordered { .. }
             | GraphSetValue::Temporal { .. }
             | GraphSetValue::Function { .. }
+            | GraphSetValue::Case { .. }
             | GraphSetValue::Local(_)
             | GraphSetValue::Comprehension { .. }
             | GraphSetValue::Quantifier { .. }

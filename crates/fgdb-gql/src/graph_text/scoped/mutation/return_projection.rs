@@ -198,6 +198,7 @@ fn list_operand_at(
 ) -> Result<bool, GraphPatternTextError> {
     match token.kind {
         TokenKind::Punct(b'[') => Ok(true),
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => case_has_list(lexer, row),
         TokenKind::Word(word) => Ok(match lexer.clone().next()?.kind {
             TokenKind::Punct(b'(') => ["REVERSE", "SPLIT", "TAIL", "RANGE", "KEYS"]
                 .iter()
@@ -210,6 +211,44 @@ fn list_operand_at(
             }),
         }),
         _ => Ok(false),
+    }
+}
+
+/// Whether the CASE that `lexer` is just past the `CASE` of has a THEN or
+/// ELSE result that starts with a list operand (list_operand_at), at its own
+/// level: such a CASE is read as a value-language Case (fgdb-13l85).
+fn case_has_list(
+    lexer: &Lexer<'_>,
+    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let mut groups = 0_usize;
+    let mut cases = 1_usize;
+    loop {
+        match lexer.next()?.kind {
+            TokenKind::End => return Ok(false),
+            TokenKind::Punct(b'(' | b'[' | b'{') => groups += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => groups = groups.saturating_sub(1),
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => cases += 1,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("END") => {
+                cases -= 1;
+                if cases == 0 {
+                    return Ok(false);
+                }
+            }
+            TokenKind::Word(word)
+                if groups == 0
+                    && cases == 1
+                    && (word.eq_ignore_ascii_case("THEN") || word.eq_ignore_ascii_case("ELSE")) =>
+            {
+                let mut ahead = lexer.clone();
+                let result = ahead.next()?;
+                if list_operand_at(result, &ahead, row)? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1521,6 +1560,34 @@ impl<'a> Parser<'a> {
         list_operand_at(self.current, &self.lexer, row)
     }
 
+    /// Whether a searched CASE with a list result starts here
+    /// (case_has_list).
+    pub(super) fn list_case_follows(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("CASE")
+            && matches!(self.lexer.clone().next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("WHEN"))
+            && case_has_list(&self.lexer, row)?)
+    }
+
+    /// Whether a list operand here is a whole CASE result: WHEN, THEN, ELSE
+    /// or END follows it.
+    pub(super) fn lone_case_result(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if !list_operand_at(self.current, &self.lexer, row)? {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(matches!(skip_factor(self.current, &mut lexer)?.kind,
+            TokenKind::Word(word) if ["WHEN", "THEN", "ELSE", "END"]
+                .iter()
+                .any(|keyword| word.eq_ignore_ascii_case(keyword))))
+    }
+
     #[allow(clippy::type_complexity)]
     fn read_value_inner(
         &mut self,
@@ -2475,6 +2542,21 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Function { function, argument } => GraphSetValue::Function {
             function: *function,
             argument: Box::new(bind_read_value(argument, values)?),
+        },
+        ReadValueTemplate::Case { arms, otherwise } => GraphSetValue::Case {
+            arms: arms
+                .iter()
+                .map(|(condition, value)| -> Result<_, GraphSetTextError> {
+                    Ok((
+                        bind_read_value(condition, values)?,
+                        bind_read_value(value, values)?,
+                    ))
+                })
+                .collect::<Result<_, _>>()?,
+            otherwise: otherwise
+                .as_deref()
+                .map(|value| bind_read_value(value, values).map(Box::new))
+                .transpose()?,
         },
         ReadValueTemplate::Size(value) => {
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))

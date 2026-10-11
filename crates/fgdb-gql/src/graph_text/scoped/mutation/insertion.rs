@@ -570,6 +570,7 @@ fn bind_fields(
             | ReadValueTemplate::Ordered { .. }
             | ReadValueTemplate::Temporal { .. }
             | ReadValueTemplate::Function { .. }
+            | ReadValueTemplate::Case { .. }
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapGet { .. }

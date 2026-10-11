@@ -1063,6 +1063,15 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             }
             remap_output_columns(body, columns);
         }
+        ReadValueTemplate::Case { arms, otherwise } => {
+            for (condition, value) in arms {
+                remap_output_columns(condition, columns);
+                remap_output_columns(value, columns);
+            }
+            if let Some(otherwise) = otherwise {
+                remap_output_columns(otherwise, columns);
+            }
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
         | ReadValueTemplate::Local(_) => {}

@@ -308,6 +308,66 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
+    /// A searched CASE with a list result (list_case_follows), read in the
+    /// value language as one let slot: `CASE WHEN c THEN reverse(l) ELSE l
+    /// END` (fgdb-13l85). False, with nothing consumed, for any other CASE,
+    /// which keeps the scalar program. Out of line: integer_unary repeats
+    /// once per nested parenthesis.
+    #[inline(never)]
+    fn list_case_here(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        if !self.list_case_follows(row)? {
+            return Ok(false);
+        }
+        self.advance()?;
+        let nesting = self.let_base + depth + 1;
+        let mut arms = Vec::new();
+        while self.take_word("WHEN")? {
+            let condition = self.case_result(columns, nesting, at)?;
+            self.word("THEN")?;
+            arms.push((condition, self.case_result(columns, nesting, at)?));
+        }
+        let otherwise = if self.take_word("ELSE")? {
+            Some(Box::new(self.case_result(columns, nesting, at)?))
+        } else {
+            None
+        };
+        self.word("END")?;
+        self.let_slot(program, ReadValueTemplate::Case { arms, otherwise }, at)?;
+        Ok(true)
+    }
+
+    /// One condition or result of a list CASE: a lone list operand read as
+    /// a value, or a whole expression with its own let slots.
+    fn case_result(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        if self.lone_case_result(row)? {
+            return self.composite_value(columns, nesting, at);
+        }
+        let base = core::mem::replace(&mut self.let_base, nesting);
+        let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Whole, true);
+        self.let_base = base;
+        let (operand, slots) = parsed?;
+        Ok(self.scalar_let_value(operand, slots, at)?)
+    }
+
     /// Whether the `+`/`-` chain here has a list operand, which the value
     /// language reads whole (fgdb-c4i0d).
     fn sum_has_list(
@@ -1264,6 +1324,9 @@ impl<'a> Parser<'a> {
             ));
         }
         if self.starts_integer_case()? {
+            if self.lets.is_some() && self.list_case_here(columns, depth, program, at)? {
+                return Ok(());
+            }
             self.advance()?;
             return self.integer_case(columns, depth + 1, program, at);
         }

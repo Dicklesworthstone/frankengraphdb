@@ -29,6 +29,11 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Temporal { argument, .. } | GraphSetValue::Function { argument, .. } => {
             constant(argument)
         }
+        GraphSetValue::Case { arms, otherwise } => {
+            arms.iter()
+                .all(|(condition, value)| constant(condition) && constant(value))
+                && otherwise.as_deref().is_none_or(constant)
+        }
         // An element is fixed by its comprehension's list (fgdb-20foe).
         GraphSetValue::Local(_) => true,
         GraphSetValue::Comprehension { list, filter, map } => {
