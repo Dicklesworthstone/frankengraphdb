@@ -859,7 +859,7 @@ fn compile_stages<'a>(
                 false,
             )
         }
-        SetNode::ProcedureCall(_) | SetNode::Join { .. } => {
+        SetNode::ProcedureCall(_) | SetNode::Join { .. } | SetNode::Owned => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };

@@ -17,7 +17,7 @@ pub(super) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 /// Private output names for hidden boundary reads. A fixed set lets each name
 /// borrow for the statement's lifetime; a user alias that matches one is
 /// skipped, never shadowed.
-const BOUNDARY_READ_NAMES: [&str; 16] = [
+pub(in crate::graph_text) const BOUNDARY_READ_NAMES: [&str; 16] = [
     "__fg_boundary_0",
     "__fg_boundary_1",
     "__fg_boundary_2",
@@ -564,7 +564,7 @@ impl<'a> Parser<'a> {
             .map_or(schema.len(), |boundary| boundary.visible)
     }
 
-    pub(super) fn row_pipeline(
+    pub(in crate::graph_text) fn row_pipeline(
         &mut self,
         schema: RowSchema<'a>,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {

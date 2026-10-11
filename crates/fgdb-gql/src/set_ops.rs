@@ -204,6 +204,8 @@ pub enum GraphSetExecutionError<E> {
     ProcedureUnavailable {
         operand: usize,
     },
+    /// An owned-row leaf reached a host that supplies no owned rows.
+    OwnedRowsUnavailable,
 }
 impl<E> GraphSetExecutionError<E> {
     /// Preserve relational failures while translating only the host source.
@@ -227,6 +229,7 @@ impl<E> GraphSetExecutionError<E> {
             Self::ProcedureUnavailable { operand } => {
                 GraphSetExecutionError::ProcedureUnavailable { operand }
             }
+            Self::OwnedRowsUnavailable => GraphSetExecutionError::OwnedRowsUnavailable,
         }
     }
 }
@@ -254,6 +257,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
                     f,
                     "set operand {operand} calls a procedure this host does not run"
                 )
+            }
+            Self::OwnedRowsUnavailable => {
+                f.write_str("a write tail reached a host without its head rows")
             }
         }
     }
@@ -283,6 +289,10 @@ enum SetNode {
     },
     /// A procedure's rows, supplied by the host (Appendix C `ProcedureCall`).
     ProcedureCall(Box<PreparedProcedureCall>),
+    /// A write's RETURN head, owned and already charged by the write, under
+    /// its WITH tail (`SET ... WITH n WHERE ... RETURN`). The executing host
+    /// supplies the rows through `GraphSetSource::owned`; no read builds one.
+    Owned,
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
@@ -366,6 +376,21 @@ fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
     }
 }
 impl PreparedGraphSet {
+    /// A write head's owned rows under its WITH tail: the schema only. The
+    /// executing write supplies the rows (`GraphSetSource::owned`).
+    pub(crate) fn owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
+        Self {
+            node: SetNode::Owned,
+            columns,
+            types,
+            operands: 0,
+            depth: 1,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        }
+    }
+
     /// A zero-column, one-row relation with no graph source admission.
     #[must_use]
     pub fn singleton() -> Self {
@@ -561,9 +586,11 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            // Procedure rows are canonically sorted on arrival, like a pattern.
+            // Procedure rows are canonically sorted on arrival, like a pattern;
+            // so are a write head's owned rows.
             SetNode::Pattern(_)
             | SetNode::ProcedureCall(_)
+            | SetNode::Owned
             | SetNode::Aggregate(_)
             | SetNode::Join { .. } => false,
             SetNode::Scope(input)
@@ -726,6 +753,7 @@ impl PreparedGraphSet {
                 bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
+            SetNode::Owned => bytes.push(11),
             SetNode::ProcedureCall(call) => {
                 bytes.push(10);
                 call.append_transcript(bytes);
@@ -856,6 +884,30 @@ impl PreparedGraphSet {
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
+    /// A write tail over its head's owned rows. The tail holds row stages
+    /// over one `SetNode::Owned` leaf and never a graph source.
+    pub(crate) fn execute_over_owned<E, C>(
+        &self,
+        rows: Vec<GraphValueRow>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        struct OwnedRows(Option<Vec<GraphValueRow>>);
+        impl<E, C> GraphSetSource<E, C> for OwnedRows {
+            fn pattern(
+                &mut self,
+                _: &PreparedGraphPattern<GraphValueRow>,
+                _: GqlQueryPolicy,
+            ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+                unreachable!("a write tail reads no graph source")
+            }
+            fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+                self.0.take()
+            }
+        }
+        execute::execute(self, policy, &mut OwnedRows(Some(rows)), checkpoint)
+    }
+
     /// The executor over any trusted source, for relational consumers (a
     /// grouped aggregate) that forward their caller's procedure host.
     pub(crate) fn execute_with_source<E, C>(
@@ -872,7 +924,7 @@ impl PreparedGraphSet {
     pub fn calls_procedure(&self) -> bool {
         match &self.node {
             SetNode::ProcedureCall(_) => true,
-            SetNode::Pattern(_) | SetNode::Values => false,
+            SetNode::Pattern(_) | SetNode::Values | SetNode::Owned => false,
             SetNode::Aggregate(summary) => summary.input().calls_procedure(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)

@@ -458,6 +458,66 @@ fn post_statement_labels_apply_the_statements_own_label_actions() {
     });
 }
 
+/// A WITH after the write (openCypher Set, Remove and Delete "... WITH n
+/// WHERE ... RETURN"): its rows are the statement's post-write values, its
+/// WHERE and the RETURN read a carried element's new property values, an
+/// aggregating WITH sums them, and neither the WHERE nor the WITH's LIMIT
+/// limits which occurrences the write changes.
+#[test]
+fn a_with_after_the_write_reads_post_write_values() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        for (statement, expected) in [
+            // p becomes 11..14; the even ones survive the WHERE.
+            (
+                "MATCH (n:Item) SET n.p = n.p + 10 WITH n WHERE n.p % 2 = 0 \
+                 RETURN n.p AS p ORDER BY p",
+                rows(vec![vec![int(12)], vec![int(14)]]),
+            ),
+            // p becomes 12..15.
+            (
+                "MATCH (n:Item) SET n.p = n.p + 1 WITH sum(n.p) AS s RETURN s",
+                rows(vec![vec![int(54)]]),
+            ),
+            (
+                "MATCH (n:Item) REMOVE n.q WITH n WHERE n.q IS NULL RETURN n.p AS p ORDER BY p",
+                rows(vec![
+                    vec![int(12)],
+                    vec![int(13)],
+                    vec![int(14)],
+                    vec![int(15)],
+                ]),
+            ),
+            (
+                "MATCH (n:Item) SET n:Seen WITH n, n.p AS p ORDER BY p DESC LIMIT 2 \
+                 RETURN p ORDER BY p",
+                rows(vec![vec![int(14)], vec![int(15)]]),
+            ),
+        ] {
+            let (stats, result) = txn
+                .execute_graph_mutation_query_governed(&mut db, cx, &prepare(statement), policy())
+                .expect(statement);
+            assert_eq!(stats.effects, 4, "{statement}");
+            assert_eq!(result.value, expected, "{statement}");
+        }
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Seen) RETURN n.p AS p ORDER BY p"),
+            vec![vec![int(12)], vec![int(13)], vec![int(14)], vec![int(15)]]
+        );
+        assert!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) WHERE n.q IS NOT NULL RETURN n.p AS p"
+            )
+            .is_empty()
+        );
+    });
+}
+
 /// Reads whose post-statement value the statement cannot know are refused
 /// at preparation, before any catalog callback runs.
 #[test]

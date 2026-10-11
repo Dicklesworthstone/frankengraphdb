@@ -76,8 +76,9 @@ impl PreparedGraphSet {
                 SetNode::Pattern(_) => (false, false),
                 // This new row-domain reducer has no admitted standing
                 // derivative yet. A window cannot make it transparent.
-                // Neither has a procedure call's relation.
-                SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => (true, true),
+                // Neither has a procedure call's relation, nor a write's
+                // owned head rows.
+                SetNode::Aggregate(_) | SetNode::ProcedureCall(_) | SetNode::Owned => (true, true),
                 // Hidden-key output preserves a sequence no longer expressible
                 // by its visible cells. An inherited canonical window would
                 // select different occurrences; the ranked proof refuses it.

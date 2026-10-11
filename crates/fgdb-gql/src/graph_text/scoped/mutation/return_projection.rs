@@ -2415,7 +2415,7 @@ impl BoundSetTextInput {
     }
 }
 
-fn bind_stages(
+pub(super) fn bind_stages(
     mut input: PreparedGraphSet,
     stages: &[ReadStageTemplate],
     values: &[GqlParameterValue],

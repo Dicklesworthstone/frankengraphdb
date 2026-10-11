@@ -105,6 +105,12 @@ pub trait GraphSetSource<E, C> {
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         None
     }
+
+    /// A write tail's owned head rows (`SetNode::Owned`), taken once. `None`
+    /// means this host supplies none; only a write executes such a tail.
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        None
+    }
 }
 
 impl<E, C, F> GraphSetSource<E, C> for F

@@ -162,6 +162,9 @@ pub(crate) struct MutationReturnTemplate {
     pub offset: ReadPageNumber,
     pub count: Option<ReadPageNumber>,
     pub at: usize,
+    /// The row stages after a WITH head (`SET ... WITH n WHERE ... RETURN`),
+    /// over the head's own output columns, hidden boundary reads included.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 /// One `MATCH ... SET/REMOVE/DETACH DELETE ... RETURN ...` statement. RETURN

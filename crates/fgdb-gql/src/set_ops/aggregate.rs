@@ -222,7 +222,7 @@ impl PreparedGraphSet {
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
             SetNode::Aggregate(summary) => summary.input().first_pattern_input(),
-            SetNode::Values | SetNode::ProcedureCall(_) => None,
+            SetNode::Values | SetNode::ProcedureCall(_) | SetNode::Owned => None,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Unwind { input, .. }

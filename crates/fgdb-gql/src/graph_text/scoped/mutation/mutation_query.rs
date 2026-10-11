@@ -375,6 +375,8 @@ pub(super) struct ParsedMutationReturn<'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    /// The row stages after a WITH head, when the head is a WITH.
+    tail: Option<Vec<ReadStageTemplate>>,
 }
 
 impl<'a> ParsedMutationReturn<'a> {
@@ -643,6 +645,7 @@ impl<'a> ParsedMutationReturn<'a> {
             offset: self.offset,
             count: self.count,
             at: self.at,
+            tail: self.tail,
         })
     }
 }
@@ -654,7 +657,13 @@ impl<'a> Parser<'a> {
         scope: ReturnScope,
     ) -> Result<ParsedMutationReturn<'a>, GraphMutationTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        // A WITH after the write is the head of a row pipeline whose rows
+        // are this statement's own post-write values (openCypher Set, Remove
+        // and Delete "... WITH n WHERE ... RETURN").
+        let head = self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -670,6 +679,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
@@ -729,7 +739,164 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            let tail = self.write_tail(&mut returning, columns, scope, output)?;
+            returning.tail = Some(tail);
+        }
         Ok(returning)
+    }
+
+    /// The stages after a write's WITH head. A carried element's property
+    /// read in the WITH's own WHERE, its pages or the terminal RETURN becomes
+    /// a hidden head column holding the post-write value, exactly as a read
+    /// pipeline hoists boundary reads; later stages see only the WITH items.
+    fn write_tail(
+        &mut self,
+        returning: &mut ParsedMutationReturn<'a>,
+        columns: &mut Vec<Projection<'a>>,
+        scope: ReturnScope,
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphMutationTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        // An aggregating WITH carries no element to read later.
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                let (
+                    Binding::Input(input),
+                    _,
+                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge,
+                ) = returning.bindings[binding]
+                else {
+                    continue;
+                };
+                let variable = columns[input].variable;
+                let column = returning.map_input(
+                    self,
+                    columns,
+                    scope,
+                    variable,
+                    ReturnMapInput::Property(key),
+                )?;
+                let name = return_projection::pipeline::BOUNDARY_READ_NAMES
+                    .iter()
+                    .copied()
+                    .find(|name| schema.iter().all(|(output, _)| output.text != *name))
+                    .ok_or_else(|| {
+                        error(
+                            key.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "at most 16 carried-element property reads after a WITH",
+                            ),
+                        )
+                    })?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                schema.push((
+                    Name {
+                        text: name,
+                        at: key.at,
+                    },
+                    GraphSetColumnType::Scalar,
+                ));
+                reads.push((alias.text, key, schema.len() - 1));
+            }
+        }
+        if !reads.is_empty() {
+            self.boundary_reads = Some(BoundaryReads {
+                visible,
+                width: schema.len(),
+                reads,
+                grouped: Vec::new(),
+                scoped: Vec::new(),
+            });
+        }
+        Ok(self.row_pipeline(schema)?)
+    }
+
+    /// `alias.key` reads of a carried vertex or edge from the current token
+    /// to the next WITH, UNWIND, MATCH or CALL: the WITH's WHERE, its pages
+    /// and the terminal RETURN. Chained keys and other names are not reads.
+    fn write_tail_reads(
+        &self,
+        outputs: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
+        let mut reads: Vec<(Name<'a>, Name<'a>)> = Vec::new();
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        // The three tokens before `token`, oldest first.
+        let mut back: [Option<Token<'a>>; 3] = [None; 3];
+        let mut depth = 0_usize;
+        loop {
+            let after_dot = matches!(
+                back[2],
+                Some(Token {
+                    kind: TokenKind::Punct(b'.'),
+                    ..
+                })
+            );
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !after_dot
+                        && ["WITH", "UNWIND", "MATCH", "CALL"]
+                            .iter()
+                            .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(key) if after_dot => {
+                    if let Some(Token {
+                        kind: TokenKind::Word(alias),
+                        at,
+                    }) = back[1]
+                        && !matches!(
+                            back[0],
+                            Some(Token {
+                                kind: TokenKind::Punct(b'.'),
+                                ..
+                            })
+                        )
+                        && outputs.iter().any(|(name, kind)| {
+                            name.text == alias
+                                && matches!(
+                                    kind,
+                                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                                )
+                        })
+                        && !reads
+                            .iter()
+                            .any(|(read, known)| read.text == alias && known.text == key)
+                    {
+                        reads.push((
+                            Name { text: alias, at },
+                            Name {
+                                text: key,
+                                at: token.at,
+                            },
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            back = [back[1], back[2], Some(token)];
+            token = lexer.next()?;
+        }
+        Ok(reads)
     }
 }
 
@@ -768,12 +935,20 @@ impl MutationReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        // The tail reads the head's own output columns, hidden reads included.
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 

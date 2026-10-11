@@ -359,6 +359,11 @@ where
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vec![GraphValueRow::unit()]
         }
+        // The write charged these rows as it built them; the tail counts its
+        // own work over them from here.
+        SetNode::Owned => source.owned().ok_or(GqlQueryError::Source(
+            GraphSetExecutionError::OwnedRowsUnavailable,
+        ))?,
         SetNode::Unwind { input, value } => {
             let input = run(input, source, meter, operand)?;
             let mut output = Vec::new();
