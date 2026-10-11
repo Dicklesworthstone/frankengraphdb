@@ -21,6 +21,7 @@ struct Pins {
     active: Rc<Cell<usize>>,
     fault: PinFault,
     consensus: Option<PersistentState<Command>>,
+    fail_publication: bool,
 }
 
 struct Backend {
@@ -56,8 +57,13 @@ impl RaftPublisher<Command> for Backend {
         &mut self,
         state: &PersistentState<Command>,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        self.pins.borrow_mut().consensus = Some(state.clone());
-        ready(Ok(()))
+        let mut pins = self.pins.borrow_mut();
+        pins.consensus = Some(state.clone());
+        ready(if pins.fail_publication {
+            Err("Raft root publication outcome unknown")
+        } else {
+            Ok(())
+        })
     }
 }
 
@@ -115,7 +121,7 @@ fn cluster(count: u128, application_limit: usize, replica_limit: usize) -> Vec<M
             app,
             pins: Rc::new(RefCell::new(Pins {
                 calls: 0, active: Rc::new(Cell::new(0)),
-                fault: PinFault::Healthy, consensus: None,
+                fault: PinFault::Healthy, consensus: None, fail_publication: false,
             })),
         };
         immediate(Member::recover(replica, backend, 1, application_limit)).unwrap()
@@ -297,4 +303,35 @@ fn application_publication_failure_fences_the_entire_admitted_batch() {
     assert!(matches!(immediate(member.read_index_batch(1)),
         Err(MemberError::State(ApplicationStateError::RecoveryRequired))));
     assert_eq!(member.application.application.pins.borrow().calls, 0);
+}
+
+#[test]
+fn uncertain_raft_publication_fences_quorum_ready_batch_before_application() {
+    let mut members = cluster(1, 3, 8);
+    elect(&mut members);
+    let member = &mut members[0];
+    let (ids, _) = immediate(member.read_index_batch(3)).unwrap();
+    assert_eq!(member.replica.pending_reads(), 0);
+    assert_eq!(member.pending_reads(), 3);
+    let pins = Rc::clone(&member.application.application.pins);
+    pins.borrow_mut().fail_publication = true;
+    assert!(immediate(member.step(Event::Propose(Command::Put(23)))).is_err());
+    // The model persisted the new committed suffix BEFORE reporting failure.
+    // The driver must not serve the older ready batch from this uncertain root.
+    let published = pins.borrow().consensus.clone().unwrap();
+    assert_eq!(published.commit_index(), 2);
+    assert_eq!(published.entries().last().unwrap().command, Some(Command::Put(23)));
+    for id in &ids {
+        assert!(matches!(immediate(member.try_read(id)),
+            Err(ApplicationError::State(ApplicationStateError::Raft(
+                fgdb_order::Error::RecoveryRequired
+            )))));
+        assert!(member.read_index_probes(id).is_err());
+    }
+    assert!(matches!(immediate(member.read_index_batch(1)),
+        Err(MemberError::State(ApplicationStateError::Raft(
+            fgdb_order::Error::RecoveryRequired
+        )))));
+    assert_eq!(pins.borrow().calls, 0);
+    assert_eq!(member.application.application.app.0.borrow().progress.applied.index, 0);
 }
