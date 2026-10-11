@@ -648,3 +648,59 @@ fn hidden_arithmetic_and_eager_source_failures_survive_limit_zero_and_lazy_branc
         Err(GqlQueryError::Source(GraphAggregateError::InputExpression { error, .. }))
             if error.kind == GraphIntegerErrorKind::DivisionByZero));
 }
+
+/// A RETURN item is a whole expression. A comparison over aggregates is the
+/// item's Boolean (TCK Return2 [10]: `MATCH (a) RETURN count(a) > 0`). A
+/// comparison over a property is a computed key, grouped by its three-valued
+/// Boolean as any computed key is grouped by its value, NULL its own group.
+#[test]
+fn predicate_items_compare_aggregates_and_group_by_their_boolean_value() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let flag = |value: Option<bool>| {
+        GraphAggregateValue::Value(GraphValue::Scalar(
+            value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
+        ))
+    };
+    // Keys first, then the aggregate columns, wherever the plan keeps them.
+    let cells = |row: &GraphAggregateRow| -> Vec<GraphAggregateValue> {
+        (row.keys().iter().cloned().map(GraphAggregateValue::Value))
+            .chain(row.values().iter().cloned())
+            .collect()
+    };
+    let props = properties();
+    let plan = prepare(
+        "MATCH (n) RETURN COUNT(n) > 0 AS any, COUNT(*) = 2 AND SUM(n.p) IS NOT NULL AS pair",
+    );
+    // p is -2, 2, 2 and 5 on vertices 1 to 4, so vertices 1 and 2 sum to 0,
+    // which is not NULL.
+    for (vertices, expected) in [
+        (&[][..], [false, false]),
+        (&[VId(1), VId(2)][..], [true, true]),
+        (&[VId(1), VId(2), VId(3), VId(4)][..], [true, false]),
+    ] {
+        let rows = run(&plan, vertices, &[], &props).unwrap().value;
+        assert_eq!(rows.len(), 1, "{vertices:?}");
+        assert_eq!(
+            cells(&rows[0]),
+            expected.map(|value| flag(Some(value))),
+            "{vertices:?}"
+        );
+    }
+    // Vertex 5 has no p: its key is NULL, a group apart from false.
+    let plan = prepare("MATCH (n) RETURN n.p > 1 AS big, COUNT(*) AS c");
+    let vertices = [VId(1), VId(2), VId(3), VId(4), VId(5)];
+    let rows = run(&plan, &vertices, &[], &props).unwrap().value;
+    assert_eq!(rows.len(), 3);
+    for expected in [
+        vec![flag(Some(true)), GraphAggregateValue::Count(3)],
+        vec![flag(Some(false)), GraphAggregateValue::Count(1)],
+        vec![flag(None), GraphAggregateValue::Count(1)],
+    ] {
+        assert!(
+            rows.iter().any(|row| cells(row) == expected),
+            "missing group {expected:?}"
+        );
+    }
+}

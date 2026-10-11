@@ -162,6 +162,32 @@ fn public_autocommit_returns_parameterized_mutation_rows_with_collection_types()
             vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]]
         );
         assert_eq!(db.frontier().unwrap(), CommitSeq(3));
+        // A write RETURN item is a whole expression: a comparison, IS [NOT]
+        // NULL or Boolean connector over post-statement values is its Boolean
+        // (TCK Remove1 [1]: `REMOVE n.num RETURN n.num IS NOT NULL`).
+        let result = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "MATCH (n:L) SET n.p = n.id RETURN n.id AS id, n.p IS NOT NULL AS kept, \
+                 n.p = 2 OR n.p < 0 AS second ORDER BY id",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(2, 2, 0),
+                no_allocate,
+            )
+            .await
+            .unwrap();
+        let flag = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        assert_eq!(
+            rows(result, &["id", "kept", "second"]),
+            vec![
+                vec![int(1), flag(true), flag(false)],
+                vec![int(2), flag(true), flag(true)],
+            ]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

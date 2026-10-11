@@ -1147,7 +1147,7 @@ impl<'a> Parser<'a> {
     ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let value = self
-            .read_resolved_value(
+            .read_resolved_item(
                 &mut |parser| {
                     let leaf = if parser.starts_aggregate_call()? {
                         let name = parser.name()?;

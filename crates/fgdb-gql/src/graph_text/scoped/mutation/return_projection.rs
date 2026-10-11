@@ -20,15 +20,28 @@ use crate::{
 /// Expression leaves and write leaves share one value grammar. Only the
 /// owner of a write can bind a parsed map selector to post-statement data.
 enum ValueResolver<'r, 'a> {
+    /// Leaves of an operand whose enclosing grammar owns the comparisons and
+    /// Boolean connectors around it (a WITH WHERE operand, an ORDER BY key):
+    /// the value stops before them.
     Columns(&'r mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>),
+    /// Leaves of a whole projection item, whose comparisons, IS [NOT] NULL
+    /// and Boolean connectors belong to the value (`RETURN count(*) > 0 AS
+    /// any`).
+    Items(&'r mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>),
+    /// A write RETURN item or aggregate argument, a whole value too.
     Write(&'r mut dyn ReturnLeaves<'a>),
 }
 impl<'a> ValueResolver<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self {
-            Self::Columns(resolve) => resolve(parser),
+            Self::Columns(resolve) | Self::Items(resolve) => resolve(parser),
             Self::Write(leaves) => leaves.leaf(parser),
         }
+    }
+
+    /// Whether the value is a whole expression, predicates included.
+    fn whole(&self) -> bool {
+        !matches!(self, Self::Columns(_))
     }
 
     fn map_input(
@@ -39,7 +52,7 @@ impl<'a> ValueResolver<'_, 'a> {
     ) -> Result<usize, GraphPatternTextError> {
         match self {
             Self::Write(leaves) => leaves.map_input(parser, source, input),
-            Self::Columns(_) => Err(error(
+            Self::Columns(_) | Self::Items(_) => Err(error(
                 source.at,
                 GraphPatternTextErrorKind::Expected("a map source in the current projection scope"),
             )),
@@ -692,7 +705,7 @@ impl<'a> Parser<'a> {
             )?;
             let item_at = self.current.at;
             let implicit = self.implicit_with_binding()?;
-            let value = self.read_resolved_value(
+            let value = self.read_resolved_item(
                 &mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else {
                         return Ok(None);
@@ -1181,6 +1194,16 @@ impl<'a> Parser<'a> {
         self.read_recursive_value(None, &[], &mut Some(ValueResolver::Columns(resolve)), depth)
     }
 
+    /// As [`Self::read_resolved_value`] for a whole RETURN or WITH item:
+    /// comparisons, IS [NOT] NULL and Boolean connectors are part of it.
+    pub(in crate::graph_text) fn read_resolved_item(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_recursive_value(None, &[], &mut Some(ValueResolver::Items(resolve)), depth)
+    }
+
     pub(super) fn read_write_value(
         &mut self,
         leaves: &mut impl ReturnLeaves<'a>,
@@ -1657,9 +1680,12 @@ impl<'a> Parser<'a> {
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(resolve) = resolve.as_mut() {
-            let operand = self
-                .resolved_expression(&mut |parser| resolve.leaf(parser))
-                .map_err(expression_error)?;
+            let operand = if resolve.whole() {
+                self.resolved_predicate(&mut |parser| resolve.leaf(parser))
+            } else {
+                self.resolved_expression(&mut |parser| resolve.leaf(parser))
+            }
+            .map_err(expression_error)?;
             self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word)

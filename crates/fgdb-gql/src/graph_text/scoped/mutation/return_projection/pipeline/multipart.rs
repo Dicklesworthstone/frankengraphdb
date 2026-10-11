@@ -580,7 +580,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                let value = self.read_resolved_value(&mut |parser| {
+                let value = self.read_resolved_item(&mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else { return Ok(None); };
                     let next = parser.lexer.clone().next()?;
                     if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))

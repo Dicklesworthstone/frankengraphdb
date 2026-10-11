@@ -560,3 +560,43 @@ fn a_leading_optional_match_is_a_left_join_of_the_unit_row() {
     assert!(union.contains(&vertices(&[Some(1)])), "{union:?}");
     assert!(union.contains(&vertices(&[None])), "{union:?}");
 }
+
+/// A RETURN item after a leading OPTIONAL MATCH is a whole expression, as it
+/// is after a required MATCH: a comparison, IS [NOT] NULL or Boolean connector
+/// over the optional binding is the item's three-valued Boolean (openCypher,
+/// TCK Null1 [2], [3] and Null2 [2], [3]: `n.missing IS NULL`).
+#[test]
+fn a_leading_optional_match_returns_whole_predicate_items() {
+    let flags = |values: &[Option<bool>]| {
+        GraphValueRow::from_owned_values(
+            values
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+                })
+                .collect(),
+        )
+    };
+    // No witness: the NULL row's property is NULL, so a comparison is UNKNOWN.
+    assert_eq!(
+        rows(
+            "OPTIONAL MATCH (a {score: 70}) RETURN a.score IS NULL AS absent, \
+             a.score IS NOT NULL AS present, a.score = 70 AS same"
+        ),
+        vec![flags(&[Some(true), Some(false), None])]
+    );
+    // Witnesses: one Boolean row each, connectors included.
+    let found = rows(
+        "OPTIONAL MATCH (a) WHERE a.score > 20 \
+         RETURN a.score = 30 AS third, a.score > 30 OR a.score < 0 AS last",
+    );
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found.contains(&flags(&[Some(true), Some(false)])),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&flags(&[Some(false), Some(true)])),
+        "{found:?}"
+    );
+}

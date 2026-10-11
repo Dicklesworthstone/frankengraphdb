@@ -296,6 +296,21 @@ fn named_with_expressions_and_parenthesized_variables_preserve_results() {
         .value;
     assert_eq!(ints(&rows, 0), [Some(1), Some(2), Some(3)]);
     assert_eq!(ints(&rows, 1), [Some(1), Some(2), Some(1)]);
+    // A named WITH item after UNWIND ... MATCH is a whole expression: a
+    // comparison against the unwound column is the item's Boolean.
+    let compared = prepare("UNWIND [1] AS k MATCH (n) WITH n.p = k + 1 AS two RETURN two");
+    let rows = run(&compared, &values, wide(), &mut || Ok(()))
+        .unwrap()
+        .value;
+    let flags: Vec<_> = rows
+        .iter()
+        .map(|row| match row.get(0).unwrap().as_scalar() {
+            Some(CanonicalScalar::Bool(flag)) => *flag,
+            other => panic!("expected a Boolean, found {other:?}"),
+        })
+        .collect();
+    assert_eq!(flags.len(), 4);
+    assert_eq!(flags.iter().filter(|flag| **flag).count(), 2, "{flags:?}");
     let implicit = prepare("UNWIND [1,2] AS x WITH ((x)) RETURN x");
     let explicit = prepare("UNWIND [1,2] AS x WITH x AS x RETURN x");
     assert_eq!(implicit.canonical_bytes(), explicit.canonical_bytes());
