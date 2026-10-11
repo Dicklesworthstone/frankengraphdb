@@ -875,6 +875,287 @@ fn dates_compare_convert_and_order_as_values() {
     );
 }
 
+/// fgdb-txbg9: localtime(...), time(...) and localdatetime(...) build from
+/// fields (over `time`, `date` and `datetime` bases), from ISO 8601 text,
+/// from another temporal value or from NULL. A time map's `timezone` moves a
+/// base that has an offset to the same instant and puts a local one at it.
+/// The values read their fields, compare (a time at an offset by its UTC
+/// time of day first), convert to their java.time text and order. Expected
+/// texts are the TCK's: Temporal1 [5]-[7] and [13], Temporal2 [2]-[4],
+/// Temporal3 [1]-[7], Temporal5 [3]-[5] and Temporal7 [2]-[4].
+#[test]
+fn times_and_local_date_times_build_read_compare_and_order() {
+    let x = text("x");
+    let rendered = |expression: &str| match scalar(expression, &x) {
+        CanonicalScalar::Date(value) => value.to_string(),
+        CanonicalScalar::LocalTime(value) => value.to_string(),
+        CanonicalScalar::Time(value) => value.to_string(),
+        CanonicalScalar::LocalDateTime(value) => value.to_string(),
+        other => format!("{other:?}"),
+    };
+    let local = "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})";
+    let time = "time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})";
+    let local_dt = "localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, \
+                    second: 14, millisecond: 645})";
+    let day = "date({year: 1984, month: 10, day: 11})";
+    for (expression, expected) in [
+        // Temporal1 [5], [6], [7] and [13]: fields.
+        (
+            "localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, \
+             microsecond: 456})"
+                .to_owned(),
+            "12:31:14.123456789",
+        ),
+        (
+            "localtime({hour: 12, minute: 31, second: 14, microsecond: 645876})".to_owned(),
+            "12:31:14.645876",
+        ),
+        (
+            "localtime({hour: 12, minute: 31, second: 14, millisecond: 645})".to_owned(),
+            "12:31:14.645",
+        ),
+        ("localtime({hour: 12, minute: 31})".to_owned(), "12:31"),
+        ("localtime({hour: 12})".to_owned(), "12:00"),
+        (
+            "time({hour: 12, minute: 31, second: 14, nanosecond: 3})".to_owned(),
+            "12:31:14.000000003Z",
+        ),
+        ("time({hour: 12})".to_owned(), "12:00Z"),
+        (
+            "time({hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'})"
+                .to_owned(),
+            "12:31:14.645+01:00",
+        ),
+        (
+            "time({hour: 12, minute: 34, second: 56, timezone: '+02:05:59'})".to_owned(),
+            "12:34:56+02:05:59",
+        ),
+        (
+            "time({hour: 12, minute: 34, second: 56, timezone: '-02:05:07'})".to_owned(),
+            "12:34:56-02:05:07",
+        ),
+        (
+            "localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, \
+             nanosecond: 645876123})"
+                .to_owned(),
+            "1984-10-11T12:31:14.645876123",
+        ),
+        (
+            "localdatetime({year: 1984, month: 10, day: 11})".to_owned(),
+            "1984-10-11T00:00",
+        ),
+        (
+            "localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12})".to_owned(),
+            "1984-03-07T12:00",
+        ),
+        (
+            "localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31})".to_owned(),
+            "1984-07-20T12:31",
+        ),
+        (
+            "localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, \
+             second: 14})"
+                .to_owned(),
+            "1984-08-14T12:31:14",
+        ),
+        ("localdatetime({year: 1984})".to_owned(), "1984-01-01T00:00"),
+        // Temporal2 [2], [3] and [4]: text.
+        ("localtime('214032.142')".to_owned(), "21:40:32.142"),
+        ("localtime('21')".to_owned(), "21:00"),
+        ("time('214032-0100')".to_owned(), "21:40:32-01:00"),
+        ("time('2140-00:00')".to_owned(), "21:40Z"),
+        ("time('22+18:00')".to_owned(), "22:00+18:00"),
+        (
+            "localdatetime('2015-W30-2T214032.142')".to_owned(),
+            "2015-07-21T21:40:32.142",
+        ),
+        ("localdatetime('2015202T21')".to_owned(), "2015-07-21T21:00"),
+        // Temporal3: another temporal value, and bases with overrides.
+        (format!("localtime({local})"), "12:31:14.645876123"),
+        (
+            format!("localtime({{time: {local}, second: 42}})"),
+            "12:31:42.645876123",
+        ),
+        (format!("localtime({time})"), "12:31:14.645876"),
+        (
+            format!("localtime({{time: {local_dt}, second: 42}})"),
+            "12:31:42.645",
+        ),
+        (format!("time({local})"), "12:31:14.645876123Z"),
+        (
+            format!("time({{time: {local}, timezone: '+05:00'}})"),
+            "12:31:14.645876123+05:00",
+        ),
+        (
+            format!("time({{time: {time}, timezone: '+05:00'}})"),
+            "16:31:14.645876+05:00",
+        ),
+        (
+            format!("time({{time: {time}, second: 42, timezone: '+05:00'}})"),
+            "16:31:42.645876+05:00",
+        ),
+        (
+            format!("time({{time: {local_dt}, second: 42}})"),
+            "12:31:42.645Z",
+        ),
+        (
+            format!("localdatetime({{date: {day}, hour: 10, minute: 10, second: 10}})"),
+            "1984-10-11T10:10:10",
+        ),
+        (
+            format!(
+                "localdatetime({{date: {local_dt}, day: 28, hour: 10, minute: 10, second: 10}})"
+            ),
+            "1984-03-28T10:10:10",
+        ),
+        (
+            format!("localdatetime({{year: 1984, month: 10, day: 11, time: {time}, second: 42}})"),
+            "1984-10-11T12:31:42.645876",
+        ),
+        (
+            format!("localdatetime({{date: {day}, time: {local}}})"),
+            "1984-10-11T12:31:14.645876123",
+        ),
+        (
+            format!("localdatetime({{datetime: {local_dt}, day: 28, second: 42}})"),
+            "1984-03-28T12:31:42.645",
+        ),
+        (
+            format!("localdatetime({local_dt})"),
+            "1984-03-07T12:31:14.645",
+        ),
+        (format!("date({local_dt})"), "1984-03-07"),
+        (format!("date({{date: {local_dt}, day: 28}})"), "1984-03-28"),
+        ("localtime(null)".to_owned(), "Null"),
+        ("time(null)".to_owned(), "Null"),
+        ("localdatetime(null)".to_owned(), "Null"),
+    ] {
+        assert_eq!(rendered(&expression), expected, "{expression}");
+    }
+
+    // Temporal5 [3]-[5] fields, and Temporal7 [2]-[4] comparisons: a time at
+    // an offset compares by its UTC time of day first, and is equal to
+    // another only with the same local time and offset.
+    let int = CanonicalScalar::Int;
+    let truth = CanonicalScalar::Bool;
+    let november = "localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, \
+                    second: 14, nanosecond: 645876123})";
+    for (expression, expected) in [
+        (format!("{local}.hour"), int(12)),
+        (format!("{local}.millisecond"), int(645)),
+        (format!("{local}.microsecond"), int(645_876)),
+        (format!("{local}.nanosecond"), int(645_876_123)),
+        (format!("{time}.timezone"), text("+01:00")),
+        (format!("{time}.offset"), text("+01:00")),
+        (format!("{time}.offsetMinutes"), int(60)),
+        (format!("{time}.offsetSeconds"), int(3_600)),
+        (format!("{time}.minute + 1"), int(32)),
+        (format!("{november}.quarter"), int(4)),
+        (format!("{november}.week"), int(45)),
+        (format!("{november}.ordinalDay"), int(316)),
+        (format!("{november}.weekDay"), int(7)),
+        (format!("{november}.dayOfQuarter"), int(42)),
+        (format!("{november}.second"), int(14)),
+        (
+            "localtime({hour: 10, minute: 35}) < localtime({hour: 12, minute: 31})".to_owned(),
+            truth(true),
+        ),
+        (
+            "time({hour: 10, minute: 0, timezone: '+01:00'}) < time({hour: 9, minute: 35, \
+             timezone: '+00:00'})"
+                .to_owned(),
+            truth(true),
+        ),
+        (
+            "time('12:00+01:00') = time('11:00Z')".to_owned(),
+            truth(false),
+        ),
+        (
+            "time('21:40-00:00') = time('21:40Z')".to_owned(),
+            truth(true),
+        ),
+        (
+            "localdatetime('1980-12-11T12:31:14') < localdatetime('1984-10-11T12:31')".to_owned(),
+            truth(true),
+        ),
+        (
+            format!("{local} = localtime('12:31:14.645876123')"),
+            truth(true),
+        ),
+        (format!("toString({time})"), text("12:31:14.645876+01:00")),
+        (
+            format!("toString({local_dt})"),
+            text("1984-03-07T12:31:14.645"),
+        ),
+    ] {
+        assert_eq!(scalar(&expression, &x), expected, "{expression}");
+    }
+
+    // A field outside the kind, a smaller unit without its larger one, a
+    // fraction out of range, a named zone (no zone database in the value
+    // language) and text of the wrong form refuse with their typed kind.
+    for (expression, kind) in [
+        ("localtime({minute: 31})", "TemporalConstruction"),
+        ("localtime({hour: 12, second: 14})", "TemporalConstruction"),
+        ("localtime({})", "TemporalConstruction"),
+        ("localtime({hour: 24})", "TemporalConstruction"),
+        (
+            "localtime({hour: 1, minute: 1, second: 1, millisecond: 1, microsecond: 1000})",
+            "TemporalConstruction",
+        ),
+        ("localtime({hour: 1, year: 1984})", "TemporalConstruction"),
+        (
+            "localtime({hour: 1, timezone: '+01:00'})",
+            "TemporalConstruction",
+        ),
+        (
+            "time({hour: 12, timezone: 'Europe/Stockholm'})",
+            "TemporalConstruction",
+        ),
+        (
+            "time({hour: 12, timezone: '+18:01'})",
+            "TemporalConstruction",
+        ),
+        ("localdatetime({hour: 12})", "TemporalConstruction"),
+        (
+            "localdatetime({year: 1984, minute: 5})",
+            "TemporalConstruction",
+        ),
+        ("localdatetime('2015-07-21 12:00')", "TemporalConstruction"),
+        ("localdatetime(date('2015-07-21'))", "TemporalConstruction"),
+        ("localtime(date('2015-07-21'))", "TemporalConstruction"),
+        ("localtime({hour: 12}).year", "TemporalField"),
+        ("localtime({hour: 12}).timezone", "TemporalField"),
+        ("localdatetime({year: 1984}).offset", "TemporalField"),
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains(kind),
+            "{expression}: {error:?}"
+        );
+    }
+
+    let ordered = execute(
+        &prepare(
+            "UNWIND [time('12:00+01:00'), null, time('11:30Z'), time('01:00+05:00')] AS t \
+             RETURN t ORDER BY t",
+        ),
+        &x,
+        policy(),
+    )
+    .unwrap();
+    let times: Vec<String> = ordered
+        .value
+        .iter()
+        .map(|row| match row.values()[0].as_scalar().unwrap() {
+            CanonicalScalar::Time(time) => time.to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(times, ["01:00+05:00", "12:00+01:00", "11:30Z", "Null"]);
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

@@ -342,14 +342,15 @@ fn expression<'g, E, C>(
                         Err(_) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
                     }
                 }
-                // A date's fields (fgdb-txbg9), as in row projections.
-                Cell::Value(ValueRef::Scalar(CanonicalScalar::Date(day))) => {
-                    let field = crate::set_ops::date_field(*day, key)
-                        .ok_or_else(|| failure(column, GraphIntegerErrorKind::TemporalField))?;
+                // A temporal value's fields (fgdb-txbg9), as in row projections.
+                Cell::Value(ValueRef::Scalar(scalar)) => {
+                    let field = crate::set_ops::temporal_field(scalar, key)
+                        .ok_or_else(|| {
+                            failure(column, GraphIntegerErrorKind::IncompatibleOperands)
+                        })?
+                        .map_err(|kind| failure(column, kind))?;
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
-                        CanonicalScalar::Int(field),
-                    )))
+                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(field)))
                 }
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
             }

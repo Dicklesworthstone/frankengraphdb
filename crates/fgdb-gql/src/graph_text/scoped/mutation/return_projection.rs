@@ -1177,11 +1177,23 @@ impl<'a> Parser<'a> {
         Ok(let_value(slots, body))
     }
 
+    /// The temporal constructor called here (fgdb-txbg9): `date(`,
+    /// `localtime(`, `time(` or `localdatetime(`, in any case.
+    fn temporal_call(&self) -> Result<Option<crate::GraphTemporalFunction>, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let Some(function) = crate::GraphTemporalFunction::named(word) else {
+            return Ok(None);
+        };
+        Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
+    }
+
     /// Whether a composite value starts here that a scalar expression reads
     /// through a let slot (fgdb-o5o9t): a list comprehension or quantifier,
-    /// head/last/tail/range/reduce, keys(), date(...), or size() of a list
-    /// literal, a parameter or a name. The scalar SIZE keeps a property read
-    /// and every literal.
+    /// head/last/tail/range/reduce, keys(), a temporal constructor, or size()
+    /// of a list literal, a parameter or a name. The scalar SIZE keeps a
+    /// property read and every literal.
     pub(super) fn starts_let_operand(&self) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         if self.is_punct(b'[') {
@@ -1192,11 +1204,12 @@ impl<'a> Parser<'a> {
         if self.list_quantifier()?.is_some() || self.list_function()?.is_some() {
             return Ok(true);
         }
-        let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
-        // A date (fgdb-txbg9) is compared, converted and read in a slot.
-        if call && self.is_word("DATE") {
+        // A temporal value (fgdb-txbg9) is compared, converted and read in a
+        // slot.
+        if self.temporal_call()?.is_some() {
             return Ok(true);
         }
+        let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
         if !call || !(self.is_word("KEYS") || self.is_word("SIZE")) {
             return Ok(false);
         }
@@ -1480,18 +1493,17 @@ impl<'a> Parser<'a> {
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
-        } else if self.is_word("DATE")
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-        {
-            // date(map | text | date | NULL) (fgdb-txbg9). date() reads the
-            // statement clock, which no read has yet.
+        } else if let Some(function) = self.temporal_call()? {
+            // date(...), localtime(...), time(...) or localdatetime(...) of a
+            // map, text, temporal value or NULL (fgdb-txbg9). An empty call
+            // reads the statement clock, which no read has yet.
             self.advance()?;
             self.punct(b'(', "(")?;
             let argument =
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Temporal {
-                function: crate::GraphTemporalFunction::Date,
+                function,
                 argument: Box::new(argument),
             }
         } else if matches!(self.current.kind, TokenKind::Word(word)

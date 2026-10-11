@@ -28,8 +28,8 @@ pub use projection::{
     GraphTemporalFunction,
 };
 pub(crate) use projection::{
-    ProjectionFailure, construct_temporal, date_field, evaluate_equality, evaluate_membership,
-    evaluate_value, map_keys, overlay_map, range_values, slice_bounds,
+    ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership, evaluate_value,
+    map_keys, overlay_map, range_values, slice_bounds, temporal_field,
 };
 
 use crate::algebra::{

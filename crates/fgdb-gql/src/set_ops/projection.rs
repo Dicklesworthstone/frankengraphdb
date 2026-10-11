@@ -7,7 +7,7 @@ mod membership;
 mod temporal;
 
 pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
-pub(crate) use temporal::{construct as construct_temporal, date_field};
+pub(crate) use temporal::{construct as construct_temporal, field as temporal_field};
 
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
@@ -130,19 +130,27 @@ pub enum GraphSetValue {
         body: Box<GraphSetValue>,
     },
     /// A temporal constructor (fgdb-txbg9), such as `date({year: 1984})` or
-    /// `date('2015-07-21')`. NULL is NULL.
+    /// `localtime('21:40')`. NULL is NULL.
     Temporal {
         function: GraphTemporalFunction,
         argument: Box<GraphSetValue>,
     },
 }
 
-/// The openCypher temporal constructors in the value language.
+/// The openCypher temporal constructors in the value language. Each takes a
+/// map of fields (over optional bases), ISO 8601 text, a temporal value to
+/// convert, or NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphTemporalFunction {
-    /// `date(x)`: from a map of one calendar's fields (optionally over a
-    /// `date` base), ISO 8601 text, a date, or NULL.
+    /// `date(x)`: calendar fields of one calendar, over a `date` base.
     Date,
+    /// `localtime(x)`: clock fields, over a `time` base.
+    LocalTime,
+    /// `time(x)`: clock fields and a `timezone` offset, over a `time` base.
+    Time,
+    /// `localdatetime(x)`: calendar and clock fields, over `date`, `time`
+    /// and `datetime` bases.
+    LocalDateTime,
 }
 
 impl GraphTemporalFunction {
@@ -150,7 +158,22 @@ impl GraphTemporalFunction {
     pub(crate) const fn tag(self) -> u8 {
         match self {
             Self::Date => 1,
+            Self::LocalTime => 2,
+            Self::Time => 3,
+            Self::LocalDateTime => 4,
         }
+    }
+
+    /// The function a call named `name` (any case) denotes.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [
+            ("DATE", Self::Date),
+            ("LOCALTIME", Self::LocalTime),
+            ("TIME", Self::Time),
+            ("LOCALDATETIME", Self::LocalDateTime),
+        ]
+        .into_iter()
+        .find_map(|(spelling, function)| name.eq_ignore_ascii_case(spelling).then_some(function))
     }
 }
 
@@ -1364,12 +1387,15 @@ fn evaluate_value_at<E>(
             if map.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
-            } else if let GraphValue::Scalar(CanonicalScalar::Date(day)) = map.as_ref() {
-                // A date's fields (fgdb-txbg9); any other key is an error.
-                let field = temporal::date_field(*day, key)
-                    .ok_or_else(|| failure(GraphIntegerErrorKind::TemporalField))?;
+            } else if let GraphValue::Scalar(scalar) = map.as_ref()
+                && let Some(field) = temporal::field(scalar, key)
+            {
+                // A temporal value's fields (fgdb-txbg9); any other key is an
+                // error. A field is an integer or an offset spelling of at
+                // most nine bytes, inside one payload unit.
+                let field = field.map_err(failure)?;
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                GraphValue::Scalar(CanonicalScalar::Int(field))
+                GraphValue::Scalar(field)
             } else {
                 let (keys, values) = map
                     .as_map()

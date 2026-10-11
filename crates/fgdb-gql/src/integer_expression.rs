@@ -426,6 +426,9 @@ impl ExpressionCell<'_> {
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
                         | CanonicalScalar::Date(_)
+                        | CanonicalScalar::LocalTime(_)
+                        | CanonicalScalar::Time(_)
+                        | CanonicalScalar::LocalDateTime(_)
                 ) =>
             {
                 Err(GraphIntegerErrorKind::NonScalar)
@@ -1272,12 +1275,24 @@ fn convert<E>(
                     }
                 };
             }
-            // toString(date) is its ISO 8601 calendar text (fgdb-txbg9); a
-            // date is not a number.
-            CanonicalScalar::Date(value) if to_text => {
+            // toString of a temporal value is its ISO 8601 text with the
+            // java.time spelling (fgdb-txbg9); a temporal value is not a number.
+            CanonicalScalar::Date(_)
+            | CanonicalScalar::LocalTime(_)
+            | CanonicalScalar::Time(_)
+            | CanonicalScalar::LocalDateTime(_)
+                if to_text =>
+            {
                 control(GlaExecutionEvent::ScratchEntry)
                     .map_err(GraphIntegerEvaluationError::Control)?;
-                return make_text(&value.to_string(), instruction, control);
+                let text = match value.as_ref() {
+                    CanonicalScalar::Date(value) => value.to_string(),
+                    CanonicalScalar::LocalTime(value) => value.to_string(),
+                    CanonicalScalar::Time(value) => value.to_string(),
+                    CanonicalScalar::LocalDateTime(value) => value.to_string(),
+                    _ => unreachable!("the arm admits only temporal kinds"),
+                };
+                return make_text(&text, instruction, control);
             }
             _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
         },

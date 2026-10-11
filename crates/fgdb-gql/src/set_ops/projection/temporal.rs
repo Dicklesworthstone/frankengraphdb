@@ -1,13 +1,18 @@
 //! Temporal values in the value language (fgdb-txbg9): the openCypher
 //! constructors and field accessors. Pure arithmetic over the scalar domain:
-//! no clock, no zone, no locale.
+//! no clock, no zone database, no locale. The default offset is UTC.
 
 use super::GraphTemporalFunction;
 use crate::GraphIntegerErrorKind;
+use crate::GraphIntegerErrorKind::TemporalConstruction as Invalid;
 use crate::algebra::GraphValue;
-use fgdb_types::{CanonicalDate, CanonicalScalar};
+use fgdb_types::{
+    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar, CanonicalTime,
+    CanonicalTimestamp, NANOS_PER_DAY, format_utc_offset, parse_utc_offset,
+};
 
-/// The fields a date map may name, in the order `date_from_fields` reads them.
+/// The calendar fields a map may name, in the order `date_from_fields`
+/// reads them.
 const DATE_FIELDS: [&str; 8] = [
     "year",
     "month",
@@ -19,63 +24,259 @@ const DATE_FIELDS: [&str; 8] = [
     "dayOfQuarter",
 ];
 
-/// `function(argument)`: NULL for NULL, a value of the function's kind
-/// passes through, text reads as ISO 8601, and a map names one calendar's
-/// fields.
+/// The clock fields a map may name, in the order `time_from_fields` reads
+/// them.
+const TIME_FIELDS: [&str; 6] = [
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "microsecond",
+    "nanosecond",
+];
+
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+
+/// A map argument split into its fields and bases.
+#[derive(Default)]
+struct MapArguments<'a> {
+    date: [Option<i64>; 8],
+    time: [Option<i64>; 6],
+    /// `date: x`, whose calendar fields fill the ones not given.
+    date_base: Option<&'a GraphValue>,
+    /// `time: x`, whose clock fields (and offset, for `time`) fill in.
+    time_base: Option<&'a GraphValue>,
+    /// `datetime: x`, a base for both parts of a local date-time.
+    datetime_base: Option<&'a GraphValue>,
+    /// `timezone: '+01:00'`.
+    timezone: Option<&'a str>,
+}
+
+impl<'a> MapArguments<'a> {
+    /// The keys `function` takes: a date takes calendar fields and `date`;
+    /// a local time and a time take clock fields and `time`, and a time also
+    /// `timezone`; a local date-time takes both sets of fields and `date`,
+    /// `time` and `datetime`. Any other key, or a field that is not an
+    /// integer, refuses.
+    fn split(
+        function: GraphTemporalFunction,
+        keys: &'a [Box<str>],
+        values: &'a [GraphValue],
+    ) -> Result<Self, GraphIntegerErrorKind> {
+        use GraphTemporalFunction as F;
+        let (dates, times) = match function {
+            F::Date => (true, false),
+            F::LocalTime | F::Time => (false, true),
+            F::LocalDateTime => (true, true),
+        };
+        let mut arguments = Self::default();
+        for (key, value) in keys.iter().zip(values) {
+            let key = &**key;
+            match key {
+                "date" if dates => arguments.date_base = Some(value),
+                "time" if times => arguments.time_base = Some(value),
+                "datetime" if dates && times => arguments.datetime_base = Some(value),
+                "timezone" if function == F::Time => match value {
+                    GraphValue::Scalar(CanonicalScalar::Text(zone)) => {
+                        arguments.timezone = Some(zone.as_str());
+                    }
+                    _ => return Err(Invalid),
+                },
+                _ => {
+                    let GraphValue::Scalar(CanonicalScalar::Int(number)) = value else {
+                        return Err(Invalid);
+                    };
+                    let slot = |names: &[&str], allowed: bool| {
+                        names
+                            .iter()
+                            .position(|name| *name == key)
+                            .filter(|_| allowed)
+                    };
+                    if let Some(at) = slot(&DATE_FIELDS[..], dates) {
+                        arguments.date[at] = Some(*number);
+                    } else if let Some(at) = slot(&TIME_FIELDS[..], times) {
+                        arguments.time[at] = Some(*number);
+                    } else {
+                        return Err(Invalid);
+                    }
+                }
+            }
+        }
+        Ok(arguments)
+    }
+}
+
+/// `function(argument)`: NULL for NULL, ISO 8601 for text, a map of fields
+/// over optional bases, or a temporal value of another kind converted (its
+/// date part, its time part, a local value at UTC).
 pub(crate) fn construct(
     function: GraphTemporalFunction,
     argument: &GraphValue,
 ) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    if matches!(argument, GraphValue::Scalar(CanonicalScalar::Null)) {
+        return Ok(CanonicalScalar::Null);
+    }
     match function {
-        GraphTemporalFunction::Date => date(argument),
+        GraphTemporalFunction::Date => date(argument).map(CanonicalScalar::Date),
+        GraphTemporalFunction::LocalTime => local_time(argument).map(CanonicalScalar::LocalTime),
+        GraphTemporalFunction::Time => time(argument).map(CanonicalScalar::Time),
+        GraphTemporalFunction::LocalDateTime => {
+            local_datetime(argument).map(CanonicalScalar::LocalDateTime)
+        }
     }
 }
 
-fn date(argument: &GraphValue) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
-    use GraphIntegerErrorKind::TemporalConstruction as Invalid;
+fn date(argument: &GraphValue) -> Result<CanonicalDate, GraphIntegerErrorKind> {
     match argument {
-        GraphValue::Scalar(CanonicalScalar::Null) => Ok(CanonicalScalar::Null),
-        GraphValue::Scalar(CanonicalScalar::Date(day)) => Ok(CanonicalScalar::Date(*day)),
-        GraphValue::Scalar(CanonicalScalar::Text(text)) => CanonicalDate::parse_iso(text.as_str())
-            .map(CanonicalScalar::Date)
-            .map_err(|_| Invalid),
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            CanonicalDate::parse_iso(text.as_str()).map_err(|_| Invalid)
+        }
         GraphValue::Map { keys, values } => {
-            date_from_fields(keys, values).map(CanonicalScalar::Date)
+            let arguments = MapArguments::split(GraphTemporalFunction::Date, keys, values)?;
+            let base = arguments.date_base.map(date_part).transpose()?;
+            date_from_fields(arguments.date, base)
+        }
+        other => date_part(other),
+    }
+}
+
+fn local_time(argument: &GraphValue) -> Result<CanonicalLocalTime, GraphIntegerErrorKind> {
+    match argument {
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            CanonicalLocalTime::parse_iso(text.as_str()).map_err(|_| Invalid)
+        }
+        GraphValue::Map { keys, values } => {
+            let arguments = MapArguments::split(GraphTemporalFunction::LocalTime, keys, values)?;
+            let base = arguments.time_base.map(time_part).transpose()?;
+            time_from_fields(arguments.time, base.map(|(local, _)| local), false)
+        }
+        other => time_part(other).map(|(local, _)| local),
+    }
+}
+
+/// A time map's `timezone` moves a base that has an offset to the same
+/// instant at the new offset, and puts a local base at it.
+fn time(argument: &GraphValue) -> Result<CanonicalTime, GraphIntegerErrorKind> {
+    match argument {
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            CanonicalTime::parse_iso(text.as_str()).map_err(|_| Invalid)
+        }
+        GraphValue::Map { keys, values } => {
+            let arguments = MapArguments::split(GraphTemporalFunction::Time, keys, values)?;
+            let base = arguments.time_base.map(time_part).transpose()?;
+            let local = time_from_fields(arguments.time, base.map(|(local, _)| local), false)?;
+            let zone = arguments
+                .timezone
+                .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+                .transpose()?;
+            let (local, offset) = match (base.and_then(|(_, offset)| offset), zone) {
+                (Some(from), Some(to)) => (shift(local, to - from), to),
+                (from, to) => (local, to.or(from).unwrap_or(0)),
+            };
+            CanonicalTime::new(local, offset).map_err(|_| Invalid)
+        }
+        other => {
+            let (local, offset) = time_part(other)?;
+            CanonicalTime::new(local, offset.unwrap_or(0)).map_err(|_| Invalid)
+        }
+    }
+}
+
+fn local_datetime(argument: &GraphValue) -> Result<CanonicalLocalDateTime, GraphIntegerErrorKind> {
+    match argument {
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            CanonicalLocalDateTime::parse_iso(text.as_str()).map_err(|_| Invalid)
+        }
+        GraphValue::Map { keys, values } => {
+            let arguments =
+                MapArguments::split(GraphTemporalFunction::LocalDateTime, keys, values)?;
+            let both = arguments.datetime_base.map(datetime_part).transpose()?;
+            let date_base = match arguments.date_base {
+                Some(base) => Some(date_part(base)?),
+                None => both.map(CanonicalLocalDateTime::date),
+            };
+            let time_base = match arguments.time_base {
+                Some(base) => Some(time_part(base)?.0),
+                None => both.map(CanonicalLocalDateTime::time),
+            };
+            Ok(CanonicalLocalDateTime::new(
+                date_from_fields(arguments.date, date_base)?,
+                time_from_fields(arguments.time, time_base, true)?,
+            ))
+        }
+        other => datetime_part(other),
+    }
+}
+
+/// The date of a date, a local date-time, or a timestamp's local wall time.
+fn date_part(value: &GraphValue) -> Result<CanonicalDate, GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Date(day)) => Ok(*day),
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok(value.date()),
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => Ok(wall_clock(value)?.date()),
+        _ => Err(Invalid),
+    }
+}
+
+/// The local time of a time-bearing value, and its offset if it has one.
+fn time_part(
+    value: &GraphValue,
+) -> Result<(CanonicalLocalTime, Option<i32>), GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::LocalTime(time)) => Ok((*time, None)),
+        GraphValue::Scalar(CanonicalScalar::Time(time)) => {
+            Ok((time.local(), Some(time.offset_seconds())))
+        }
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok((value.time(), None)),
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
+            Ok((wall_clock(value)?.time(), Some(value.utc_offset_seconds())))
         }
         _ => Err(Invalid),
     }
 }
 
-/// openCypher's date map: the fields of one calendar (year, month and day;
-/// ISO week year, week and dayOfWeek; year and ordinalDay; or year, quarter
-/// and dayOfQuarter), each an integer, optionally over a `date` base whose
-/// own fields in that calendar fill the ones not given. Without a base the
-/// year is required and a missing smaller field is its first value. An
-/// unknown field, a mix of calendars or a day that does not exist refuses.
-fn date_from_fields(
-    keys: &[Box<str>],
-    values: &[GraphValue],
-) -> Result<CanonicalDate, GraphIntegerErrorKind> {
-    use GraphIntegerErrorKind::TemporalConstruction as Invalid;
-    let mut base = None;
-    let mut fields = [None; DATE_FIELDS.len()];
-    for (key, value) in keys.iter().zip(values) {
-        if &**key == "date" {
-            let GraphValue::Scalar(CanonicalScalar::Date(day)) = value else {
-                return Err(Invalid);
-            };
-            base = Some(*day);
-            continue;
-        }
-        let slot = DATE_FIELDS
-            .iter()
-            .position(|name| *name == &**key)
-            .ok_or(Invalid)?;
-        let GraphValue::Scalar(CanonicalScalar::Int(number)) = value else {
-            return Err(Invalid);
-        };
-        fields[slot] = Some(*number);
+/// A local date-time, or a timestamp's local wall time.
+fn datetime_part(value: &GraphValue) -> Result<CanonicalLocalDateTime, GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok(*value),
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => wall_clock(value),
+        _ => Err(Invalid),
     }
+}
+
+/// A timestamp's wall-clock date and time at its own offset; a timestamp
+/// whose day lies outside the date range refuses.
+fn wall_clock(value: &CanonicalTimestamp) -> Result<CanonicalLocalDateTime, GraphIntegerErrorKind> {
+    let wall = value.local_wall_nanos();
+    let per_day = i128::from(NANOS_PER_DAY);
+    let day = i64::try_from(wall.div_euclid(per_day)).map_err(|_| Invalid)?;
+    let nanos = u64::try_from(wall.rem_euclid(per_day)).map_err(|_| Invalid)?;
+    Ok(CanonicalLocalDateTime::new(
+        CanonicalDate::from_epoch_day(day).map_err(|_| Invalid)?,
+        CanonicalLocalTime::from_nanos_of_day(nanos).map_err(|_| Invalid)?,
+    ))
+}
+
+/// `local` moved by `seconds`, around the clock.
+fn shift(local: CanonicalLocalTime, seconds: i32) -> CanonicalLocalTime {
+    let nanos = (i128::from(local.nanos_of_day()) + i128::from(seconds) * NANOS_PER_SECOND)
+        .rem_euclid(i128::from(NANOS_PER_DAY));
+    u64::try_from(nanos)
+        .ok()
+        .and_then(|nanos| CanonicalLocalTime::from_nanos_of_day(nanos).ok())
+        .expect("a time reduced modulo one day")
+}
+
+/// openCypher's date fields: those of one calendar (year, month and day;
+/// ISO week year, week and dayOfWeek; year and ordinalDay; or year, quarter
+/// and dayOfQuarter), optionally over a base date whose own fields in that
+/// calendar fill the ones not given. Without a base the year is required and
+/// a missing smaller field is its first value. A mix of calendars, or a day
+/// that does not exist, refuses.
+fn date_from_fields(
+    fields: [Option<i64>; 8],
+    base: Option<CanonicalDate>,
+) -> Result<CanonicalDate, GraphIntegerErrorKind> {
     let [
         year,
         month,
@@ -128,8 +329,94 @@ fn date_from_fields(
     built.map_err(|_| Invalid)
 }
 
+/// openCypher's clock fields over an optional base time. Without a base a
+/// field needs every larger one (no minute without an hour), and the hour is
+/// required unless `midnight` lets an empty clock be 00:00. Given fraction
+/// fields replace the base's fraction and add up: millisecond 0-999, then
+/// microsecond 0-999 after a millisecond (else 0-999999), then nanosecond
+/// 0-999 after either (else 0-999999999).
+fn time_from_fields(
+    fields: [Option<i64>; 6],
+    base: Option<CanonicalLocalTime>,
+    midnight: bool,
+) -> Result<CanonicalLocalTime, GraphIntegerErrorKind> {
+    let [hour, minute, second, millisecond, microsecond, nanosecond] = fields;
+    let fraction_given = millisecond.is_some() || microsecond.is_some() || nanosecond.is_some();
+    if base.is_none() {
+        let given = [
+            hour.is_some(),
+            minute.is_some(),
+            second.is_some(),
+            fraction_given,
+        ];
+        let first_missing = given.iter().position(|given| !given).unwrap_or(given.len());
+        if given[first_missing..].iter().any(|given| *given) || (hour.is_none() && !midnight) {
+            return Err(Invalid);
+        }
+    }
+    let base = base.unwrap_or(CanonicalLocalTime::MIDNIGHT);
+    let unit = |value: Option<i64>, limit: i64, from_base: u8| match value {
+        None => Ok(from_base),
+        Some(value) if (0..limit).contains(&value) => u8::try_from(value).map_err(|_| Invalid),
+        Some(_) => Err(Invalid),
+    };
+    let part = |value: Option<i64>, limit: i64| match value {
+        None => Ok(0),
+        Some(value) if (0..limit).contains(&value) => Ok(value),
+        Some(_) => Err(Invalid),
+    };
+    let fraction = if fraction_given {
+        let micro_limit = if millisecond.is_some() {
+            1_000
+        } else {
+            1_000_000
+        };
+        let nano_limit = if millisecond.is_some() || microsecond.is_some() {
+            1_000
+        } else {
+            1_000_000_000
+        };
+        part(millisecond, 1_000)? * 1_000_000
+            + part(microsecond, micro_limit)? * 1_000
+            + part(nanosecond, nano_limit)?
+    } else {
+        i64::from(base.nanosecond())
+    };
+    CanonicalLocalTime::from_hms_nano(
+        unit(hour, 24, base.hour())?,
+        unit(minute, 60, base.minute())?,
+        unit(second, 60, base.second())?,
+        u32::try_from(fraction).map_err(|_| Invalid)?,
+    )
+    .map_err(|_| Invalid)
+}
+
+/// `value.key` for a temporal value: `None` when the value is not temporal,
+/// `Some(Err(TemporalField))` for a key its kind does not have. Dates and
+/// local date-times have the calendar fields, times the clock fields, and a
+/// time at an offset also `timezone` and `offset` (its spelling, `Z` for
+/// UTC), `offsetMinutes` and `offsetSeconds`.
+pub(crate) fn field(
+    value: &CanonicalScalar,
+    key: &str,
+) -> Option<Result<CanonicalScalar, GraphIntegerErrorKind>> {
+    let (date, time, offset) = match value {
+        CanonicalScalar::Date(day) => (Some(*day), None, None),
+        CanonicalScalar::LocalTime(time) => (None, Some(*time), None),
+        CanonicalScalar::Time(time) => (None, Some(time.local()), Some(time.offset_seconds())),
+        CanonicalScalar::LocalDateTime(value) => (Some(value.date()), Some(value.time()), None),
+        _ => return None,
+    };
+    let found = date
+        .and_then(|day| date_field(day, key))
+        .or_else(|| time.and_then(|time| time_field(time, key)))
+        .map(CanonicalScalar::Int)
+        .or_else(|| offset.and_then(|offset| offset_field(offset, key)));
+    Some(found.ok_or(GraphIntegerErrorKind::TemporalField))
+}
+
 /// `day.key` for the openCypher date fields; `None` for any other key.
-pub(crate) fn date_field(day: CanonicalDate, key: &str) -> Option<i64> {
+fn date_field(day: CanonicalDate, key: &str) -> Option<i64> {
     let (week_year, week, weekday) = day.iso_week();
     let (quarter, day_of_quarter) = day.quarter();
     Some(match key {
@@ -144,4 +431,30 @@ pub(crate) fn date_field(day: CanonicalDate, key: &str) -> Option<i64> {
         "dayOfQuarter" => i64::from(day_of_quarter),
         _ => return None,
     })
+}
+
+/// `time.key` for the openCypher clock fields. `millisecond`, `microsecond`
+/// and `nanosecond` each read the whole fraction of the second in that unit.
+fn time_field(time: CanonicalLocalTime, key: &str) -> Option<i64> {
+    let fraction = i64::from(time.nanosecond());
+    Some(match key {
+        "hour" => i64::from(time.hour()),
+        "minute" => i64::from(time.minute()),
+        "second" => i64::from(time.second()),
+        "millisecond" => fraction / 1_000_000,
+        "microsecond" => fraction / 1_000,
+        "nanosecond" => fraction,
+        _ => return None,
+    })
+}
+
+fn offset_field(offset_seconds: i32, key: &str) -> Option<CanonicalScalar> {
+    match key {
+        "timezone" | "offset" => {
+            CanonicalScalar::ucs_basic_text(&format_utc_offset(offset_seconds)).ok()
+        }
+        "offsetMinutes" => Some(CanonicalScalar::Int(i64::from(offset_seconds / 60))),
+        "offsetSeconds" => Some(CanonicalScalar::Int(i64::from(offset_seconds))),
+        _ => None,
+    }
 }
