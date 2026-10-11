@@ -9,7 +9,10 @@
 mod folded;
 
 use super::*;
-use crate::{GraphSetProjection, GraphSetQuantifier, GraphSetValue, PreparedGraphSet, PreparedGraphSetAggregate};
+use crate::{
+    GraphSetProjection, GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+    PreparedGraphSetAggregate,
+};
 use std::cell::RefCell;
 
 impl PreparedGraphAggregate {
@@ -89,28 +92,34 @@ impl PreparedGraphAggregate {
         self.relational_input.as_ref()
     }
 
-    /// Normalize a native single-vertex COLLECT into the existing ordered
+    /// Normalize a native vertex or one-edge COLLECT into the existing ordered
     /// relational group owner. The retained source is the original graph plan,
-    /// with at most one private vertex identity, not a fabricated schema leaf.
+    /// with at most two private vertex identities, not a fabricated schema leaf.
     /// Every input expression and result clause remains in the definition.
     ///
     /// Ordinary native vertex scans visit ascending identities. Their private
     /// leading identity makes that occurrence order explicit in the row bag.
+    /// Uncaptured fixed-edge scans visit ascending source/destination pairs;
+    /// both identities carry this order, with exact parallel-edge multiplicity.
+    /// Reverse and undirected scans use their bound endpoint orientations.
     /// Computed inputs instead retain the original complete-row ordering used
     /// by their materialized source, before evaluating argument expressions.
     /// Equal source rows have equal computed values and preserve their full
     /// multiplicity. Neither argument order nor change-arrival order can stand
     /// in for the original occurrence sequence.
     ///
-    /// Edge/scoped sources, hidden source columns and unsupported schema widths
+    /// Multi-hop/scoped/captured sources, hidden columns and excessive widths
     /// refuse. The consumer must still admit and meter the complete returned
     /// relation through its ordinary maintained circuit. Iterator callers that
     /// supply vertices in arbitrary order have no native ordering guarantee.
     #[must_use]
-    pub fn incremental_vertex_collection_relation(&self) -> Option<PreparedGraphSetAggregate> {
+    pub fn incremental_collection_relation(&self) -> Option<PreparedGraphSetAggregate> {
         if self.relational_input.is_some()
             || !self.aggregates.iter().any(|aggregate| {
-                matches!(aggregate.function, GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
+                matches!(
+                    aggregate.function,
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                )
             })
         {
             return None;
@@ -127,26 +136,42 @@ impl PreparedGraphAggregate {
                 break name;
             }
         };
-        let (source, projection, prefix) = match &self.computed_input {
-            Some(computed) => {
-                let (source, _) = self.input.incremental_vertex_collection_source(None)?;
-                let prefix = source.columns().len();
-                let mut projection: Vec<_> = (0..prefix)
-                    .map(|column| GraphSetProjection::new(private_name(), GraphSetValue::Column(column)))
-                    .collect();
-                projection.extend_from_slice(computed);
-                (source, projection, prefix)
-            }
-            None => {
-                let name = private_name();
-                let (source, identity) = self.input.incremental_vertex_collection_source(Some(&name))?;
-                let mut projection = vec![GraphSetProjection::new(name, GraphSetValue::Column(identity?))];
-                projection.extend(self.input.columns().iter().enumerate().map(|(column, name)| {
-                    GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
-                }));
-                (source, projection, 1)
-            }
-        };
+        let (source, projection, prefix) =
+            match &self.computed_input {
+                Some(computed) => {
+                    let (source, _) = self.input.incremental_collection_source(None)?;
+                    let prefix = source.columns().len();
+                    let mut projection: Vec<_> = (0..prefix)
+                        .map(|column| {
+                            GraphSetProjection::new(private_name(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    projection.extend_from_slice(computed);
+                    (source, projection, prefix)
+                }
+                None => {
+                    let names = [private_name(), private_name()];
+                    let (source, identities) =
+                        self.input.incremental_collection_source(Some(&[
+                            names[0].as_str(),
+                            names[1].as_str(),
+                        ]))?;
+                    let prefix = identities.len();
+                    let mut projection: Vec<_> = names
+                        .into_iter()
+                        .zip(identities)
+                        .map(|(name, column)| {
+                            GraphSetProjection::new(name, GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    projection.extend(self.input.columns().iter().enumerate().map(
+                        |(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        },
+                    ));
+                    (source, projection, prefix)
+                }
+            };
         let relation = PreparedGraphSet::from(source.clone())
             .project(projection, GraphSetQuantifier::All)
             .ok()?;

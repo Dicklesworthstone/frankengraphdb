@@ -48,7 +48,7 @@ fn aggregate_footprint(
     if let Some(input) = definition.input_relation() {
         return circuit(cx, input)?.append(1);
     }
-    if let Some(definition) = definition.incremental_vertex_collection_relation() {
+    if let Some(definition) = definition.incremental_collection_relation() {
         return circuit(cx, definition.input())?.append(1);
     }
     Ok(Footprint {

@@ -134,7 +134,7 @@ impl PreparedNativeRead {
                             policy,
                         );
                     }
-                    if let Some(definition) = bound.incremental_vertex_collection_relation() {
+                    if let Some(definition) = bound.incremental_collection_relation() {
                         return set::register_group(
                             database,
                             cx,
@@ -185,7 +185,7 @@ impl PreparedNativeRead {
                             policy,
                         );
                     }
-                    if let Some(definition) = bound.incremental_vertex_collection_relation() {
+                    if let Some(definition) = bound.incremental_collection_relation() {
                         return set::register_group(
                             database,
                             cx,
