@@ -451,9 +451,41 @@ pub mod structure {
         }
     }
 
+    /// `LocalTime{nanoseconds}` (tag `t`): nanoseconds since midnight.
+    #[must_use]
+    pub fn local_time(nanoseconds: i64) -> Value {
+        Value::Struct {
+            tag: LOCAL_TIME,
+            fields: vec![Value::Int(nanoseconds)],
+        }
+    }
+
+    /// `Time{nanoseconds, tz_offset_seconds}` (tag `T`): local nanoseconds
+    /// since midnight and the offset east of UTC.
+    #[must_use]
+    pub fn time(nanoseconds: i64, offset_seconds: i64) -> Value {
+        Value::Struct {
+            tag: TIME,
+            fields: vec![Value::Int(nanoseconds), Value::Int(offset_seconds)],
+        }
+    }
+
+    /// `LocalDateTime{seconds, nanoseconds}` (tag `d`): the wall-clock
+    /// seconds since 1970-01-01T00:00 and the fraction of that second.
+    #[must_use]
+    pub fn local_date_time(seconds: i64, nanoseconds: i64) -> Value {
+        Value::Struct {
+            tag: LOCAL_DATE_TIME,
+            fields: vec![Value::Int(seconds), Value::Int(nanoseconds)],
+        }
+    }
+
     pub const DATE: u8 = 0x44;
     pub const DATE_TIME: u8 = 0x49;
     pub const DATE_TIME_ZONE_ID: u8 = 0x69;
+    pub const LOCAL_TIME: u8 = 0x74;
+    pub const TIME: u8 = 0x54;
+    pub const LOCAL_DATE_TIME: u8 = 0x64;
 }
 
 #[cfg(test)]

@@ -14,7 +14,8 @@ use fgdb_gql::{
     GraphWriteProgramPolicy,
 };
 use fgdb_types::{
-    CanonicalDate, CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId,
+    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
+    CanonicalScalarKind, CanonicalTime, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId,
     EId, PurposeContexts, QueryCx, VId,
 };
 use std::fmt::Debug;
@@ -659,11 +660,12 @@ fn native_preparation_rejects_unknown_oid_with_other_valid_resolver() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// fgdb-txbg9: a Date is a query value but not yet a storable property: the
-/// durable containers do not record the scalar profile version a Date needs.
-/// Every write row that carries one refuses before anything is published.
+/// fgdb-txbg9: the temporal kinds of scalar profile version 2 are query
+/// values but not yet storable properties: the durable containers do not
+/// record the profile version they need. Every write row that carries one
+/// refuses, naming its kind, before anything is published.
 #[test]
-fn a_date_property_refuses_before_any_commit() {
+fn a_version_2_temporal_property_refuses_before_any_commit() {
     let ((), report) = run_async_under_lab(0x209e_00da, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -673,32 +675,50 @@ fn a_date_property_refuses_before_any_commit() {
         baseline.create_vertex(BASELINE_ID, vec![BASELINE], vec![]);
         baseline.create_vertex(TARGET_ID, vec![BASELINE], vec![]);
         let before = db.write(&commit, baseline).await.unwrap();
-        let date = CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).unwrap());
-        let builds: [&dyn Fn(&mut WriteBatch); 3] = [
-            &|batch| {
-                batch.create_vertex(VId(3), vec![BASELINE], vec![(P, date.clone())]);
-            },
-            &|batch| {
-                batch.add_edge(EId(9), BASELINE_ID, TARGET_ID, vec![(P, date.clone())]);
-            },
-            &|batch| {
-                batch.set_vertex_property(TARGET_ID, P, Some(date.clone()));
-            },
-        ];
-        for build in builds {
-            let mut batch = WriteBatch::new(R);
-            build(&mut batch);
-            assert!(matches!(
-                db.prepare_write(batch),
-                Err(WriteError::DateNotStorable)
-            ));
-            let mut batch = WriteBatch::new(R);
-            build(&mut batch);
-            assert!(matches!(
-                db.write(&commit, batch).await,
-                Err(WriteError::DateNotStorable)
-            ));
-            assert_eq!(db.frontier().unwrap(), before);
+        let date = CanonicalDate::from_civil(2015, 7, 21).unwrap();
+        let time = CanonicalLocalTime::from_hms_nano(21, 40, 32, 142_000_000).unwrap();
+        for (value, kind) in [
+            (CanonicalScalar::Date(date), CanonicalScalarKind::Date),
+            (
+                CanonicalScalar::LocalTime(time),
+                CanonicalScalarKind::LocalTime,
+            ),
+            (
+                CanonicalScalar::Time(CanonicalTime::new(time, 3_600).unwrap()),
+                CanonicalScalarKind::Time,
+            ),
+            (
+                CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, time)),
+                CanonicalScalarKind::LocalDateTime,
+            ),
+        ] {
+            // Sync: the lab task holds these across its awaits.
+            let builds: [&(dyn Fn(&mut WriteBatch) + Sync); 3] = [
+                &|batch| {
+                    batch.create_vertex(VId(3), vec![BASELINE], vec![(P, value.clone())]);
+                },
+                &|batch| {
+                    batch.add_edge(EId(9), BASELINE_ID, TARGET_ID, vec![(P, value.clone())]);
+                },
+                &|batch| {
+                    batch.set_vertex_property(TARGET_ID, P, Some(value.clone()));
+                },
+            ];
+            for build in builds {
+                let mut batch = WriteBatch::new(R);
+                build(&mut batch);
+                assert!(matches!(
+                    db.prepare_write(batch),
+                    Err(WriteError::ScalarKindNotStorable { kind: refused }) if refused == kind
+                ));
+                let mut batch = WriteBatch::new(R);
+                build(&mut batch);
+                assert!(matches!(
+                    db.write(&commit, batch).await,
+                    Err(WriteError::ScalarKindNotStorable { kind: refused }) if refused == kind
+                ));
+                assert_eq!(db.frontier().unwrap(), before);
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

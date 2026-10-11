@@ -16,8 +16,13 @@ use crate::ids::ObjectId;
 
 pub mod calendar;
 mod date;
+mod time;
 
 pub use date::{CanonicalDate, DateError};
+pub use time::{
+    CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, NANOS_PER_DAY, TimeError,
+    format_utc_offset, parse_utc_offset,
+};
 
 /// Maximum absolute UTC offset admitted by `STRICT_PORTABLE`.
 ///

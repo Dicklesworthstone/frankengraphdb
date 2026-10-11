@@ -23,13 +23,15 @@
 
 use fgdb_types::temporal::calendar;
 use fgdb_types::{
-    CanonicalBytes, CanonicalDate, CanonicalDecimal, CanonicalF64, CanonicalList, CanonicalMap,
-    CanonicalMapEntry, CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar,
+    CanonicalBytes, CanonicalDate, CanonicalDecimal, CanonicalF64, CanonicalList,
+    CanonicalLocalDateTime, CanonicalLocalTime, CanonicalMap, CanonicalMapEntry,
+    CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar,
     CanonicalScalarCoercionError, CanonicalScalarKind, CanonicalScalarProfile,
     CanonicalScalarProfileError, CanonicalScalarProfileIdentityVerifier, CanonicalText,
-    CanonicalTimestamp, CollationResolver, CollationResolverError, DecimalError,
+    CanonicalTime, CanonicalTimestamp, CollationResolver, CollationResolverError, DecimalError,
     MAX_PROPERTY_VALUE_BYTES, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
-    MIN_TIMESTAMP_UTC_NANOS, NonBinaryTextBinding, ObjectId, ScalarProfileVersion, TzdbResolver,
+    MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY, NonBinaryTextBinding, ObjectId, ScalarProfileVersion,
+    TzdbResolver,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -108,6 +110,40 @@ fn scalar_corpus() -> Vec<CanonicalScalar> {
     for epoch_day in [calendar::MIN_EPOCH_DAY, -1, 0, 1, calendar::MAX_EPOCH_DAY] {
         if let Ok(value) = CanonicalDate::from_epoch_day(epoch_day) {
             values.push(CanonicalScalar::Date(value));
+        }
+    }
+
+    // Times of day: both ends of the day and a value whose bytes differ in
+    // both halves of an endian swap. Times at offsets add the two offset
+    // extremes, a seconds offset, and two values with the same UTC time of
+    // day but different local times, where a local-only or UTC-only key
+    // collapses distinct values. Local date-times cross the day-number sign.
+    let times = [0, 1, 78_032_142_000_000, NANOS_PER_DAY - 1]
+        .map(|nanos| CanonicalLocalTime::from_nanos_of_day(nanos).expect("in the day"));
+    values.extend(times.map(CanonicalScalar::LocalTime));
+    for (time, offset) in [
+        (times[0], 0),
+        (times[0], MAX_UTC_OFFSET_SECONDS),
+        (times[0], -MAX_UTC_OFFSET_SECONDS),
+        (times[3], MAX_UTC_OFFSET_SECONDS),
+        (times[2], -7_507),
+        (times[2], 3_600),
+        (
+            CanonicalLocalTime::from_nanos_of_day(78_032_142_000_000 - 3_600_000_000_000)
+                .expect("in the day"),
+            0,
+        ),
+    ] {
+        values.push(CanonicalScalar::Time(
+            CanonicalTime::new(time, offset).expect("offset in range"),
+        ));
+    }
+    for epoch_day in [calendar::MIN_EPOCH_DAY, -1, 0, calendar::MAX_EPOCH_DAY] {
+        let date = CanonicalDate::from_epoch_day(epoch_day).expect("in range");
+        for time in [times[0], times[3]] {
+            values.push(CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(
+                date, time,
+            )));
         }
     }
 
@@ -454,6 +490,9 @@ fn hash_separates_distinct_values_within_every_arm() {
             CanonicalScalar::Timestamp(_) => "Timestamp",
             CanonicalScalar::Bytes(_) => "Bytes",
             CanonicalScalar::Date(_) => "Date",
+            CanonicalScalar::LocalTime(_) => "LocalTime",
+            CanonicalScalar::Time(_) => "Time",
+            CanonicalScalar::LocalDateTime(_) => "LocalDateTime",
         }
     }
 
@@ -1051,7 +1090,7 @@ fn scalar_profile_identity_binds_rules_artifacts_and_canonical_collation_set()
 /// a Date anywhere in a value, on both encode and decode; version 2 admits it,
 /// and a version 1 value encodes to the same bytes under either.
 #[test]
-fn a_version_2_profile_adds_the_date_kind_without_changing_version_1()
+fn a_version_2_profile_adds_the_temporal_kinds_without_changing_version_1()
 -> Result<(), CanonicalScalarProfileError> {
     use ScalarProfileVersion::{V1, V2};
     let resolver = ProfileResolver::AVAILABLE;
@@ -1077,52 +1116,68 @@ fn a_version_2_profile_adds_the_date_kind_without_changing_version_1()
     ));
     let mut range = calendar::MIN_EPOCH_DAY.to_le_bytes().to_vec();
     range.extend_from_slice(&calendar::MAX_EPOCH_DAY.to_le_bytes());
+    range.extend_from_slice(&NANOS_PER_DAY.to_le_bytes());
     assert!(contains(&v2, &range) && !contains(&v1, &range));
-    // Same-length domains; three Date rule bytes and the 16-byte range.
-    assert_eq!(v2.len(), v1.len() + 3 + 16);
+    // Same-length domains; ten temporal rule bytes (Date three, LocalTime
+    // two, Time three, LocalDateTime two) and the 24 bytes of bounds.
+    assert_eq!(v2.len(), v1.len() + 10 + 24);
 
     let version_1 = profile_at(V1, &resolver)?;
     let version_2 = profile_at(V2, &resolver)?;
     assert_eq!((version_1.version(), version_2.version()), (V1, V2));
     assert_ne!(version_1.profile_oid(), version_2.profile_oid());
-    let day = CanonicalScalar::Date(CanonicalDate::from_epoch_day(16_637).expect("2015-07-21"));
-    assert_eq!(ScalarProfileVersion::required_for(&day), V2);
     assert_eq!(
         ScalarProfileVersion::required_for(&CanonicalScalar::Int(1)),
         V1
     );
-    let refused = CanonicalScalarProfileError::KindNotInProfile {
-        kind: CanonicalScalarKind::Date,
-        version: V1,
-    };
-    for value in [
-        scalar_value(day.clone()),
-        CanonicalPropertyValue::List(
-            CanonicalList::try_new(vec![
-                scalar_value(CanonicalScalar::Null),
-                scalar_value(day.clone()),
-            ])
-            .expect("bounded List"),
+    let date = CanonicalDate::from_epoch_day(16_637).expect("2015-07-21");
+    let time = CanonicalLocalTime::from_nanos_of_day(78_032_142_000_000).expect("21:40:32.142");
+    for (temporal, kind) in [
+        (CanonicalScalar::Date(date), CanonicalScalarKind::Date),
+        (
+            CanonicalScalar::LocalTime(time),
+            CanonicalScalarKind::LocalTime,
         ),
-        map_value(vec![("d", scalar_value(day.clone()))]),
+        (
+            CanonicalScalar::Time(CanonicalTime::new(time, -7_507).expect("in range")),
+            CanonicalScalarKind::Time,
+        ),
+        (
+            CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, time)),
+            CanonicalScalarKind::LocalDateTime,
+        ),
     ] {
-        assert_eq!(
-            version_1.validate_value(&value, &resolver),
-            Err(refused.clone())
-        );
-        assert_eq!(
-            version_1.encode_value(&value, &resolver),
-            Err(refused.clone())
-        );
-        let bytes = version_2.encode_value(&value, &resolver)?;
-        assert_eq!(
-            version_2.decode_value_with_resolver(&bytes, &resolver)?,
-            value
-        );
-        assert_eq!(
-            version_1.decode_value_with_resolver(&bytes, &resolver),
-            Err(refused.clone())
-        );
+        assert_eq!(ScalarProfileVersion::required_for(&temporal), V2);
+        let refused = CanonicalScalarProfileError::KindNotInProfile { kind, version: V1 };
+        for value in [
+            scalar_value(temporal.clone()),
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![
+                    scalar_value(CanonicalScalar::Null),
+                    scalar_value(temporal.clone()),
+                ])
+                .expect("bounded List"),
+            ),
+            map_value(vec![("d", scalar_value(temporal.clone()))]),
+        ] {
+            assert_eq!(
+                version_1.validate_value(&value, &resolver),
+                Err(refused.clone())
+            );
+            assert_eq!(
+                version_1.encode_value(&value, &resolver),
+                Err(refused.clone())
+            );
+            let bytes = version_2.encode_value(&value, &resolver)?;
+            assert_eq!(
+                version_2.decode_value_with_resolver(&bytes, &resolver)?,
+                value
+            );
+            assert_eq!(
+                version_1.decode_value_with_resolver(&bytes, &resolver),
+                Err(refused.clone())
+            );
+        }
     }
     let int = scalar_value(CanonicalScalar::Int(7));
     assert_eq!(
@@ -1248,6 +1303,27 @@ fn profiled_property_encoding_round_trips_and_byte_order_equals_value_order()
         date(-1),
         date(0),
         date(calendar::MAX_EPOCH_DAY),
+        scalar_value(CanonicalScalar::LocalTime(
+            CanonicalLocalTime::from_nanos_of_day(0).expect("midnight"),
+        )),
+        scalar_value(CanonicalScalar::LocalTime(
+            CanonicalLocalTime::from_nanos_of_day(NANOS_PER_DAY - 1).expect("in the day"),
+        )),
+        scalar_value(CanonicalScalar::Time(
+            CanonicalTime::parse_iso("01:00+05:00").expect("time"),
+        )),
+        scalar_value(CanonicalScalar::Time(
+            CanonicalTime::parse_iso("11:00Z").expect("time"),
+        )),
+        scalar_value(CanonicalScalar::Time(
+            CanonicalTime::parse_iso("12:00+01:00").expect("time"),
+        )),
+        scalar_value(CanonicalScalar::LocalDateTime(
+            CanonicalLocalDateTime::parse_iso("-0001-12-31T23:59").expect("date-time"),
+        )),
+        scalar_value(CanonicalScalar::LocalDateTime(
+            CanonicalLocalDateTime::parse_iso("1970-01-01T00:00").expect("date-time"),
+        )),
     ];
     let encoded: Vec<Vec<u8>> = corpus
         .iter()

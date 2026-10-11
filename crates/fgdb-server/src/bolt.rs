@@ -54,7 +54,10 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
-use fgdb_types::{CanonicalDate, CommitSeq, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, CommitSeq, EId,
+    PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -991,6 +994,12 @@ fn argument(value: &Value) -> Result<WireValue, Failure> {
             format!("{what} parameters are not supported over Bolt"),
         )
     };
+    let local_time = |nanos: i64| {
+        u64::try_from(nanos)
+            .ok()
+            .and_then(|nanos| CanonicalLocalTime::from_nanos_of_day(nanos).ok())
+            .ok_or_else(|| unsupported("out-of-range time"))
+    };
     Ok(match value {
         Value::Null => WireValue::Null,
         Value::Bool(value) => WireValue::Bool(*value),
@@ -1028,6 +1037,33 @@ fn argument(value: &Value) -> Result<WireValue, Failure> {
             ),
             _ => return Err(unsupported("malformed date")),
         },
+        Value::Struct { tag, fields } if *tag == structure::LOCAL_TIME => match fields.as_slice() {
+            [Value::Int(nanos)] => WireValue::LocalTime(local_time(*nanos)?.to_string()),
+            _ => return Err(unsupported("malformed local time")),
+        },
+        Value::Struct { tag, fields } if *tag == structure::TIME => match fields.as_slice() {
+            [Value::Int(nanos), Value::Int(offset)] => {
+                let offset =
+                    i32::try_from(*offset).map_err(|_| unsupported("out-of-range time"))?;
+                WireValue::Time(
+                    CanonicalTime::new(local_time(*nanos)?, offset)
+                        .map_err(|_| unsupported("out-of-range time"))?
+                        .to_string(),
+                )
+            }
+            _ => return Err(unsupported("malformed time")),
+        },
+        Value::Struct { tag, fields } if *tag == structure::LOCAL_DATE_TIME => {
+            match fields.as_slice() {
+                [Value::Int(seconds), Value::Int(nanos)] if (0..1_000_000_000).contains(nanos) => {
+                    let date = CanonicalDate::from_epoch_day(seconds.div_euclid(86_400))
+                        .map_err(|_| unsupported("out-of-range local date-time"))?;
+                    let time = local_time(seconds.rem_euclid(86_400) * 1_000_000_000 + nanos)?;
+                    WireValue::LocalDateTime(CanonicalLocalDateTime::new(date, time).to_string())
+                }
+                _ => return Err(unsupported("malformed local date-time")),
+            }
+        }
         Value::Struct { .. } => return Err(unsupported("this structure's")),
     })
 }
@@ -1301,6 +1337,11 @@ fn feature_not_supported(what: &str) -> Failure {
     )
 }
 
+/// A local time's nanoseconds since midnight, below 86_400 * 10^9 < 2^47.
+fn nanos_of_day(time: CanonicalLocalTime) -> i64 {
+    i64::try_from(time.nanos_of_day()).expect("a time of day is under one day")
+}
+
 impl Entities {
     fn node(&self, id: u128) -> Result<Value, Failure> {
         let (labels, properties) = self.nodes.get(&id).ok_or_else(unavailable_graph_value)?;
@@ -1397,6 +1438,25 @@ fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
                 .map_err(|_| feature_not_supported("A non-canonical date"))?
                 .epoch_day(),
         ),
+        WireValue::LocalTime(text) => structure::local_time(nanos_of_day(
+            CanonicalLocalTime::parse_iso(&text)
+                .map_err(|_| feature_not_supported("A non-canonical local time"))?,
+        )),
+        WireValue::Time(text) => {
+            let time = CanonicalTime::parse_iso(&text)
+                .map_err(|_| feature_not_supported("A non-canonical time"))?;
+            structure::time(nanos_of_day(time.local()), i64::from(time.offset_seconds()))
+        }
+        WireValue::LocalDateTime(text) => {
+            let value = CanonicalLocalDateTime::parse_iso(&text)
+                .map_err(|_| feature_not_supported("A non-canonical local date-time"))?;
+            let nanos = nanos_of_day(value.time());
+            // |epoch day| < 4e11, so the seconds fit an i64 with room to spare.
+            structure::local_date_time(
+                value.date().epoch_day() * 86_400 + nanos / 1_000_000_000,
+                nanos % 1_000_000_000,
+            )
+        }
         WireValue::Bytes(bytes) => Value::Bytes(bytes),
         WireValue::Timestamp(timestamp) => {
             let seconds = timestamp.instant_utc_nanos.div_euclid(1_000_000_000);
@@ -1501,6 +1561,63 @@ mod tests {
                 )
             })
             .collect(),
+        }
+    }
+
+    /// fgdb-txbg9: each temporal kind is its Bolt structure in both
+    /// directions, through the same canonical text the FGP cell carries.
+    #[test]
+    fn temporal_values_are_their_bolt_structures_both_ways() {
+        let none = Entities::default();
+        for (cell, tag, fields) in [
+            (WireValue::Date("-0001-07-21".into()), 0x44, vec![-719_692]),
+            (
+                WireValue::LocalTime("21:40:32.142".into()),
+                0x74,
+                vec![78_032_142_000_000],
+            ),
+            (
+                WireValue::Time("00:00:01-02:05:07".into()),
+                0x54,
+                vec![1_000_000_000, -7_507],
+            ),
+            (
+                WireValue::LocalDateTime("1969-12-31T23:59:59.999999999".into()),
+                0x64,
+                vec![-1, 999_999_999],
+            ),
+            (
+                WireValue::LocalDateTime("2015-07-21T21:40".into()),
+                0x64,
+                vec![1_437_514_800, 0],
+            ),
+        ] {
+            let encoded = Value::Struct {
+                tag,
+                fields: fields.into_iter().map(Value::Int).collect(),
+            };
+            assert_eq!(value(cell.clone(), &none).unwrap(), encoded, "{cell:?}");
+            assert_eq!(argument(&encoded).unwrap(), cell, "{cell:?}");
+        }
+        for malformed in [
+            Value::Struct {
+                tag: 0x74,
+                fields: vec![Value::Int(86_400_000_000_000)],
+            },
+            Value::Struct {
+                tag: 0x54,
+                fields: vec![Value::Int(0), Value::Int(18 * 3_600 + 1)],
+            },
+            Value::Struct {
+                tag: 0x64,
+                fields: vec![Value::Int(0), Value::Int(1_000_000_000)],
+            },
+            Value::Struct {
+                tag: 0x64,
+                fields: vec![Value::Int(0)],
+            },
+        ] {
+            assert!(argument(&malformed).is_err(), "{malformed:?}");
         }
     }
 

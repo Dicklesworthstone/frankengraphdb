@@ -166,9 +166,12 @@ impl Work<'_> {
     fn argument(&mut self, value: &WireValue) -> Result<(), Refusal> {
         self.charge(1)?;
         match value {
-            WireValue::Text(text) | WireValue::Decimal(text) | WireValue::Date(text) => {
-                self.bytes(text.len())
-            }
+            WireValue::Text(text)
+            | WireValue::Decimal(text)
+            | WireValue::Date(text)
+            | WireValue::LocalTime(text)
+            | WireValue::Time(text)
+            | WireValue::LocalDateTime(text) => self.bytes(text.len()),
             WireValue::Bytes(bytes) => self.bytes(bytes.len()),
             WireValue::List(items) => {
                 for item in items {
@@ -209,9 +212,19 @@ impl Work<'_> {
             // STRICT_PORTABLE decimals have at most 34 coefficient digits,
             // one sign and one decimal point. Reserve before formatting.
             GraphValue::Scalar(CanonicalScalar::Decimal(_)) => self.charge(36),
-            // Canonical date text is at most MAX_DATE_BYTES (16) bytes.
+            // Canonical temporal text is at most the protocol's bound for
+            // its kind. Reserve before formatting.
             GraphValue::Scalar(CanonicalScalar::Date(_)) => {
                 self.charge(fgdb_protocol::body::MAX_DATE_BYTES as u64)
+            }
+            GraphValue::Scalar(CanonicalScalar::LocalTime(_)) => {
+                self.charge(fgdb_protocol::body::MAX_LOCAL_TIME_BYTES as u64)
+            }
+            GraphValue::Scalar(CanonicalScalar::Time(_)) => {
+                self.charge(fgdb_protocol::body::MAX_TIME_BYTES as u64)
+            }
+            GraphValue::Scalar(CanonicalScalar::LocalDateTime(_)) => {
+                self.charge(fgdb_protocol::body::MAX_LOCAL_DATETIME_BYTES as u64)
             }
             GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => match value.zone() {
                 Some(zone) => self.bytes(zone.identifier().len()),

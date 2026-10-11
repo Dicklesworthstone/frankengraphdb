@@ -260,6 +260,15 @@ pub enum WireValue {
     /// java.time year spelling (`2015-07-21`, `+10000-01-01`, `-0001-07-21`),
     /// at most [`MAX_DATE_BYTES`] bytes.
     Date(String),
+    /// A local time as its canonical java.time text (`21:40`, `21:40:32.142`),
+    /// at most [`MAX_LOCAL_TIME_BYTES`] bytes.
+    LocalTime(String),
+    /// A time at a UTC offset as its canonical text (`21:40Z`,
+    /// `21:40:32+01:00`, `12:34:56-02:05:07`), at most [`MAX_TIME_BYTES`].
+    Time(String),
+    /// A local date-time as its canonical text (`2015-07-21T21:40:32.142`),
+    /// at most [`MAX_LOCAL_DATETIME_BYTES`] bytes.
+    LocalDateTime(String),
     Vertex(u128),
     Edge(u128),
     /// A path: its start vertex, then one (edge, vertex) pair per step.
@@ -303,10 +312,22 @@ mod tag {
     pub const WIDE_INT: u8 = 16;
     pub const AVERAGE: u8 = 17;
     pub const DATE: u8 = 18;
+    pub const LOCAL_TIME: u8 = 19;
+    pub const TIME: u8 = 20;
+    pub const LOCAL_DATETIME: u8 = 21;
 }
 
 /// Longest canonical date text: a sign, nine year digits and `-MM-DD`.
 pub const MAX_DATE_BYTES: usize = 16;
+
+/// Longest canonical local time text: `hh:mm:ss.nnnnnnnnn`.
+pub const MAX_LOCAL_TIME_BYTES: usize = 18;
+
+/// Longest canonical time text: a local time and `±hh:mm:ss`.
+pub const MAX_TIME_BYTES: usize = MAX_LOCAL_TIME_BYTES + 9;
+
+/// Longest canonical local date-time text: a date, `T` and a local time.
+pub const MAX_LOCAL_DATETIME_BYTES: usize = MAX_DATE_BYTES + 1 + MAX_LOCAL_TIME_BYTES;
 
 impl WireValue {
     fn check(&self, depth: usize) -> Result<(), BodyError> {
@@ -316,6 +337,9 @@ impl WireValue {
         match self {
             Self::Decimal(v) | Self::Text(v) => check_len(v.len(), MAX_SCALAR_BYTES),
             Self::Date(v) => check_len(v.len(), MAX_DATE_BYTES),
+            Self::LocalTime(v) => check_len(v.len(), MAX_LOCAL_TIME_BYTES),
+            Self::Time(v) => check_len(v.len(), MAX_TIME_BYTES),
+            Self::LocalDateTime(v) => check_len(v.len(), MAX_LOCAL_DATETIME_BYTES),
             Self::Bytes(v) => check_len(v.len(), MAX_SCALAR_BYTES),
             Self::Timestamp(t) => t
                 .zone
@@ -369,6 +393,18 @@ impl WireValue {
             }
             Self::Date(v) => {
                 out.u8(tag::DATE);
+                out.text(v);
+            }
+            Self::LocalTime(v) => {
+                out.u8(tag::LOCAL_TIME);
+                out.text(v);
+            }
+            Self::Time(v) => {
+                out.u8(tag::TIME);
+                out.text(v);
+            }
+            Self::LocalDateTime(v) => {
+                out.u8(tag::LOCAL_DATETIME);
                 out.text(v);
             }
             Self::Bytes(v) => {
@@ -463,6 +499,9 @@ impl WireValue {
             tag::DECIMAL => Self::Decimal(input.text(MAX_SCALAR_BYTES)?),
             tag::TEXT => Self::Text(input.text(MAX_SCALAR_BYTES)?),
             tag::DATE => Self::Date(input.text(MAX_DATE_BYTES)?),
+            tag::LOCAL_TIME => Self::LocalTime(input.text(MAX_LOCAL_TIME_BYTES)?),
+            tag::TIME => Self::Time(input.text(MAX_TIME_BYTES)?),
+            tag::LOCAL_DATETIME => Self::LocalDateTime(input.text(MAX_LOCAL_DATETIME_BYTES)?),
             tag::BYTES => Self::Bytes(input.bytes(MAX_SCALAR_BYTES)?.to_vec()),
             tag::TIMESTAMP => {
                 let instant_utc_nanos = input.i128()?;
@@ -1540,6 +1579,9 @@ mod tests {
             WireValue::Decimal("12.50".into()),
             WireValue::Text("héllo".into()),
             WireValue::Date("+999999999-12-31".into()),
+            WireValue::LocalTime("23:59:59.999999999".into()),
+            WireValue::Time("23:59:59.999999999-02:05:07".into()),
+            WireValue::LocalDateTime("+999999999-12-31T23:59:59.999999999".into()),
             WireValue::Bytes(vec![0, 255]),
             WireValue::Timestamp(WireTimestamp {
                 instant_utc_nanos: -5,

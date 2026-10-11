@@ -13,7 +13,8 @@ use fgdb_gql::{
 };
 use fgdb_protocol::body::{WireTimestamp, WireValue, WireZone};
 use fgdb_types::{
-    CanonicalDate, CanonicalF64, CanonicalScalar, CanonicalTimestamp, ObjectId, TzdbResolver,
+    CanonicalDate, CanonicalF64, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
+    CanonicalTime, CanonicalTimestamp, ObjectId, TzdbResolver,
 };
 
 /// One result cell.
@@ -74,6 +75,9 @@ fn scalar_value(scalar: &CanonicalScalar) -> WireValue {
         }),
         CanonicalScalar::Bytes(v) => WireValue::Bytes(v.as_slice().to_vec()),
         CanonicalScalar::Date(v) => WireValue::Date(v.to_string()),
+        CanonicalScalar::LocalTime(v) => WireValue::LocalTime(v.to_string()),
+        CanonicalScalar::Time(v) => WireValue::Time(v.to_string()),
+        CanonicalScalar::LocalDateTime(v) => WireValue::LocalDateTime(v.to_string()),
     }
 }
 
@@ -199,6 +203,18 @@ fn argument_scalar(
             Ok(date) if date.to_string() == *v => CanonicalScalar::Date(date),
             _ => return Err("a date argument must be canonical ISO 8601 text"),
         },
+        WireValue::LocalTime(v) => match CanonicalLocalTime::parse_iso(v) {
+            Ok(time) if time.to_string() == *v => CanonicalScalar::LocalTime(time),
+            _ => return Err("a local time argument must be canonical ISO 8601 text"),
+        },
+        WireValue::Time(v) => match CanonicalTime::parse_iso(v) {
+            Ok(time) if time.to_string() == *v => CanonicalScalar::Time(time),
+            _ => return Err("a time argument must be canonical ISO 8601 text"),
+        },
+        WireValue::LocalDateTime(v) => match CanonicalLocalDateTime::parse_iso(v) {
+            Ok(value) if value.to_string() == *v => CanonicalScalar::LocalDateTime(value),
+            _ => return Err("a local date-time argument must be canonical ISO 8601 text"),
+        },
         WireValue::Decimal(_) => return Err("decimal arguments are not supported"),
         WireValue::Vertex(_)
         | WireValue::Edge(_)
@@ -263,6 +279,44 @@ mod tests {
         ));
         for text in ["20150721", "2015-W30-2", "+2015-07-21", "2015-02-30", ""] {
             assert_eq!(parameters_of(text).unwrap_err().parameter, "d", "{text}");
+        }
+        // The times follow the same rule: the canonical spelling binds, and
+        // another spelling of the same value is refused.
+        let bind = |value: WireValue| {
+            parameters(&[("t".into(), value)], None)
+                .map(|bound| match bound.get("t") {
+                    Some(GqlParameterValue::Scalar(scalar)) => scalar.value().clone(),
+                    _ => panic!("a temporal argument binds a scalar"),
+                })
+                .map_err(|error| error.parameter)
+        };
+        let local = CanonicalLocalTime::from_hms_nano(21, 40, 0, 0).unwrap();
+        assert_eq!(
+            bind(WireValue::LocalTime("21:40".into())),
+            Ok(CanonicalScalar::LocalTime(local))
+        );
+        assert_eq!(
+            bind(WireValue::Time("21:40-01:30".into())),
+            Ok(CanonicalScalar::Time(
+                CanonicalTime::new(local, -5_400).unwrap()
+            ))
+        );
+        assert_eq!(
+            bind(WireValue::LocalDateTime("2015-07-21T21:40".into())),
+            Ok(CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(
+                CanonicalDate::from_civil(2015, 7, 21).unwrap(),
+                local
+            )))
+        );
+        for value in [
+            WireValue::LocalTime("2140".into()),
+            WireValue::LocalTime("21:40:00".into()),
+            WireValue::Time("21:40+00:00".into()),
+            WireValue::Time("21:40".into()),
+            WireValue::LocalDateTime("20150721T21:40".into()),
+            WireValue::LocalDateTime("2015-07-21T24:00".into()),
+        ] {
+            assert_eq!(bind(value.clone()), Err("t".into()), "{value:?}");
         }
     }
 

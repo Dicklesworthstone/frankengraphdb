@@ -63,7 +63,10 @@ pub(crate) fn collect<'a, E>(
             | CanonicalScalar::Int(_)
             | CanonicalScalar::Decimal(_)
             | CanonicalScalar::Float(_)
-            | CanonicalScalar::Date(_) => [0, 0],
+            | CanonicalScalar::Date(_)
+            | CanonicalScalar::LocalTime(_)
+            | CanonicalScalar::Time(_)
+            | CanonicalScalar::LocalDateTime(_) => [0, 0],
         };
         for bytes in sizes {
             payload(bytes, control)?;

@@ -611,6 +611,9 @@ pub enum CanonicalScalarKind {
     Timestamp = 6,
     Bytes = 7,
     Date = 10,
+    LocalTime = 11,
+    Time = 12,
+    LocalDateTime = 13,
 }
 
 impl CanonicalScalarKind {
@@ -626,6 +629,9 @@ impl CanonicalScalarKind {
             CanonicalScalar::Timestamp(_) => Self::Timestamp,
             CanonicalScalar::Bytes(_) => Self::Bytes,
             CanonicalScalar::Date(_) => Self::Date,
+            CanonicalScalar::LocalTime(_) => Self::LocalTime,
+            CanonicalScalar::Time(_) => Self::Time,
+            CanonicalScalar::LocalDateTime(_) => Self::LocalDateTime,
         }
     }
 }
@@ -639,7 +645,7 @@ impl CanonicalScalarKind {
 ///
 /// Order is canonical byte order: values of different kinds order by their
 /// leading encoding tag, so the scalar ranks 0x00-0x07 come before List
-/// (0x08) and Map (0x09), and a Date scalar (0x0A) after both.
+/// (0x08) and Map (0x09), and the temporal scalars (0x0A-0x0D) after both.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CanonicalPropertyValue {
     Scalar(CanonicalScalar),

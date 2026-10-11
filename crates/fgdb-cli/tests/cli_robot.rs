@@ -312,6 +312,43 @@ fn check_hex(value: &Json) {
     );
 }
 
+/// ISO 8601 extended calendar form, java.time year spelling.
+fn check_date(text: &str) {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (year, month_day) = body.split_once('-').unwrap();
+    assert!(
+        (4..=9).contains(&year.len()) && year.bytes().all(|byte| byte.is_ascii_digit()),
+        "{text}"
+    );
+    assert!(
+        month_day.len() == 5
+            && month_day.as_bytes()[2] == b'-'
+            && month_day.bytes().filter(u8::is_ascii_digit).count() == 4,
+        "{text}"
+    );
+}
+
+/// A java.time local time at the start of `text`; returns what follows it.
+fn check_clock(text: &str) -> &str {
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let bytes = text.as_bytes();
+    assert!(
+        bytes.len() >= 5 && bytes[2] == b':' && digits(&text[..2]) && digits(&text[3..5]),
+        "{text}"
+    );
+    let mut rest = &text[5..];
+    if let Some(seconds) = rest.strip_prefix(':') {
+        assert!(seconds.len() >= 2 && digits(&seconds[..2]), "{text}");
+        rest = &seconds[2..];
+        if let Some(fraction) = rest.strip_prefix('.') {
+            let length = fraction.bytes().take_while(u8::is_ascii_digit).count();
+            assert!(matches!(length, 3 | 6 | 9), "{text}");
+            rest = &fraction[length..];
+        }
+    }
+    rest
+}
+
 fn check_cell(cell: &Json, schema: &Json) {
     let kind = cell.get("type").string();
     assert!(
@@ -387,20 +424,36 @@ fn check_cell(cell: &Json, schema: &Json) {
         }
         "bytes" => check_hex(value),
         // ISO 8601 extended calendar form, java.time year spelling.
-        "date" => {
+        "date" => check_date(value.string()),
+        // java.time spellings: hh:mm[:ss[.fff|.ffffff|.fffffffff]], a time
+        // then Z or ±hh:mm[:ss], a date-time with T between.
+        "localtime" => {
             let text = value.string();
-            let body = text.strip_prefix(['+', '-']).unwrap_or(text);
-            let (year, month_day) = body.split_once('-').unwrap();
-            assert!(
-                (4..=9).contains(&year.len()) && year.bytes().all(|byte| byte.is_ascii_digit()),
-                "{text}"
-            );
-            assert!(
-                month_day.len() == 5
-                    && month_day.as_bytes()[2] == b'-'
-                    && month_day.bytes().filter(u8::is_ascii_digit).count() == 4,
-                "{text}"
-            );
+            assert_eq!(check_clock(text), "", "{text}");
+        }
+        "time" => {
+            let text = value.string();
+            let offset = check_clock(text);
+            if offset != "Z" {
+                let body = offset
+                    .strip_prefix(['+', '-'])
+                    .unwrap_or_else(|| fail(text));
+                assert!(
+                    matches!(body.len(), 5 | 8)
+                        && body.bytes().enumerate().all(|(at, byte)| if at % 3 == 2 {
+                            byte == b':'
+                        } else {
+                            byte.is_ascii_digit()
+                        }),
+                    "{text}"
+                );
+            }
+        }
+        "localdatetime" => {
+            let text = value.string();
+            let (date, time) = text.split_once('T').unwrap_or_else(|| fail(text));
+            check_date(date);
+            assert_eq!(check_clock(time), "", "{text}");
         }
         "timestamp" => {
             exact_fields(value, &["instant_utc_nanos", "utc_offset_seconds", "zone"]);
