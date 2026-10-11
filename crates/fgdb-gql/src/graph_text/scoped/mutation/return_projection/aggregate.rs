@@ -210,7 +210,8 @@ impl PreparedGraphPipelineAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, Error> {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let multipart = crate::set_text::multipart::has_continuation(&tokens);
         let (head, mut stages, schema, depth) = rows::prefix(&mut parser, statement, multipart)?;

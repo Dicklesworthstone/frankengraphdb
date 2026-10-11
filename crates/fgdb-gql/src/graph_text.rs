@@ -157,6 +157,12 @@ impl ReverseSymbolCatalog {
 
 pub trait GraphSymbolResolver {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol>;
+    /// The host's pinned tzdb for named time zones (`timezone:
+    /// 'Europe/Stockholm'`). A statement prepared without one refuses a
+    /// named zone; asking for it is not a catalog symbol lookup.
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        None
+    }
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         None
     }
@@ -622,6 +628,9 @@ struct Parser<'a> {
     /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
     /// key belongs to the HAVING test, not to the key expression.
     having_operand: bool,
+    /// The host's pinned tzdb, carried by every temporal constructor the
+    /// statement reads (fgdb-txbg9): named zones resolve only through it.
+    zones: Option<crate::GqlTimeZones>,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -657,6 +666,12 @@ struct BoundaryReads<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Carry the host's pinned tzdb into every temporal constructor read.
+    fn with_zones(mut self, zones: Option<crate::GqlTimeZones>) -> Self {
+        self.zones = zones;
+        self
+    }
+
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
         if text.len() > MAX_GRAPH_TEXT_BYTES {
             return Err(error(
@@ -687,6 +702,7 @@ impl<'a> Parser<'a> {
             random_sites: 0,
             aggregate_argument: false,
             having_operand: false,
+            zones: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
@@ -1636,7 +1652,8 @@ impl PreparedGraphText {
         statement: &str,
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
-        Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
+        let parser = Parser::new(statement)?.with_zones(resolve.time_zones());
+        Self::from_syntax(statement, parser.parse()?, resolve)
     }
 
     fn from_syntax<'a>(

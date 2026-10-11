@@ -26,7 +26,7 @@ pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub use projection::{
-    GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
+    GqlTimeZones, GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
     GraphTemporalFunction, GraphValueFunction,
 };
 pub(crate) use projection::{

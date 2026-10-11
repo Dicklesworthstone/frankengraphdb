@@ -165,10 +165,12 @@ pub(crate) enum ReadValueTemplate {
         values: Vec<ReadValueTemplate>,
         body: Box<ReadValueTemplate>,
     },
-    /// A temporal constructor (fgdb-txbg9).
+    /// A temporal constructor (fgdb-txbg9), with the statement's pinned
+    /// tzdb for named zones.
     Temporal {
         function: crate::GraphTemporalFunction,
         argument: Box<ReadValueTemplate>,
+        zones: Option<crate::GqlTimeZones>,
     },
     /// reverse() or split() (fgdb-13l85); a longer call's argument is the
     /// list of its arguments.
@@ -451,8 +453,19 @@ impl ReadValueTemplate {
                 left.append_template_transcript(bytes);
                 right.append_template_transcript(bytes);
             }
-            Self::Temporal { function, argument } => {
-                bytes.extend_from_slice(&[21, function.tag()]);
+            Self::Temporal {
+                function,
+                argument,
+                zones,
+            } => {
+                // A pinned tzdb is part of the plan: tag 26 and its identity.
+                match zones {
+                    None => bytes.extend_from_slice(&[21, function.tag()]),
+                    Some(zones) => {
+                        bytes.extend_from_slice(&[26, function.tag()]);
+                        bytes.extend_from_slice(zones.tzdb().as_bytes());
+                    }
+                }
                 argument.append_template_transcript(bytes);
             }
             Self::Function { function, argument } => {
@@ -1733,6 +1746,7 @@ impl PreparedGraphSetText {
     where
         R: crate::graph_text::GraphSymbolResolver + ?Sized,
     {
+        let zones = resolve.time_zones();
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)
             .map_err(|error| pattern_error(0, error))?;
         let mut parser = Composition {
@@ -1766,6 +1780,7 @@ impl PreparedGraphSetText {
                 &statement[span.start..span.end],
                 &local,
                 &parser.tokens[span.first_token..span.last_token],
+                zones.as_ref(),
             )
             .map_err(|error| rebase_error(span.start, error))?;
             operands += input.operand_count();

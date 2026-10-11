@@ -9,6 +9,7 @@ mod temporal;
 pub(crate) use membership::{
     equal as evaluate_equality, evaluate as evaluate_membership, order as evaluate_order,
 };
+pub use temporal::GqlTimeZones;
 pub(crate) use temporal::{
     arithmetic as temporal_arithmetic, construct as construct_temporal, field as temporal_field,
     field_scratch_entries as temporal_field_scratch_entries, is_field_name as temporal_field_name,
@@ -149,6 +150,9 @@ pub enum GraphSetValue {
     Temporal {
         function: GraphTemporalFunction,
         argument: Box<GraphSetValue>,
+        /// The statement's pinned tzdb, for named zones; without it a
+        /// named zone refuses.
+        zones: Option<temporal::GqlTimeZones>,
     },
     /// An openCypher value function over lists and text (fgdb-13l85). The
     /// argument of a one-argument function is that value; of a longer one,
@@ -1129,8 +1133,19 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             append_value_transcript(left, bytes);
             append_value_transcript(right, bytes);
         }
-        GraphSetValue::Temporal { function, argument } => {
-            bytes.extend_from_slice(&[21, function.tag()]);
+        GraphSetValue::Temporal {
+            function,
+            argument,
+            zones,
+        } => {
+            // A pinned tzdb is part of the plan: tag 26 and its identity.
+            match zones {
+                None => bytes.extend_from_slice(&[21, function.tag()]),
+                Some(zones) => {
+                    bytes.extend_from_slice(&[26, function.tag()]);
+                    bytes.extend_from_slice(zones.tzdb().as_bytes());
+                }
+            }
             append_value_transcript(argument, bytes);
         }
         GraphSetValue::Function { function, argument } => {
@@ -1502,9 +1517,14 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
-        GraphSetValue::Temporal { function, argument } => {
+        GraphSetValue::Temporal {
+            function,
+            argument,
+            zones,
+        } => {
             let argument = operand(argument, row, column, control, depth + 1, nodes)?;
-            let value = temporal::construct(*function, argument.as_ref()).map_err(failure)?;
+            let value = temporal::construct(*function, argument.as_ref(), zones.as_ref())
+                .map_err(failure)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(value)
         }

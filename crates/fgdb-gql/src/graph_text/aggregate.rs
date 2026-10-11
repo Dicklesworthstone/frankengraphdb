@@ -167,7 +167,8 @@ impl PreparedGraphAggregateText {
         let mut source_aliases: Vec<String> = Vec::new();
         let mut computed = ComputedInputs::default();
         let mut output_leaves = Vec::new();
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         parser.parse_head()?;
         let distinct = parser.take_word("DISTINCT")?;
         if !distinct {

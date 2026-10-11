@@ -233,10 +233,14 @@ fn expression<'g, E, C>(
             )))
         }
         // Temporal constructors with the row evaluator's law (fgdb-txbg9).
-        GraphSetValue::Temporal { function, argument } => {
+        GraphSetValue::Temporal {
+            function,
+            argument,
+            zones,
+        } => {
             let argument = expression(argument, input, column, control)?.into_owned(control)?;
             let argument = graph_value(argument, column)?;
-            let value = crate::set_ops::construct_temporal(*function, &argument)
+            let value = crate::set_ops::construct_temporal(*function, &argument, zones.as_ref())
                 .map_err(|kind| failure(column, kind))?;
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))

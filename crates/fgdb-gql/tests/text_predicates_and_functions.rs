@@ -2795,3 +2795,200 @@ fn numeric_functions_round_once_and_follow_opencypher_ties_and_specials() {
             .is_empty()
     );
 }
+
+/// A test tzdb artifact: Europe/Stockholm with its 1984 and 2017 summer
+/// time (CET +01:00, CEST +02:00 from 01:00 UTC on the switch days, as
+/// zdump reports them) and Pacific/Honolulu at a fixed -10:00.
+struct TestTzdb;
+const TEST_TZDB: fgdb_types::ObjectId = fgdb_types::ObjectId([0x7a; 32]);
+impl fgdb_types::TzdbResolver for TestTzdb {
+    fn contains_tzdb(&self, tzdb_oid: &fgdb_types::ObjectId) -> bool {
+        *tzdb_oid == TEST_TZDB
+    }
+    fn canonical_utc_offset_seconds(
+        &self,
+        tzdb_oid: &fgdb_types::ObjectId,
+        zone_identifier: &str,
+        instant_utc_nanos: i128,
+    ) -> Option<i32> {
+        if !self.contains_tzdb(tzdb_oid) {
+            return None;
+        }
+        let second = instant_utc_nanos.div_euclid(1_000_000_000);
+        match zone_identifier {
+            "Pacific/Honolulu" => Some(-36_000),
+            "Europe/Stockholm" => {
+                let summers = [(449_024_400, 465_354_000), (1_490_490_000, 1_509_238_800)];
+                let summer = summers
+                    .iter()
+                    .any(|&(start, end)| (start..end).contains(&second));
+                Some(if summer { 7_200 } else { 3_600 })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A catalog with the test tzdb as its named-zone capability.
+struct ZonedCatalog;
+impl fgdb_gql::GraphSymbolResolver for ZonedCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        fgdb_gql::GqlTimeZones::new(std::sync::Arc::new(TestTzdb), TEST_TZDB)
+    }
+}
+
+fn zoned(expression: &str) -> Result<fgdb_types::CanonicalTimestamp, String> {
+    let statement = format!("MATCH (n) RETURN {expression} AS value");
+    let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        &statement,
+        &[],
+        &mut ZonedCatalog,
+    )
+    .map_err(|error| format!("{error:?}"))?
+    .bind_parameters(&GqlParameters::new())
+    .map_err(|error| format!("{error:?}"))?;
+    let result = execute(&query, &CanonicalScalar::Null, policy()).map_err(|_| "execution")?;
+    match result.value[0].values()[0].as_scalar() {
+        Some(CanonicalScalar::Timestamp(value)) => Ok(value.clone()),
+        other => Err(format!("{other:?}")),
+    }
+}
+
+/// fgdb-txbg9: a named zone (`timezone: 'Europe/Stockholm'`, a text value's
+/// `[zone]` suffix) resolves only through the statement's pinned tzdb, by
+/// java.time's rules: the offset in force at that local time, the earlier
+/// offset in an overlap, and a gap's wall time moved later by the gap. A
+/// datetime base keeps its instant in a new zone; truncation keeps a zoned
+/// value's zone, or places the result in a map's zone. The value records the
+/// zone and the artifact. Without a tzdb, or for a zone it lacks, a name
+/// refuses, and a plan that carries a tzdb records its identity.
+#[test]
+fn named_time_zones_resolve_through_the_pinned_tzdb_only() {
+    const HOUR: i128 = 3_600 * 1_000_000_000;
+    let second = |s: i128| s * 1_000_000_000;
+    // (expression, UTC instant, offset seconds, zone)
+    for (expression, instant, offset, zone) in [
+        // After the 1984 switch back: CET.
+        (
+            "datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'})",
+            second(466_340_400),
+            3_600,
+            Some("Europe/Stockholm"),
+        ),
+        // Summer: CEST.
+        (
+            "datetime({year: 1984, month: 7, day: 11, hour: 12, timezone: 'Europe/Stockholm'})",
+            second(458_388_000),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        // 02:30 on 1984-03-25 does not exist: it becomes 03:30 CEST.
+        (
+            "datetime({year: 1984, month: 3, day: 25, hour: 2, minute: 30, timezone: 'Europe/Stockholm'})",
+            second(449_026_200),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        // 02:30 on 1984-09-30 happens twice: the earlier, CEST.
+        (
+            "datetime({year: 1984, month: 9, day: 30, hour: 2, minute: 30, timezone: 'Europe/Stockholm'})",
+            second(465_352_200),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        // A datetime base keeps its instant in the new zone.
+        (
+            "datetime({datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}), timezone: 'Pacific/Honolulu'})",
+            second(466_340_400),
+            -36_000,
+            Some("Pacific/Honolulu"),
+        ),
+        // A zoned base keeps its zone when its fields change.
+        (
+            "datetime({datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}), month: 7})",
+            second(458_388_000),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        // Text with a zone suffix, with and without an agreeing offset.
+        (
+            "datetime('1984-10-11T12:00[Europe/Stockholm]')",
+            second(466_340_400),
+            3_600,
+            Some("Europe/Stockholm"),
+        ),
+        (
+            "datetime('1984-10-11T12:00+01:00[Europe/Stockholm]')",
+            second(466_340_400),
+            3_600,
+            Some("Europe/Stockholm"),
+        ),
+        // Truncation keeps the zone, and a map's zone places the result.
+        (
+            "datetime.truncate('day', datetime({year: 2017, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}))",
+            second(1_507_672_800),
+            7_200,
+            Some("Europe/Stockholm"),
+        ),
+        (
+            "datetime.truncate('day', localdatetime({year: 2017, month: 10, day: 11, hour: 12}), {timezone: 'Pacific/Honolulu'})",
+            second(1_507_672_800) + 12 * HOUR,
+            -36_000,
+            Some("Pacific/Honolulu"),
+        ),
+        // An offset stays an offset.
+        (
+            "datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'})",
+            second(466_340_400),
+            3_600,
+            None,
+        ),
+    ] {
+        let value = zoned(expression).unwrap_or_else(|error| panic!("{expression}: {error}"));
+        assert_eq!(value.instant_utc_nanos(), instant, "{expression}");
+        assert_eq!(value.utc_offset_seconds(), offset, "{expression}");
+        assert_eq!(
+            value.zone().map(|zone| zone.identifier()),
+            zone,
+            "{expression}"
+        );
+        if let Some(zone) = value.zone() {
+            assert_eq!(zone.tzdb_oid(), TEST_TZDB, "{expression}");
+        }
+    }
+    for refused in [
+        "datetime({year: 1984, month: 10, day: 11, timezone: 'Frost/Nixon'})",
+        "datetime('1984-10-11T12:00+02:00[Europe/Stockholm]')",
+        "time({hour: 12, timezone: 'Europe/Stockholm'})",
+    ] {
+        assert!(zoned(refused).is_err(), "{refused}");
+    }
+    // Without a pinned tzdb a named zone refuses.
+    let plain = prepare(
+        "MATCH (n) RETURN datetime({year: 1984, month: 10, day: 11, timezone: 'Europe/Stockholm'}) AS value",
+    );
+    assert!(execute(&plain, &CanonicalScalar::Null, policy()).is_err());
+    // The tzdb is part of the plan's identity.
+    let text = "MATCH (n) RETURN datetime({year: 1984, month: 10, day: 11}) AS value";
+    let with_zones = |text: &str| {
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut ZonedCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    assert_eq!(
+        with_zones(text).canonical_bytes(),
+        with_zones(text).canonical_bytes()
+    );
+    assert_ne!(
+        with_zones(text).canonical_bytes(),
+        prepare(text).canonical_bytes()
+    );
+}

@@ -24,7 +24,9 @@ impl PreparedGraphText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
-        let syntax = Parser::new_with_parameter_types(statement, declarations)?.parse()?;
+        let syntax = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones())
+            .parse()?;
         Self::from_syntax(statement, syntax, resolve)
     }
 
@@ -33,7 +35,9 @@ impl PreparedGraphText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
-        let syntax = Parser::new_with_parameter_types(statement, declarations)?.parse()?;
+        let syntax = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones())
+            .parse()?;
         Self::from_syntax(statement, syntax, resolve)
     }
 
@@ -74,8 +78,10 @@ impl PreparedGraphText {
     pub(crate) fn unresolved_for_composition<'a>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
+        zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedGraphText<'a>, crate::GraphSetTextError> {
         Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(zones.cloned())
             .parse_return_for_composition(statement)
     }
 }

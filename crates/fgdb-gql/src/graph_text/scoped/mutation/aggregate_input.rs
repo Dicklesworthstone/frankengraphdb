@@ -263,9 +263,14 @@ impl PreparedGraphAggregateText {
                 left: Box::new(Self::bind_input_value(left, values)?),
                 right: Box::new(Self::bind_input_value(right, values)?),
             }),
-            ReadValueTemplate::Temporal { function, argument } => Ok(GraphSetValue::Temporal {
+            ReadValueTemplate::Temporal {
+                function,
+                argument,
+                zones,
+            } => Ok(GraphSetValue::Temporal {
                 function: *function,
                 argument: Box::new(Self::bind_input_value(argument, values)?),
+                zones: zones.clone(),
             }),
             ReadValueTemplate::Function { function, argument } => Ok(GraphSetValue::Function {
                 function: *function,

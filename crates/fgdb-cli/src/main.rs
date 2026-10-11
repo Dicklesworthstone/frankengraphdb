@@ -314,6 +314,9 @@ struct Options {
     /// `write --rows json:[...]`: one parameter set per object.
     rows: Option<String>,
     tzdb_file: Option<PathBuf>,
+    /// The `--tzdb-file` artifact as the statement's named-zone capability,
+    /// once it is read (fgdb-txbg9).
+    zones: Option<fgdb_gql::GqlTimeZones>,
     labels: BTreeMap<String, u32>,
     relations: BTreeMap<String, u32>,
     properties: BTreeMap<String, u32>,
@@ -387,6 +390,10 @@ impl GraphSymbolResolver for Options {
             .iter()
             .find_map(|(name, &raw)| (u64::from(raw) == id.0).then(|| name.clone()))
     }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.zones.clone()
+    }
 }
 
 impl GraphSymbolResolver for &Options {
@@ -404,6 +411,10 @@ impl GraphSymbolResolver for &Options {
 
     fn reverse_relation(&self, id: RelationId) -> Option<String> {
         (*self).reverse_relation(id)
+    }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        (*self).time_zones()
     }
 }
 fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
@@ -663,6 +674,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         raw_params,
         rows,
         tzdb_file,
+        zones: None,
         labels,
         relations,
         properties,
@@ -1205,6 +1217,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
                     let artifact = std::sync::Arc::new(fgdb::PinnedTzdb::decode(&bytes).map_err(Failure::open)?);
                     keys = keys.with_scalar_resolver(artifact.clone());
+                    options.zones = fgdb_gql::GqlTimeZones::new(artifact.clone(), artifact.object_id());
                     Some(artifact)
                 } else { None };
                 // A Prism call types its own arguments (vertex:<id> among them).

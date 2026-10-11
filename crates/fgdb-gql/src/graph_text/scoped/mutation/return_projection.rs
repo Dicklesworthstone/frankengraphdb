@@ -1897,6 +1897,7 @@ impl<'a> Parser<'a> {
             ReadValueTemplate::Temporal {
                 function,
                 argument: Box::new(argument),
+                zones: self.zones.clone(),
             }
         } else if let Some(parentheses) = self.parenthesized_name()? {
             // `(n)`, `((n))`: parentheses around a lone name that no operator
@@ -2608,9 +2609,14 @@ pub(in crate::graph_text) fn bind_read_value(
             left: Box::new(bind_read_value(left, values)?),
             right: Box::new(bind_read_value(right, values)?),
         },
-        ReadValueTemplate::Temporal { function, argument } => GraphSetValue::Temporal {
+        ReadValueTemplate::Temporal {
+            function,
+            argument,
+            zones,
+        } => GraphSetValue::Temporal {
             function: *function,
             argument: Box::new(bind_read_value(argument, values)?),
+            zones: zones.clone(),
         },
         ReadValueTemplate::Function { function, argument } => GraphSetValue::Function {
             function: *function,

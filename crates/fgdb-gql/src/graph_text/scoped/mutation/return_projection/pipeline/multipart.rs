@@ -89,14 +89,17 @@ impl PreparedGraphText {
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
         tokens: &[TextToken<'_>],
+        zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
         if !has_continuation(tokens) {
             return Ok(UnresolvedReadInput {
-                first: Self::unresolved_for_composition(statement, declarations)?,
+                first: Self::unresolved_for_composition(statement, declarations, zones)?,
                 continuations: Vec::new(),
             });
         }
-        Parser::new_with_parameter_types(statement, declarations)?.multipart_read(statement)
+        Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(zones.cloned())
+            .multipart_read(statement)
     }
 }
 

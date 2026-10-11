@@ -1,6 +1,7 @@
 //! Temporal values in the value language (fgdb-txbg9): the openCypher
 //! constructors and field accessors. Pure arithmetic over the scalar domain:
-//! no clock, no zone database, no locale. The default offset is UTC.
+//! no clock, no locale, and no zone database except a pinned tzdb artifact
+//! the statement carries ([`GqlTimeZones`]). The default offset is UTC.
 
 use super::GraphTemporalFunction;
 use crate::GraphIntegerErrorKind;
@@ -8,9 +9,151 @@ use crate::GraphIntegerErrorKind::TemporalConstruction as Invalid;
 use crate::algebra::GraphValue;
 use fgdb_types::{
     CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
-    CanonicalTime, CanonicalTimestamp, DurationUnit, NANOS_PER_DAY, format_utc_offset,
-    parse_utc_offset,
+    CanonicalTime, CanonicalTimestamp, DurationUnit, NANOS_PER_DAY, ObjectId, TzdbResolver,
+    format_utc_offset, parse_utc_offset,
 };
+use std::sync::Arc;
+
+/// A pinned tzdb capability for named time zones (`timezone:
+/// 'Europe/Stockholm'`). A named zone resolves only through this exact
+/// artifact, never host state or a clock, and a plan that carries it records
+/// its identity: the same artifact gives the same result (doctrine #4).
+#[derive(Clone)]
+pub struct GqlTimeZones {
+    resolver: Arc<dyn TzdbResolver + Send + Sync>,
+    tzdb: ObjectId,
+}
+
+impl GqlTimeZones {
+    /// `None` unless `resolver` holds the exact artifact `tzdb`.
+    pub fn new(resolver: Arc<dyn TzdbResolver + Send + Sync>, tzdb: ObjectId) -> Option<Self> {
+        resolver
+            .contains_tzdb(&tzdb)
+            .then_some(Self { resolver, tzdb })
+    }
+
+    /// The content address of the artifact, as plans record it.
+    #[must_use]
+    pub fn tzdb(&self) -> ObjectId {
+        self.tzdb
+    }
+
+    fn offset_at(&self, zone: &str, instant: i128) -> Option<i32> {
+        self.resolver
+            .canonical_utc_offset_seconds(&self.tzdb, zone, instant)
+    }
+
+    /// The instant and offset of local wall time `wall` (nanoseconds, as if
+    /// at UTC) in `zone`, by java.time's rules, which openCypher follows: in
+    /// an overlap the earlier offset, and in a gap the wall time moves later
+    /// by the gap's length. Transitions are taken to be over a day apart.
+    fn local(&self, zone: &str, wall: i128) -> Option<(i128, i32)> {
+        const DAY: i128 = 86_400 * NANOS_PER_SECOND;
+        let before = self.offset_at(zone, wall - DAY)?;
+        let after = self.offset_at(zone, wall + DAY)?;
+        let at = |offset: i32| wall - i128::from(offset) * NANOS_PER_SECOND;
+        for offset in [before, after] {
+            if self.offset_at(zone, at(offset))? == offset {
+                return Some((at(offset), offset));
+            }
+        }
+        let instant = at(before);
+        Some((instant, self.offset_at(zone, instant)?))
+    }
+
+    fn timestamp(
+        &self,
+        zone: &str,
+        instant: i128,
+        offset: i32,
+    ) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+        CanonicalTimestamp::zoned(instant, offset, zone, self.tzdb, &*self.resolver)
+            .map_err(|_| Invalid)
+    }
+}
+
+impl PartialEq for GqlTimeZones {
+    fn eq(&self, other: &Self) -> bool {
+        self.tzdb == other.tzdb
+    }
+}
+impl Eq for GqlTimeZones {}
+
+impl core::fmt::Debug for GqlTimeZones {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GqlTimeZones")
+            .field("tzdb", &self.tzdb)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a value is placed in time: a fixed UTC offset, or a named zone of
+/// the statement's pinned tzdb.
+#[derive(Clone, Copy)]
+enum Zone<'a> {
+    Offset(i32),
+    Named(&'a str),
+}
+
+/// A `timezone` value: an offset (`+01:00`, `Z`), or a zone the pinned tzdb
+/// names. Without a tzdb, or for a name it lacks, a name refuses.
+fn zone_spec<'a>(
+    text: &'a str,
+    zones: Option<&GqlTimeZones>,
+) -> Result<Zone<'a>, GraphIntegerErrorKind> {
+    if let Ok(offset) = parse_utc_offset(text) {
+        return Ok(Zone::Offset(offset));
+    }
+    match zones {
+        Some(zones) if zones.offset_at(text, 0).is_some() => Ok(Zone::Named(text)),
+        _ => Err(Invalid),
+    }
+}
+
+/// `local` placed in `zone`: at a fixed offset, or resolved in a named zone.
+fn in_zone(
+    local: CanonicalLocalDateTime,
+    zone: Zone<'_>,
+    zones: Option<&GqlTimeZones>,
+) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+    match zone {
+        Zone::Offset(offset) => at_offset(local, offset),
+        Zone::Named(name) => {
+            let zones = zones.ok_or(Invalid)?;
+            let (instant, offset) = zones.local(name, wall_nanos(local)).ok_or(Invalid)?;
+            zones.timestamp(name, instant, offset)
+        }
+    }
+}
+
+/// The UTC instant `instant` seen in `zone`.
+fn at_instant(
+    instant: i128,
+    zone: Zone<'_>,
+    zones: Option<&GqlTimeZones>,
+) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+    match zone {
+        Zone::Offset(offset) => {
+            CanonicalTimestamp::offset_only(instant, offset).map_err(|_| Invalid)
+        }
+        Zone::Named(name) => {
+            let zones = zones.ok_or(Invalid)?;
+            let offset = zones.offset_at(name, instant).ok_or(Invalid)?;
+            zones.timestamp(name, instant, offset)
+        }
+    }
+}
+
+/// The zone a timestamp is in: its named zone when the statement carries a
+/// tzdb, else its offset.
+fn timestamp_zone<'v>(value: &'v CanonicalTimestamp, zones: Option<&GqlTimeZones>) -> Zone<'v> {
+    match value.zone() {
+        Some(zone) if zones.is_some_and(|zones| zones.tzdb == zone.tzdb_oid()) => {
+            Zone::Named(zone.identifier())
+        }
+        _ => Zone::Offset(value.utc_offset_seconds()),
+    }
+}
 
 /// The calendar fields a map may name, in the order `date_from_fields`
 /// reads them.
@@ -131,6 +274,7 @@ fn integer(value: &GraphValue) -> Result<i64, GraphIntegerErrorKind> {
 pub(crate) fn construct(
     function: GraphTemporalFunction,
     argument: &GraphValue,
+    zones: Option<&GqlTimeZones>,
 ) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
     if matches!(argument, GraphValue::Scalar(CanonicalScalar::Null)) {
         return Ok(CanonicalScalar::Null);
@@ -142,12 +286,16 @@ pub(crate) fn construct(
         GraphTemporalFunction::LocalDateTime => {
             local_datetime(argument).map(CanonicalScalar::LocalDateTime)
         }
-        GraphTemporalFunction::DateTime => datetime(argument).map(CanonicalScalar::Timestamp),
+        GraphTemporalFunction::DateTime => {
+            datetime(argument, zones).map(CanonicalScalar::Timestamp)
+        }
         GraphTemporalFunction::TruncateDate
         | GraphTemporalFunction::TruncateLocalTime
         | GraphTemporalFunction::TruncateTime
         | GraphTemporalFunction::TruncateLocalDateTime
-        | GraphTemporalFunction::TruncateDateTime => truncate(function, arguments(argument)?),
+        | GraphTemporalFunction::TruncateDateTime => {
+            truncate(function, arguments(argument)?, zones)
+        }
         GraphTemporalFunction::FromEpoch | GraphTemporalFunction::FromEpochMillis => {
             from_epoch_call(function, arguments(argument)?)
         }
@@ -647,6 +795,7 @@ impl Unit {
 fn truncate(
     function: GraphTemporalFunction,
     items: &[GraphValue],
+    zones: Option<&GqlTimeZones>,
 ) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
     use GraphTemporalFunction as F;
     let (unit, value, map) = match items {
@@ -688,7 +837,7 @@ fn truncate(
     }
     let zone = arguments
         .timezone
-        .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+        .map(|zone| zone_spec(zone, zones))
         .transpose()?;
     Ok(match function {
         F::TruncateDate => {
@@ -705,16 +854,22 @@ fn truncate(
             let time = truncate_time(time, unit)?;
             keep_subseconds(&mut arguments.time, time, unit);
             let time = time_from_fields(arguments.time, Some(time), false)?;
+            // A time has an offset, never a named zone.
+            let zone = match zone {
+                Some(Zone::Offset(offset)) => Some(offset),
+                Some(Zone::Named(_)) => return Err(Invalid),
+                None => None,
+            };
             let offset = zone.or(offset).unwrap_or(0);
             CanonicalScalar::Time(CanonicalTime::new(time, offset).map_err(|_| Invalid)?)
         }
         _ => {
-            let (local, offset) = match value {
+            let (local, base) = match value {
                 GraphValue::Scalar(CanonicalScalar::Date(day)) => (
                     CanonicalLocalDateTime::new(*day, CanonicalLocalTime::MIDNIGHT),
                     None,
                 ),
-                other => zoned_part(other)?,
+                other => zoned_part(other, zones)?,
             };
             let (date, time) = if unit <= Unit::Day {
                 (
@@ -732,7 +887,8 @@ fn truncate(
             if function == F::TruncateLocalDateTime {
                 CanonicalScalar::LocalDateTime(local)
             } else {
-                CanonicalScalar::Timestamp(at_offset(local, zone.or(offset).unwrap_or(0))?)
+                let zone = zone.or(base).unwrap_or(Zone::Offset(0));
+                CanonicalScalar::Timestamp(in_zone(local, zone, zones)?)
             }
         }
     })
@@ -911,17 +1067,29 @@ fn local_datetime(argument: &GraphValue) -> Result<CanonicalLocalDateTime, Graph
     }
 }
 
-/// A datetime is a timestamp at a UTC offset; without a `timezone` it is at
-/// the offset of its time-bearing base, else at UTC. A named zone refuses.
-/// A `timezone` moves a `datetime` base to the same instant at the new
-/// offset, and a `time` base that has an offset to the same time of day at
-/// it (the date stays); a date base never carries an offset.
-fn datetime(argument: &GraphValue) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+/// A datetime is a timestamp in a zone: a fixed UTC offset, or a named zone
+/// of the statement's pinned tzdb (`timezone: 'Europe/Stockholm'`, or a text
+/// value's `[Europe/Stockholm]` suffix). Without a `timezone` it is in the
+/// zone of its time-bearing base, else at UTC. A `timezone` moves a
+/// `datetime` base to the same instant in the new zone, and a `time` base
+/// that has an offset to the same time of day there (the date stays); a date
+/// base never carries a zone.
+fn datetime(
+    argument: &GraphValue,
+    zones: Option<&GqlTimeZones>,
+) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
     match argument {
         GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            let text = text.as_str();
+            let (text, named) = match text
+                .strip_suffix(']')
+                .and_then(|rest| rest.rsplit_once('['))
+            {
+                Some((rest, name)) => (rest, Some(zone_spec(name, zones)?)),
+                None => (text, None),
+            };
             // The offset starts at the first sign or Z after the T. A date
             // alone is its midnight at UTC (TCK: datetime('-999999999-01-01')).
-            let text = text.as_str();
             let split = match text.find('T') {
                 Some(clock) => text[clock..]
                     .find(&['+', '-', 'Z'][..])
@@ -930,45 +1098,73 @@ fn datetime(argument: &GraphValue) -> Result<CanonicalTimestamp, GraphIntegerErr
             };
             let local = CanonicalLocalDateTime::parse_iso(&text[..split]).map_err(|_| Invalid)?;
             let offset = match &text[split..] {
-                "" => 0,
-                offset => parse_utc_offset(offset).map_err(|_| Invalid)?,
+                "" => None,
+                offset => Some(parse_utc_offset(offset).map_err(|_| Invalid)?),
             };
-            at_offset(local, offset)
+            match (offset, named) {
+                // A written offset must be the zone's own at that instant.
+                (Some(offset), Some(zone)) => {
+                    let instant = at_offset(local, offset)?.instant_utc_nanos();
+                    let value = at_instant(instant, zone, zones)?;
+                    if value.utc_offset_seconds() != offset {
+                        return Err(Invalid);
+                    }
+                    Ok(value)
+                }
+                (None, Some(zone)) => in_zone(local, zone, zones),
+                (offset, None) => at_offset(local, offset.unwrap_or(0)),
+            }
         }
         GraphValue::Map { keys, values } => {
             let arguments = MapArguments::split(GraphTemporalFunction::DateTime, keys, values)?;
             if arguments.epoch_seconds.is_some() || arguments.epoch_millis.is_some() {
-                return from_epoch(&arguments);
+                return from_epoch(&arguments, zones);
             }
-            let both = arguments.datetime_base.map(zoned_part).transpose()?;
+            let both = arguments
+                .datetime_base
+                .map(|base| zoned_part(base, zones))
+                .transpose()?;
             let date_base = match arguments.date_base {
                 Some(base) => Some(date_part(base)?),
                 None => both.map(|(value, _)| value.date()),
             };
             let time_base = match arguments.time_base {
-                Some(base) => Some(time_part(base)?),
-                None => both.map(|(value, offset)| (value.time(), offset)),
+                Some(base) => {
+                    let (time, offset) = time_part(base)?;
+                    Some((time, offset.map(Zone::Offset)))
+                }
+                None => both.map(|(value, zone)| (value.time(), zone)),
             };
             let date = date_from_fields(arguments.date, date_base)?;
             let local = time_from_fields(arguments.time, time_base.map(|(time, _)| time), true)?;
             let zone = arguments
                 .timezone
-                .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+                .map(|zone| zone_spec(zone, zones))
                 .transpose()?;
-            match (time_base.and_then(|(_, offset)| offset), zone) {
+            let from = time_base.and_then(|(_, zone)| zone);
+            let wall = CanonicalLocalDateTime::new(date, local);
+            match (from, zone) {
+                // A datetime base keeps its instant in the new zone.
                 (Some(from), Some(to)) if arguments.time_base.is_none() => {
-                    let instant = at_offset(CanonicalLocalDateTime::new(date, local), from)?;
-                    CanonicalTimestamp::offset_only(instant.instant_utc_nanos(), to)
-                        .map_err(|_| Invalid)
+                    let instant = in_zone(wall, from, zones)?.instant_utc_nanos();
+                    at_instant(instant, to, zones)
                 }
-                (Some(from), Some(to)) => at_offset(
-                    CanonicalLocalDateTime::new(date, shift(local, to - from)),
-                    to,
-                ),
-                (from, to) => at_offset(
-                    CanonicalLocalDateTime::new(date, local),
-                    to.or(from).unwrap_or(0),
-                ),
+                // A time base keeps its time of day, read at the new zone's
+                // offset for that instant.
+                (Some(Zone::Offset(from)), Some(to)) => {
+                    let instant = at_offset(wall, from)?.instant_utc_nanos();
+                    let to_offset = at_instant(instant, to, zones)?.utc_offset_seconds();
+                    let shifted = CanonicalLocalDateTime::new(date, shift(local, to_offset - from));
+                    match to {
+                        Zone::Offset(offset) => at_offset(shifted, offset),
+                        Zone::Named(name) => zones.ok_or(Invalid)?.timestamp(
+                            name,
+                            wall_nanos(shifted) - i128::from(to_offset) * NANOS_PER_SECOND,
+                            to_offset,
+                        ),
+                    }
+                }
+                (from, to) => in_zone(wall, to.or(from).unwrap_or(Zone::Offset(0)), zones),
             }
         }
         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => Ok(value.clone()),
@@ -980,7 +1176,10 @@ fn datetime(argument: &GraphValue) -> Result<CanonicalTimestamp, GraphIntegerErr
 /// `datetime({epochSeconds: s[, nanosecond: n]})` or
 /// `datetime({epochMillis: m})`, plus fraction fields, at an optional
 /// `timezone`. Calendar and clock fields, and bases, refuse alongside.
-fn from_epoch(arguments: &MapArguments<'_>) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+fn from_epoch(
+    arguments: &MapArguments<'_>,
+    zones: Option<&GqlTimeZones>,
+) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
     let [hour, minute, second, millisecond, microsecond, nanosecond] = arguments.time;
     if hour.or(minute).or(second).is_some()
         || arguments.date.iter().any(Option::is_some)
@@ -996,12 +1195,12 @@ fn from_epoch(arguments: &MapArguments<'_>) -> Result<CanonicalTimestamp, GraphI
         (None, Some(millis)) => i128::from(millis) * 1_000_000 + fraction,
         _ => return Err(Invalid),
     };
-    let offset = arguments
+    let zone = arguments
         .timezone
-        .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+        .map(|zone| zone_spec(zone, zones))
         .transpose()?
-        .unwrap_or(0);
-    CanonicalTimestamp::offset_only(instant, offset).map_err(|_| Invalid)
+        .unwrap_or(Zone::Offset(0));
+    at_instant(instant, zone, zones)
 }
 
 /// `local` at `offset_seconds` east of UTC, as a timestamp.
@@ -1009,24 +1208,29 @@ fn at_offset(
     local: CanonicalLocalDateTime,
     offset_seconds: i32,
 ) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
-    let wall = i128::from(local.date().epoch_day()) * i128::from(NANOS_PER_DAY)
-        + i128::from(local.time().nanos_of_day());
     CanonicalTimestamp::offset_only(
-        wall - i128::from(offset_seconds) * NANOS_PER_SECOND,
+        wall_nanos(local) - i128::from(offset_seconds) * NANOS_PER_SECOND,
         offset_seconds,
     )
     .map_err(|_| Invalid)
 }
 
-/// A local date-time base and its offset if it has one: a local date-time,
-/// or a timestamp's wall time at its offset.
-fn zoned_part(
-    value: &GraphValue,
-) -> Result<(CanonicalLocalDateTime, Option<i32>), GraphIntegerErrorKind> {
+/// `local` as nanoseconds from the epoch, as if at UTC.
+fn wall_nanos(local: CanonicalLocalDateTime) -> i128 {
+    i128::from(local.date().epoch_day()) * i128::from(NANOS_PER_DAY)
+        + i128::from(local.time().nanos_of_day())
+}
+
+/// A local date-time base and the zone it is in, if any: a local date-time,
+/// or a timestamp's wall time in its zone ([`timestamp_zone`]).
+fn zoned_part<'v>(
+    value: &'v GraphValue,
+    zones: Option<&GqlTimeZones>,
+) -> Result<(CanonicalLocalDateTime, Option<Zone<'v>>), GraphIntegerErrorKind> {
     match value {
         GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok((*value, None)),
         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
-            Ok((wall_clock(value)?, Some(value.utc_offset_seconds())))
+            Ok((wall_clock(value)?, Some(timestamp_zone(value, zones))))
         }
         _ => Err(Invalid),
     }
