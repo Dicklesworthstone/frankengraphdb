@@ -53,6 +53,8 @@ mod procedures {
             // This source admits snapshot records and work independently.
             // The immutable host's work-as-record proxy would incorrectly
             // spend a row allowance on overlay normalization and witnesses.
+            // Keep the bound recipe; actual source/kernel work below still
+            // consumes the original query's cumulative allowance.
             let options = spec.options_at(self.basis);
             let mut usage = AdmissionUsage::default();
             let mut source_policy = policy;
@@ -70,27 +72,23 @@ mod procedures {
                     usage.observe(source_policy, event)
                 })?;
 
-            // Select the induced graph from the canonical overlay, retaining
-            // isolates and concrete EIds. Keep the existing complete scan
-            // witnesses: a selected label, relation or weight may change after
-            // this read, including when no output row survives LIMIT.
-            // Excluded edges and dropped loops never resolve their weights.
+            // Project the canonical overlay, including staged label/weight
+            // edits and isolated vertices. Keep the source's complete table
+            // witnesses: selecting fewer rows must not lose conflict evidence.
             let mut staging_bytes = 0usize;
             let mut vertices = Vec::new();
-            for (vertex, row) in &source.vertices {
+            for &(vertex, ref view) in &source.vertices {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                usage.observe(policy, SourceEvent::Work)?;
-                if options
-                    .selection
-                    .vertex_label
-                    .is_some_and(|label| !row.matches(&VertexPredicate::HasLabel(label)))
-                {
-                    continue;
+                if let Some(label) = options.selection.vertex_label {
+                    usage.observe(policy, SourceEvent::Work)?;
+                    if !view.matches(&VertexPredicate::HasLabel(label)) {
+                        continue;
+                    }
                 }
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
                 crate::query::push_prism_staged(
                     &mut vertices,
-                    *vertex,
+                    vertex,
                     "vertices",
                     options.projection_limits.max_vertices,
                     &mut staging_bytes,
@@ -99,30 +97,37 @@ mod procedures {
                 .map_err(prism_failure)?;
             }
             let mut edges = Vec::new();
-            for ((eid, from, relation, to), row) in &source.edges {
+            for &((eid, from, relation, to), ref view) in &source.edges {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                usage.observe(policy, SourceEvent::Work)?;
-                if options
-                    .selection
-                    .relation
-                    .is_some_and(|selected| selected != *relation)
-                    || vertices.binary_search(from).is_err()
-                    || vertices.binary_search(to).is_err()
+                if options.selection.relation.is_some()
+                    || options.selection.vertex_label.is_some()
                 {
-                    continue;
+                    usage.observe(policy, SourceEvent::Work)?;
+                    if options
+                        .selection
+                        .relation
+                        .is_some_and(|selected| selected != relation)
+                        || vertices.binary_search(&from).is_err()
+                        || vertices.binary_search(&to).is_err()
+                    {
+                        continue;
+                    }
                 }
+                // Discarded loops and explicit unit collapse do not observe
+                // their properties, matching the immutable and scoped hosts.
                 if from == to {
                     match options.projection.self_loops {
                         SelfLoopPolicy::Drop => continue,
                         SelfLoopPolicy::Reject => {
                             return Err(prism_failure(FnxReadError::Projection(
-                                ProjectionError::SelfLoop(*eid),
+                                ProjectionError::SelfLoop(eid),
                             )));
                         }
                         SelfLoopPolicy::Keep => {}
                     }
                 }
-                let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit
+                let weight = if options.projection.parallel_edges
+                    == ParallelEdgePolicy::CollapseUnit
                 {
                     1.0
                 } else {
@@ -130,18 +135,18 @@ mod procedures {
                         .selection
                         .weight
                         .property_key()
-                        .and_then(|key| row.property(key));
+                        .and_then(|key| view.property(key));
                     options.selection.weight.resolve(value).map_err(|reason| {
-                        prism_failure(FnxReadError::Weight { edge: *eid, reason })
+                        prism_failure(FnxReadError::Weight { edge: eid, reason })
                     })?
                 };
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
                 crate::query::push_prism_staged(
                     &mut edges,
                     ProjectionEdge {
-                        eid: *eid,
-                        source: *from,
-                        target: *to,
+                        eid,
+                        source: from,
+                        target: to,
                         weight,
                     },
                     "input edges",
