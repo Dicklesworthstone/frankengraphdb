@@ -220,17 +220,33 @@ impl Search<'_> {
         snapshot: &IndexSnapshot,
         work: &mut dyn WorkControl,
     ) -> Result<Rows, BeaconError> {
-        // This adapter accepts an already restricted corpus, not an ACL-shaped
-        // output predicate. Every source lane sees the same entire domain.
+        self.execute_filtered(snapshot, |_| true, work)
+    }
+
+    /// Apply a stable result predicate inside each native candidate search,
+    /// before source depths, rank assignment, and final top-k. Filtering an
+    /// already-truncated `Rows` value can otherwise lose valid matches.
+    ///
+    /// This is not authorization: the snapshot must already contain only the
+    /// admitted corpus, including its statistics and index topology. A result
+    /// predicate does not change BM25 corpus statistics or make ANN exact.
+    /// The native search mode and the caller's work allowance are preserved;
+    /// failures expose no partial `Rows` value.
+    pub fn execute_filtered(
+        self,
+        snapshot: &IndexSnapshot,
+        eligible: impl Fn(VId) -> bool,
+        work: &mut dyn WorkControl,
+    ) -> Result<Rows, BeaconError> {
         match self {
             Self::Text { query, k, mode } => snapshot
-                .text_search(query, k, mode, |_| true, work)
+                .text_search(query, k, mode, eligible, work)
                 .map(Rows::Text),
             Self::Vector { query, k, mode } => snapshot
-                .knn(query, k, mode, |_| true, work)
+                .knn(query, k, mode, eligible, work)
                 .map(Rows::Vector),
             Self::Hybrid(query) => snapshot
-                .hybrid_search_exact_fusion(query, |_| true, work)
+                .hybrid_search_exact_fusion(query, eligible, work)
                 .map(Rows::Hybrid),
         }
     }
@@ -453,4 +469,147 @@ fn packed<'a, K>(
     };
     work.charge(1)?;
     Ok(IndexDocument { id, vector, text })
+}
+
+#[cfg(test)]
+mod filtered_search_tests {
+    use super::*;
+    use crate::{BeaconIndex, DistanceMetric, ExactRrfProfile, HnswConfig, WorkBudget};
+
+    fn index() -> IndexSnapshot {
+        BeaconIndex::build(
+            IndexConfig {
+                vector: Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean)),
+                ..IndexConfig::default()
+            },
+            [
+                IndexDocument {
+                    id: VId(1),
+                    vector: Some(vec![0.0]),
+                    text: Some("red".into()),
+                },
+                IndexDocument {
+                    id: VId(2),
+                    vector: Some(vec![1.0]),
+                    text: Some("red".into()),
+                },
+            ],
+            &mut WorkBudget::new(100_000),
+        )
+        .unwrap()
+        .snapshot()
+    }
+
+    fn queries() -> [Search<'static>; 3] {
+        [
+            Search::Text {
+                query: "red",
+                k: 1,
+                mode: TextMatch::Any,
+            },
+            Search::Vector {
+                query: &[0.0],
+                k: 1,
+                mode: VectorSearch::Exact,
+            },
+            Search::Hybrid(ExactHybridQuery {
+                vector: &[0.0],
+                text: "red",
+                k: 1,
+                vector_candidates: 1,
+                text_candidates: 1,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            }),
+        ]
+    }
+
+    fn ids(rows: &Rows) -> Vec<VId> {
+        match rows {
+            Rows::Text(rows) => rows.iter().map(|hit| hit.id).collect(),
+            Rows::Vector(rows) => rows.iter().map(|hit| hit.id).collect(),
+            Rows::Hybrid(rows) => rows.iter().map(|hit| hit.id).collect(),
+        }
+    }
+
+    #[test]
+    fn all_read_variants_select_eligible_candidates_before_their_limits() {
+        let snapshot = index();
+        for query in queries() {
+            let unfiltered = query
+                .execute(&snapshot, &mut WorkBudget::new(100_000))
+                .unwrap();
+            assert_eq!(ids(&unfiltered), [VId(1)]);
+            let filtered = query
+                .execute_filtered(
+                    &snapshot,
+                    |id| id == VId(2),
+                    &mut WorkBudget::new(100_000),
+                )
+                .unwrap();
+            assert_eq!(ids(&filtered), [VId(2)]);
+            if let Rows::Hybrid(hits) = filtered {
+                assert_eq!(hits[0].vector_rank, std::num::NonZeroU32::new(1));
+                assert_eq!(hits[0].text_rank, std::num::NonZeroU32::new(1));
+                assert_eq!(hits[0].score.numerator(), 2);
+                assert_eq!(hits[0].score.denominator(), 61);
+            }
+        }
+    }
+
+    #[test]
+    fn rejecting_every_candidate_returns_an_empty_native_result() {
+        let snapshot = index();
+        for query in queries() {
+            assert!(
+                query
+                    .execute_filtered(&snapshot, |_| false, &mut WorkBudget::new(100_000))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct Count(usize);
+    impl WorkControl for Count {
+        fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+            self.0 += units;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_native_work_cut_refuses_without_a_partial_result() {
+        let snapshot = index();
+        for query in queries() {
+            let mut count = Count::default();
+            let expected = query
+                .execute_filtered(&snapshot, |id| id == VId(2), &mut count)
+                .unwrap();
+            for units in 0..count.0 {
+                assert_eq!(
+                    query
+                        .execute_filtered(
+                            &snapshot,
+                            |id| id == VId(2),
+                            &mut WorkBudget::new(units),
+                        )
+                        .unwrap_err(),
+                    BeaconError::WorkBudgetExceeded
+                );
+            }
+            assert_eq!(
+                query
+                    .execute_filtered(
+                        &snapshot,
+                        |id| id == VId(2),
+                        &mut WorkBudget::new(count.0),
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 }
