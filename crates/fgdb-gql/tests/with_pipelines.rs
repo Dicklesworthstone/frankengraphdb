@@ -208,6 +208,100 @@ fn each_stage_preserves_bags_and_its_page_before_the_next_filter() {
 }
 
 #[test]
+fn with_expressions_require_explicit_names_before_catalog_access() {
+    for (text, expression) in [
+        ("MATCH (n) WITH n.p RETURN p", "n.p"),
+        ("MATCH (n) WITH ((n.p)) RETURN p", "((n.p))"),
+        ("MATCH (n) WITH labels(n) RETURN n", "labels(n)"),
+        ("MATCH (n) WITH properties(n) RETURN n", "properties(n)"),
+        (
+            "MATCH (n) WITH labels /* function trivia */ (n) RETURN n",
+            "labels",
+        ),
+        ("MATCH (a)-[e:R]->(b) WITH type(e) RETURN e", "type(e)"),
+        (
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH nodes(p) RETURN p",
+            "nodes(p)",
+        ),
+        ("UNWIND [1] AS k MATCH (n) WITH n.p RETURN p", "n.p"),
+        ("MATCH (n) WITH n MATCH (n) WITH n.p RETURN p", "n.p"),
+        (
+            "MATCH (n) WITH n MATCH (n)-[e:R]->(m) WITH type(e) RETURN e",
+            "type(e)",
+        ),
+        ("MATCH (n) WITH n.p, count(*) AS c RETURN p,c", "n.p"),
+        (
+            "MATCH (n) WITH properties(n),count(*) AS c RETURN n,c",
+            "properties(n)",
+        ),
+        ("MATCH (n) WITH count(*) RETURN count", "count(*)"),
+        (
+            "MATCH (n) WITH n.p AS x WITH x,count(*) RETURN x,count",
+            "count(*)",
+        ),
+        ("UNWIND [1,2] AS x WITH sum(x) RETURN sum", "sum(x)"),
+        ("WITH count(*) RETURN count", "count(*)"),
+        (
+            "\u{2003}MATCH (private:PrivateLabel) WITH private.secret /* λ */ RETURN secret LIMIT 0",
+            "private.secret",
+        ),
+    ] {
+        let calls = Cell::new(0);
+        let error = PreparedGraphSetText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                GraphSetTextErrorKind::Expected(
+                    "AS alias for a computed WITH value" | "AS alias for a computed row value"
+                )
+            ),
+            "{text}: {error:?}"
+        );
+        assert_eq!(error.offset, text.find(expression).unwrap(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
+        let diagnostic = format!("{error:?} {error}");
+        assert!(!diagnostic.contains("PrivateLabel"));
+        assert!(!diagnostic.contains("private.secret"));
+    }
+}
+
+#[test]
+fn named_with_expressions_and_parenthesized_variables_preserve_results() {
+    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    for text in [
+        "MATCH (n) WITH n.p AS value RETURN value ORDER BY value",
+        "MATCH (n) WITH ((n)) RETURN n.p AS value ORDER BY value",
+        "MATCH (n) WITH n.p AS value WITH ((value)) RETURN value ORDER BY value",
+        "MATCH (n) WITH n.p AS value WITH value /* λ */ RETURN value ORDER BY value",
+        "UNWIND [1] AS k MATCH (n) WITH n.p AS value,k RETURN value ORDER BY value",
+        "MATCH (n) WITH n MATCH (n) WITH n.p AS value RETURN value ORDER BY value",
+    ] {
+        let query = prepare(text);
+        assert_eq!(query.columns(), ["value"], "{text}");
+        let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+        assert_eq!(
+            ints(&rows, 0),
+            [Some(1), Some(2), Some(2), Some(3)],
+            "{text}"
+        );
+    }
+    let grouped =
+        prepare("MATCH (n) WITH n.p AS value,count(*) AS count RETURN value,count ORDER BY value");
+    let rows = run(&grouped, &values, wide(), &mut || Ok(()))
+        .unwrap()
+        .value;
+    assert_eq!(ints(&rows, 0), [Some(1), Some(2), Some(3)]);
+    assert_eq!(ints(&rows, 1), [Some(1), Some(2), Some(1)]);
+    let implicit = prepare("UNWIND [1,2] AS x WITH ((x)) RETURN x");
+    let explicit = prepare("UNWIND [1,2] AS x WITH x AS x RETURN x");
+    assert_eq!(implicit.canonical_bytes(), explicit.canonical_bytes());
+}
+
+#[test]
 fn alias_arithmetic_case_and_coalesce_reuse_checked_lazy_execution() {
     let values = [
         CanonicalScalar::Int(0),

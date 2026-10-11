@@ -575,6 +575,11 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
+                let implicit = if with {
+                    self.implicit_with_binding()?
+                } else {
+                    None
+                };
                 let value = self.read_resolved_value(&mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else { return Ok(None); };
                     let next = parser.lexer.clone().next()?;
@@ -639,6 +644,14 @@ impl<'a> Parser<'a> {
                 let end = self.current.at;
                 let (mut alias, source) = if self.take_word("AS")? {
                     (self.name()?, None)
+                } else if with {
+                    let name = implicit
+                        .filter(|(_, boundary)| {
+                            *boundary == end && matches!(value, ReadValueTemplate::Column(_))
+                        })
+                        .map(|(name, _)| name)
+                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?;
+                    (name, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
                     let name = if *column < width {
                         incoming[*column].0
@@ -647,11 +660,9 @@ impl<'a> Parser<'a> {
                         input.property.unwrap_or(input.variable)
                     };
                     (name, Some(self.source_name(at, end)))
-                } else if !with {
+                } else {
                     let source = self.source_name(at, end);
                     (source, Some(source))
-                } else {
-                    return Err(expected(at, "AS alias for a computed row value"));
                 };
                 if let Some(source) = source
                     && let Some(previous) =

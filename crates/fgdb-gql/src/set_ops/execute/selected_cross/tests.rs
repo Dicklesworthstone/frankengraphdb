@@ -673,8 +673,10 @@ fn leading_unwind_match_with_reads_graph_properties_beside_row_columns() {
     let expected = over_two_vertices(&correlated);
     assert_eq!(expected.len(), 3);
     assert_eq!(over_two_vertices(&with_where), expected);
-    // Unaliased items take the column's own name, as at a MATCH-first WITH.
-    let named = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p RETURN x, p").unwrap();
+    // Forwarded variables keep their names; property expressions need AS at
+    // this boundary just as they do at a MATCH-first WITH.
+    assert!(prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p RETURN x, p").is_err());
+    let named = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p AS p RETURN x, p").unwrap();
     assert_eq!(over_two_vertices(&named).len(), 2);
 }
 

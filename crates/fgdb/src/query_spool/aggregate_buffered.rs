@@ -151,9 +151,13 @@ impl GroupInput for CompletedRelation<'_> {
     }
 
     fn finish_result(&mut self) -> core::result::Result<(), ExecutionError> {
-        let count = self.rows.result_rows.checked_add(1).ok_or_else(|| {
-            GqlQueryError::Source(fgdb_gql::GraphAggregateError::ResultCountOverflow)
-        })?;
+        let count = self
+            .rows
+            .result_rows
+            .checked_add(1)
+            .ok_or(GqlQueryError::Source(
+                fgdb_gql::GraphAggregateError::ResultCountOverflow,
+            ))?;
         self.policy
             .rows
             .check(GqlBudgetDimension::ResultRows, count)

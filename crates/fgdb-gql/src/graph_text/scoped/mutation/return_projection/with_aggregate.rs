@@ -150,15 +150,13 @@ impl<'a> Parser<'a> {
         inputs: &mut Vec<ReadProjectionTemplate>,
     ) -> Result<(usize, GraphSetColumnType, Option<Name<'a>>), GraphSetTextError> {
         let at = self.current.at;
+        let implicit = self.implicit_with_binding()?;
         let value = self.read_row_value(schema, 0)?;
-        let name = if let ReadValueTemplate::Column(column) = &value {
-            Some(
-                self.boundary_key(schema.len(), *column)
-                    .unwrap_or(schema[*column].0),
-            )
-        } else {
-            None
-        };
+        let name = implicit
+            .filter(|(_, boundary)| {
+                *boundary == self.current.at && matches!(value, ReadValueTemplate::Column(_))
+            })
+            .map(|(name, _)| name);
         let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
         let kind = value.column_type(&types, &self.syntax.parameters);
         // Admit the shared expression program before any catalog callback.
@@ -305,7 +303,7 @@ impl<'a> Parser<'a> {
                 _ => None,
             };
             let (output, kind, default_name) = if let Some(mut function) = summary {
-                let spelling = self.name()?;
+                self.advance()?;
                 self.punct(b'(', "(")?;
                 let unique = self.take_word("DISTINCT")?;
                 if !unique {
@@ -350,7 +348,7 @@ impl<'a> Parser<'a> {
                     function,
                     column,
                 });
-                (Output::Aggregate(index), kind, Some(spelling))
+                (Output::Aggregate(index), kind, None)
             } else {
                 let (column, kind, name) = self.with_input(schema, &mut inputs)?;
                 let key = match keys.iter().position(|&key| key == column) {
@@ -365,7 +363,8 @@ impl<'a> Parser<'a> {
             let name = if self.take_word("AS")? {
                 self.name()?
             } else {
-                default_name.ok_or_else(|| expected(item_at, "AS alias for a computed WITH key"))?
+                default_name
+                    .ok_or_else(|| expected(item_at, "AS alias for a computed WITH value"))?
             };
             if returned.iter().any(|(prior, _, _)| prior.text == name.text) {
                 return Err(aggregate_error(

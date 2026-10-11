@@ -129,6 +129,39 @@ impl<'a> GraphProjectionHead<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// A WITH item may keep an existing variable without AS. Source reads and
+    /// functions also lower to Column, so the lowered value alone cannot prove
+    /// that the item names a variable. Retain the token boundary of a possible
+    /// variable, allowing grouping parentheses and trivia; the caller checks
+    /// that normal expression parsing ends at exactly that boundary.
+    fn implicit_with_binding(&self) -> Result<Option<(Name<'a>, usize)>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut parentheses = 0_usize;
+        while matches!(token.kind, TokenKind::Punct(b'(')) {
+            // Match the read/integer expression nesting bound. The real parser
+            // owns the typed refusal; this lookahead need not scan its suffix.
+            if parentheses == 64 {
+                return Ok(None);
+            }
+            parentheses += 1;
+            token = lexer.next()?;
+        }
+        let TokenKind::Word(text) = token.kind else {
+            return Ok(None);
+        };
+        let name = Name { text, at: token.at };
+        token = lexer.next()?;
+        while parentheses != 0 {
+            if !matches!(token.kind, TokenKind::Punct(b')')) {
+                return Ok(None);
+            }
+            parentheses -= 1;
+            token = lexer.next()?;
+        }
+        Ok(Some((name, token.at)))
+    }
+
     fn property_map_projection(
         &self,
         columns: &mut Vec<Projection<'a>>,
@@ -510,6 +543,7 @@ impl<'a> Parser<'a> {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let item_at = self.current.at;
+            let implicit = self.implicit_with_binding()?;
             let value = self.read_resolved_value(
                 &mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else {
@@ -551,20 +585,19 @@ impl<'a> Parser<'a> {
                 },
                 0,
             )?;
+            let end = self.current.at;
             let alias = if self.take_word("AS")? {
                 self.name()?
-            } else if let ReadValueTemplate::Column(index) = &value {
-                if *index < width {
-                    leading[*index]
-                } else {
-                    let input = inputs[*index - width];
-                    input.property.unwrap_or(input.variable)
-                }
             } else {
-                return Err(GraphSetTextError {
-                    offset: item_at,
-                    kind: GraphSetTextErrorKind::Expected("AS alias for a computed WITH value"),
-                });
+                implicit
+                    .filter(|(_, boundary)| {
+                        *boundary == end && matches!(value, ReadValueTemplate::Column(_))
+                    })
+                    .map(|(name, _)| name)
+                    .ok_or(GraphSetTextError {
+                        offset: item_at,
+                        kind: GraphSetTextErrorKind::Expected("AS alias for a computed WITH value"),
+                    })?
             };
             if outputs.iter().any(|(name, _)| name.text == alias.text) {
                 return Err(error(
@@ -626,26 +659,39 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
+                let implicit = if with {
+                    self.implicit_with_binding()?
+                } else {
+                    None
+                };
                 let operand = self.read_graph_value(&mut inputs, 0)?;
                 let end = self.current.at;
                 let (mut alias, source) = if self.take_word("AS")? {
                     (self.name()?, None)
+                } else if with {
+                    let name = implicit
+                        .filter(|(_, boundary)| {
+                            *boundary == end && matches!(operand, ReadValueTemplate::Column(_))
+                        })
+                        .map(|(name, _)| name)
+                        .ok_or(GraphSetTextError {
+                            offset: at,
+                            kind: GraphSetTextErrorKind::Expected(
+                                "AS alias for a computed WITH value",
+                            ),
+                        })?;
+                    (name, None)
                 } else if let ReadValueTemplate::Column(index) = &operand {
                     let source = self.source_name(at, end);
                     (
                         inputs[*index].property.unwrap_or(inputs[*index].variable),
                         Some(source),
                     )
-                } else if !with {
+                } else {
                     // openCypher names an unaliased computed RETURN value by
-                    // its text; a WITH binding still needs its AS name.
+                    // its text.
                     let source = self.source_name(at, end);
                     (source, Some(source))
-                } else {
-                    return Err(GraphSetTextError {
-                        offset: at,
-                        kind: GraphSetTextErrorKind::Expected("AS alias for a computed WITH value"),
-                    });
                 };
                 if let Some(source) = source
                     && let Some(previous) =

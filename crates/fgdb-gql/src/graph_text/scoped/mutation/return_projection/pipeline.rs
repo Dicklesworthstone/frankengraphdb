@@ -536,20 +536,31 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
+                let implicit = if returning {
+                    None
+                } else {
+                    self.implicit_with_binding()?
+                };
                 let value = self.read_row_value(schema, 0)?;
                 let end = self.current.at;
                 let (mut alias, source) = if self.take_word("AS")? {
                     (self.name()?, None)
+                } else if !returning {
+                    let name = implicit
+                        .filter(|(_, boundary)| {
+                            *boundary == end && matches!(value, ReadValueTemplate::Column(_))
+                        })
+                        .map(|(name, _)| name)
+                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?;
+                    (name, None)
                 } else if let ReadValueTemplate::Column(column) = &value {
                     let name = self
                         .boundary_key(schema.len(), *column)
                         .unwrap_or(schema[*column].0);
                     (name, returning.then(|| self.source_name(at, end)))
-                } else if returning {
+                } else {
                     let source = self.source_name(at, end);
                     (source, Some(source))
-                } else {
-                    return Err(expected(at, "AS alias for a computed row value"));
                 };
                 if let Some(source) = source
                     && let Some(previous) = next_schema
