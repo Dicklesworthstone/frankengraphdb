@@ -108,10 +108,26 @@ impl GraphUnwindWriteText {
         mut control: impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindBindError<C>> {
         work(&mut control, 1)?;
-        let Some(GqlParameterValue::List(source)) = arguments.get(&self.source_parameter) else {
+        let Some(source) = arguments.get(&self.source_parameter) else {
             return Err(GraphUnwindWriteError::SourceParameter.into());
         };
-        let rows = source.values();
+        // Keep the shared parameter handle alive while every selected row and
+        // expanded frame borrows its payload. Unselected siblings are neither
+        // cloned nor inserted into the native argument transcripts.
+        let rows = if self.source_path.is_empty() {
+            let GqlParameterValue::List(source) = &source else {
+                return Err(GraphUnwindWriteError::SourceParameter.into());
+            };
+            source.values()
+        } else {
+            expansion::parameter_list(
+                &source,
+                &self.source_path,
+                self.source_offset,
+                0,
+                &mut control,
+            )?
+        };
         if rows.is_empty() {
             return Err(GraphUnwindWriteError::Empty.into());
         }

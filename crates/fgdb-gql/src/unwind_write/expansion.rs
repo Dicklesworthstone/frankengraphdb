@@ -89,16 +89,17 @@ pub(super) fn prepare_parameter_sources<C>(
 
 // The same static selector walker serves row operands, correlated sources and
 // parameter documents. Borrow the original graph value inside its shared owner.
-fn parameter_list<'a, C>(
+pub(super) fn parameter_list<'a, C>(
     value: &'a GqlParameterValue,
-    source: &UnwindSource,
+    path: &[UnwindFieldAccess],
+    offset: usize,
     clause: usize,
     control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
 ) -> Result<&'a [GraphValue], GraphUnwindBindError<C>> {
     let refusal = |kind| GraphUnwindWriteError::Expansion {
         row: 0,
-        clause: clause + 1,
-        offset: source.offset,
+        clause,
+        offset,
         kind,
     };
     work(control, 1)?;
@@ -111,22 +112,19 @@ fn parameter_list<'a, C>(
             return Ok(&[]);
         }
         _ => {
-            return Err(refusal(match source.path.first() {
+            return Err(refusal(match path.first() {
                 Some(UnwindFieldAccess::Key(_)) => GraphUnwindRowError::ExpectedMapField,
                 _ => GraphUnwindRowError::ExpectedListField,
             })
             .into());
         }
     };
-    let value =
-        field_value(value, &source.path, source.offset, 0, control).map_err(
-            |error| match error {
-                GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
-                    GraphUnwindBindError::Binding(refusal(kind))
-                }
-                error => error,
-            },
-        )?;
+    let value = field_value(value, path, offset, 0, control).map_err(|error| match error {
+        GraphUnwindBindError::Binding(GraphUnwindWriteError::Row { kind, .. }) => {
+            GraphUnwindBindError::Binding(refusal(kind))
+        }
+        error => error,
+    })?;
     match value {
         None | Some(GraphValue::Scalar(CanonicalScalar::Null)) => Ok(&[]),
         Some(GraphValue::List(values)) => Ok(values.as_ref()),
@@ -157,7 +155,7 @@ pub(super) fn expand_with_parameters<'a, C>(
         let Some(Some(value)) = parameters.get(clause) else {
             return Err(GraphUnwindWriteError::ArgumentNames.into());
         };
-        let values = parameter_list(value, source, clause, control)?;
+        let values = parameter_list(value, &source.path, source.offset, clause + 1, control)?;
         if values.len() > limit {
             return Err(GraphUnwindWriteError::TooManyRows {
                 limit,
@@ -265,3 +263,6 @@ impl<'a> Expansion<'a, '_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod root_tests;

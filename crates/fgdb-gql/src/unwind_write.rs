@@ -12,6 +12,8 @@
 //! and signed list indexes select scalar leaves without copying their containers.
 //! Chained UNWIND clauses expand nested lists, retaining earlier aliases as
 //! borrowed bindings. Each stage is bounded before any native program escapes.
+//! The root may select a list from a parameter document using the same static
+//! map keys and signed indexes as later sources, without copying that document.
 //! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
 
 mod controlled;
@@ -55,7 +57,7 @@ pub enum GraphUnwindRowError {
 #[derive(Debug)]
 pub enum GraphUnwindWriteError {
     Syntax(GraphWriteScriptError),
-    /// The named UNWIND source is missing or is not a list parameter.
+    /// The named UNWIND source is missing, or a bare source is not a list parameter.
     SourceParameter,
     /// Supplied names must be exactly the names referenced by the original text.
     ArgumentNames,
@@ -65,8 +67,8 @@ pub enum GraphUnwindWriteError {
         limit: usize,
         observed: usize,
     },
-    /// A nested source failed before scalar binding. `row` addresses the root
-    /// parameter list; `clause` is zero-based (the root is clause zero).
+    /// A source failed before scalar binding. `row` addresses the selected root
+    /// list; `clause` is zero-based. Root selection failures use row/clause zero.
     Expansion {
         row: usize,
         clause: usize,
@@ -200,6 +202,8 @@ pub struct GraphUnwindWriteText {
     pub(crate) lowered: String,
     pub(crate) source_offsets: Box<[UnwindSourceOffset]>,
     pub(crate) source_parameter: String,
+    pub(crate) source_path: Box<[UnwindFieldAccess]>,
+    pub(crate) source_offset: usize,
     pub(crate) sources: Box<[UnwindSource]>,
     pub(crate) external_parameters: Box<[String]>,
     pub(crate) fields: Box<[UnwindField]>,

@@ -173,8 +173,8 @@ impl GraphUnwindWriteText {
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
     /// `UNWIND earlier[.static.path] AS alias` clauses before the mutation.
-    /// Later clauses may also select lists from independent parameters, such
-    /// as `$payload.groups[-1].members`. Missing/null selections expand to no
+    /// The root and later clauses may select lists from parameter documents,
+    /// such as `$payload.groups[-1].members`. Missing/null selections expand to no
     /// rows; selected non-list values refuse before catalog access. Reusing a
     /// parameter under a fresh alias forms a product, not a zip. Source-only
     /// parameters are borrowed for expansion, not replicated into each native
@@ -207,24 +207,12 @@ impl GraphUnwindWriteText {
         let TokenKind::Parameter(source_name) = source.0.kind else {
             return Ok(None);
         };
-        let as_token = token(&mut lexer)?;
-        if !is_word(&as_token.0, "AS") {
-            return Ok(None);
-        }
-        let alias_token = token(&mut lexer)?;
-        let TokenKind::Word(alias) = alias_token.0.kind else {
-            return Ok(None);
-        };
-        let tail = token(&mut lexer)?;
-        if !is_word(&tail.0, "MERGE") && !is_word(&tail.0, "MATCH") && !is_word(&tail.0, "UNWIND") {
-            return Ok(None);
-        }
-
         let statements = scan(text).map_err(GraphUnwindWriteError::Syntax)?;
         if statements.len() != 1 {
             return Ok(None);
         }
-        let mut tokens = vec![tail];
+        let source_offset = source.0.at;
+        let mut tokens = vec![source];
         loop {
             let next = token(&mut lexer)?;
             if matches!(next.0.kind, TokenKind::End | TokenKind::Punct(b';')) {
@@ -236,13 +224,39 @@ impl GraphUnwindWriteText {
             return Ok(None);
         }
 
+        // Recognize the mutation family before restricting source expressions:
+        // native CREATE/INSERT must keep its own UNWIND compiler. Once admitted,
+        // parse the root with the SAME complete selector grammar as later sources.
+        // In particular, a property named AS is not the alias delimiter.
+        let (source_path, next, _) = field_path(&tokens, 0)?;
+        if !tokens
+            .get(next)
+            .is_some_and(|(token, _)| is_word(token, "AS"))
+        {
+            return Err(syntax(
+                tokens.get(next).map_or(text.len(), |(token, _)| token.at),
+                "a static list path followed by AS",
+            ));
+        }
+        let Some((
+            Token {
+                kind: TokenKind::Word(alias),
+                ..
+            },
+            _,
+        )) = tokens.get(next + 1)
+        else {
+            return Err(syntax(source_offset, "an alias after AS"));
+        };
+        let alias = *alias;
+
         // Resolve scope coordinates, not values. A later source may refer to
         // ANY earlier alias (sibling expansions form the ordinary product).
         // Inspect the mutation family first so existing CREATE pipelines with
         // other UNWIND expression forms are never intercepted by this adapter.
         let mut aliases = BTreeMap::from([(alias, 0usize)]);
         let mut sources = Vec::new();
-        let mut tail_at = 0;
+        let mut tail_at = next + 2;
         while tokens
             .get(tail_at)
             .is_some_and(|(token, _)| is_word(token, "UNWIND"))
@@ -448,6 +462,8 @@ impl GraphUnwindWriteText {
             lowered,
             source_offsets: source_offsets.into_boxed_slice(),
             source_parameter: source_name.to_owned(),
+            source_path: source_path.into_boxed_slice(),
+            source_offset,
             sources: sources.into_boxed_slice(),
             external_parameters: external_parameters.into_boxed_slice(),
             fields: fields.into_boxed_slice(),
