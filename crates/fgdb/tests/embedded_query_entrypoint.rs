@@ -1380,6 +1380,82 @@ fn ascending_and_descending_spell_the_same_directions_as_asc_and_desc() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A WITH page sorts by any row value, not only a column (fgdb-mf7og):
+/// arithmetic over aliases, a carried vertex's properties inside an
+/// expression, text built from a value, and computed keys mixed with plain
+/// ones. The key is a hidden column, so a later RETURN * never sees it. The
+/// final RETURN has its own (canonical) order, so each case shows its sort in
+/// which rows the LIMIT keeps. Seeded rows: p = 1..=4, q = 10 * p.
+#[test]
+fn a_with_page_sorts_by_computed_keys_and_hides_them() {
+    let ((), report) = run_async_under_lab(0x7d14_0095, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let result = |statement: &str| {
+            db.query(&cx, statement, &args, symbols, policy())
+                .map_err(|error| format!("{statement}: {error}"))
+                .unwrap()
+        };
+        let rows = |statement: &str| match result(statement) {
+            QueryResult::Rows { columns, rows } => Ok((columns, rows)),
+            QueryResult::Write { .. } => Err(format!("{statement}: rows expected")),
+        };
+        let kept = |statement: &str| {
+            let (_, rows) = rows(statement).unwrap();
+            let mut kept: Vec<i64> = rows
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(p)))] => {
+                        Some(*p)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .ok_or_else(|| format!("{statement}: expected one integer cell per row"))
+                .unwrap();
+            kept.sort_unstable();
+            kept
+        };
+        for (statement, expected) in [
+            // A carried vertex's property inside the key: descending p.
+            (
+                "MATCH (n) WITH n ORDER BY n.p * -1 LIMIT 2 RETURN n.p AS p",
+                vec![3, 4],
+            ),
+            // Arithmetic over aliases: q - 11 * p = -p, so ascending keeps p = 4.
+            (
+                "MATCH (n) WITH n.p AS p, n.q AS q ORDER BY q - p * 11 LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            // Text built from a value, descending.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY toString(p) + 'x' DESC LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            // A computed key, then a plain one: even p first, each part descending.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p % 2, p DESC LIMIT 3 RETURN p",
+                vec![2, 3, 4],
+            ),
+            // After a WHERE.
+            (
+                "MATCH (n) WITH n.p AS p WHERE p > 1 ORDER BY 0 - p LIMIT 2 RETURN p",
+                vec![3, 4],
+            ),
+        ] {
+            assert_eq!(kept(statement), expected, "{statement}");
+        }
+        // The key is projected away before RETURN *.
+        let (columns, rows) =
+            rows("MATCH (n) WITH n.p AS p ORDER BY p * 2 LIMIT 2 RETURN *").unwrap();
+        assert_eq!(columns, ["p"]);
+        assert_eq!(rows.len(), 2);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// openCypher binds the string, list and null predicates (IS [NOT] NULL,
 /// [NOT] IN, STARTS WITH, ENDS WITH, CONTAINS) tighter than comparisons.
 /// Expected values are the openCypher TCK's: Precedence1 [8] and [11],
