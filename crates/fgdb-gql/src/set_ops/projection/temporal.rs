@@ -50,14 +50,18 @@ struct MapArguments<'a> {
     datetime_base: Option<&'a GraphValue>,
     /// `timezone: '+01:00'`.
     timezone: Option<&'a str>,
+    /// `epochSeconds: n` or `epochMillis: n`, for a datetime.
+    epoch_seconds: Option<i64>,
+    epoch_millis: Option<i64>,
 }
 
 impl<'a> MapArguments<'a> {
     /// The keys `function` takes: a date takes calendar fields and `date`;
     /// a local time and a time take clock fields and `time`, and a time also
     /// `timezone`; a local date-time takes both sets of fields and `date`,
-    /// `time` and `datetime`. Any other key, or a field that is not an
-    /// integer, refuses.
+    /// `time` and `datetime`; a datetime takes what a local date-time does,
+    /// `timezone`, `epochSeconds` and `epochMillis`. Any other key, or a
+    /// field that is not an integer, refuses.
     fn split(
         function: GraphTemporalFunction,
         keys: &'a [Box<str>],
@@ -67,8 +71,9 @@ impl<'a> MapArguments<'a> {
         let (dates, times) = match function {
             F::Date => (true, false),
             F::LocalTime | F::Time => (false, true),
-            F::LocalDateTime => (true, true),
+            F::LocalDateTime | F::DateTime => (true, true),
         };
+        let zoned = matches!(function, F::Time | F::DateTime);
         let mut arguments = Self::default();
         for (key, value) in keys.iter().zip(values) {
             let key = &**key;
@@ -76,16 +81,20 @@ impl<'a> MapArguments<'a> {
                 "date" if dates => arguments.date_base = Some(value),
                 "time" if times => arguments.time_base = Some(value),
                 "datetime" if dates && times => arguments.datetime_base = Some(value),
-                "timezone" if function == F::Time => match value {
+                "timezone" if zoned => match value {
                     GraphValue::Scalar(CanonicalScalar::Text(zone)) => {
                         arguments.timezone = Some(zone.as_str());
                     }
                     _ => return Err(Invalid),
                 },
+                "epochSeconds" if function == F::DateTime => {
+                    arguments.epoch_seconds = Some(integer(value)?);
+                }
+                "epochMillis" if function == F::DateTime => {
+                    arguments.epoch_millis = Some(integer(value)?);
+                }
                 _ => {
-                    let GraphValue::Scalar(CanonicalScalar::Int(number)) = value else {
-                        return Err(Invalid);
-                    };
+                    let number = integer(value)?;
                     let slot = |names: &[&str], allowed: bool| {
                         names
                             .iter()
@@ -93,9 +102,9 @@ impl<'a> MapArguments<'a> {
                             .filter(|_| allowed)
                     };
                     if let Some(at) = slot(&DATE_FIELDS[..], dates) {
-                        arguments.date[at] = Some(*number);
+                        arguments.date[at] = Some(number);
                     } else if let Some(at) = slot(&TIME_FIELDS[..], times) {
-                        arguments.time[at] = Some(*number);
+                        arguments.time[at] = Some(number);
                     } else {
                         return Err(Invalid);
                     }
@@ -103,6 +112,13 @@ impl<'a> MapArguments<'a> {
             }
         }
         Ok(arguments)
+    }
+}
+
+fn integer(value: &GraphValue) -> Result<i64, GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Int(number)) => Ok(*number),
+        _ => Err(Invalid),
     }
 }
 
@@ -123,6 +139,7 @@ pub(crate) fn construct(
         GraphTemporalFunction::LocalDateTime => {
             local_datetime(argument).map(CanonicalScalar::LocalDateTime)
         }
+        GraphTemporalFunction::DateTime => datetime(argument).map(CanonicalScalar::Timestamp),
     }
 }
 
@@ -206,6 +223,140 @@ fn local_datetime(argument: &GraphValue) -> Result<CanonicalLocalDateTime, Graph
         }
         other => datetime_part(other),
     }
+}
+
+/// A datetime is a timestamp at a UTC offset; without a `timezone` it is at
+/// the offset of its time-bearing base, else at UTC. A named zone refuses.
+/// A `timezone` moves a `datetime` base to the same instant at the new
+/// offset, and a `time` base that has an offset to the same time of day at
+/// it (the date stays); a date base never carries an offset.
+fn datetime(argument: &GraphValue) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+    match argument {
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            // The offset starts at the first sign or Z after the T. A date
+            // alone is its midnight at UTC (TCK: datetime('-999999999-01-01')).
+            let text = text.as_str();
+            let split = match text.find('T') {
+                Some(clock) => text[clock..]
+                    .find(&['+', '-', 'Z'][..])
+                    .map_or(text.len(), |at| clock + at),
+                None => text.len(),
+            };
+            let local = CanonicalLocalDateTime::parse_iso(&text[..split]).map_err(|_| Invalid)?;
+            let offset = match &text[split..] {
+                "" => 0,
+                offset => parse_utc_offset(offset).map_err(|_| Invalid)?,
+            };
+            at_offset(local, offset)
+        }
+        GraphValue::Map { keys, values } => {
+            let arguments = MapArguments::split(GraphTemporalFunction::DateTime, keys, values)?;
+            if arguments.epoch_seconds.is_some() || arguments.epoch_millis.is_some() {
+                return from_epoch(&arguments);
+            }
+            let both = arguments.datetime_base.map(zoned_part).transpose()?;
+            let date_base = match arguments.date_base {
+                Some(base) => Some(date_part(base)?),
+                None => both.map(|(value, _)| value.date()),
+            };
+            let time_base = match arguments.time_base {
+                Some(base) => Some(time_part(base)?),
+                None => both.map(|(value, offset)| (value.time(), offset)),
+            };
+            let date = date_from_fields(arguments.date, date_base)?;
+            let local = time_from_fields(arguments.time, time_base.map(|(time, _)| time), true)?;
+            let zone = arguments
+                .timezone
+                .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+                .transpose()?;
+            match (time_base.and_then(|(_, offset)| offset), zone) {
+                (Some(from), Some(to)) if arguments.time_base.is_none() => {
+                    let instant = at_offset(CanonicalLocalDateTime::new(date, local), from)?;
+                    CanonicalTimestamp::offset_only(instant.instant_utc_nanos(), to)
+                        .map_err(|_| Invalid)
+                }
+                (Some(from), Some(to)) => at_offset(
+                    CanonicalLocalDateTime::new(date, shift(local, to - from)),
+                    to,
+                ),
+                (from, to) => at_offset(
+                    CanonicalLocalDateTime::new(date, local),
+                    to.or(from).unwrap_or(0),
+                ),
+            }
+        }
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => Ok(value.clone()),
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => at_offset(*value, 0),
+        _ => Err(Invalid),
+    }
+}
+
+/// `datetime({epochSeconds: s[, nanosecond: n]})` or
+/// `datetime({epochMillis: m})`, plus fraction fields, at an optional
+/// `timezone`. Calendar and clock fields, and bases, refuse alongside.
+fn from_epoch(arguments: &MapArguments<'_>) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+    let [hour, minute, second, millisecond, microsecond, nanosecond] = arguments.time;
+    if hour.or(minute).or(second).is_some()
+        || arguments.date.iter().any(Option::is_some)
+        || arguments.date_base.is_some()
+        || arguments.time_base.is_some()
+        || arguments.datetime_base.is_some()
+    {
+        return Err(Invalid);
+    }
+    let fraction = i128::from(fraction_nanos(millisecond, microsecond, nanosecond)?.unwrap_or(0));
+    let instant = match (arguments.epoch_seconds, arguments.epoch_millis) {
+        (Some(seconds), None) => i128::from(seconds) * NANOS_PER_SECOND + fraction,
+        (None, Some(millis)) => i128::from(millis) * 1_000_000 + fraction,
+        _ => return Err(Invalid),
+    };
+    let offset = arguments
+        .timezone
+        .map(|zone| parse_utc_offset(zone).map_err(|_| Invalid))
+        .transpose()?
+        .unwrap_or(0);
+    CanonicalTimestamp::offset_only(instant, offset).map_err(|_| Invalid)
+}
+
+/// `local` at `offset_seconds` east of UTC, as a timestamp.
+fn at_offset(
+    local: CanonicalLocalDateTime,
+    offset_seconds: i32,
+) -> Result<CanonicalTimestamp, GraphIntegerErrorKind> {
+    let wall = i128::from(local.date().epoch_day()) * i128::from(NANOS_PER_DAY)
+        + i128::from(local.time().nanos_of_day());
+    CanonicalTimestamp::offset_only(
+        wall - i128::from(offset_seconds) * NANOS_PER_SECOND,
+        offset_seconds,
+    )
+    .map_err(|_| Invalid)
+}
+
+/// A local date-time base and its offset if it has one: a local date-time,
+/// or a timestamp's wall time at its offset.
+fn zoned_part(
+    value: &GraphValue,
+) -> Result<(CanonicalLocalDateTime, Option<i32>), GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok((*value, None)),
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
+            Ok((wall_clock(value)?, Some(value.utc_offset_seconds())))
+        }
+        _ => Err(Invalid),
+    }
+}
+
+/// A timestamp's openCypher text: its wall-clock date-time, its offset, and
+/// `[zone]` when it has a zone.
+pub(crate) fn timestamp_text(value: &CanonicalTimestamp) -> Result<String, GraphIntegerErrorKind> {
+    let mut text = wall_clock(value)?.to_string();
+    text.push_str(&format_utc_offset(value.utc_offset_seconds()));
+    if let Some(zone) = value.zone() {
+        text.push('[');
+        text.push_str(zone.identifier());
+        text.push(']');
+    }
+    Ok(text)
 }
 
 /// The date of a date, a local date-time, or a timestamp's local wall time.
@@ -360,28 +511,8 @@ fn time_from_fields(
         Some(value) if (0..limit).contains(&value) => u8::try_from(value).map_err(|_| Invalid),
         Some(_) => Err(Invalid),
     };
-    let part = |value: Option<i64>, limit: i64| match value {
-        None => Ok(0),
-        Some(value) if (0..limit).contains(&value) => Ok(value),
-        Some(_) => Err(Invalid),
-    };
-    let fraction = if fraction_given {
-        let micro_limit = if millisecond.is_some() {
-            1_000
-        } else {
-            1_000_000
-        };
-        let nano_limit = if millisecond.is_some() || microsecond.is_some() {
-            1_000
-        } else {
-            1_000_000_000
-        };
-        part(millisecond, 1_000)? * 1_000_000
-            + part(microsecond, micro_limit)? * 1_000
-            + part(nanosecond, nano_limit)?
-    } else {
-        i64::from(base.nanosecond())
-    };
+    let fraction = fraction_nanos(millisecond, microsecond, nanosecond)?
+        .unwrap_or_else(|| i64::from(base.nanosecond()));
     CanonicalLocalTime::from_hms_nano(
         unit(hour, 24, base.hour())?,
         unit(minute, 60, base.minute())?,
@@ -391,28 +522,107 @@ fn time_from_fields(
     .map_err(|_| Invalid)
 }
 
+/// The fraction of a second the given fraction fields add up to, `None`
+/// when none is given: millisecond 0-999, then microsecond 0-999 after a
+/// millisecond (else 0-999999), then nanosecond 0-999 after either (else
+/// 0-999999999).
+fn fraction_nanos(
+    millisecond: Option<i64>,
+    microsecond: Option<i64>,
+    nanosecond: Option<i64>,
+) -> Result<Option<i64>, GraphIntegerErrorKind> {
+    if millisecond.is_none() && microsecond.is_none() && nanosecond.is_none() {
+        return Ok(None);
+    }
+    let part = |value: Option<i64>, limit: i64| match value {
+        None => Ok(0),
+        Some(value) if (0..limit).contains(&value) => Ok(value),
+        Some(_) => Err(Invalid),
+    };
+    let micro_limit = if millisecond.is_some() {
+        1_000
+    } else {
+        1_000_000
+    };
+    let nano_limit = if millisecond.is_some() || microsecond.is_some() {
+        1_000
+    } else {
+        1_000_000_000
+    };
+    Ok(Some(
+        part(millisecond, 1_000)? * 1_000_000
+            + part(microsecond, micro_limit)? * 1_000
+            + part(nanosecond, nano_limit)?,
+    ))
+}
+
 /// `value.key` for a temporal value: `None` when the value is not temporal,
-/// `Some(Err(TemporalField))` for a key its kind does not have. Dates and
-/// local date-times have the calendar fields, times the clock fields, and a
-/// time at an offset also `timezone` and `offset` (its spelling, `Z` for
-/// UTC), `offsetMinutes` and `offsetSeconds`.
+/// `Some(Err(TemporalField))` for a key its kind does not have. Dates, local
+/// date-times and datetimes have the calendar fields; times, local date-times
+/// and datetimes the clock fields (a datetime's at its own offset); a time
+/// and a datetime also `timezone` and `offset` (the offset's spelling, `Z`
+/// for UTC; a zoned datetime's `timezone` is its zone), `offsetMinutes` and
+/// `offsetSeconds`; a datetime also `epochSeconds` and `epochMillis`.
 pub(crate) fn field(
     value: &CanonicalScalar,
     key: &str,
 ) -> Option<Result<CanonicalScalar, GraphIntegerErrorKind>> {
-    let (date, time, offset) = match value {
-        CanonicalScalar::Date(day) => (Some(*day), None, None),
-        CanonicalScalar::LocalTime(time) => (None, Some(*time), None),
-        CanonicalScalar::Time(time) => (None, Some(time.local()), Some(time.offset_seconds())),
-        CanonicalScalar::LocalDateTime(value) => (Some(value.date()), Some(value.time()), None),
+    let (date, time, offset, timestamp) = match value {
+        CanonicalScalar::Date(day) => (Some(*day), None, None, None),
+        CanonicalScalar::LocalTime(time) => (None, Some(*time), None, None),
+        CanonicalScalar::Time(time) => {
+            (None, Some(time.local()), Some(time.offset_seconds()), None)
+        }
+        CanonicalScalar::LocalDateTime(value) => {
+            (Some(value.date()), Some(value.time()), None, None)
+        }
+        CanonicalScalar::Timestamp(value) => match wall_clock(value) {
+            Ok(wall) => (
+                Some(wall.date()),
+                Some(wall.time()),
+                Some(value.utc_offset_seconds()),
+                Some(value),
+            ),
+            Err(kind) => return Some(Err(kind)),
+        },
         _ => return None,
     };
     let found = date
         .and_then(|day| date_field(day, key))
         .or_else(|| time.and_then(|time| time_field(time, key)))
         .map(CanonicalScalar::Int)
+        .or_else(|| timestamp.and_then(|value| timestamp_field(value, key)))
         .or_else(|| offset.and_then(|offset| offset_field(offset, key)));
     Some(found.ok_or(GraphIntegerErrorKind::TemporalField))
+}
+
+/// The scratch entries a field result takes: one for the value and one per
+/// payload unit of its text (an offset spelling, or a zone of up to 255
+/// bytes).
+pub(crate) fn field_scratch_entries(value: &CanonicalScalar) -> usize {
+    let text = match value {
+        CanonicalScalar::Text(text) => text.len(),
+        _ => 0,
+    };
+    1 + text.div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+}
+
+/// A datetime's own fields: whole seconds and milliseconds since the epoch
+/// (floored), and a zoned datetime's `timezone`, its zone.
+fn timestamp_field(value: &CanonicalTimestamp, key: &str) -> Option<CanonicalScalar> {
+    let instant = value.instant_utc_nanos();
+    match key {
+        "epochSeconds" => i64::try_from(instant.div_euclid(NANOS_PER_SECOND))
+            .ok()
+            .map(CanonicalScalar::Int),
+        "epochMillis" => i64::try_from(instant.div_euclid(1_000_000))
+            .ok()
+            .map(CanonicalScalar::Int),
+        "timezone" => value
+            .zone()
+            .and_then(|zone| CanonicalScalar::ucs_basic_text(zone.identifier()).ok()),
+        _ => None,
+    }
 }
 
 /// `day.key` for the openCypher date fields; `None` for any other key.

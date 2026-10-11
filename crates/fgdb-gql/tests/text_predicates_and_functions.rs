@@ -1156,6 +1156,180 @@ fn times_and_local_date_times_build_read_compare_and_order() {
     assert_eq!(times, ["01:00+05:00", "12:00+01:00", "11:30Z", "Null"]);
 }
 
+/// fgdb-txbg9: datetime(...) is a timestamp at a UTC offset, from fields and
+/// a `timezone` offset (UTC without one), from ISO 8601 text, from
+/// `epochSeconds` or `epochMillis`, or over bases. A date base never carries
+/// an offset; a `time` base's offset is kept, or moved to a new `timezone`
+/// at the same time of day; a `datetime` base moves to the same instant. A
+/// named zone refuses: the value language has no zone database. Expected
+/// texts are the TCK's (Temporal1 [9], [11] and [13], Temporal2 [5],
+/// Temporal3 [8], [9] and [11], Temporal5 [6] at the equal offset `+01:00`,
+/// Temporal7 [5]).
+#[test]
+fn datetimes_at_offsets_build_read_compare_and_convert() {
+    let x = text("x");
+    let as_text = |expression: &str| scalar(&format!("toString({expression})"), &x);
+    let at_one = "datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'})";
+    let time = "time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'})";
+    for (expression, expected) in [
+        (
+            "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, \
+             nanosecond: 645876123, timezone: '+01:00'})"
+                .to_owned(),
+            "1984-10-11T12:31:14.645876123+01:00",
+        ),
+        (
+            "datetime({year: 1984, month: 10, day: 11, hour: 12})".to_owned(),
+            "1984-10-11T12:00Z",
+        ),
+        (
+            "datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, timezone: \
+             '-02:05:59'})"
+                .to_owned(),
+            "1984-03-07T12:31-02:05:59",
+        ),
+        (
+            "datetime('2015-07-21T21:40:32.142+0100')".to_owned(),
+            "2015-07-21T21:40:32.142+01:00",
+        ),
+        (
+            "datetime('2015-W30-2T214032.142Z')".to_owned(),
+            "2015-07-21T21:40:32.142Z",
+        ),
+        // A date alone is its midnight at UTC (TCK datetime('-999999999-01-01')).
+        ("datetime('2015-07-21')".to_owned(), "2015-07-21T00:00Z"),
+        (
+            "datetime('2015T214032-0100')".to_owned(),
+            "2015-01-01T21:40:32-01:00",
+        ),
+        (
+            "datetime('20150721T21:40-01:30')".to_owned(),
+            "2015-07-21T21:40-01:30",
+        ),
+        (
+            "datetime('2015-W30T2140-02')".to_owned(),
+            "2015-07-20T21:40-02:00",
+        ),
+        (
+            "datetime('2015202T21+18:00')".to_owned(),
+            "2015-07-21T21:00+18:00",
+        ),
+        (
+            "datetime({epochSeconds: 416779, nanosecond: 999999999})".to_owned(),
+            "1970-01-05T19:46:19.999999999Z",
+        ),
+        (
+            "datetime({epochMillis: 237821673987})".to_owned(),
+            "1977-07-15T13:34:33.987Z",
+        ),
+        (
+            "datetime({date: date({year: 1984, month: 10, day: 11}), hour: 10, minute: 10, \
+             second: 10, timezone: '+05:00'})"
+                .to_owned(),
+            "1984-10-11T10:10:10+05:00",
+        ),
+        (
+            format!("datetime({{date: {at_one}, day: 28, hour: 10, minute: 10, second: 10}})"),
+            "1984-10-28T10:10:10Z",
+        ),
+        (
+            format!("datetime({{year: 1984, month: 10, day: 11, time: {time}}})"),
+            "1984-10-11T12:31:14.645876+01:00",
+        ),
+        (
+            format!(
+                "datetime({{year: 1984, month: 10, day: 11, time: {time}, second: 42, \
+                 timezone: '+05:00'}})"
+            ),
+            "1984-10-11T16:31:42.645876+05:00",
+        ),
+        (
+            format!("datetime({{datetime: {at_one}, timezone: '+05:00'}})"),
+            "1984-10-11T16:00+05:00",
+        ),
+        (
+            format!("datetime({{datetime: {at_one}, day: 28, second: 42}})"),
+            "1984-10-28T12:00:42+01:00",
+        ),
+        (
+            "datetime(localdatetime('2015-07-21T21:40'))".to_owned(),
+            "2015-07-21T21:40Z",
+        ),
+        (format!("date({at_one})"), "1984-10-11"),
+        (format!("localtime({at_one})"), "12:00"),
+        (format!("time({at_one})"), "12:00+01:00"),
+        (format!("localdatetime({at_one})"), "1984-10-11T12:00"),
+    ] {
+        assert_eq!(as_text(&expression), text(expected), "{expression}");
+    }
+    assert_eq!(scalar("datetime(null)", &x), CanonicalScalar::Null);
+
+    let int = CanonicalScalar::Int;
+    let november = "datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, \
+                    nanosecond: 645876123, timezone: '+01:00'})";
+    for (field, expected) in [
+        ("year", int(1984)),
+        ("quarter", int(4)),
+        ("week", int(45)),
+        ("weekDay", int(7)),
+        ("dayOfQuarter", int(42)),
+        ("hour", int(12)),
+        ("millisecond", int(645)),
+        ("nanosecond", int(645_876_123)),
+        ("timezone", text("+01:00")),
+        ("offset", text("+01:00")),
+        ("offsetMinutes", int(60)),
+        ("offsetSeconds", int(3_600)),
+        ("epochSeconds", int(469_020_674)),
+        ("epochMillis", int(469_020_674_645)),
+    ] {
+        assert_eq!(
+            scalar(&format!("{november}.{field}"), &x),
+            expected,
+            "{field}"
+        );
+    }
+    for (expression, expected) in [
+        (
+            "datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, \
+             timezone: '+00:00'}) < datetime({year: 1984, month: 10, day: 11, hour: 12, \
+             minute: 31, second: 14, timezone: '+05:00'})",
+            true,
+        ),
+        (
+            "datetime('2015-07-21T21:40+01:00') < datetime('2015-07-21T21:00Z')",
+            true,
+        ),
+        (
+            "datetime('2015-07-21T21:40Z') = datetime({year: 2015, month: 7, day: 21, hour: 21, \
+             minute: 40})",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            scalar(expression, &x),
+            CanonicalScalar::Bool(expected),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "datetime({year: 1984, timezone: 'Europe/Stockholm'})",
+        "datetime('2015-07-21T21:40:32.142[Europe/London]')",
+        "datetime('2015-07-21T21:40:32.142+0100[Europe/London]')",
+        "datetime({epochSeconds: 1, epochMillis: 1})",
+        "datetime({epochSeconds: 1, hour: 1})",
+        "datetime(date('2015-07-21'))",
+        "datetime({year: 1984}).dayOfYear",
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("Temporal"),
+            "{expression}: {error:?}"
+        );
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

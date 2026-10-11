@@ -30,6 +30,7 @@ pub use projection::{
 pub(crate) use projection::{
     ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership, evaluate_value,
     map_keys, overlay_map, range_values, slice_bounds, temporal_field,
+    temporal_field_scratch_entries, timestamp_text,
 };
 
 use crate::algebra::{

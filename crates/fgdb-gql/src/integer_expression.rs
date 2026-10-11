@@ -429,6 +429,7 @@ impl ExpressionCell<'_> {
                         | CanonicalScalar::LocalTime(_)
                         | CanonicalScalar::Time(_)
                         | CanonicalScalar::LocalDateTime(_)
+                        | CanonicalScalar::Timestamp(_)
                 ) =>
             {
                 Err(GraphIntegerErrorKind::NonScalar)
@@ -1281,8 +1282,11 @@ fn convert<E>(
             | CanonicalScalar::LocalTime(_)
             | CanonicalScalar::Time(_)
             | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Timestamp(_)
                 if to_text =>
             {
+                // At most a zone's 255 bytes past the fixed temporal text;
+                // make_text reserves the payload of what formatting built.
                 control(GlaExecutionEvent::ScratchEntry)
                     .map_err(GraphIntegerEvaluationError::Control)?;
                 let text = match value.as_ref() {
@@ -1290,6 +1294,9 @@ fn convert<E>(
                     CanonicalScalar::LocalTime(value) => value.to_string(),
                     CanonicalScalar::Time(value) => value.to_string(),
                     CanonicalScalar::LocalDateTime(value) => value.to_string(),
+                    CanonicalScalar::Timestamp(value) => {
+                        crate::set_ops::timestamp_text(value).map_err(failure)?
+                    }
                     _ => unreachable!("the arm admits only temporal kinds"),
                 };
                 return make_text(&text, instruction, control);

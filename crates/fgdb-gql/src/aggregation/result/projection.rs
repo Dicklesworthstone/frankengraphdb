@@ -349,7 +349,9 @@ fn expression<'g, E, C>(
                             failure(column, GraphIntegerErrorKind::IncompatibleOperands)
                         })?
                         .map_err(|kind| failure(column, kind))?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
+                    for _ in 0..crate::set_ops::temporal_field_scratch_entries(&field) {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
                     OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(field)))
                 }
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),

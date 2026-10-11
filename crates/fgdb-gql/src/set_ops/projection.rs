@@ -7,7 +7,10 @@ mod membership;
 mod temporal;
 
 pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
-pub(crate) use temporal::{construct as construct_temporal, field as temporal_field};
+pub(crate) use temporal::{
+    construct as construct_temporal, field as temporal_field,
+    field_scratch_entries as temporal_field_scratch_entries, timestamp_text,
+};
 
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
@@ -151,6 +154,10 @@ pub enum GraphTemporalFunction {
     /// `localdatetime(x)`: calendar and clock fields, over `date`, `time`
     /// and `datetime` bases.
     LocalDateTime,
+    /// `datetime(x)`: a timestamp at a UTC offset, from calendar and clock
+    /// fields and a `timezone` offset over `date`, `time` and `datetime`
+    /// bases, or from `epochSeconds` or `epochMillis`.
+    DateTime,
 }
 
 impl GraphTemporalFunction {
@@ -161,6 +168,7 @@ impl GraphTemporalFunction {
             Self::LocalTime => 2,
             Self::Time => 3,
             Self::LocalDateTime => 4,
+            Self::DateTime => 5,
         }
     }
 
@@ -171,6 +179,7 @@ impl GraphTemporalFunction {
             ("LOCALTIME", Self::LocalTime),
             ("TIME", Self::Time),
             ("LOCALDATETIME", Self::LocalDateTime),
+            ("DATETIME", Self::DateTime),
         ]
         .into_iter()
         .find_map(|(spelling, function)| name.eq_ignore_ascii_case(spelling).then_some(function))
@@ -1391,10 +1400,11 @@ fn evaluate_value_at<E>(
                 && let Some(field) = temporal::field(scalar, key)
             {
                 // A temporal value's fields (fgdb-txbg9); any other key is an
-                // error. A field is an integer or an offset spelling of at
-                // most nine bytes, inside one payload unit.
+                // error. A text field charges its payload too.
                 let field = field.map_err(failure)?;
-                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                for _ in 0..temporal::field_scratch_entries(&field) {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                }
                 GraphValue::Scalar(field)
             } else {
                 let (keys, values) = map
