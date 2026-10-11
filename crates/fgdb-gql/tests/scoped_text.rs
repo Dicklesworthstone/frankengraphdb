@@ -364,8 +364,8 @@ fn pattern_predicates_are_their_exists_spelling() {
             "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(:L) } RETURN a",
         ),
         (
-            "MATCH (a) WHERE (a:L)-[:R]-({n: 2}) RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-({n: 2}) } RETURN a",
+            "MATCH (a) WHERE (a:L)-[:R]-(:L {n: 2}) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-(:L {n: 2}) } RETURN a",
         ),
         (
             "MATCH (a) WHERE a.n > 1 AND (a)-[:R]->() AND NOT (a)-[:S]->() RETURN a",

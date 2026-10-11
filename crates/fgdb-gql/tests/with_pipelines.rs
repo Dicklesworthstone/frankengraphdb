@@ -581,17 +581,19 @@ fn a_plain_with_reads_the_bindings_it_drops_in_its_own_where_and_pages() {
             "MATCH (n) WITH n.p AS v ORDER BY v DESC LIMIT 2 RETURN v ORDER BY v",
             2,
         ),
+        // This harness executes no identified edges, so the optional binding
+        // the WHERE reads is the far vertex (NULL on every row here).
         (
-            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n WHERE r IS NULL \
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n WHERE m IS NULL \
              RETURN n ORDER BY n",
-            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n, r WHERE r IS NULL \
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n, m WHERE m IS NULL \
              RETURN n ORDER BY n",
             5,
         ),
         (
-            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n WHERE r IS NOT NULL OR n.p = 3 \
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n WHERE m IS NOT NULL OR n.p = 3 \
              RETURN n ORDER BY n",
-            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n, r WHERE r IS NOT NULL OR n.p = 3 \
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n, m WHERE m IS NOT NULL OR n.p = 3 \
              RETURN n ORDER BY n",
             1,
         ),
@@ -685,7 +687,6 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
         "MATCH (n) WITH n WHERE n > n RETURN n",
         "MATCH (n) WITH n.p AS p RETURN missing LIMIT 0",
         "MATCH (n) WITH n.p AS p ORDER BY missing RETURN p",
-        "MATCH (n) WITH n.p AS p ORDER BY p,p RETURN p",
         "MATCH (n) WITH COUNT(DISTINCT *) AS count RETURN count",
     ] {
         let calls = Cell::new(0);
@@ -699,6 +700,13 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // A repeated ORDER BY key is not a refusal: the first key's direction
+    // stands (openCypher WithOrderBy3 [7]; the WITH page laws in fgdb's
+    // embedded_query_entrypoint pin the rows).
+    assert!(
+        PreparedGraphSetText::prepare("MATCH (n) WITH n.p AS p ORDER BY p,p RETURN p", symbols)
+            .is_ok()
+    );
     let valid = format!("MATCH (n){} RETURN n", " WITH n".repeat(62));
     assert!(PreparedGraphSetText::prepare(&valid, symbols).is_ok());
     let invalid = format!("MATCH (n){} RETURN n", " WITH n".repeat(63));
