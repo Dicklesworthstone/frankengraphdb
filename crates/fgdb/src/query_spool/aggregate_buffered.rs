@@ -11,7 +11,7 @@ use fgdb_gql::spill_aggregate::{
 };
 use fgdb_gql::spill_set::{SpillSetAggregatePlan, SpillSetAggregateRowError};
 use fgdb_gql::stream::AsyncVertexScanSource;
-use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension};
+use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension, GqlExecutionBudget};
 
 struct BufferedInput<'q, T> {
     cursor: T,

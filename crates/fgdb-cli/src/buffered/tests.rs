@@ -1078,10 +1078,6 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",
                 None,
             ),
-            (
-                "MATCH (n) WITH [n.p] AS value RETURN SUM(value) AS total LIMIT 0",
-                None,
-            ),
             ("MATCH (n) RETURN sum(10/(n.p-2)) AS value LIMIT 0", None),
             (
                 "MATCH (n) RETURN 10/(sum(n.p)-2) AS value GROUP BY n.p LIMIT 0",
@@ -1125,6 +1121,15 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             drop(view);
             assert_eq!(pool.used(), 0, "{text}");
         }
+        // SUM over a list-valued column never reaches execution: the numeric
+        // aggregate type check refuses it while preparing (since 2ffacf17).
+        let text = "MATCH (n) WITH [n.p] AS value RETURN SUM(value) AS total LIMIT 0";
+        let error = prepare_query(&spill_options(&directory, text))
+            .err()
+            .ok_or_else(|| format!("{text} must refuse while preparing"))
+            .unwrap();
+        assert_eq!(error.class, "query", "{text}");
+        no_scratch(&directory);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

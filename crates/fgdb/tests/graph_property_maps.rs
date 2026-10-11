@@ -284,7 +284,7 @@ fn actual_property_ids_must_be_named_even_for_an_empty_selected_page() {
         seed(&mut db, &commit, false).await;
         for tail in ["", " LIMIT 0"] {
             let statement = format!("MATCH (n:Thing) RETURN properties(n) AS props{tail}");
-            let query = PreparedGraphText::prepare(&statement, Catalog::MissingScore)
+            let query = PreparedGraphText::prepare_with_resolver(&statement, Catalog::MissingScore)
                 .unwrap()
                 .bind_parameters(&GqlParameters::new())
                 .unwrap();
@@ -295,7 +295,7 @@ fn actual_property_ids_must_be_named_even_for_an_empty_selected_page() {
                 )))
             ));
         }
-        let query = PreparedGraphText::prepare(
+        let query = PreparedGraphText::prepare_with_resolver(
             "MATCH (n:Thing) RETURN properties(n) AS props",
             Catalog::DuplicateName,
         )
@@ -313,7 +313,7 @@ fn actual_property_ids_must_be_named_even_for_an_empty_selected_page() {
             "MATCH (n:Thing) RETURN n",
         ] {
             let bind = |catalog| {
-                PreparedGraphText::prepare(statement, catalog)
+                PreparedGraphText::prepare_with_resolver(statement, catalog)
                     .unwrap()
                     .bind_parameters(&GqlParameters::new())
                     .unwrap()
@@ -407,7 +407,7 @@ fn property_maps_follow_effective_overlay_pins_history_compaction_and_reopen() {
             ),
             before
         );
-        let query = PreparedGraphText::prepare(statement, Catalog::Full)
+        let query = PreparedGraphText::prepare_with_resolver(statement, Catalog::Full)
             .unwrap()
             .bind_parameters(&params)
             .unwrap();

@@ -446,7 +446,7 @@ fn cold_pipeline_aggregate_orders_more_input_payload_than_its_scratch_pool() {
         }
         assert_eq!(db.write(&commit, batch).await.unwrap(), CommitSeq(1));
         drop(db);
-        assert!(ROWS * PAYLOAD_BYTES > SCRATCH_BYTES);
+        const { assert!(ROWS * PAYLOAD_BYTES > SCRATCH_BYTES) };
         let prepared = prepare(
             "MATCH (n) WITH n.q AS label,n.p AS value ORDER BY label DESC LIMIT 96 RETURN COUNT(*) AS rows,SUM(value) AS total",
         );

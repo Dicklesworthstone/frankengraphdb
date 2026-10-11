@@ -99,10 +99,14 @@ impl Fixture {
         )
     }
     fn rows(&self, text: &str) -> Vec<Vec<GraphValue>> {
-        let query = PreparedGraphSetText::prepare(text, Catalog("p"))
-            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
+        let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut Catalog("p"),
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         query
             .execute_governed(
                 policy(),
@@ -190,7 +194,7 @@ fn legacy_sources_refuse_enumeration_before_consuming_inputs_even_for_limit_zero
     let input_reads = Cell::new(0);
     for suffix in ["", " LIMIT 0"] {
         let text = format!("MATCH (n) RETURN properties(n) AS m{suffix}");
-        let pattern = PreparedGraphText::prepare(&text, Catalog("p"))
+        let pattern = PreparedGraphText::prepare_with_resolver(&text, Catalog("p"))
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
@@ -268,10 +272,14 @@ fn maps_follow_optional_and_with_scope_without_exposing_private_columns() {
             vec![vec![null.clone()]]
         );
     }
-    let query = PreparedGraphSetText::prepare("UNWIND [1] AS m RETURN m{} AS result", Catalog("p"))
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
+    let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        "UNWIND [1] AS m RETURN m{} AS result",
+        &[],
+        &mut Catalog("p"),
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     assert!(
         query
             .execute_governed(
@@ -282,9 +290,10 @@ fn maps_follow_optional_and_with_scope_without_exposing_private_columns() {
             .is_err()
     );
     assert!(
-        PreparedGraphSetText::prepare(
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
             "MATCH (n) WITH 1 AS x RETURN properties(n) AS m",
-            Catalog("p")
+            &[],
+            &mut Catalog("p")
         )
         .is_err()
     );
@@ -303,10 +312,14 @@ fn map_inputs_and_outputs_use_the_existing_aggregate_engine() {
             map(&[("count", integer(2))]),
         ),
     ] {
-        let aggregate = PreparedGraphAggregateText::prepare(text, Catalog("p"))
-            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
+        let aggregate = PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            Catalog("p"),
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let rows = aggregate
             .execute_governed_with_element_maps(
                 2,
@@ -344,8 +357,8 @@ fn property_names_bind_both_template_and_plan_identity_only_when_maps_are_read()
         "MATCH (n) RETURN properties(n) AS m",
         "MATCH (n) RETURN n.p AS p",
     ] {
-        let original = PreparedGraphText::prepare(text, Catalog("p")).unwrap();
-        let renamed = PreparedGraphText::prepare(text, Catalog("renamed")).unwrap();
+        let original = PreparedGraphText::prepare_with_resolver(text, Catalog("p")).unwrap();
+        let renamed = PreparedGraphText::prepare_with_resolver(text, Catalog("renamed")).unwrap();
         let original_plan = original.bind_parameters(&GqlParameters::new()).unwrap();
         let renamed_plan = renamed.bind_parameters(&GqlParameters::new()).unwrap();
         if text.contains("properties") {
