@@ -45,16 +45,23 @@ fn root_document_upsert_matches_flat_input_and_does_not_interpolate_values() {
 #[test]
 fn invalid_document_roots_and_late_rows_refuse_before_opening_storage() {
     let fixture = Fixture::new(false);
-    for json in [
-        "42",
-        "{}",
-        r#"{"groups":null}"#,
-        r#"{"groups":[{"members":[]}]}"#,
-        r#"{"groups":[{"members":42}]}"#,
-        r#"{"groups":[{"members":[{"id":1,"name":"Good"},{"id":2,"name":true}]}]}"#,
+    // A top-level scalar is not a json: document at all: the CLI refuses that
+    // spelling as usage (exit 2) before any query is prepared, as its
+    // json_parameter contract documents (scalars have their own spellings).
+    // Every document that does parse is a query refusal (exit 3).
+    for (json, code) in [
+        ("42", 2),
+        ("{}", 3),
+        (r#"{"groups":null}"#, 3),
+        (r#"{"groups":[{"members":[]}]}"#, 3),
+        (r#"{"groups":[{"members":42}]}"#, 3),
+        (
+            r#"{"groups":[{"members":[{"id":1,"name":"Good"},{"id":2,"name":true}]}]}"#,
+            3,
+        ),
     ] {
         let result = write_document(&fixture, json, DOCUMENT_UPSERT);
-        assert_eq!(result.status.code(), Some(3), "{}", output(&result));
+        assert_eq!(result.status.code(), Some(code), "{}", output(&result));
         assert!(!fixture.db.exists(), "refused input opened storage");
         assert!(!output(&result).contains("\"kind\":\"written\""));
     }
