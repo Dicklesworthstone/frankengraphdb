@@ -298,3 +298,85 @@ fn opencypher_start_and_end_node_are_the_bound_endpoints() {
         assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
     }
 }
+
+/// openCypher reads a path's `nodes(p)` and `relationships(p)`, and a
+/// variable-length relationship variable, as lists of their elements in
+/// traversal order, for every list operation: index, slice, size, reverse,
+/// comprehension, quantifier and reduce (TCK Quantifier1-4 over
+/// `tail(nodes(p))`, Match9 [1] `last(r)`).
+#[test]
+fn path_element_lists_answer_every_list_operation() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, PreparedGraphSetText};
+    use fgdb_types::{CanonicalScalar, EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(1), VId(3)),
+    ];
+    let first = |text: &str| {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let rows = query
+            .execute_governed(
+                GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
+                |pattern, remaining| {
+                    pattern.plan().execute_governed_with_identified_properties(
+                        edges.len() as u64 + 4,
+                        (1..=4).map(VId),
+                        edges.iter().copied(),
+                        |_, _| Ok::<_, ()>(true),
+                        |_, _| Ok(None),
+                        remaining,
+                        || Ok::<_, ()>(()),
+                    )
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+        rows[0].values()[0].clone()
+    };
+    let vertices = |ids: &[u128]| {
+        GraphValue::List(ids.iter().map(|&id| GraphValue::Vertex(VId(id))).collect())
+    };
+    let edges_of =
+        |ids: &[u128]| GraphValue::List(ids.iter().map(|&id| GraphValue::Edge(EId(id))).collect());
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let truth = |b: bool| GraphValue::Scalar(CanonicalScalar::Bool(b));
+    let path = "MATCH p = (a)-[:R]->(b)-[:R]->(c) RETURN";
+    for (item, expected) in [
+        ("tail(nodes(p)) AS v", vertices(&[2, 3])),
+        ("nodes(p)[1..] AS v", vertices(&[2, 3])),
+        ("reverse(nodes(p)) AS v", vertices(&[3, 2, 1])),
+        ("[x IN relationships(p) | x] AS v", edges_of(&[91, 92])),
+        ("relationships(p)[0] AS v", GraphValue::Edge(EId(91))),
+        ("last(relationships(p)) AS v", GraphValue::Edge(EId(92))),
+        ("head(nodes(p)) AS v", GraphValue::Vertex(VId(1))),
+        ("size(nodes(p)) AS v", int(3)),
+        ("size(relationships(p)) AS v", int(2)),
+        ("any(x IN nodes(p) WHERE true) AS v", truth(true)),
+        (
+            "single(x IN relationships(p) WHERE true) AS v",
+            truth(false),
+        ),
+        ("reduce(n = 0, x IN relationships(p) | n + 1) AS v", int(2)),
+    ] {
+        assert_eq!(first(&format!("{path} {item}")), expected, "{item}");
+    }
+    for (text, expected) in [
+        (
+            "MATCH ()-[r:R*2]->() RETURN last(r) AS v",
+            GraphValue::Edge(EId(92)),
+        ),
+        (
+            "MATCH ()-[r:R*2]->() RETURN head(r) AS v",
+            GraphValue::Edge(EId(91)),
+        ),
+        ("MATCH ()-[r:R*2]->() RETURN size(r) AS v", int(2)),
+    ] {
+        assert_eq!(first(text), expected, "{text}");
+    }
+}

@@ -778,7 +778,11 @@ fn admit(
             if nonnull_literal
                 || !matches!(
                     kind,
-                    GraphSetColumnType::List | GraphSetColumnType::Any | GraphSetColumnType::Scalar
+                    GraphSetColumnType::List
+                        | GraphSetColumnType::Any
+                        | GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Vertices
+                        | GraphSetColumnType::Edges
                 )
             {
                 return Err(Error::ListInput { column });
@@ -817,7 +821,11 @@ fn admit(
             if literal
                 || !matches!(
                     admit(value, types, column, depth + 1, nodes, locals)?,
-                    GraphSetColumnType::List | GraphSetColumnType::Any | GraphSetColumnType::Scalar
+                    GraphSetColumnType::List
+                        | GraphSetColumnType::Any
+                        | GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Vertices
+                        | GraphSetColumnType::Edges
                 )
             {
                 return Err(Error::ListInput { column });
@@ -991,7 +999,20 @@ fn admit_list(
     let null = matches!(value, GraphSetValue::TypedNull(_))
         || matches!(value, GraphSetValue::Literal(v) if matches!(v.value(), CanonicalScalar::Null))
         || matches!(value, GraphSetValue::Value(v) if v.is_null());
-    if !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any) && !null {
+    // A scalar column or expression can carry NULL, whose list operation is
+    // NULL; any nonnull scalar fails in the shared evaluator, as for IN. A
+    // nonnull scalar literal can never be a list, so it refuses here.
+    let scalar_literal = matches!(value, GraphSetValue::Literal(_))
+        || matches!(value, GraphSetValue::Value(GraphValue::Scalar(_)));
+    let admitted = match kind {
+        GraphSetColumnType::List
+        | GraphSetColumnType::Any
+        | GraphSetColumnType::Vertices
+        | GraphSetColumnType::Edges => true,
+        GraphSetColumnType::Scalar => !scalar_literal,
+        _ => false,
+    };
+    if !admitted && !null {
         return Err(GraphSetProjectionError::ListInput { column });
     }
     Ok(())
@@ -1352,6 +1373,34 @@ fn operand<'a, E>(
     }
 }
 
+/// The members of a list operand. A list lends its own values. A compact node
+/// or relationship list (`nodes(p)`, `relationships(p)`, a variable-length
+/// relationship variable) reads as its Vertex or Edge values, one scratch
+/// entry each. Any other value has no members.
+fn list_members<'a, E>(
+    value: &'a GraphValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<std::borrow::Cow<'a, [GraphValue]>>, E> {
+    let mut members = Vec::new();
+    match value {
+        GraphValue::List(values) => return Ok(Some(std::borrow::Cow::Borrowed(&values[..]))),
+        GraphValue::Vertices(ids) => {
+            for id in ids.iter() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                members.push(GraphValue::Vertex(*id));
+            }
+        }
+        GraphValue::Edges(ids) => {
+            for id in ids.iter() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                members.push(GraphValue::Edge(*id));
+            }
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::borrow::Cow::Owned(members)))
+}
+
 fn evaluate_value_at<E>(
     value: &GraphSetValue,
     row: &GraphValueRow,
@@ -1467,8 +1516,8 @@ fn evaluate_value_at<E>(
                     }
                 }
             } else {
-                let values = list
-                    .as_list()
+                let values = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
                 let GraphValue::Scalar(CanonicalScalar::Int(index)) = index else {
                     return Err(failure(GraphIntegerErrorKind::NonInteger));
@@ -1496,10 +1545,10 @@ fn evaluate_value_at<E>(
             let truth = if list.is_null() {
                 None
             } else {
-                let members = list
-                    .as_list()
+                let members = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
-                membership::evaluate(value.as_ref(), members, control)
+                membership::evaluate(value.as_ref(), &members, control)
                     .map_err(ProjectionFailure::Control)?
             };
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -1550,6 +1599,10 @@ fn evaluate_value_at<E>(
                 None
             } else if let Some(values) = list.as_list() {
                 Some(values.len())
+            } else if let GraphValue::Vertices(ids) = list.as_ref() {
+                Some(ids.len())
+            } else if let GraphValue::Edges(ids) = list.as_ref() {
+                Some(ids.len())
             } else if let GraphValue::Scalar(CanonicalScalar::Text(text)) = list.as_ref() {
                 // CHAR_LENGTH's charge: one unit of work per payload unit read.
                 let text = text.as_str();
@@ -1583,12 +1636,12 @@ fn evaluate_value_at<E>(
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
             } else {
-                let members = list
-                    .as_list()
+                let members = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
                 let mut scope = element_scope(row, 1, control)?;
                 let mut kept = Vec::new();
-                for member in members {
+                for member in members.iter() {
                     scope.set_from_end(
                         0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
@@ -1630,12 +1683,12 @@ fn evaluate_value_at<E>(
             let truth = if list.is_null() {
                 None
             } else {
-                let members = list
-                    .as_list()
+                let members = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
                 let mut scope = element_scope(row, 1, control)?;
                 let mut results = Vec::new();
-                for member in members {
+                for member in members.iter() {
                     scope.set_from_end(
                         0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
@@ -1666,8 +1719,8 @@ fn evaluate_value_at<E>(
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
             } else {
-                let members = list
-                    .as_list()
+                let members = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
                 let mut kept = Vec::new();
                 for member in &members[slice_bounds(members.len(), bounds[0], bounds[1])] {
@@ -1708,11 +1761,11 @@ fn evaluate_value_at<E>(
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
             } else {
-                let members = list
-                    .as_list()
+                let members = list_members(&list, control)
+                    .map_err(ProjectionFailure::Control)?
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
                 let mut scope = element_scope(row, 2, control)?;
-                for member in members {
+                for member in members.iter() {
                     scope.set_from_end(1, accumulator);
                     scope.set_from_end(
                         0,
@@ -1931,7 +1984,9 @@ pub(crate) fn value_function<E>(
             if argument.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 Ok(null)
-            } else if let Some(values) = argument.as_list() {
+            } else if let Some(values) =
+                list_members(argument, control).map_err(ProjectionFailure::Control)?
+            {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 let mut reversed = Vec::with_capacity(values.len());
                 for value in values.iter().rev() {
@@ -2109,7 +2164,9 @@ fn sum_value<E>(
     if left.is_null() || right.is_null() {
         return Ok(GraphValue::Scalar(CanonicalScalar::Null));
     }
-    let (prefix, suffix) = match (left.as_list(), right.as_list()) {
+    let left_members = list_members(left, control).map_err(ProjectionFailure::Control)?;
+    let right_members = list_members(right, control).map_err(ProjectionFailure::Control)?;
+    let (prefix, suffix) = match (left_members.as_deref(), right_members.as_deref()) {
         (None, None) => {
             let (GraphValue::Scalar(a), GraphValue::Scalar(b)) = (left, right) else {
                 return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));

@@ -1383,3 +1383,49 @@ fn a_parenthesized_operand_in_a_list_column_is_a_membership() {
     named_rows.sort();
     assert_eq!(rows, named_rows);
 }
+
+/// A scalar column can carry NULL, and a list operation over NULL is NULL
+/// (TCK Map2 [3], `expr[idx]` over a NULL `expr`). Any nonnull scalar in a
+/// list position fails, when evaluated or, for a literal, at preparation, and
+/// never answers rows.
+#[test]
+fn a_list_operation_over_a_null_scalar_column_is_null() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [CanonicalScalar::Int(2)];
+    let first = |text: &str| {
+        let rows = run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+        rows[0].get(0).unwrap().clone()
+    };
+    for text in [
+        "MATCH (n) WITH null AS e, 'x' AS k RETURN e[k] AS v",
+        "MATCH (n) WITH null AS e RETURN e[0] AS v",
+        "MATCH (n) WITH null AS l RETURN [x IN l | x] AS v",
+        "MATCH (n) WITH null AS l RETURN any(x IN l WHERE true) AS v",
+        "MATCH (n) WITH null AS l RETURN l[1..] AS v",
+        "MATCH (n) WITH null AS l RETURN reduce(s = 0, x IN l | s + x) AS v",
+    ] {
+        assert_eq!(
+            first(text),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            "{text}"
+        );
+    }
+    let fails = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .ok()
+            .and_then(|query| query.bind_parameters(&GqlParameters::new()).ok())
+            .is_none_or(|query| run(&query, &values, wide(), &mut || Ok(())).is_err())
+    };
+    for text in [
+        "MATCH (n) RETURN n.p[0] AS v",
+        "MATCH (n) WITH 1 AS l RETURN l[0] AS v",
+        "MATCH (n) WITH n.p AS l RETURN [x IN l | x] AS v",
+        "MATCH (n) RETURN [x IN 3 | x] AS v",
+        "MATCH (n) RETURN 1[0] AS v",
+    ] {
+        assert!(fails(text), "{text}");
+    }
+}
