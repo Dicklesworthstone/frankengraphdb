@@ -91,9 +91,10 @@ impl SpillAggregatePlan {
 /// The ordinary numeric definition and row evaluators own every semantic step.
 /// Fixed-hop edge expansions use the native awaitable join driver. Probes,
 /// OPTIONAL/variable-length expansion refuse before the host opens storage.
-/// Unary relational inputs retain every projection, filter, UNWIND, DISTINCT,
-/// ordering and window barrier before reduction. Values inputs use the native
-/// singleton without a graph source. This plan contains no result or authority.
+/// Relational inputs retain every projection, filter, UNWIND, binary set,
+/// DISTINCT, ordering and window barrier before reduction. Values inputs use the
+/// native singleton without a graph source. This plan contains no result or
+/// authority.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillAggregatePlan {
     Vertex(AsyncVertexSpillAggregatePlan),
@@ -152,9 +153,9 @@ impl AsyncSpillAggregatePlan {
 
     /// Compile the complete source-aware relation and its native numeric group
     /// definition. Zero-source Values/UNWIND pipelines require this owner;
-    /// graph-backed unary inputs retain the same stages and result clauses.
+    /// graph-backed and binary inputs retain the same stages and result clauses.
     /// Every descendant is admitted before I/O, including beneath LIMIT zero.
-    /// Unsupported joins, intermediate grouping and binary set nodes refuse.
+    /// Unsupported joins and intermediate grouping refuse.
     /// The private summary never becomes an executable single-graph source.
     pub fn compile_relation(
         aggregate: &PreparedGraphSetAggregate,

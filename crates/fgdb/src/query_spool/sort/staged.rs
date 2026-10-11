@@ -19,7 +19,7 @@ struct Limits {
 
 // Continue the original source's native allowance. Physical decode/encoding,
 // copying and sorting have their separate cumulative Work counter below.
-fn native_event(
+pub(super) fn native_event(
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     stats: &mut GlaExecutionStats,
@@ -499,7 +499,7 @@ where
     })
 }
 
-async fn copy<A, B>(
+pub(super) async fn copy<A, B>(
     input: &NativeResultSpool,
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,

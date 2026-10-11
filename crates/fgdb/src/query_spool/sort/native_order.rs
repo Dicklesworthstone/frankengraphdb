@@ -11,6 +11,8 @@ use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 #[path = "buffered_order.rs"]
 mod buffered;
 pub use buffered::PreparedBufferedOrder;
+#[path = "binary.rs"]
+mod binary;
 #[path = "staged.rs"]
 mod staged;
 

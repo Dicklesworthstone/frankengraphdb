@@ -8,6 +8,61 @@ use core::cmp::Ordering;
 mod cursor;
 pub(super) use cursor::SortedMerge;
 
+/// One decision over complete canonically ordered input heads. Emit steps
+/// consume the emitted head; every other named advance consumes and discards
+/// that head. No row is copied or retained by the decision itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpillSetMergeStep {
+    Done,
+    EmitLeft,
+    EmitRight,
+    EmitLeftAdvanceRight,
+    AdvanceLeft,
+    AdvanceRight,
+    AdvanceBoth,
+}
+
+/// The resident and external merge share this exact ALL/DISTINCT transition.
+/// DISTINCT inputs must each be unique before this function is driven; removing
+/// duplicates only from the output would implement EXCEPT DISTINCT incorrectly.
+pub(super) fn next_step<T: ?Sized, E, C, F>(
+    left: Option<&T>,
+    right: Option<&T>,
+    operation: GraphSetOperation,
+    quantifier: GraphSetQuantifier,
+    control: &mut C,
+    compare: &mut F,
+) -> Result<SpillSetMergeStep, E>
+where
+    C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+    F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
+{
+    control(GlaExecutionEvent::Work)?;
+    let order = match (left, right) {
+        (None, None) => return Ok(SpillSetMergeStep::Done),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(a), Some(b)) => compare(a, b, control)?,
+    };
+    Ok(match (operation, order) {
+        (GraphSetOperation::Union, Ordering::Less) => SpillSetMergeStep::EmitLeft,
+        (GraphSetOperation::Union, Ordering::Greater) => SpillSetMergeStep::EmitRight,
+        (GraphSetOperation::Union, Ordering::Equal) => {
+            if quantifier == GraphSetQuantifier::Distinct {
+                SpillSetMergeStep::EmitLeftAdvanceRight
+            } else {
+                SpillSetMergeStep::EmitLeft
+            }
+        }
+        (GraphSetOperation::Intersect, Ordering::Equal) => SpillSetMergeStep::EmitLeftAdvanceRight,
+        (GraphSetOperation::Intersect, Ordering::Less) => SpillSetMergeStep::AdvanceLeft,
+        (GraphSetOperation::Intersect, Ordering::Greater) => SpillSetMergeStep::AdvanceRight,
+        (GraphSetOperation::Except, Ordering::Less) => SpillSetMergeStep::EmitLeft,
+        (GraphSetOperation::Except, Ordering::Equal) => SpillSetMergeStep::AdvanceBoth,
+        (GraphSetOperation::Except, Ordering::Greater) => SpillSetMergeStep::AdvanceRight,
+    })
+}
+
 pub(super) fn sort<T, E, C, F>(rows: &mut [T], control: &mut C, compare: &mut F) -> Result<(), E>
 where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,

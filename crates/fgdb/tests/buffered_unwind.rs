@@ -1,4 +1,4 @@
-//! Graph-backed and source-free UNWIND through buffered external stages.
+//! Graph-backed and source-free UNWIND/set operations through external stages.
 //! Literal expectations describe the fixture, independently of either executor.
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
@@ -11,13 +11,13 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::scan_stream::ScanKind;
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphIntegerErrorKind,
-    GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
+    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue,
+    GraphIntegerErrorKind, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, VId,
+    CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::future::poll_fn;
 use std::io::{self, Cursor, Seek, SeekFrom};
@@ -123,6 +123,7 @@ async fn view(cx: &CommitCx, vfs: &MemVfs, pool: &MemoryPool) -> BufferedReadVie
 struct FileState {
     bytes: Cursor<Vec<u8>>,
     suspend_on: Option<&'static [u8]>,
+    suspend_also_on: Option<&'static [u8]>,
     suspended: bool,
 }
 #[derive(Clone, Default)]
@@ -155,6 +156,9 @@ impl AsyncWrite for File {
         if state
             .suspend_on
             .is_some_and(|marker| bytes.windows(marker.len()).any(|part| part == marker))
+            && state
+                .suspend_also_on
+                .is_none_or(|marker| bytes.windows(marker.len()).any(|part| part == marker))
         {
             state.suspended = true;
             Poll::Pending
@@ -455,6 +459,344 @@ fn source_free_rows_use_values_provenance_without_any_graph_record_allowance() {
         assert_eq!(view.buffer_stats(), buffer);
         assert_eq!(source_pool.used(), baseline);
         assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_binary_sets_preserve_six_bags_nested_values_and_all_source_provenance() {
+    let ((), report) = run_async_under_lab(0xc01d_4301, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let mut cases = Vec::new();
+        for (operation, expected) in [
+            (
+                "UNION ALL",
+                vec![
+                    None,
+                    None,
+                    None,
+                    Some(1),
+                    Some(2),
+                    Some(2),
+                    Some(2),
+                    Some(3),
+                ],
+            ),
+            ("UNION DISTINCT", vec![None, Some(1), Some(2), Some(3)]),
+            ("INTERSECT ALL", vec![None, Some(2)]),
+            ("INTERSECT DISTINCT", vec![None, Some(2)]),
+            ("EXCEPT ALL", vec![None, Some(1), Some(2)]),
+            ("EXCEPT DISTINCT", vec![Some(1)]),
+        ] {
+            cases.push((
+                format!(
+                    "(UNWIND [2,NULL,1,2,NULL] AS value RETURN value) {operation} (UNWIND [3,NULL,2] AS value RETURN value)"
+                ),
+                2,
+                0,
+                expected.into_iter().map(|n| vec![n.map_or_else(null, scalar)]).collect::<Vec<_>>(),
+            ));
+        }
+        for (text, cut, records, expected) in [
+            (
+                "MATCH (n) RETURN n.p AS value UNION ALL UNWIND [2,2] AS value RETURN value+0 AS value",
+                2,
+                3,
+                vec![
+                    vec![scalar(1)],
+                    vec![scalar(2)],
+                    vec![scalar(2)],
+                    vec![scalar(2)],
+                    vec![scalar(13)],
+                ],
+            ),
+            (
+                "UNWIND [8,10] AS value RETURN value+0 AS value EXCEPT ALL MATCH (a)-[r:R]->(b) RETURN r.p AS value",
+                2,
+                3,
+                vec![vec![scalar(10)]],
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS value UNION ALL (MATCH (a)-[r:R]->(b) RETURN r.p AS value UNION ALL RETURN 1 AS value)",
+                1,
+                6,
+                [1, 1, 2, 3, 7, 8, 9].map(|n| vec![scalar(n)]).to_vec(),
+            ),
+            (
+                "(UNWIND [4,1,4,2] AS value RETURN value ORDER BY value DESC LIMIT 2) EXCEPT ALL (UNWIND [4] AS value RETURN value)",
+                2,
+                0,
+                vec![vec![scalar(4)]],
+            ),
+            (
+                "((UNWIND [1,2,2] AS value RETURN value) EXCEPT ALL (UNWIND [2] AS value RETURN value)) UNION ALL (UNWIND [3] AS value RETURN value) ORDER BY value DESC SKIP 1 LIMIT 2",
+                2,
+                0,
+                vec![vec![scalar(2)], vec![scalar(1)]],
+            ),
+            (
+                "UNWIND [1,2] AS n WITH n WHERE n>1 UNWIND [n,n] AS value RETURN value UNION ALL UNWIND [3] AS value RETURN value",
+                2,
+                0,
+                vec![vec![scalar(2)], vec![scalar(2)], vec![scalar(3)]],
+            ),
+            (
+                "RETURN 1 AS a,2 AS b UNION DISTINCT RETURN 2 AS b,1 AS a",
+                2,
+                0,
+                vec![vec![scalar(1), scalar(2)]],
+            ),
+            (
+                "UNWIND [] AS value RETURN value EXCEPT ALL UNWIND [1] AS value RETURN value",
+                2,
+                0,
+                vec![],
+            ),
+        ] {
+            cases.push((text.to_owned(), cut, records, expected));
+        }
+        let mut nested = vec![
+            vec![null()],
+            vec![scalar(1)],
+            vec![GraphValue::Scalar(CanonicalScalar::Float(
+                CanonicalF64::new(1.0),
+            ))],
+            vec![GraphValue::List(
+                vec![scalar(1), scalar(2)].into_boxed_slice(),
+            )],
+            vec![
+                GraphValue::map(vec![
+                    ("a".into(), scalar(1)),
+                    (
+                        "z".into(),
+                        GraphValue::List(vec![scalar(2), null()].into_boxed_slice()),
+                    ),
+                ])
+                .unwrap(),
+            ],
+        ];
+        nested.sort();
+        cases.push((
+            "UNWIND [1,1.0,NULL,{z:[2,NULL],a:1},{a:1,z:[2,NULL]},[1,2]] AS value RETURN value UNION DISTINCT UNWIND [1.0,NULL,{a:1,z:[2,NULL]}] AS value RETURN value".to_owned(),
+            2,
+            0,
+            nested,
+        ));
+        for (text, cut, records, expected) in cases {
+            let prepared = prepare(&text, &GqlParameters::new());
+            let before = view.buffer_stats();
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(records, expected.len() as u64, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    100,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), ScanKind::Set, "{text}");
+            assert_eq!(spool.snapshot_seq(), CommitSeq(cut), "{text}");
+            assert_eq!(spool.row_stats().snapshot_records, records, "{text}");
+            assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            if records == 0 {
+                assert_eq!(view.buffer_stats(), before, "{text}: graph-free operands");
+            }
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_binary_allowances_accumulate_across_children_before_the_final_page() {
+    let ((), report) = run_async_under_lab(0xc01d_4302, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let prepared = prepare(
+            "MATCH (n) RETURN n.p AS value UNION ALL MATCH (m) RETURN m.p AS value ORDER BY value DESC LIMIT 1",
+            &GqlParameters::new(),
+        );
+        let mut exact = None;
+        for trial in 0..7 {
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let mut budget = GqlQueryPolicy::new(if trial == 2 { 5 } else { 6 }, 1, WORK, WORK);
+            let mut physical = WORK;
+            if let Some((native, entries, sort)) = exact {
+                budget.evaluator.max_work_units = native - u64::from(trial == 3);
+                budget.evaluator.max_scratch_entries = entries - u64::from(trial == 4);
+                physical = sort - u64::from(trial == 5);
+            }
+            let result = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    budget,
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    if trial == 6 { 5 } else { 6 },
+                    physical,
+                )
+                .await;
+            if trial < 2 {
+                let (spool, work) =
+                    result.unwrap_or_else(|error| panic!("trial {trial}: {error:?}"));
+                assert_eq!(spool.kind(), ScanKind::Set);
+                assert_eq!(spool.row_stats().snapshot_records, 6);
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    vec![vec![scalar(13)]]
+                );
+                let stats = spool.evaluator_stats();
+                let measured = (stats.work_units, stats.scratch_entries, work);
+                if let Some(prior) = exact {
+                    assert_eq!(prior, measured);
+                }
+                exact = Some(measured);
+            } else {
+                let error = result.unwrap_err();
+                match trial {
+                    2 => assert!(
+                        matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                        if matches!(**inner, GqlQueryError::Rows(ref limit)
+                        if limit.dimension == GqlBudgetDimension::SnapshotRecords && limit.limit == 5 && limit.observed == 6)),
+                        "{error:?}"
+                    ),
+                    3 | 4 => assert!(
+                        matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                        if matches!(**inner, GqlQueryError::Evaluator(_))),
+                        "{error:?}"
+                    ),
+                    5 => assert!(
+                        matches!(error, NativeSpoolError::SortWorkLimit { .. }),
+                        "{error:?}"
+                    ),
+                    6 => assert!(
+                        matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                        if matches!(**inner, GqlQueryError::Rows(ref limit)
+                        if limit.dimension == GqlBudgetDimension::ResultRows && limit.limit == 5 && limit.observed == 6)),
+                        "{error:?}"
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_binary_zero_pages_preserve_both_child_failures_and_admission() {
+    let ((), report) = run_async_under_lab(0xc01d_4303, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let before = view.buffer_stats();
+        for (text, input_limit, expected) in [
+            (
+                "(UNWIND [] AS value RETURN value+0 AS value) INTERSECT ALL (UNWIND [1,0] AS n RETURN 1/n AS value) LIMIT 0",
+                3,
+                Some(GraphIntegerErrorKind::DivisionByZero),
+            ),
+            (
+                "(UNWIND [] AS value RETURN value) EXCEPT DISTINCT (UNWIND [[1],2] AS items UNWIND items AS item RETURN item AS value) LIMIT 0",
+                3,
+                Some(GraphIntegerErrorKind::IncompatibleOperands),
+            ),
+            (
+                "(UNWIND [1,0] AS n RETURN 1/n AS value) UNION ALL (UNWIND [[1],2] AS items UNWIND items AS item RETURN item+0 AS value) LIMIT 0",
+                3,
+                Some(GraphIntegerErrorKind::DivisionByZero),
+            ),
+            (
+                "(UNWIND [1,2] AS value RETURN value) INTERSECT ALL (UNWIND [3,4] AS value RETURN value) LIMIT 0",
+                3,
+                None,
+            ),
+        ] {
+            let prepared = prepare(text, &GqlParameters::new());
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, 0, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    input_limit,
+                    WORK,
+                )
+                .await
+                .unwrap_err();
+            if let Some(kind) = expected {
+                assert!(
+                    matches!(error, NativeSpoolError::SetExecution(
+                    GraphSetExecutionError::Projection { row: 1, error, .. }
+                ) if error.kind == kind),
+                    "{text}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                    if matches!(**inner, GqlQueryError::Rows(ref limit)
+                    if limit.limit == 3 && limit.observed == 4)),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(view.buffer_stats(), before);
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
         drop(view);
         assert_eq!(source_pool.used(), 0);
     });
@@ -919,7 +1261,9 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
         let payload = GraphValue::Scalar(
             CanonicalScalar::ucs_basic_text(&"x".repeat(PAYLOAD_BYTES)).unwrap(),
         );
-        for graph_backed in [true, false] {
+        for shape in 0..3 {
+            let graph_backed = shape == 0;
+            let binary = shape == 2;
             let mut params = GqlParameters::new()
                 .with_list("items", (0..ITEMS as i64).map(scalar).collect())
                 .unwrap();
@@ -929,17 +1273,22 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
                 params = params
                     .with_map("document", vec![("payload".into(), payload.clone())])
                     .unwrap();
-                "WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC"
+                if binary {
+                    "(WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item) UNION ALL (WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item) ORDER BY item DESC"
+                } else {
+                    "WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC"
+                }
             };
             let prepared = prepare(text, &params);
             drop(params);
             let buffer = view.buffer_stats();
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, _) = file(&cx, &spill_pool).await;
+            let output_rows = ITEMS as u64 * if binary { 2 } else { 1 };
             let budget = if graph_backed {
-                policy(ITEMS as u64)
+                policy(output_rows)
             } else {
-                GqlQueryPolicy::new(0, ITEMS as u64, WORK, WORK)
+                GqlQueryPolicy::new(0, output_rows, WORK, WORK)
             };
             let (spool, _) = prepared
                 .spool_in_view(
@@ -952,26 +1301,35 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
                     512,
                     1024,
                     32 * 1024,
-                    ITEMS as u64,
+                    output_rows,
                     WORK,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{text}: {error:?}"));
-            assert_eq!(spool.row_count(), ITEMS as u64);
+            assert_eq!(spool.row_count(), output_rows);
             assert!(
                 scratch.stats().reserved_bytes + destination.stats().reserved_bytes
                     > SCRATCH_BYTES as u64
             );
             if !graph_backed {
-                assert_eq!(spool.kind(), ScanKind::Values);
+                assert_eq!(
+                    spool.kind(),
+                    if binary {
+                        ScanKind::Set
+                    } else {
+                        ScanKind::Values
+                    }
+                );
                 assert_eq!(spool.row_stats().snapshot_records, 0);
                 assert_eq!(view.buffer_stats(), buffer);
             }
             let mut reader = spool.reader(&mut destination);
             for value in (0..ITEMS as i64).rev() {
-                let bytes = reader.next_row(&cx).await.unwrap().unwrap();
-                let row = GraphValueRow::decode_canonical(bytes.as_ref()).unwrap();
-                assert_eq!(row.values(), &[payload.clone(), scalar(value)]);
+                for _ in 0..if binary { 2 } else { 1 } {
+                    let bytes = reader.next_row(&cx).await.unwrap().unwrap();
+                    let row = GraphValueRow::decode_canonical(bytes.as_ref()).unwrap();
+                    assert_eq!(row.values(), &[payload.clone(), scalar(value)]);
+                }
             }
             assert!(reader.next_row(&cx).await.unwrap().is_none());
             drop(reader);
@@ -1040,6 +1398,84 @@ fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations(
         assert!([&scratch, &destination][blocked].is_poisoned());
         assert_eq!(source_pool.used(), baseline);
         assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dropping_binary_execution_during_right_child_or_merge_releases_both_sides() {
+    const LEFT: &str = "set-left-merge-witness";
+    const RIGHT: &str = "set-right-merge-witness";
+    let ((), report) = run_async_under_lab(0xc01d_4305, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for during_merge in [false, true] {
+            let text = if during_merge {
+                format!("RETURN '{LEFT}' AS value UNION ALL RETURN '{RIGHT}' AS value")
+            } else {
+                format!(
+                    "MATCH (n) WHERE n.p=1 RETURN n.q AS value UNION ALL RETURN '{}' AS value",
+                    RIGHT.repeat(16)
+                )
+            };
+            let prepared = prepare(&text, &GqlParameters::new());
+            let (mut scratch, a) = file(&cx, &spill_pool).await;
+            let (mut destination, b) = file(&cx, &spill_pool).await;
+            for backing in [&a, &b] {
+                let mut state = backing.0.lock().unwrap();
+                state.suspend_on = Some(RIGHT.as_bytes());
+                // No child contains BOTH markers. The first physical page
+                // containing both can only be the binary merge output; no
+                // fragile sorter pass or write-occurrence count is assumed.
+                state.suspend_also_on = during_merge.then_some(LEFT.as_bytes());
+            }
+            let mut future = prepared.spool_in_view(
+                &mut view,
+                &cx,
+                if during_merge {
+                    GqlQueryPolicy::new(0, 2, WORK, WORK)
+                } else {
+                    policy(2)
+                },
+                &mut scratch,
+                &mut destination,
+                1,
+                512,
+                if during_merge { 1024 } else { 63 },
+                32 * 1024,
+                3,
+                WORK,
+            );
+            let blocked = poll_fn(|task| {
+                let result = future.as_mut().poll(task);
+                let suspended = [a.0.lock().unwrap().suspended, b.0.lock().unwrap().suspended];
+                if let Some(index) = suspended.iter().position(|&seen| seen) {
+                    assert!(result.is_pending());
+                    assert_eq!(suspended.iter().filter(|&&seen| seen).count(), 1);
+                    Poll::Ready(index)
+                } else {
+                    assert!(
+                        result.is_pending(),
+                        "binary suspension must be reached: {text}"
+                    );
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(spill_pool.used() > 0);
+            drop(future);
+            assert!([&scratch, &destination][blocked].is_poisoned());
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
         drop(view);
         assert_eq!(source_pool.used(), 0);
     });

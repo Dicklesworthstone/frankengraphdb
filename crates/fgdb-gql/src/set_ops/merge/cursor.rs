@@ -5,7 +5,7 @@
 //! spill-backed. Comparisons and moves use the caller's existing cumulative
 //! control; retaining or delivering a row is charged by its actual consumer.
 
-use super::{GraphSetOperation, GraphSetQuantifier, sort, unique};
+use super::{GraphSetOperation, GraphSetQuantifier, SpillSetMergeStep, next_step, sort, unique};
 use crate::GlaExecutionEvent;
 use core::cmp::Ordering;
 use std::iter::Peekable;
@@ -88,41 +88,32 @@ impl<T> SortedMerge<T> {
         F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
     {
         loop {
-            control(GlaExecutionEvent::Work)?;
-            let order = match (inputs.left.peek(), inputs.right.peek()) {
-                (None, None) => return Ok(None),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (Some(a), Some(b)) => compare(a, b, control)?,
-            };
-            let next = match (operation, order) {
-                (GraphSetOperation::Union, Ordering::Less) => inputs.left.next(),
-                (GraphSetOperation::Union, Ordering::Greater) => inputs.right.next(),
-                (GraphSetOperation::Union, Ordering::Equal) => {
-                    if quantifier == GraphSetQuantifier::Distinct {
-                        let _ = inputs.right.next();
-                    }
-                    inputs.left.next()
-                }
-                (GraphSetOperation::Intersect, Ordering::Equal) => {
+            let step = next_step(
+                inputs.left.peek(),
+                inputs.right.peek(),
+                operation,
+                quantifier,
+                control,
+                compare,
+            )?;
+            let next = match step {
+                SpillSetMergeStep::Done => return Ok(None),
+                SpillSetMergeStep::EmitLeft => inputs.left.next(),
+                SpillSetMergeStep::EmitRight => inputs.right.next(),
+                SpillSetMergeStep::EmitLeftAdvanceRight => {
                     let _ = inputs.right.next();
                     inputs.left.next()
                 }
-                (GraphSetOperation::Intersect, Ordering::Less) => {
+                SpillSetMergeStep::AdvanceLeft => {
                     let _ = inputs.left.next();
                     None
                 }
-                (GraphSetOperation::Intersect, Ordering::Greater) => {
+                SpillSetMergeStep::AdvanceRight => {
                     let _ = inputs.right.next();
                     None
                 }
-                (GraphSetOperation::Except, Ordering::Less) => inputs.left.next(),
-                (GraphSetOperation::Except, Ordering::Equal) => {
+                SpillSetMergeStep::AdvanceBoth => {
                     let _ = inputs.left.next();
-                    let _ = inputs.right.next();
-                    None
-                }
-                (GraphSetOperation::Except, Ordering::Greater) => {
                     let _ = inputs.right.next();
                     None
                 }

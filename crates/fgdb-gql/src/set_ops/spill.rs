@@ -1,10 +1,12 @@
-//! Physical admission for external unary relations. Do not fuse across a
-//! stage: the child's complete evaluation and selected row order precede the
-//! parent's expressions, including when a later stage requests LIMIT zero.
+//! Physical admission for external relations. Do not fuse across a stage:
+//! every child's complete evaluation and selected row order precede its
+//! parent's operation, including when a later stage requests LIMIT zero.
 
+pub use super::merge::SpillSetMergeStep;
 use super::{
-    GraphSetColumnType, GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier,
-    GraphSetValue, PreparedGraphSet, SetNode, filter::RowPredicate, projection,
+    GraphSetColumnType, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
+    GraphSetQuantifier, GraphSetValue, PreparedGraphSet, SetNode, filter::RowPredicate, merge,
+    projection,
 };
 use crate::GlaExecutionEvent;
 use crate::algebra::{GlaOperator, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
@@ -16,8 +18,9 @@ use core::convert::Infallible;
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
-    /// Only scope, selection, projection and UNWIND over one native graph or
-    /// singleton leaf are admitted. This ordinal is the depth from the root.
+    /// Scope, selection, projection, UNWIND and binary set operations over
+    /// native graph or singleton leaves are admitted. This ordinal is the
+    /// depth from the root, including across binary operands.
     Unsupported {
         depth: usize,
     },
@@ -30,7 +33,7 @@ impl core::fmt::Display for SpillSetBuildError {
             Self::Unsupported { depth } => {
                 write!(
                     f,
-                    "external unary relation has an unsupported node at depth {depth}"
+                    "external relation has an unsupported node at depth {depth}"
                 )
             }
             Self::Vertex(error) => error.fmt(f),
@@ -42,6 +45,7 @@ impl core::error::Error for SpillSetBuildError {}
 
 /// The ordinary async sort-input compiler owns all graph predicates, captures
 /// and projection. Values owns the native singleton and opens no graph source.
+/// Binary owns both complete operand plans and their checked set semantics.
 /// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillSetSourcePlan {
@@ -49,6 +53,7 @@ pub enum AsyncSpillSetSourcePlan {
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
+    Binary(SpillSetBinaryPlan),
 }
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
@@ -56,7 +61,97 @@ impl AsyncSpillSetSourcePlan {
             Self::Values(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
+            Self::Binary(_) => ScanKind::Set,
         }
+    }
+}
+
+/// A compiler-owned binary relation, including both complete child plans.
+///
+/// Execute the complete left child, then the complete right child, even if
+/// either returns no rows or a parent asks for LIMIT zero. Only after both
+/// children succeed, sort each completed child by canonical whole-row order
+/// (NULL first). DISTINCT additionally deduplicates EACH child before merging;
+/// output-only deduplication does not implement EXCEPT DISTINCT. Operand order
+/// and pagination belong to the child and must run before this canonical sort.
+///
+/// The merge emits canonical whole-row order. Its enclosing plan's first stage
+/// then applies the binary node's own ORDER BY/SKIP/LIMIT before any parent
+/// stage. Column names belong to the left child; position and value domains of
+/// both children were checked by the native relational binder.
+#[derive(Clone)]
+pub struct SpillSetBinaryPlan {
+    left: Box<AsyncSpillSetPlan>,
+    right: Box<AsyncSpillSetPlan>,
+    operation: GraphSetOperation,
+    quantifier: GraphSetQuantifier,
+    columns: Vec<String>,
+    types: Vec<GraphSetColumnType>,
+}
+
+impl core::fmt::Debug for SpillSetBinaryPlan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillSetBinaryPlan")
+            .field("operation", &self.operation)
+            .field("quantifier", &self.quantifier)
+            .field("columns", &self.columns.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl SpillSetBinaryPlan {
+    pub fn left(&self) -> &AsyncSpillSetPlan {
+        &self.left
+    }
+    pub fn right(&self) -> &AsyncSpillSetPlan {
+        &self.right
+    }
+    pub fn operation(&self) -> GraphSetOperation {
+        self.operation
+    }
+    pub fn quantifier(&self) -> GraphSetQuantifier {
+        self.quantifier
+    }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+
+    /// Decide one step using the SAME transition as the native resident merge.
+    /// The caller owns at most one current head per sorted child and may use
+    /// canonical encoded rows without allocating a decoded copy. The comparator
+    /// must implement complete native canonical row ordering, including value
+    /// type identity and NULL equality, and charge its own work through control.
+    /// An explicit ORDER BY comparator or raw framing-byte order is invalid.
+    ///
+    /// This charges Work before comparison/decision, never ScratchEntry or a
+    /// final ResultRow. The host uses its original cumulative query allowance,
+    /// reserves payload bytes before pulling heads, and retains each reservation
+    /// through any awaited append. A refusal is terminal for the host's tentative
+    /// merge; no output handle may escape. Follow a returned advance exactly once
+    /// and call again until Done, including the unselected suffix of either child.
+    pub fn next_with_control<T: ?Sized, E, C, F>(
+        &self,
+        left: Option<&T>,
+        right: Option<&T>,
+        control: &mut C,
+        compare: &mut F,
+    ) -> Result<SpillSetMergeStep, E>
+    where
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        F: FnMut(&T, &T, &mut C) -> Result<core::cmp::Ordering, E>,
+    {
+        merge::next_step(
+            left,
+            right,
+            self.operation,
+            self.quantifier,
+            control,
+            compare,
+        )
     }
 }
 
@@ -94,13 +189,15 @@ struct GraphSourceMetadata {
     tail: ScanSortTail,
 }
 
-/// One bound graph or singleton source followed by native relational barriers.
+/// A bound source or binary relation followed by native relational barriers.
 ///
 /// First consume the complete source and apply its source_tail(), when present,
 /// including hidden-column removal. Values emits one zero-column identity tuple
-/// and has no graph pattern or scan tail. Then execute stages() in order. The
-/// first graph stage canonicalizes visible source tuples as native Set admission
-/// does; a graph leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
+/// and has no graph pattern or scan tail. Binary executes both complete child
+/// plans and merges them according to its native contract, also without a graph
+/// pattern or scan tail. Then execute stages() in order. The first graph stage
+/// canonicalizes visible source tuples as native Set admission does; a graph
+/// leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
 /// No source, expression, clause or unsupported descendant is erased even when
 /// the final count is zero. Bound plans contain no storage or query authority.
 #[derive(Clone)]
@@ -111,13 +208,27 @@ pub struct AsyncSpillSetPlan {
 }
 impl AsyncSpillSetPlan {
     pub fn compile(query: &PreparedGraphSet) -> Result<Self, SpillSetBuildError> {
+        Self::compile_at(query, 0)
+    }
+
+    fn compile_at(query: &PreparedGraphSet, depth: usize) -> Result<Self, SpillSetBuildError> {
         let mut stages = Vec::new();
-        let Some(pattern) = compile_stages(query, 0, &mut stages)? else {
-            return Ok(Self {
-                source: AsyncSpillSetSourcePlan::Values(SpillSetValuesPlan { _private: () }),
-                graph: None,
-                stages,
-            });
+        let pattern = match compile_stages(query, depth, &mut stages)? {
+            CompiledSource::Values => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Values(SpillSetValuesPlan { _private: () }),
+                    graph: None,
+                    stages,
+                });
+            }
+            CompiledSource::Binary(binary) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Binary(binary),
+                    graph: None,
+                    stages,
+                });
+            }
+            CompiledSource::Pattern(pattern) => pattern,
         };
         let (source, source_tail) = if matches!(
             pattern.plan().operators().first(),
@@ -161,15 +272,33 @@ impl AsyncSpillSetPlan {
         &self.source
     }
     pub fn source_columns(&self) -> &[String] {
-        self.graph
-            .as_ref()
-            .map_or(&[], |graph| graph.pattern.columns())
+        match &self.source {
+            AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
+            _ => self
+                .graph
+                .as_ref()
+                .map_or(&[], |graph| graph.pattern.columns()),
+        }
     }
     pub fn source_tail(&self) -> Option<&ScanSortTail> {
         self.graph.as_ref().map(|graph| &graph.tail)
     }
     pub fn stages(&self) -> &[SpillSetStage] {
         &self.stages
+    }
+    /// Total bounded physical barriers, including both binary descendants and
+    /// their two canonicalization passes plus merge. Hosts use this finite count
+    /// to admit append-only scratch metadata; it never raises byte or work caps.
+    pub fn stage_count(&self) -> usize {
+        let descendants = match &self.source {
+            AsyncSpillSetSourcePlan::Binary(binary) => binary
+                .left()
+                .stage_count()
+                .saturating_add(binary.right().stage_count())
+                .saturating_add(3),
+            _ => 0,
+        };
+        self.stages.len().saturating_add(descendants)
     }
     pub fn columns(&self) -> &[String] {
         self.stages
@@ -404,11 +533,17 @@ fn compile_stages<'a>(
     query: &'a PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
-) -> Result<Option<&'a PreparedGraphPattern<GraphValueRow>>, SpillSetBuildError> {
+) -> Result<CompiledSource<'a>, SpillSetBuildError> {
     let (pattern, input, operation, canonical, distinct) = match &query.node {
-        SetNode::Values => (None, Vec::new(), Operation::Identity, false, false),
+        SetNode::Values => (
+            CompiledSource::Values,
+            Vec::new(),
+            Operation::Identity,
+            false,
+            false,
+        ),
         SetNode::Pattern(pattern) => (
-            Some(pattern),
+            CompiledSource::Pattern(pattern),
             query.types.clone(),
             Operation::Identity,
             true,
@@ -448,11 +583,29 @@ fn compile_stages<'a>(
             false,
             false,
         ),
+        SetNode::Binary {
+            operation,
+            quantifier,
+            left,
+            right,
+        } => (
+            CompiledSource::Binary(SpillSetBinaryPlan {
+                left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
+                right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                operation: *operation,
+                quantifier: *quantifier,
+                columns: query.columns.clone(),
+                types: query.types.clone(),
+            }),
+            query.types.clone(),
+            Operation::Identity,
+            false,
+            false,
+        ),
         SetNode::Aggregate(_)
         | SetNode::ProcedureCall(_)
         | SetNode::CrossJoin { .. }
-        | SetNode::Join { .. }
-        | SetNode::Binary { .. } => return Err(SpillSetBuildError::Unsupported { depth }),
+        | SetNode::Join { .. } => return Err(SpillSetBuildError::Unsupported { depth }),
     };
     let order = if !query.order.is_empty() {
         Some(query.order.clone())
@@ -470,4 +623,10 @@ fn compile_stages<'a>(
         count: query.count,
     });
     Ok(pattern)
+}
+
+enum CompiledSource<'a> {
+    Values,
+    Pattern(&'a PreparedGraphPattern<GraphValueRow>),
+    Binary(SpillSetBinaryPlan),
 }

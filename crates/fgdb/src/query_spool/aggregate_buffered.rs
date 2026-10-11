@@ -272,7 +272,7 @@ impl PreparedBufferedAggregate {
     /// Hosts include these append-only passes in scratch metadata admission.
     pub fn stage_count(&self) -> usize {
         match &self.plan {
-            AsyncSpillAggregatePlan::Relation { input, .. } => input.stages().len(),
+            AsyncSpillAggregatePlan::Relation { input, .. } => input.stage_count(),
             _ => 0,
         }
     }

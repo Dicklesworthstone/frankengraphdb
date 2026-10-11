@@ -718,6 +718,114 @@ fn buffered_external_values_preserve_native_rows_and_complete_group_output_contr
 }
 
 #[test]
+fn buffered_external_binary_sets_match_native_frames_and_remove_all_scratch() {
+    let ((), report) = run_async_under_lab(0xc01d_4304, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        let mut cases = Vec::new();
+        for (operation, count) in [
+            ("UNION ALL", 8),
+            ("UNION DISTINCT", 4),
+            ("INTERSECT ALL", 2),
+            ("INTERSECT DISTINCT", 2),
+            ("EXCEPT ALL", 3),
+            ("EXCEPT DISTINCT", 1),
+        ] {
+            cases.push((format!(
+                "(UNWIND [2,NULL,1,2,NULL] AS value RETURN value) {operation} (UNWIND [3,NULL,2] AS value RETURN value)"
+            ), 2, 0, count));
+        }
+        for (text, cut, records, count) in [
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS value UNION ALL MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY value DESC LIMIT 2",
+                1,
+                6,
+                2,
+            ),
+            (
+                "MATCH (n) RETURN {value:n.p} AS value UNION ALL UNWIND [{value:2},{value:2}] AS value RETURN value",
+                2,
+                3,
+                5,
+            ),
+            (
+                "((UNWIND [1,2,2] AS value RETURN value) EXCEPT ALL (UNWIND [2] AS value RETURN value)) UNION ALL (UNWIND [3] AS value RETURN value) ORDER BY value DESC SKIP 1 LIMIT 2",
+                2,
+                0,
+                2,
+            ),
+            (
+                "RETURN 1 AS a,2 AS b UNION DISTINCT RETURN 2 AS b,1 AS a",
+                2,
+                0,
+                1,
+            ),
+            (
+                "RETURN 1 AS value UNION ALL RETURN 2 AS value LIMIT 0",
+                2,
+                0,
+                0,
+            ),
+        ] {
+            cases.push((text.to_owned(), cut, records, count));
+        }
+        for (text, cut, records, count) in cases {
+            let mut options = spill_options(&directory, &text);
+            // Resident graph scans use their existing broader record census;
+            // the bounded source must charge only its actual cursor records.
+            let eager = resident
+                .query(
+                    &cx,
+                    &text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let mut expected = Vec::new();
+            okay(crate::render(eager, cut, "rows", true, &mut expected));
+            assert_eq!(rows(&expected).len(), count, "{text}");
+            options.budget.records = Some(records);
+            options.budget.rows = Some(count as u64);
+            let prepared = okay(prepare_query(&options));
+            let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                pool.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let before = view.buffer_stats();
+            let mut output = Vec::new();
+            okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            let output = std::str::from_utf8(&output).unwrap();
+            assert!(
+                output.starts_with(&format!(
+                    r#"{{"v":1,"event":"columns","stream":true,"seq":{cut},"#
+                )),
+                "{text}: {output}"
+            );
+            assert!(output.contains(r#""event":"result""#), "{text}");
+            if records == 0 {
+                assert_eq!(view.buffer_stats(), before, "{text}");
+            }
+            no_scratch(&directory);
+            drop(view);
+            assert_eq!(pool.used(), 0, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn buffered_external_admission_limits_and_late_expressions_never_publish_partial_results() {
     let ((), report) = run_async_under_lab(0x636c_7511, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -729,7 +837,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         for text in [
             "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS result LIMIT 0",
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
-            "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m) RETURN {value:m.p} AS value LIMIT 0",
+            "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m),(z) RETURN {value:m.p} AS value LIMIT 0",
         ] {
             let options = spill_options(&directory, text);
             let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
@@ -833,6 +941,18 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             (
                 "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 3 RETURN item LIMIT 0",
                 None,
+            ),
+            (
+                "(UNWIND [] AS value RETURN value+0 AS value) INTERSECT ALL (UNWIND [1,0] AS n RETURN 1/n AS value) LIMIT 0",
+                None,
+            ),
+            (
+                "(RETURN 1 AS value) EXCEPT DISTINCT (UNWIND [[1],2] AS items UNWIND items AS item RETURN item+0 AS value) LIMIT 0",
+                None,
+            ),
+            (
+                "(UNWIND [1,2] AS value RETURN value) INTERSECT ALL (UNWIND [3,4] AS value RETURN value) LIMIT 0",
+                Some(("--max-spill-rows", "3")),
             ),
             (
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",

@@ -6,7 +6,9 @@ use crate::BufferedReadView;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
 };
-use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetValuesPlan};
+use fgdb_gql::spill_set::{
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBinaryPlan, SpillSetValuesPlan,
+};
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
@@ -14,6 +16,7 @@ use fgdb_types::CanonicalScalarResolver;
 #[derive(Clone)]
 enum Input {
     Values(SpillSetValuesPlan),
+    Binary(SpillSetBinaryPlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
     Join(AsyncEdgeJoinPlan, ScanSortTail),
@@ -44,6 +47,10 @@ impl PreparedNativeRead {
     /// Native unary Project/Filter/Scope/UNWIND relations preserve every
     /// expansion, canonicalization, DISTINCT, order and window through external
     /// stages. UNWIND retains one input/list and one expanded row at a time.
+    /// UNION/INTERSECT/EXCEPT, ALL and DISTINCT, complete both operands before
+    /// canonical external merging; every child window and the shared native
+    /// occurrence/equality laws survive composition. All child sources share
+    /// the same snapshot and cumulative record/evaluator/physical allowances.
     /// Probes, OPTIONAL/variable-length paths and relational joins refuse.
     /// Numeric aggregate plans have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
@@ -145,12 +152,12 @@ impl PreparedBufferedOrder {
         }
     }
 
-    /// Number of native relational barriers after graph-source evaluation.
+    /// Number of native relational and binary canonicalization/merge barriers.
     /// Every barrier has finite external sort/window/copy work; hosts may use
     /// this bound to admit scratch metadata before opening the database.
     pub fn stage_count(&self) -> usize {
         match &self.input {
-            Input::Set(plan) => plan.stages().len(),
+            Input::Set(plan) => plan.stage_count(),
             _ => 0,
         }
     }
@@ -256,6 +263,9 @@ impl PreparedBufferedOrder {
                             AsyncSpillSetSourcePlan::Values(source) => {
                                 Input::Values(source.clone())
                             }
+                            AsyncSpillSetSourcePlan::Binary(source) => {
+                                Input::Binary(source.clone())
+                            }
                             AsyncSpillSetSourcePlan::Vertex(source) => {
                                 Input::Vertex(source.clone(), tail()?)
                             }
@@ -302,6 +312,25 @@ impl PreparedBufferedOrder {
                     )
                     .await
                 })
+            }
+            Input::Binary(plan) => {
+                let plan = plan.clone();
+                Box::pin(super::binary::execute(
+                    plan,
+                    as_of,
+                    view,
+                    cx,
+                    input_policy,
+                    scratch,
+                    destination,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                    resolver,
+                ))
             }
             Input::Values(plan) => {
                 let plan = plan.clone();

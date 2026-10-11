@@ -1,5 +1,5 @@
-//! Physical unary stages must preserve the native relation, including every
-//! inner page, canonicalization and complete-input failure barrier. This small
+//! Physical stages must preserve the native relation, including every binary
+//! bag, inner page, canonicalization and complete-input failure barrier. This small
 //! materialized host tests the public semantic seam, not external I/O bounds.
 
 use core::cmp::Ordering;
@@ -11,11 +11,12 @@ use fgdb_gql::spill_set::{
 };
 use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphIntegerErrorKind, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
-    GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
-    PreparedGraphSetText, PreparedGraphText,
+    GraphAggregate, GraphIntegerErrorKind, GraphSetExecutionError, GraphSetOperation,
+    GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, EId, VId};
+use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
@@ -168,6 +169,13 @@ fn staged(
     query: &PreparedGraphSet,
 ) -> Result<Vec<GraphValueRow>, SpillSetRowError<()>> {
     let plan = AsyncSpillSetPlan::compile(query).unwrap();
+    staged_plan(graph, &plan)
+}
+
+fn staged_plan(
+    graph: &Graph,
+    plan: &AsyncSpillSetPlan,
+) -> Result<Vec<GraphValueRow>, SpillSetRowError<()>> {
     // A graph source completes its own ordered/page/visible contract first.
     // Values starts with one unit occurrence and never opens a graph source.
     let mut rows = match plan.source() {
@@ -179,6 +187,41 @@ fn staged(
             while let Some((row, next)) = cursor.next_with_control(&mut |_| Ok::<_, ()>(()))? {
                 rows.push(row);
                 cursor = next;
+            }
+            rows
+        }
+        AsyncSpillSetSourcePlan::Binary(binary) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), binary.columns());
+            // Complete both children before any parent operation, then use
+            // independent count arithmetic, not the production merge driver.
+            let left = staged_plan(graph, binary.left())?;
+            let right = staged_plan(graph, binary.right())?;
+            let mut counts = BTreeMap::<GraphValueRow, (usize, usize)>::new();
+            for row in left {
+                counts.entry(row).or_default().0 += 1;
+            }
+            for row in right {
+                counts.entry(row).or_default().1 += 1;
+            }
+            let mut rows = Vec::new();
+            for (row, (mut left, mut right)) in counts {
+                if binary.quantifier() == GraphSetQuantifier::Distinct {
+                    left = usize::from(left != 0);
+                    right = usize::from(right != 0);
+                }
+                let count = match binary.operation() {
+                    GraphSetOperation::Union
+                        if binary.quantifier() == GraphSetQuantifier::Distinct =>
+                    {
+                        usize::from(left + right != 0)
+                    }
+                    GraphSetOperation::Union => left + right,
+                    GraphSetOperation::Intersect => left.min(right),
+                    GraphSetOperation::Except => left.saturating_sub(right),
+                };
+                rows.extend(std::iter::repeat_n(row, count));
             }
             rows
         }
@@ -506,6 +549,227 @@ fn source_free_complete_child_failures_precede_parent_expressions_and_empty_page
 }
 
 #[test]
+fn binary_sources_preserve_all_six_bag_laws_and_canonical_null_equality() {
+    let graph = Graph::sample();
+    for (operation, quantifier, expected) in [
+        (
+            GraphSetOperation::Union,
+            GraphSetQuantifier::All,
+            vec![
+                None,
+                None,
+                None,
+                Some(1),
+                Some(2),
+                Some(2),
+                Some(2),
+                Some(3),
+            ],
+        ),
+        (
+            GraphSetOperation::Union,
+            GraphSetQuantifier::Distinct,
+            vec![None, Some(1), Some(2), Some(3)],
+        ),
+        (
+            GraphSetOperation::Intersect,
+            GraphSetQuantifier::All,
+            vec![None, Some(2)],
+        ),
+        (
+            GraphSetOperation::Intersect,
+            GraphSetQuantifier::Distinct,
+            vec![None, Some(2)],
+        ),
+        (
+            GraphSetOperation::Except,
+            GraphSetQuantifier::All,
+            vec![None, Some(1), Some(2)],
+        ),
+        (
+            GraphSetOperation::Except,
+            GraphSetQuantifier::Distinct,
+            vec![Some(1)],
+        ),
+    ] {
+        let query = prepare("UNWIND [2,NULL,1,2,NULL] AS value RETURN value")
+            .combine(
+                operation,
+                quantifier,
+                prepare("UNWIND [3,NULL,2] AS value RETURN value"),
+            )
+            .unwrap();
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        let AsyncSpillSetSourcePlan::Binary(binary) = plan.source() else {
+            panic!("binary source must retain both operands");
+        };
+        assert_eq!(binary.operation(), operation);
+        assert_eq!(binary.quantifier(), quantifier);
+        assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
+        assert_eq!(
+            plan.stage_count(),
+            plan.stages().len() + binary.left().stage_count() + binary.right().stage_count() + 3
+        );
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|value| {
+                row(vec![value.map_or_else(
+                    || GraphValue::Scalar(CanonicalScalar::Null),
+                    scalar,
+                )])
+            })
+            .collect();
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+        assert_eq!(graph.native(&query).unwrap(), expected);
+    }
+}
+
+#[test]
+fn binary_sources_keep_typed_scalars_nested_values_child_pages_and_parent_stages() {
+    let graph = Graph::sample();
+    let text = "UNWIND [1,1.0,NULL,{z:[2,NULL],a:1},{a:1,z:[2,NULL]},[1,2]] AS value RETURN value UNION DISTINCT UNWIND [1.0,NULL,{a:1,z:[2,NULL]}] AS value RETURN value";
+    let query = prepare(text);
+    let mut expected = vec![
+        row(vec![scalar(1)]),
+        row(vec![GraphValue::Scalar(CanonicalScalar::Float(
+            CanonicalF64::new(1.0),
+        ))]),
+        row(vec![GraphValue::Scalar(CanonicalScalar::Null)]),
+        row(vec![
+            GraphValue::map(vec![
+                ("a".into(), scalar(1)),
+                (
+                    "z".into(),
+                    GraphValue::List(
+                        vec![scalar(2), GraphValue::Scalar(CanonicalScalar::Null)]
+                            .into_boxed_slice(),
+                    ),
+                ),
+            ])
+            .unwrap(),
+        ]),
+        row(vec![GraphValue::List(
+            vec![scalar(1), scalar(2)].into_boxed_slice(),
+        )]),
+    ];
+    expected.sort();
+    assert_eq!(staged(&graph, &query).unwrap(), expected);
+    assert_eq!(graph.native(&query).unwrap(), expected);
+    for (text, expected) in [
+        (
+            "(UNWIND [4,1,4,2] AS value RETURN value ORDER BY value DESC LIMIT 2) EXCEPT ALL (UNWIND [4] AS value RETURN value)",
+            vec![row(vec![scalar(4)])],
+        ),
+        (
+            "((UNWIND [1,2,2] AS value RETURN value) EXCEPT ALL (UNWIND [2] AS value RETURN value)) UNION ALL (UNWIND [3] AS value RETURN value) ORDER BY value DESC SKIP 1 LIMIT 2",
+            vec![row(vec![scalar(2)]), row(vec![scalar(1)])],
+        ),
+        (
+            "RETURN 1 AS a,2 AS b UNION DISTINCT RETURN 2 AS b,1 AS a",
+            vec![row(vec![scalar(1), scalar(2)])],
+        ),
+        (
+            "MATCH (n) RETURN n.p AS value INTERSECT ALL UNWIND [1,1,3,NULL] AS value RETURN value+0 AS value",
+            vec![
+                row(vec![GraphValue::Scalar(CanonicalScalar::Null)]),
+                row(vec![scalar(1)]),
+                row(vec![scalar(1)]),
+                row(vec![scalar(3)]),
+            ],
+        ),
+    ] {
+        let query = prepare(text);
+        assert_eq!(staged(&graph, &query).unwrap(), expected, "{text}");
+        assert_eq!(graph.native(&query).unwrap(), expected, "{text}");
+    }
+    let query = prepare("RETURN 3 AS value UNION ALL RETURN 1 AS value")
+        .unwind(
+            "item".into(),
+            GraphSetValue::List(vec![GraphSetValue::Column(0), GraphSetValue::Column(0)]),
+        )
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new("item", GraphSetValue::Column(1))],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .with_page(1, Some(2));
+    assert_eq!(
+        staged(&graph, &query).unwrap(),
+        vec![row(vec![scalar(1)]), row(vec![scalar(3)])]
+    );
+    assert_eq!(
+        staged(&graph, &query).unwrap(),
+        graph.native(&query).unwrap()
+    );
+}
+
+#[test]
+fn binary_empty_left_and_zero_pages_never_hide_right_or_reorder_child_failures() {
+    let graph = Graph::sample();
+    for operator in ["UNION ALL", "INTERSECT ALL", "EXCEPT DISTINCT"] {
+        for left in [
+            "UNWIND [] AS value RETURN value+0 AS value",
+            "UNWIND [1,0] AS value RETURN 1/value AS value",
+        ] {
+            let text = format!(
+                "({left}) {operator} (UNWIND [[1],2] AS items UNWIND items AS item RETURN item+0 AS value) LIMIT 0"
+            );
+            let query = prepare(&text);
+            let GqlQueryError::Source(expected) = graph.native(&query).unwrap_err() else {
+                panic!("{text}: native child failure");
+            };
+            let expected_kind = if left.contains("1/value") {
+                GraphIntegerErrorKind::DivisionByZero
+            } else {
+                GraphIntegerErrorKind::IncompatibleOperands
+            };
+            assert!(
+                matches!(expected, GraphSetExecutionError::Projection { row: 1, error, .. }
+                if error.kind == expected_kind),
+                "{text}: {expected:?}"
+            );
+            assert_eq!(
+                staged(&graph, &query),
+                Err(SpillSetRowError::Native(expected))
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_binary_aggregate_compilation_retains_the_complete_relation() {
+    let query = prepare("RETURN 3 AS value UNION ALL RETURN 1 AS value");
+    let aggregate = PreparedGraphSetAggregate::prepare(
+        query.clone(),
+        &[],
+        &[
+            GraphAggregate::count_rows("rows"),
+            GraphAggregate::sum_int("total", 0),
+        ],
+        0,
+        None,
+    )
+    .unwrap();
+    let plan =
+        fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::compile_relation(&aggregate).unwrap();
+    assert_eq!(plan.kind(), fgdb_gql::scan_stream::ScanKind::Set);
+    let fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::Relation { input, definition } = plan
+    else {
+        panic!("compound aggregation must retain its original relation");
+    };
+    assert_eq!(definition.input_width(), 1);
+    assert_eq!(
+        staged_plan(&Graph::sample(), &input).unwrap(),
+        vec![row(vec![scalar(1)]), row(vec![scalar(3)])]
+    );
+    assert_eq!(
+        input.stage_count(),
+        AsyncSpillSetPlan::compile(&query).unwrap().stage_count()
+    );
+}
+
+#[test]
 fn single_edge_parallel_multiplicity_orientation_and_computed_payloads_are_admitted() {
     let graph = Graph::sample();
     for direction in ["->", "-"] {
@@ -636,24 +900,30 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
         );
     }
     let pattern = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"));
-    let unsupported = [
-        pattern
-            .clone()
-            .combine(
-                GraphSetOperation::Union,
-                GraphSetQuantifier::All,
-                pattern.clone(),
-            )
-            .unwrap(),
-        pattern.clone().cross_join(pattern).unwrap(),
-    ];
-    for input in unsupported {
-        let query = input.nested().unwrap().with_page(0, Some(0));
-        assert!(matches!(
-            AsyncSpillSetPlan::compile(&query),
-            Err(SpillSetBuildError::Unsupported { depth: 1 })
-        ));
-    }
+    let unsupported = pattern.clone().cross_join(pattern.clone()).unwrap();
+    let query = unsupported.clone().nested().unwrap().with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&query),
+        Err(SpillSetBuildError::Unsupported { depth: 1 })
+    ));
+    let unsupported = unsupported
+        .project(
+            vec![GraphSetProjection::new("value", GraphSetValue::Column(0))],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let query = pattern
+        .combine(
+            GraphSetOperation::Union,
+            GraphSetQuantifier::All,
+            unsupported,
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&query),
+        Err(SpillSetBuildError::Unsupported { depth: 2 })
+    ));
 }
 
 #[test]
