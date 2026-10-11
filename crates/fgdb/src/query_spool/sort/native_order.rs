@@ -210,7 +210,7 @@ impl PreparedNativeRead {
         async move {
             let (columns, cursor, tail) =
                 opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(
+            ordered_input(
                 cx,
                 columns,
                 cursor,
@@ -254,7 +254,7 @@ impl PreparedNativeRead {
         async move {
             let (columns, cursor, tail) =
                 opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(
+            ordered_input(
                 cx,
                 columns,
                 cursor,
@@ -274,7 +274,9 @@ impl PreparedNativeRead {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn evaluate<I, A, B>(
+// Scoped sources enter this same pipeline after the host has reserved their
+// signed physical allowance. They retain their native statistics and errors.
+pub(crate) async fn ordered_input<I, A, B>(
     cx: &QueryCx,
     columns: Vec<String>,
     cursor: I,

@@ -161,10 +161,11 @@ pub use gql_cert::{
 };
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
-    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS,
-    HybridCallError, NativeAggregateCursor, NativeAggregateSpool, NativeAggregateSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderedReadSession,
+    AuthorizedPreparedFnxCall, AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS, HybridCallError,
+    NativeAggregateCursor, NativeAggregateSpool, NativeAggregateSpoolCursor,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeExplainCertificate,
     NativeResultCertificate, NativeResultSpool, NativeSpoolCursor, NativeSpoolError, PinnedIndex,
     PreparedBufferedAggregate, PreparedBufferedOrder, PreparedNativeRead, ProcedureError,

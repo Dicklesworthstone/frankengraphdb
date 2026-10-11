@@ -8,9 +8,10 @@ mod graph;
 #[path = "relational/native.rs"]
 mod native;
 pub use native::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
-    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderedReadSession,
+    AuthorizedPreparedFnxCall, AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 
 use super::*;

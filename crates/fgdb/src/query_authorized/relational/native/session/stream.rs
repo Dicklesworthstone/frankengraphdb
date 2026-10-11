@@ -19,6 +19,10 @@ use std::sync::{Mutex, MutexGuard};
 mod aggregate;
 pub use aggregate::{AuthorizedAggregateCursor, AuthorizedSendAggregateCursor};
 
+#[path = "stream/ordered.rs"]
+mod ordered;
+pub use ordered::{AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor};
+
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is
 // held across a source call or suspension. Keeping the actual borrowed clock
 // permits both existing thread-local clocks and Send task-owned cursors.
@@ -747,7 +751,7 @@ fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata, Driver>(
+fn open<'q, C: FnMut() -> u64, Plan, Output>(
     view: &EmbeddedReadView,
     capability: &'q VerifiedCapability<'_>,
     clock: &'q mut C,
@@ -765,8 +769,8 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata, Driver>(
         &'q QueryCx,
         Shared<'q, C>,
         GqlQueryPolicy,
-    ) -> Opened<'q, Row, Metadata, Driver>,
-) -> Opened<'q, Row, Metadata, Driver> {
+    ) -> Result<Output, QueryError>,
+) -> Result<Output, QueryError> {
     let now = clock();
     if now < *last_now_ms {
         return Err(QueryError::Authorization(

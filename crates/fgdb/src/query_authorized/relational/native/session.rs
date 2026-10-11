@@ -7,8 +7,9 @@
 #[path = "session/stream.rs"]
 mod stream;
 pub use stream::{
-    AuthorizedAggregateCursor, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor,
+    AuthorizedAggregateCursor, AuthorizedOrderedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 
 use super::*;
@@ -122,15 +123,18 @@ fn check_branch(
     Ok(())
 }
 fn terminal<T>(result: &Result<T, QueryError>) -> bool {
+    result.as_ref().err().is_some_and(terminal_error)
+}
+fn terminal_error(error: &QueryError) -> bool {
     matches!(
-        result,
-        Err(QueryError::Authorization(
+        error,
+        QueryError::Authorization(
             AuthorizationError::ExecutionStopped
                 | AuthorizationError::Expired
                 | AuthorizationError::NotYetValid
                 | AuthorizationError::AuthorityRetired
                 | AuthorizationError::ClockWentBackwards
-        ))
+        )
     )
 }
 fn result_rows(
@@ -467,7 +471,8 @@ impl<V: Vfs + Clone> Database<V> {
             self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
         let owner = Arc::clone(&session.owner);
         let prepared = session.run(cx, |_, _, _, _, _, _| {
-            if crate::query::explain::without_terminator(selector.statement()) != native.statement() {
+            if crate::query::explain::without_terminator(selector.statement()) != native.statement()
+            {
                 return Err(QueryError::Authorization(
                     AuthorizationError::WrongAuthority,
                 ));

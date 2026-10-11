@@ -327,7 +327,9 @@ fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
-fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> QueryError {
+pub(in super::super) fn row_error(
+    error: GqlQueryError<EdgeScanError<QueryError>, QueryError>,
+) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
         GqlQueryError::Source(error) => source_error(error),
@@ -338,6 +340,24 @@ fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> Que
         }
         GqlQueryError::Data(error) => QueryError::EdgeStream(GqlQueryError::Data(error)),
     }
+}
+
+// External ordering uses this exact masked source, with private input rows
+// rather than the row driver's final delivery admission.
+pub(in super::super) fn ordered_source<'q, C: FnMut() -> u64 + Send>(
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+) -> Result<impl EdgeScanSource<Error = QueryError> + Send + 'q + use<'q, C>, QueryError> {
+    Ok(Source {
+        edges: view.edge_scan_source(cx, at).map_err(QueryError::Read)?,
+        vertices: ScopedSource {
+            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+            execution,
+        },
+        after: None,
+    })
 }
 
 // Both row constructors erase this SAME native driver; only Send capability

@@ -368,9 +368,10 @@ application output is admitted.
   automatic retry.
 
   The supported row profile is the native cursor's identity-leading order:
-  vertex rows begin with the scanned vertex; fixed-edge rows begin with the
-  captured root edge and its root-source vertex, followed by additional edge
-  identities for connected fixed joins. Admitted masked scalar columns and
+  vertex rows begin with the scanned vertex; directed fixed-edge rows begin
+  with the captured root edge, followed by every additional edge identity for
+  connected fixed joins. An undirected root also requires its root-source
+  vertex immediately after the root edge to distinguish orientations. Admitted masked scalar columns and
   native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
   semantics. Vertex and fixed-edge aggregates also use the native cursor:
   the first credited demand consumes the complete authorized input and later
@@ -418,6 +419,10 @@ application output is admitted.
   durable result, background query task, spill, or per-page requery. Embedded
   callers use `AuthorizedReadSession::stream_send` for the same Send-capable
   cursor. The original `stream` API still accepts thread-local host clocks.
+  The separate embedded `authorized_ordered_read_session` API can externally
+  sort property-only projections into host-owned authenticated scratch before
+  exposing its final authorized cursor. It does not change these FGP modes or
+  make transport credit govern the blocking sort phase.
 - **Results.** Every result is the session-owned, ephemeral
   SNAPSHOT_RESULT class on a server-minted 128-bit child stream. The first
   chunk carries the columns. Each chunk is sized to the stream's available

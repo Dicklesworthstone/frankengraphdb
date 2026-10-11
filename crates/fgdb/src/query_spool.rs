@@ -21,10 +21,13 @@ pub use aggregate::{
     NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
 pub use sort::PreparedBufferedOrder;
+pub(crate) use sort::ordered_input;
 
 #[derive(Debug)]
 pub enum NativeSpoolError {
     Prepare(Box<QueryError>),
+    /// The scoped native source retains the original capability error.
+    Authorized(Box<QueryError>),
     Execute(Box<GqlQueryError<ScanError<ReadError>, Cancel>>),
     BufferedExecute(Box<GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>>),
     /// Snapshot admission for a source that opens no graph scan.
@@ -53,7 +56,7 @@ pub enum NativeSpoolError {
 impl core::fmt::Display for NativeSpoolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Prepare(e) => e.fmt(f),
+            Self::Prepare(e) | Self::Authorized(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
             Self::BufferedExecute(e) => e.fmt(f),
             Self::BufferedRead(e) => e.fmt(f),
@@ -82,7 +85,7 @@ impl core::fmt::Display for NativeSpoolError {
 impl core::error::Error for NativeSpoolError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Prepare(e) => Some(e.as_ref()),
+            Self::Prepare(e) | Self::Authorized(e) => Some(e.as_ref()),
             Self::Execute(e) => Some(e.as_ref()),
             Self::BufferedExecute(e) => Some(e.as_ref()),
             Self::BufferedRead(e) => Some(e.as_ref()),
@@ -311,27 +314,41 @@ impl PreparedNativeRead {
 }
 
 // A buffered row's reservation must survive encoding and every awaited append,
-// even if its source has already exhausted. Resident cursors need no new charge.
+// even if its source has already exhausted. Governed resident rows use the same
+// byte/work-admitted encoder without inventing a reservation for the source row.
 // Field order releases the actual row before refunding its reservation.
-struct SpoolRow {
+pub(crate) struct SpoolRow {
     row: GraphValueRow,
-    charge: Option<MemoryCharge>,
+    _charge: Option<MemoryCharge>,
+    tracked_encoding: bool,
 }
 impl SpoolRow {
     fn resident(row: GraphValueRow) -> Self {
-        Self { row, charge: None }
+        Self {
+            row,
+            _charge: None,
+            tracked_encoding: false,
+        }
     }
     fn buffered((row, charge): (GraphValueRow, MemoryCharge)) -> Self {
         Self {
             row,
-            charge: Some(charge),
+            _charge: Some(charge),
+            tracked_encoding: true,
+        }
+    }
+    pub(crate) fn governed(row: GraphValueRow) -> Self {
+        Self {
+            row,
+            _charge: None,
+            tracked_encoding: true,
         }
     }
 }
 
 // Type-only adapters for the SAME native cursors. Async sources and resident
 // pulls share the complete framing, validation and scratch-acceptance loop.
-trait SpoolInput: Send {
+pub(crate) trait SpoolInput: Send {
     fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow, NativeSpoolError>>> + Send;
     fn spool_state(&self) -> ScanState;
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats);
@@ -484,7 +501,7 @@ where
             .map_err(SpillError::Interrupted)?;
         // Keep this tuple intact: fields drop in declaration order on errors,
         // cancellation and unwind too, so bytes always die before the charge.
-        let encoded = if row.charge.is_some() {
+        let encoded = if row.tracked_encoding {
             let work = encoding_work
                 .as_deref_mut()
                 .ok_or(NativeSpoolError::IncompleteCursor)?;
@@ -641,3 +658,7 @@ mod tests;
 #[cfg(test)]
 #[path = "query_spool/buffered_tests.rs"]
 mod buffered_tests;
+
+#[cfg(test)]
+#[path = "query_spool/governed_tests.rs"]
+mod governed_tests;
