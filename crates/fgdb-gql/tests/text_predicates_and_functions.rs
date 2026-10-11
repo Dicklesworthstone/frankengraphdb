@@ -655,6 +655,26 @@ fn composite_literals_compare_three_valued() {
         ("[] IN [1, []]", truth(true)),
         ("[] IN []", truth(false)),
         ("[null] IN [[null]]", null.clone()),
+        // A lone operand IN a list that is not a literal (TCK Graph and
+        // List5: 'exists' IN keys(map)): keys(), tail(), a graph property on
+        // the left, and NULL membership.
+        (
+            "'exists' IN keys({exists: 42, notMissing: null})",
+            truth(true),
+        ),
+        (
+            "'notMissing' IN keys({exists: 42, notMissing: null})",
+            truth(true),
+        ),
+        (
+            "'missing' IN keys({exists: 42, notMissing: null})",
+            truth(false),
+        ),
+        ("2 IN tail([1, 2])", truth(true)),
+        ("1 IN tail([1, 2])", truth(false)),
+        ("n.text IN keys({x: 1})", truth(true)),
+        ("null IN tail([1, 2])", null.clone()),
+        ("null IN tail([1])", truth(false)),
         // The comparison is one operand of the operators around it, after
         // the literal's own postfix reads.
         ("[1] = [1] AND [2] <> [3]", truth(true)),

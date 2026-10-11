@@ -289,9 +289,37 @@ impl<'a> Parser<'a> {
         self.let_slot(program, value, at)
     }
 
+    /// Whether a lone operand (a number or text literal, a parameter, a
+    /// name with optional `.key` reads, or TRUE/FALSE/NULL) stands here
+    /// directly before IN, and the list after IN is not a `[` literal.
+    fn starts_operand_membership(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let after = match self.current.kind {
+            TokenKind::Digits(_) | TokenKind::Quoted(_) | TokenKind::Parameter(_) => {
+                lexer.next()?
+            }
+            TokenKind::Word(_) => {
+                let mut token = lexer.next()?;
+                while matches!(token.kind, TokenKind::Punct(b'.')) {
+                    if !matches!(lexer.next()?.kind, TokenKind::Word(_)) {
+                        return Ok(false);
+                    }
+                    token = lexer.next()?;
+                }
+                token
+            }
+            _ => return Ok(false),
+        };
+        if !matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")) {
+            return Ok(false);
+        }
+        Ok(!matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
+    }
+
     /// `[..] = rhs`, `{..} <> rhs` or `[..] IN list`, read whole in the
     /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
-    /// equality.
+    /// equality. `operand IN value` with a non-literal list takes the same
+    /// path (starts_operand_membership).
     #[inline(never)]
     fn composite_comparison(
         &mut self,
@@ -696,7 +724,17 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
-        self.scalar_concat(columns, depth, program)?;
+        // `operand IN value` whose list is not a literal (a name, a
+        // parameter, keys(n), list[0], list[0..1]) is one membership in the
+        // value language, as `[..] IN list` is (fgdb-9cawv). Only a lone
+        // operand directly before IN qualifies, so `1 + x IN l` keeps
+        // `1 + x` as its left side; a list literal keeps the scalar IN.
+        if self.lets.is_some() && self.starts_operand_membership()? {
+            let at = self.current.at;
+            self.composite_comparison(columns, depth, program, at)?;
+        } else {
+            self.scalar_concat(columns, depth, program)?;
+        }
         loop {
             let at = self.current.at;
             let op = if self.take_word("STARTS")? {
