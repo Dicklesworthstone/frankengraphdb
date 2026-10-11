@@ -632,6 +632,8 @@ struct Parser<'a> {
     /// BY is next: a repeat of one item's expression there is that output
     /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
     projected_sources: Option<ProjectedSources>,
+    /// The rand() calls read so far: the next call's site (fgdb-13l85).
+    random_sites: u32,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -694,6 +696,7 @@ impl<'a> Parser<'a> {
             lets: None,
             let_base: 0,
             projected_sources: None,
+            random_sites: 0,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

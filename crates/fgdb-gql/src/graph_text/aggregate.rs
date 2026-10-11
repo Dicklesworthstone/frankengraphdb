@@ -1074,7 +1074,8 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
         }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
-        | ReadValueTemplate::Local(_) => {}
+        | ReadValueTemplate::Local(_)
+        | ReadValueTemplate::Random { .. } => {}
     }
 }
 

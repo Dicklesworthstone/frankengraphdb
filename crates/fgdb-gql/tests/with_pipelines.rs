@@ -412,6 +412,75 @@ fn plus_concatenates_list_columns_after_with() {
     );
 }
 
+/// openCypher rand() (fgdb-13l85): a float in [0, 1), drawn as a pure
+/// function of its call site, the row's ordinal in its projection stage and
+/// the comprehension elements in force. Rows, sites and elements draw
+/// differently, a rerun draws the same, and a context that numbers no rows
+/// (an aggregate output) refuses instead of guessing a key.
+#[test]
+fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1, 2, 3, 4].map(CanonicalScalar::Int);
+    let float = |value: &GraphValue| match value {
+        GraphValue::Scalar(CanonicalScalar::Float(value)) => value.get(),
+        _ => panic!("rand() is a float"),
+    };
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    let unit = |draw: f64| (0.0..1.0).contains(&draw);
+
+    let text = "MATCH (n) RETURN n.p AS p, rand() AS a, rand() AS b ORDER BY p";
+    let first = rows(text);
+    assert_eq!(first.len(), 4);
+    assert_eq!(rows(text), first, "a rerun draws the same");
+    let draws: Vec<(f64, f64)> = first
+        .iter()
+        .map(|row| (float(row.get(1).unwrap()), float(row.get(2).unwrap())))
+        .collect();
+    assert!(draws.iter().all(|&(a, b)| unit(a) && unit(b)), "{draws:?}");
+    assert!(
+        draws.windows(2).any(|pair| pair[0].0 != pair[1].0),
+        "rows differ"
+    );
+    assert!(draws.iter().any(|&(a, b)| a != b), "sites differ");
+
+    // Inside a comprehension each element draws apart.
+    for row in
+        rows("MATCH (n) WITH n.p AS p RETURN p, [y IN range(1, 16) | rand()] AS d ORDER BY p")
+    {
+        let GraphValue::List(list) = row.get(1).unwrap() else {
+            panic!("a list of draws");
+        };
+        let list: Vec<f64> = list.iter().map(float).collect();
+        assert_eq!(list.len(), 16);
+        assert!(list.iter().copied().all(unit), "{list:?}");
+        assert!(list.windows(2).any(|pair| pair[0] != pair[1]), "{list:?}");
+    }
+    assert_eq!(
+        ints(
+            &rows(
+                "MATCH (n) WITH n.p AS p RETURN size([y IN range(1, 16) WHERE rand() < 2.0 | y]) \
+                 AS kept, size([y IN range(1, 16) WHERE rand() < 0.0 | y]) AS dropped ORDER BY kept"
+            ),
+            0
+        ),
+        [16, 16, 16, 16].map(Some)
+    );
+
+    let refused =
+        PreparedGraphSetText::prepare("MATCH (n) RETURN rand() AS r, count(*) AS c", symbols)
+            .ok()
+            .and_then(|template| template.bind_parameters(&GqlParameters::new()).ok())
+            .map(|query| run(&query, &values, wide(), &mut || Ok(())));
+    assert!(
+        !matches!(refused, Some(Ok(_))),
+        "an aggregate output numbers no rows"
+    );
+}
+
 /// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'
 /// expressions, which then is that item's output (openCypher, TCK
 /// WithOrderBy2 [22] to [24] and WithOrderBy4 [16] to [18]): `n.p` after

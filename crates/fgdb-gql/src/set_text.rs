@@ -182,6 +182,11 @@ pub(crate) enum ReadValueTemplate {
         arms: Vec<(ReadValueTemplate, ReadValueTemplate)>,
         otherwise: Option<Box<ReadValueTemplate>>,
     },
+    /// rand() at call `site`, under `scope` element locals (fgdb-13l85).
+    Random {
+        site: u32,
+        scope: u32,
+    },
 }
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
@@ -235,9 +240,11 @@ impl ReadValueTemplate {
                     .any(|(condition, value)| condition.binds_elements() || value.binds_elements())
                     || otherwise.as_deref().is_some_and(Self::binds_elements)
             }
-            Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
-                false
-            }
+            Self::Column(_)
+            | Self::Literal(_)
+            | Self::Parameter { .. }
+            | Self::Integer { .. }
+            | Self::Random { .. } => false,
         }
     }
 
@@ -469,6 +476,11 @@ impl ReadValueTemplate {
                     value.append_template_transcript(bytes);
                 }
                 optional(bytes, otherwise.as_deref());
+            }
+            Self::Random { site, scope } => {
+                bytes.push(25);
+                bytes.extend_from_slice(&site.to_be_bytes());
+                bytes.extend_from_slice(&scope.to_be_bytes());
             }
         }
     }

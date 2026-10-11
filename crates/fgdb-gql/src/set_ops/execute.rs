@@ -500,8 +500,9 @@ where
     let mut output = Vec::new();
     for (row_at, row) in input.into_iter().enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
-        let row = GraphSetProjection::evaluate_row_with_control(
+        let row = GraphSetProjection::evaluate_numbered_row_with_control(
             &row,
+            row_at as u64,
             projection,
             &mut |event| meter.event(event),
             |column, error| {

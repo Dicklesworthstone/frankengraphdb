@@ -261,6 +261,10 @@ impl PreparedGraphAggregateText {
                 argument: Box::new(Self::bind_input_value(argument, values)?),
             }),
             ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
+            ReadValueTemplate::Random { site, scope } => Ok(GraphSetValue::Random {
+                site: *site,
+                scope: *scope,
+            }),
             ReadValueTemplate::Comprehension { list, filter, map } => {
                 let part = |part: &Option<Box<ReadValueTemplate>>| {
                     part.as_deref()

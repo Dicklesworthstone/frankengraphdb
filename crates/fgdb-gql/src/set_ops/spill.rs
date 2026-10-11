@@ -632,9 +632,10 @@ impl SpillSetStage {
             Operation::Filter(predicate) => {
                 StageRows::One(predicate.evaluate(&row, &mut event)?.then_some(row))
             }
-            Operation::Project(projection) => {
-                StageRows::One(Some(GraphSetProjection::evaluate_row_with_control(
+            Operation::Project(projection) => StageRows::One(Some(
+                GraphSetProjection::evaluate_numbered_row_with_control(
                     &row,
+                    row_index as u64,
                     projection,
                     &mut event,
                     |column, error| {
@@ -644,8 +645,8 @@ impl SpillSetStage {
                             error,
                         })
                     },
-                )?))
-            }
+                )?,
+            )),
             Operation::Unwind(value) => {
                 StageRows::Unwind(projection::UnwindRows::new(row, value, &mut event).map_err(
                     |error| match error {

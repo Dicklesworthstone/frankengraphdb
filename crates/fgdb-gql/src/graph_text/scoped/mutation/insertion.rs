@@ -571,6 +571,7 @@ fn bind_fields(
             | ReadValueTemplate::Temporal { .. }
             | ReadValueTemplate::Function { .. }
             | ReadValueTemplate::Case { .. }
+            | ReadValueTemplate::Random { .. }
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapGet { .. }

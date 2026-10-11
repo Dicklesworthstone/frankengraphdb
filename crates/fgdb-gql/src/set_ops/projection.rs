@@ -167,6 +167,16 @@ pub enum GraphSetValue {
         arms: Vec<(GraphSetValue, GraphSetValue)>,
         otherwise: Option<Box<GraphSetValue>>,
     },
+    /// openCypher rand() (fgdb-13l85): a float in [0, 1) that is a pure
+    /// function of the call `site`, the row's ordinal in its projection
+    /// stage and the `scope` innermost element values in force, so every
+    /// execution of a statement over the same rows draws the same values.
+    /// Equal elements of one row draw equally. Without a row ordinal it is
+    /// a typed MissingColumn error, never a guessed key.
+    Random {
+        site: u32,
+        scope: u32,
+    },
 }
 
 /// The openCypher value functions over lists and text (fgdb-13l85).
@@ -468,7 +478,23 @@ impl GraphSetProjection {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        evaluate(row, projection, control).map_err(|error| match error {
+        evaluate(row, projection, None, control).map_err(|error| match error {
+            ProjectionFailure::Control(error) => error,
+            ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
+        })
+    }
+
+    /// evaluate_row_with_control for a row at `ordinal` in the stage's
+    /// deterministic input order, which keys rand() (fgdb-13l85). Every
+    /// executor of the same stage numbers its rows the same way.
+    pub(crate) fn evaluate_numbered_row_with_control<E>(
+        row: &GraphValueRow,
+        ordinal: u64,
+        projection: &[Self],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        evaluate(row, projection, Some(ordinal), control).map_err(|error| match error {
             ProjectionFailure::Control(error) => error,
             ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
         })
@@ -898,6 +924,13 @@ fn admit(
             }
             GraphSetColumnType::Any
         }
+        // The draw keys on exactly the element locals in force here.
+        GraphSetValue::Random { scope, .. } => {
+            if *scope as usize != locals {
+                return Err(Error::InvalidValue { column });
+            }
+            GraphSetColumnType::Scalar
+        }
     })
 }
 
@@ -1107,6 +1140,11 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             }
             append_optional_transcript(otherwise.as_deref(), bytes);
         }
+        GraphSetValue::Random { site, scope } => {
+            bytes.push(25);
+            bytes.extend_from_slice(&site.to_be_bytes());
+            bytes.extend_from_slice(&scope.to_be_bytes());
+        }
     }
 }
 
@@ -1209,11 +1247,19 @@ impl UnwindRows {
 pub(super) fn evaluate<E>(
     row: &GraphValueRow,
     projection: &[GraphSetProjection],
+    ordinal: Option<u64>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValueRow, ProjectionFailure<E>> {
     let mut values = Vec::new();
     for (column, output) in projection.iter().enumerate() {
-        let value = evaluate_value(&output.value, row, column, control)?;
+        let value = evaluate_value_at(
+            &output.value,
+            row,
+            column,
+            control,
+            0,
+            &mut Evaluation::new(ordinal),
+        )?;
         values.push(value);
     }
     Ok(GraphValueRow::from_owned_values(values))
@@ -1225,7 +1271,26 @@ pub(crate) fn evaluate_value<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
-    evaluate_value_at(value, row, column, control, 0, &mut 0)
+    evaluate_value_at(value, row, column, control, 0, &mut Evaluation::new(None))
+}
+
+/// One value evaluation's running state: the node count that bounds it, and
+/// the row's ordinal when its caller numbers the rows it projects, which
+/// keys rand() (fgdb-13l85). Without an ordinal, rand() is a typed error.
+struct Evaluation {
+    nodes: usize,
+    ordinal: Option<u64>,
+}
+
+impl Evaluation {
+    const fn new(ordinal: Option<u64>) -> Self {
+        Self { nodes: 0, ordinal }
+    }
+
+    /// A fresh node bound for one element's own evaluation, on the same row.
+    const fn element(&self) -> Self {
+        Self::new(self.ordinal)
+    }
 }
 
 fn operand<'a, E>(
@@ -1234,7 +1299,7 @@ fn operand<'a, E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut usize,
+    nodes: &mut Evaluation,
 ) -> Result<std::borrow::Cow<'a, GraphValue>, ProjectionFailure<E>> {
     let borrowed = match value {
         GraphSetValue::Column(input) => row.values().get(*input),
@@ -1255,7 +1320,7 @@ fn evaluate_value_at<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut usize,
+    nodes: &mut Evaluation,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
     use crate::GraphIntegerErrorKind;
     let failure = |kind| ProjectionFailure::Arithmetic {
@@ -1266,8 +1331,8 @@ fn evaluate_value_at<E>(
         },
     };
     control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-    *nodes += 1;
-    if depth > GraphValue::MAX_LIST_DEPTH || *nodes > GraphValue::MAX_LIST_NODES {
+    nodes.nodes += 1;
+    if depth > GraphValue::MAX_LIST_DEPTH || nodes.nodes > GraphValue::MAX_LIST_NODES {
         return Err(failure(GraphIntegerErrorKind::Overflow));
     }
     let result = match value {
@@ -1482,7 +1547,8 @@ fn evaluate_value_at<E>(
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     if let Some(filter) = filter
-                        && !element_truth(filter, &scope, column, control, depth)?.unwrap_or(false)
+                        && !element_truth(filter, &scope, column, control, depth, nodes)?
+                            .unwrap_or(false)
                     {
                         continue;
                     }
@@ -1490,9 +1556,14 @@ fn evaluate_value_at<E>(
                     kept.push(match map {
                         // Each element evaluation is bounded like a whole
                         // expression; total work is charged through control.
-                        Some(map) => {
-                            evaluate_value_at(map, &scope, column, control, depth + 1, &mut 0)?
-                        }
+                        Some(map) => evaluate_value_at(
+                            map,
+                            &scope,
+                            column,
+                            control,
+                            depth + 1,
+                            &mut nodes.element(),
+                        )?,
                         None => copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     });
                 }
@@ -1523,7 +1594,9 @@ fn evaluate_value_at<E>(
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                    results.push(element_truth(predicate, &scope, column, control, depth)?);
+                    results.push(element_truth(
+                        predicate, &scope, column, control, depth, nodes,
+                    )?);
                 }
                 kind.combine(results)
             };
@@ -1598,8 +1671,14 @@ fn evaluate_value_at<E>(
                         0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
-                    accumulator =
-                        evaluate_value_at(expr, &scope, column, control, depth + 1, &mut 0)?;
+                    accumulator = evaluate_value_at(
+                        expr,
+                        &scope,
+                        column,
+                        control,
+                        depth + 1,
+                        &mut nodes.element(),
+                    )?;
                 }
                 accumulator
             }
@@ -1753,6 +1832,20 @@ fn evaluate_value_at<E>(
                 }
             }
         }
+        GraphSetValue::Random { site, scope } => {
+            let ordinal = nodes
+                .ordinal
+                .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
+            let elements = row
+                .values()
+                .len()
+                .checked_sub(*scope as usize)
+                .map(|start| &row.values()[start..])
+                .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
+            let draw = random_draw(*site, ordinal, elements, column, control)?;
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(draw)))
+        }
     };
     Ok(result)
 }
@@ -1853,6 +1946,52 @@ pub(crate) fn value_function<E>(
             )
         }
     }
+}
+
+/// rand()'s draw (fgdb-13l85): FNV-1a over a domain tag, the call site, the
+/// row ordinal and each in-scope element's canonical bytes, finished by the
+/// SplitMix64 mixer; its top 53 bits over 2^53 are a float in [0, 1). A pure
+/// function, so replaying a statement over the same rows draws the same.
+fn random_draw<E>(
+    site: u32,
+    ordinal: u64,
+    elements: &[GraphValue],
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<f64, ProjectionFailure<E>> {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn absorb(hash: &mut u64, bytes: &[u8]) {
+        for &byte in bytes {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    let mut hash = FNV_OFFSET;
+    absorb(&mut hash, b"fgdb:rand:v1");
+    absorb(&mut hash, &site.to_be_bytes());
+    absorb(&mut hash, &ordinal.to_be_bytes());
+    for element in elements {
+        let bytes = element
+            .canonical_bytes()
+            .map_err(|_| ProjectionFailure::Arithmetic {
+                column,
+                error: GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                },
+            })?;
+        for _ in 0..bytes.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        }
+        absorb(&mut hash, &(bytes.len() as u64).to_be_bytes());
+        absorb(&mut hash, &bytes);
+    }
+    let mut mixed = hash.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    Ok((mixed >> 11) as f64 / (1_u64 << 53) as f64)
 }
 
 /// `left + right` (`add`) or `left - right` over values that may be lists
@@ -2025,7 +2164,7 @@ fn integer_part<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut usize,
+    nodes: &mut Evaluation,
 ) -> Result<Option<i64>, ProjectionFailure<E>> {
     match evaluate_value_at(value, row, column, control, depth + 1, nodes)? {
         GraphValue::Scalar(CanonicalScalar::Int(value)) => Ok(Some(value)),
@@ -2122,8 +2261,16 @@ fn element_truth<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
+    outer: &Evaluation,
 ) -> Result<Option<bool>, ProjectionFailure<E>> {
-    match evaluate_value_at(predicate, scope, column, control, depth + 1, &mut 0)? {
+    match evaluate_value_at(
+        predicate,
+        scope,
+        column,
+        control,
+        depth + 1,
+        &mut outer.element(),
+    )? {
         GraphValue::Scalar(CanonicalScalar::Bool(truth)) => Ok(Some(truth)),
         GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
         _ => Err(ProjectionFailure::Arithmetic {

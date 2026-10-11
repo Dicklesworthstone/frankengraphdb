@@ -1422,6 +1422,7 @@ impl<'a> Parser<'a> {
         if self.list_quantifier()?.is_some()
             || self.list_function()?.is_some()
             || self.value_function()?.is_some()
+            || self.random_call()?
         {
             return Ok(true);
         }
@@ -1800,6 +1801,8 @@ impl<'a> Parser<'a> {
             self.advance()?;
             self.punct(b'(', "(")?;
             self.value_function_call(function, inputs.as_deref_mut(), schema, resolve, depth)?
+        } else if self.random_call()? {
+            self.random_value()?
         } else if self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -2005,6 +2008,31 @@ impl<'a> Parser<'a> {
             self.is_punct(b'.')
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')),
         )
+    }
+
+    /// RAND directly followed by `(` (fgdb-13l85).
+    fn random_call(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("RAND")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
+    /// `rand()`: the next call site, keyed on the element locals in force.
+    /// Out of line, so the value reader's recursive frame stays as narrow as
+    /// before.
+    #[inline(never)]
+    fn random_value(&mut self) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let at = self.current.at;
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        self.punct(b')', "() without arguments")?;
+        let overflow = || GraphSetTextError {
+            offset: at,
+            kind: GraphSetTextErrorKind::Expected("fewer rand() calls"),
+        };
+        let site = self.random_sites;
+        self.random_sites = site.checked_add(1).ok_or_else(overflow)?;
+        let scope = u32::try_from(self.elements.len()).map_err(|_| overflow())?;
+        Ok(ReadValueTemplate::Random { site, scope })
     }
 
     /// REVERSE or SPLIT directly followed by `(` (fgdb-13l85).
@@ -2562,6 +2590,10 @@ pub(in crate::graph_text) fn bind_read_value(
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))
         }
         ReadValueTemplate::Local(offset) => GraphSetValue::Local(*offset),
+        ReadValueTemplate::Random { site, scope } => GraphSetValue::Random {
+            site: *site,
+            scope: *scope,
+        },
         ReadValueTemplate::Comprehension { list, filter, map } => {
             let part = |part: &Option<Box<ReadValueTemplate>>| {
                 part.as_deref()

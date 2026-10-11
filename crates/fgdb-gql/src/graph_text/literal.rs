@@ -91,6 +91,7 @@ const KEYWORDS: &[&str] = &[
     "PATH",
     "PATH_LENGTH",
     "PATHS",
+    "RAND",
     "RELATIONSHIPS",
     "REMOVE",
     "RETURN",

@@ -717,6 +717,7 @@ impl Properties {
                 | GraphSetValue::Temporal { .. }
                 | GraphSetValue::Function { .. }
                 | GraphSetValue::Case { .. }
+                | GraphSetValue::Random { .. }
                 | GraphSetValue::Local(_)
                 | GraphSetValue::Comprehension { .. }
                 | GraphSetValue::Quantifier { .. }

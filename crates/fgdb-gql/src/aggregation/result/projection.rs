@@ -313,11 +313,13 @@ fn expression<'g, E, C>(
         // Aggregate outputs bind no element scope (fgdb-20foe): the text
         // compilers refuse a comprehension there before binding, so this is
         // a typed failure for a hand-built plan, never a guessed element.
+        // They number no rows either, so rand() has no key here.
         GraphSetValue::Local(_)
         | GraphSetValue::Comprehension { .. }
         | GraphSetValue::Quantifier { .. }
         | GraphSetValue::Reduce { .. }
-        | GraphSetValue::Let { .. } => {
+        | GraphSetValue::Let { .. }
+        | GraphSetValue::Random { .. } => {
             return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
         }
         // Map values over aggregate cells (fgdb-2jw3z), with the row

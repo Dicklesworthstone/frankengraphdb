@@ -29,6 +29,8 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Temporal { argument, .. } | GraphSetValue::Function { argument, .. } => {
             constant(argument)
         }
+        // A draw keys on its row's ordinal: never one value for every row.
+        GraphSetValue::Random { .. } => false,
         GraphSetValue::Case { arms, otherwise } => {
             arms.iter()
                 .all(|(condition, value)| constant(condition) && constant(value))
