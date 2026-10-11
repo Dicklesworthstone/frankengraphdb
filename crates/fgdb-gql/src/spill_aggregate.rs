@@ -15,7 +15,7 @@ use crate::stream::VertexScanEvent;
 use crate::stream::aggregate::{Input, NumericState};
 use crate::{
     GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphAggregateFunction,
-    GraphAggregateOrder, GraphAggregateRow, PreparedGraphAggregate,
+    GraphAggregateOrder, GraphAggregateRow, PreparedGraphAggregate, PreparedGraphSetAggregate,
 };
 use fgdb_types::CanonicalScalar;
 use std::sync::Arc;
@@ -91,9 +91,9 @@ impl SpillAggregatePlan {
 /// The ordinary numeric definition and row evaluators own every semantic step.
 /// Fixed-hop edge expansions use the native awaitable join driver. Probes,
 /// OPTIONAL/variable-length expansion refuse before the host opens storage.
-/// Unary relational inputs retain every projection, filter, DISTINCT, ordering
-/// and window barrier before reduction. This is a physical source plan, not a
-/// result or authority.
+/// Unary relational inputs retain every projection, filter, UNWIND, DISTINCT,
+/// ordering and window barrier before reduction. Values inputs use the native
+/// singleton without a graph source. This plan contains no result or authority.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillAggregatePlan {
     Vertex(AsyncVertexSpillAggregatePlan),
@@ -149,6 +149,28 @@ impl AsyncSpillAggregatePlan {
                 .map_err(SpillAggregateBuildError::Vertex)
         }
     }
+
+    /// Compile the complete source-aware relation and its native numeric group
+    /// definition. Zero-source Values/UNWIND pipelines require this owner;
+    /// graph-backed unary inputs retain the same stages and result clauses.
+    /// Every descendant is admitted before I/O, including beneath LIMIT zero.
+    /// Unsupported joins, intermediate grouping and binary set nodes refuse.
+    /// The private summary never becomes an executable single-graph source.
+    pub fn compile_relation(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let input = AsyncSpillSetPlan::compile(aggregate.input())
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let physical = aggregate
+            .prepare_spill_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let definition = SpillAggregateDefinition::from_physical(physical)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
     pub fn definition(&self) -> &SpillAggregateDefinition {
         match self {
             Self::Vertex(plan) => plan.definition(),
@@ -205,10 +227,14 @@ impl SpillAggregateDefinition {
     }
 
     fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        if aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
-            || aggregate
-                .input_relation()
-                .is_some_and(|relation| relation.columns().len() > MAX_PATTERN_VERTICES)
+        // Relational owners derive their schema from the real completed input,
+        // including zero-column Values. Graph admission metadata is irrelevant
+        // to this branch and must never manufacture a source or input width.
+        let input_width = aggregate.input_relation().map_or_else(
+            || aggregate.input_pattern().columns().len(),
+            |relation| relation.columns().len(),
+        );
+        if input_width > MAX_PATTERN_VERTICES
             || aggregate
                 .input_projection()
                 .is_some_and(|projection| projection.len() > MAX_PATTERN_VERTICES)

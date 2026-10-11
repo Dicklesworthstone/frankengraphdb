@@ -1,4 +1,4 @@
-//! Graph-backed UNWIND through authenticated cold reads and external stages.
+//! Graph-backed and source-free UNWIND through buffered external stages.
 //! Literal expectations describe the fixture, independently of either executor.
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
@@ -9,6 +9,7 @@ use fgdb::{
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::scan_stream::ScanKind;
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphIntegerErrorKind,
     GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
@@ -328,6 +329,367 @@ fn cold_unwind_keeps_nested_values_multiplicity_history_and_completed_pages() {
 }
 
 #[test]
+fn source_free_rows_use_values_provenance_without_any_graph_record_allowance() {
+    let ((), report) = run_async_under_lab(0xc01d_4201, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let buffer = view.buffer_stats();
+        for (text, cut, expected) in [
+            ("RETURN 42 AS answer", 2, vec![vec![scalar(42)]]),
+            (
+                "UNWIND [3,1,3,NULL] AS item RETURN item ORDER BY item",
+                2,
+                vec![
+                    vec![scalar(1)],
+                    vec![scalar(3)],
+                    vec![scalar(3)],
+                    vec![null()],
+                ],
+            ),
+            (
+                "WITH 2 AS x UNWIND [x,x+1,x] AS item RETURN item ORDER BY item",
+                2,
+                vec![vec![scalar(2)], vec![scalar(2)], vec![scalar(3)]],
+            ),
+            (
+                "UNWIND [{items:[1,2]},{items:[]},{items:NULL}] AS record UNWIND record.items AS item RETURN item ORDER BY item",
+                2,
+                vec![vec![scalar(1)], vec![scalar(2)]],
+            ),
+            (
+                "UNWIND [3,1,3] AS item WITH DISTINCT item ORDER BY item DESC LIMIT 1 RETURN item+10 AS value",
+                2,
+                vec![vec![scalar(13)]],
+            ),
+            (
+                "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 1 RETURN item",
+                1,
+                vec![vec![scalar(7)]],
+            ),
+            (
+                "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 0 RETURN item",
+                0,
+                vec![vec![scalar(7)]],
+            ),
+            ("UNWIND [] AS item RETURN item", 2, vec![]),
+            ("UNWIND NULL AS item RETURN item", 2, vec![]),
+            ("RETURN 42 AS answer LIMIT 0", 2, vec![]),
+            (
+                "WITH 0 AS x LIMIT 0 UNWIND [1/x] AS item RETURN item",
+                2,
+                vec![],
+            ),
+        ] {
+            let prepared = prepare(text, &GqlParameters::new());
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, expected.len() as u64, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    100,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), ScanKind::Values, "{text}");
+            assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
+            assert_eq!(spool.row_stats().snapshot_records, 0);
+            assert!(spool.evaluator_stats().work_units > 0);
+            assert!(spool.evaluator_stats().scratch_entries > 0);
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            assert_eq!(
+                view.buffer_stats(),
+                buffer,
+                "{text}: no graph load is needed"
+            );
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        let future = prepare(
+            "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 3 RETURN item LIMIT 0",
+            &GqlParameters::new(),
+        );
+        let (mut scratch, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let error = future
+            .spool_in_view(
+                &mut view,
+                &cx,
+                GqlQueryPolicy::new(0, 0, WORK, WORK),
+                &mut scratch,
+                &mut destination,
+                1,
+                512,
+                1024,
+                32 * 1024,
+                1,
+                WORK,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, NativeSpoolError::BufferedRead(ref error)
+            if matches!(**error, fgdb::BufferedReadError::BeyondPublication {
+                requested: CommitSeq(3), publication: CommitSeq(2),
+            })),
+            "{error:?}"
+        );
+        assert_eq!(view.buffer_stats(), buffer);
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn source_free_numeric_aggregates_distinguish_the_unit_empty_groups_and_selected_groups() {
+    let ((), report) = run_async_under_lab(0xc01d_4202, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let buffer = view.buffer_stats();
+        for (text, expected) in [
+            (
+                "RETURN COUNT(*) AS rows,SUM(7) AS total",
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(1),
+                        GraphAggregateValue::Integer(7),
+                    ],
+                )],
+            ),
+            (
+                "UNWIND [] AS x RETURN COUNT(*) AS rows,SUM(x) AS total",
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(0),
+                        GraphAggregateValue::Value(null()),
+                    ],
+                )],
+            ),
+            (
+                "UNWIND NULL AS x RETURN COUNT(*) AS rows,SUM(x) AS total",
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(0),
+                        GraphAggregateValue::Value(null()),
+                    ],
+                )],
+            ),
+            (
+                "UNWIND [3,1,3,NULL] AS x RETURN COUNT(*) AS rows,SUM(x) AS total",
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(4),
+                        GraphAggregateValue::Integer(7),
+                    ],
+                )],
+            ),
+            (
+                "UNWIND [3,1,3,NULL] AS x RETURN COUNT(DISTINCT x) AS rows,SUM(DISTINCT x) AS total",
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(2),
+                        GraphAggregateValue::Integer(4),
+                    ],
+                )],
+            ),
+            (
+                "UNWIND [{category:'a',amount:5},{category:'b',amount:7},{category:'a',amount:3}] AS row RETURN row.category AS category, sum(row.amount) AS total ORDER BY total DESC",
+                vec![
+                    (
+                        vec![GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("a").unwrap(),
+                        )],
+                        vec![GraphAggregateValue::Integer(8)],
+                    ),
+                    (
+                        vec![GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("b").unwrap(),
+                        )],
+                        vec![GraphAggregateValue::Integer(7)],
+                    ),
+                ],
+            ),
+            (
+                "UNWIND [4,1,3,4,NULL] AS x WITH x WHERE x IS NOT NULL RETURN x%2 AS bucket,COUNT(*) AS rows,SUM(x) AS total GROUP BY x%2 HAVING total>0 ORDER BY total DESC",
+                vec![
+                    (
+                        vec![scalar(0)],
+                        vec![
+                            GraphAggregateValue::Count(2),
+                            GraphAggregateValue::Integer(8),
+                        ],
+                    ),
+                    (
+                        vec![scalar(1)],
+                        vec![
+                            GraphAggregateValue::Count(2),
+                            GraphAggregateValue::Integer(4),
+                        ],
+                    ),
+                ],
+            ),
+            (
+                "UNWIND [] AS x RETURN x AS bucket,COUNT(*) AS rows,SUM(x) AS total GROUP BY x",
+                vec![],
+            ),
+            ("RETURN COUNT(*) AS rows,SUM(7) AS total LIMIT 0", vec![]),
+        ] {
+            let params = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(text, &params, resolve)
+                .unwrap()
+                .prepare_buffered_aggregate(&params)
+                .unwrap();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, expected.len() as u64, WORK, WORK),
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    100,
+                    WORK,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), ScanKind::Values);
+            assert_eq!(spool.snapshot_seq(), CommitSeq(2));
+            assert_eq!(spool.row_stats().snapshot_records, 0);
+            assert!(spool.evaluator_stats().work_units > 0);
+            let mut reader = spool.reader(&mut destination, None);
+            let mut actual = Vec::new();
+            while let Some(row) = reader.next_row(&cx).await.unwrap() {
+                actual.push((row.keys().to_vec(), row.values().to_vec()));
+            }
+            drop(reader);
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(view.buffer_stats(), buffer);
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn source_free_zero_private_input_quota_and_late_failures_never_succeed_via_limit_zero() {
+    let ((), report) = run_async_under_lab(0xc01d_4203, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let buffer = view.buffer_stats();
+        for (text, input_limit, expression) in [
+            ("RETURN 1 AS value LIMIT 0", 0, false),
+            ("UNWIND [] AS item RETURN item", 0, false),
+            ("UNWIND [1,2] AS item RETURN item LIMIT 0", 1, false),
+            (
+                "UNWIND [1,0] AS item RETURN 1/item AS value LIMIT 0",
+                2,
+                true,
+            ),
+            (
+                "UNWIND [[1],2] AS items UNWIND items AS item RETURN 1/(item-item) AS value LIMIT 0",
+                2,
+                true,
+            ),
+        ] {
+            let prepared = prepare(text, &GqlParameters::new());
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, 0, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    input_limit,
+                    WORK,
+                )
+                .await
+                .unwrap_err();
+            if expression {
+                assert!(
+                    matches!(
+                        error,
+                        NativeSpoolError::SetExecution(GraphSetExecutionError::Projection {
+                            row: 1,
+                            ..
+                        })
+                    ),
+                    "{text}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                    if matches!(**inner,GqlQueryError::Rows(_))),
+                    "{text}: {error:?}"
+                );
+            }
+            assert_eq!(view.buffer_stats(), buffer);
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn expanded_occurrences_feed_external_aggregates_including_empty_and_distinct_inputs() {
     let ((), report) = run_async_under_lab(0xc01d_4102, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -550,54 +912,72 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
         let cx = contexts.query();
         let vfs = fixture(&commit).await;
         assert!(ITEMS * PAYLOAD_BYTES > SCRATCH_BYTES);
-        let params = GqlParameters::new()
-            .with_list("items", (0..ITEMS as i64).map(scalar).collect())
-            .unwrap();
-        let prepared = prepare(
-            "MATCH (n) WHERE n.p=1 WITH n.q AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC",
-            &params,
-        );
-        drop(params);
         let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
         let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
         let mut view = view(&commit, &vfs, &source_pool).await;
         let baseline = source_pool.used();
-        let (mut scratch, _) = file(&cx, &spill_pool).await;
-        let (mut destination, _) = file(&cx, &spill_pool).await;
-        let (spool, _) = prepared
-            .spool_in_view(
-                &mut view,
-                &cx,
-                policy(ITEMS as u64),
-                &mut scratch,
-                &mut destination,
-                1,
-                512,
-                1024,
-                32 * 1024,
-                ITEMS as u64,
-                WORK,
-            )
-            .await
-            .unwrap();
-        assert_eq!(spool.row_count(), ITEMS as u64);
-        assert!(
-            scratch.stats().reserved_bytes + destination.stats().reserved_bytes
-                > SCRATCH_BYTES as u64
-        );
         let payload = GraphValue::Scalar(
             CanonicalScalar::ucs_basic_text(&"x".repeat(PAYLOAD_BYTES)).unwrap(),
         );
-        let mut reader = spool.reader(&mut destination);
-        for value in (0..ITEMS as i64).rev() {
-            let bytes = reader.next_row(&cx).await.unwrap().unwrap();
-            let row = GraphValueRow::decode_canonical(bytes.as_ref()).unwrap();
-            assert_eq!(row.values(), &[payload.clone(), scalar(value)]);
+        for graph_backed in [true, false] {
+            let mut params = GqlParameters::new()
+                .with_list("items", (0..ITEMS as i64).map(scalar).collect())
+                .unwrap();
+            let text = if graph_backed {
+                "MATCH (n) WHERE n.p=1 WITH n.q AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC"
+            } else {
+                params = params
+                    .with_map("document", vec![("payload".into(), payload.clone())])
+                    .unwrap();
+                "WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC"
+            };
+            let prepared = prepare(text, &params);
+            drop(params);
+            let buffer = view.buffer_stats();
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let budget = if graph_backed {
+                policy(ITEMS as u64)
+            } else {
+                GqlQueryPolicy::new(0, ITEMS as u64, WORK, WORK)
+            };
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    budget,
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    ITEMS as u64,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.row_count(), ITEMS as u64);
+            assert!(
+                scratch.stats().reserved_bytes + destination.stats().reserved_bytes
+                    > SCRATCH_BYTES as u64
+            );
+            if !graph_backed {
+                assert_eq!(spool.kind(), ScanKind::Values);
+                assert_eq!(spool.row_stats().snapshot_records, 0);
+                assert_eq!(view.buffer_stats(), buffer);
+            }
+            let mut reader = spool.reader(&mut destination);
+            for value in (0..ITEMS as i64).rev() {
+                let bytes = reader.next_row(&cx).await.unwrap().unwrap();
+                let row = GraphValueRow::decode_canonical(bytes.as_ref()).unwrap();
+                assert_eq!(row.values(), &[payload.clone(), scalar(value)]);
+            }
+            assert!(reader.next_row(&cx).await.unwrap().is_none());
+            drop(reader);
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
         }
-        assert!(reader.next_row(&cx).await.unwrap().is_none());
-        drop(reader);
-        assert_eq!(source_pool.used(), baseline);
-        assert_eq!(spill_pool.used(), 0);
         drop(view);
         assert_eq!(source_pool.used(), 0);
     });

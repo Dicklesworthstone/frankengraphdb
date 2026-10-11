@@ -168,12 +168,27 @@ fn staged(
     query: &PreparedGraphSet,
 ) -> Result<Vec<GraphValueRow>, SpillSetRowError<()>> {
     let plan = AsyncSpillSetPlan::compile(query).unwrap();
-    // The graph's own ordered/page/visible contract is completed before the
-    // relational host runs, as the real buffered host must do with source_tail.
-    let mut rows = graph
-        .execute(plan.source_pattern(), policy())
-        .unwrap()
-        .value;
+    // A graph source completes its own ordered/page/visible contract first.
+    // Values starts with one unit occurrence and never opens a graph source.
+    let mut rows = match plan.source() {
+        AsyncSpillSetSourcePlan::Values(values) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            let mut cursor = values.start(&mut |_| Ok::<_, ()>(()))?;
+            let mut rows = Vec::new();
+            while let Some((row, next)) = cursor.next_with_control(&mut |_| Ok::<_, ()>(()))? {
+                rows.push(row);
+                cursor = next;
+            }
+            rows
+        }
+        _ => {
+            graph
+                .execute(plan.source_pattern().unwrap(), policy())
+                .unwrap()
+                .value
+        }
+    };
     for stage in plan.stages() {
         let mut output = Vec::new();
         for (index, row) in rows.into_iter().enumerate() {
@@ -350,6 +365,147 @@ fn unwind_null_empty_and_type_errors_keep_original_input_locations() {
 }
 
 #[test]
+fn values_source_emits_one_metered_unit_without_graph_metadata_or_result_charges() {
+    let query = PreparedGraphSet::singleton();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Values(values) = plan.source() else {
+        panic!("source-free plan must have a Values source");
+    };
+    assert!(plan.source_pattern().is_none());
+    assert!(plan.source_tail().is_none());
+    assert!(plan.source_columns().is_empty());
+    let mut events = Vec::new();
+    let cursor = values
+        .start(&mut |event| {
+            events.push(event);
+            Ok::<_, &'static str>(())
+        })
+        .unwrap();
+    let (unit, cursor) = cursor
+        .next_with_control(&mut |event| {
+            events.push(event);
+            Ok::<_, &'static str>(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(unit, GraphValueRow::unit());
+    assert!(
+        cursor
+            .next_with_control(&mut |event| {
+                events.push(event);
+                Ok::<_, &'static str>(())
+            })
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        events,
+        [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry]
+    );
+    for refusal in 0..events.len() {
+        let mut observed = Vec::new();
+        let result = values.start(&mut |event| {
+            observed.push(event);
+            if observed.len() == refusal + 1 {
+                Err("source admission refused")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(
+            result.err(),
+            Some(SpillSetRowError::Control("source admission refused"))
+        );
+        assert_eq!(observed, events[..=refusal]);
+    }
+    assert_eq!(
+        staged(&Graph::sample(), &query).unwrap(),
+        vec![GraphValueRow::unit()]
+    );
+}
+
+#[test]
+fn source_free_values_and_nested_unwind_match_independent_rows_without_graph_access() {
+    for (text, expected) in [
+        ("RETURN 42 AS answer", vec![row(vec![scalar(42)])]),
+        (
+            "UNWIND [3,1,3,NULL] AS item RETURN item ORDER BY item",
+            vec![
+                row(vec![scalar(1)]),
+                row(vec![scalar(3)]),
+                row(vec![scalar(3)]),
+                row(vec![GraphValue::Scalar(CanonicalScalar::Null)]),
+            ],
+        ),
+        (
+            "WITH 2 AS x UNWIND [x,x+1,x] AS item RETURN item ORDER BY item",
+            vec![
+                row(vec![scalar(2)]),
+                row(vec![scalar(2)]),
+                row(vec![scalar(3)]),
+            ],
+        ),
+        (
+            "UNWIND [3,1,3] AS x WITH DISTINCT x ORDER BY x DESC LIMIT 1 UNWIND [x,x+1] AS value RETURN value ORDER BY value",
+            vec![row(vec![scalar(3)]), row(vec![scalar(4)])],
+        ),
+        (
+            "UNWIND [{items:[1,2]},{items:[]},{items:NULL}] AS record UNWIND record.items AS item RETURN item ORDER BY item",
+            vec![row(vec![scalar(1)]), row(vec![scalar(2)])],
+        ),
+        ("UNWIND [] AS item RETURN item", vec![]),
+        ("UNWIND NULL AS item RETURN item", vec![]),
+        ("RETURN 42 AS answer LIMIT 0", vec![]),
+        (
+            "WITH 0 AS x LIMIT 0 UNWIND [1/x] AS item RETURN item",
+            vec![],
+        ),
+    ] {
+        let query = prepare(text);
+        let native = query
+            .execute_governed(
+                GqlQueryPolicy::new(0, 100, 100_000, 100_000),
+                |_, _| -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<Infallible, ()>> {
+                    panic!("{text}: a source-free query must not ask for graph rows");
+                },
+                || Ok(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(native.rows.snapshot_records, 0);
+        assert_eq!(native.value, expected, "{text}");
+        assert_eq!(
+            staged(&Graph::sample(), &query).unwrap(),
+            expected,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn source_free_complete_child_failures_precede_parent_expressions_and_empty_pages() {
+    let graph = Graph::sample();
+    for text in [
+        "UNWIND [[1],2] AS items UNWIND items AS item RETURN 1/(item-item) AS value LIMIT 0",
+        "UNWIND [1,0] AS value RETURN 1/value AS result LIMIT 0",
+        "UNWIND [1,0] AS value WITH 1/value AS result RETURN result LIMIT 1",
+    ] {
+        let query = prepare(text);
+        let GqlQueryError::Source(expected) = graph.native(&query).unwrap_err() else {
+            panic!("{text}: native expression or UNWIND type failure");
+        };
+        assert!(matches!(
+            expected,
+            GraphSetExecutionError::Projection { row: 1, .. }
+        ));
+        assert_eq!(
+            staged(&graph, &query),
+            Err(SpillSetRowError::Native(expected)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn single_edge_parallel_multiplicity_orientation_and_computed_payloads_are_admitted() {
     let graph = Graph::sample();
     for direction in ["->", "-"] {
@@ -381,9 +537,10 @@ fn source_page_precedes_visible_row_canonicalization_and_scopes_preserve_selecte
         .unwrap()
         .with_page(1, Some(1));
     let plan = AsyncSpillSetPlan::compile(&query).unwrap();
-    assert!(plan.source_tail().evaluation_width() > plan.source_tail().visible_width());
-    assert_eq!(plan.source_tail().offset(), 1);
-    assert_eq!(plan.source_tail().count(), Some(3));
+    let tail = plan.source_tail().unwrap();
+    assert!(tail.evaluation_width() > tail.visible_width());
+    assert_eq!(tail.offset(), 1);
+    assert_eq!(tail.count(), Some(3));
     assert_eq!(plan.stages().len(), 3);
     assert_eq!(plan.stages()[0].order(), Some(&[][..]));
     assert_eq!(plan.stages()[2].order(), None);
@@ -480,7 +637,6 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
     }
     let pattern = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"));
     let unsupported = [
-        PreparedGraphSet::singleton(),
         pattern
             .clone()
             .combine(
@@ -498,19 +654,6 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
             Err(SpillSetBuildError::Unsupported { depth: 1 })
         ));
     }
-    let singleton = PreparedGraphSet::singleton()
-        .unwind(
-            "element".to_owned(),
-            GraphSetValue::List(vec![GraphSetValue::Value(scalar(1))]),
-        )
-        .unwrap()
-        .nested()
-        .unwrap()
-        .with_page(0, Some(0));
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&singleton),
-        Err(SpillSetBuildError::Unsupported { depth: 2 })
-    ));
 }
 
 #[test]
@@ -597,8 +740,9 @@ fn fixed_hop_sources_preserve_computed_barriers_multiplicity_and_hidden_source_w
         .with_page(1, Some(1));
     let plan = AsyncSpillSetPlan::compile(&query).unwrap();
     assert!(matches!(plan.source(), AsyncSpillSetSourcePlan::Join(_)));
-    assert!(plan.source_tail().evaluation_width() > plan.source_tail().visible_width());
-    assert_eq!(plan.source_tail().offset(), 1);
-    assert_eq!(plan.source_tail().count(), Some(3));
+    let tail = plan.source_tail().unwrap();
+    assert!(tail.evaluation_width() > tail.visible_width());
+    assert_eq!(tail.offset(), 1);
+    assert_eq!(tail.count(), Some(3));
     assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(4)])]);
 }

@@ -26,6 +26,32 @@ fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     }
 }
 
+// All sources, including the native singleton, enter the same physical
+// execution contract before reserving a scratch writer or evaluating a row.
+fn validate_spill_limits(
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_sort_work: u64,
+) -> Result<()> {
+    if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
+        return Err(SpillError::InvalidLimits.into());
+    }
+    if max_runs == 0 {
+        return Err(NativeSpoolError::SortRunLimit {
+            required: 1,
+            limit: 0,
+        });
+    }
+    if max_sort_work == 0 {
+        return Err(NativeSpoolError::SortWorkLimit {
+            attempted: 1,
+            limit: 0,
+        });
+    }
+    Ok(())
+}
+
 fn open<'q>(
     prepared: &PreparedNativeRead,
     view: &EmbeddedReadView,
@@ -269,21 +295,7 @@ where
         return Err(SpillError::InvalidRun.into());
     }
     validate_order(tail.order(), tail.evaluation_width())?;
-    if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
-        return Err(SpillError::InvalidLimits.into());
-    }
-    if max_runs == 0 {
-        return Err(NativeSpoolError::SortRunLimit {
-            required: 1,
-            limit: 0,
-        });
-    }
-    if max_sort_work == 0 {
-        return Err(NativeSpoolError::SortWorkLimit {
-            attempted: 1,
-            limit: 0,
-        });
-    }
+    validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
     let mut work = Work {
         cx,
         used: 0,

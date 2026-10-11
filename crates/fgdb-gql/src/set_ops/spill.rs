@@ -16,8 +16,8 @@ use core::convert::Infallible;
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
-    /// Only scope, selection, projection and UNWIND over one native graph leaf
-    /// are admitted. This ordinal is the depth from the outermost node.
+    /// Only scope, selection, projection and UNWIND over one native graph or
+    /// singleton leaf are admitted. This ordinal is the depth from the root.
     Unsupported {
         depth: usize,
     },
@@ -41,9 +41,11 @@ impl core::fmt::Display for SpillSetBuildError {
 impl core::error::Error for SpillSetBuildError {}
 
 /// The ordinary async sort-input compiler owns all graph predicates, captures
-/// and projection. This is a fixed source choice, never a fallback strategy.
+/// and projection. Values owns the native singleton and opens no graph source.
+/// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillSetSourcePlan {
+    Values(SpillSetValuesPlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
@@ -51,31 +53,72 @@ pub enum AsyncSpillSetSourcePlan {
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
         match self {
+            Self::Values(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
         }
     }
 }
 
-/// One bound graph source followed by exact native relational barriers.
+/// A compiler-owned native singleton source with one zero-column occurrence.
+/// Starting it performs no graph access or source-record accounting. The host
+/// separately admits its private input occurrence before encoding or appending.
+#[derive(Clone, Debug)]
+pub struct SpillSetValuesPlan {
+    _private: (),
+}
+impl SpillSetValuesPlan {
+    /// Charge the existing native Values work and retention before constructing
+    /// its identity tuple. These events belong to the SAME cumulative allowance
+    /// used by every following stage; no final ResultRow is charged here.
+    ///
+    /// The host retains the returned cursor's reservation through the yielded
+    /// row's last use, including awaited encoding/appends. The consuming cursor
+    /// emits exactly one unit row and then exhausts. Its first stage still owns
+    /// the Values node's page; a later LIMIT zero never skips this source.
+    pub fn start<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<SpillSetRows, SpillSetRowError<E>> {
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        Ok(SpillSetRows {
+            state: StageRows::One(Some(GraphValueRow::unit())),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct GraphSourceMetadata {
+    pattern: PreparedGraphPattern<GraphValueRow>,
+    tail: ScanSortTail,
+}
+
+/// One bound graph or singleton source followed by native relational barriers.
 ///
-/// First consume the complete source and apply source_tail(), including its
-/// hidden-column removal. Then execute stages() in order. The first stage
-/// canonicalizes the visible source tuples, just as native Set admission does;
-/// a graph leaf's own ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
+/// First consume the complete source and apply its source_tail(), when present,
+/// including hidden-column removal. Values emits one zero-column identity tuple
+/// and has no graph pattern or scan tail. Then execute stages() in order. The
+/// first graph stage canonicalizes visible source tuples as native Set admission
+/// does; a graph leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
 /// No source, expression, clause or unsupported descendant is erased even when
 /// the final count is zero. Bound plans contain no storage or query authority.
 #[derive(Clone)]
 pub struct AsyncSpillSetPlan {
-    pattern: PreparedGraphPattern<GraphValueRow>,
     source: AsyncSpillSetSourcePlan,
-    source_tail: ScanSortTail,
+    graph: Option<GraphSourceMetadata>,
     stages: Vec<SpillSetStage>,
 }
 impl AsyncSpillSetPlan {
     pub fn compile(query: &PreparedGraphSet) -> Result<Self, SpillSetBuildError> {
         let mut stages = Vec::new();
-        let pattern = compile_stages(query, 0, &mut stages)?;
+        let Some(pattern) = compile_stages(query, 0, &mut stages)? else {
+            return Ok(Self {
+                source: AsyncSpillSetSourcePlan::Values(SpillSetValuesPlan { _private: () }),
+                graph: None,
+                stages,
+            });
+        };
         let (source, source_tail) = if matches!(
             pattern.plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
@@ -102,24 +145,28 @@ impl AsyncSpillSetPlan {
             (AsyncSpillSetSourcePlan::Vertex(plan), tail)
         };
         Ok(Self {
-            pattern: pattern.clone(),
             source,
-            source_tail,
+            graph: Some(GraphSourceMetadata {
+                pattern: pattern.clone(),
+                tail: source_tail,
+            }),
             stages,
         })
     }
 
-    pub fn source_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        &self.pattern
+    pub fn source_pattern(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        self.graph.as_ref().map(|graph| &graph.pattern)
     }
     pub fn source(&self) -> &AsyncSpillSetSourcePlan {
         &self.source
     }
     pub fn source_columns(&self) -> &[String] {
-        self.pattern.columns()
+        self.graph
+            .as_ref()
+            .map_or(&[], |graph| graph.pattern.columns())
     }
-    pub fn source_tail(&self) -> &ScanSortTail {
-        &self.source_tail
+    pub fn source_tail(&self) -> Option<&ScanSortTail> {
+        self.graph.as_ref().map(|graph| &graph.tail)
     }
     pub fn stages(&self) -> &[SpillSetStage] {
         &self.stages
@@ -127,7 +174,7 @@ impl AsyncSpillSetPlan {
     pub fn columns(&self) -> &[String] {
         self.stages
             .last()
-            .expect("a graph leaf is a stage")
+            .expect("every admitted source leaf is a stage")
             .columns()
     }
 }
@@ -357,10 +404,11 @@ fn compile_stages<'a>(
     query: &'a PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
-) -> Result<&'a PreparedGraphPattern<GraphValueRow>, SpillSetBuildError> {
+) -> Result<Option<&'a PreparedGraphPattern<GraphValueRow>>, SpillSetBuildError> {
     let (pattern, input, operation, canonical, distinct) = match &query.node {
+        SetNode::Values => (None, Vec::new(), Operation::Identity, false, false),
         SetNode::Pattern(pattern) => (
-            pattern,
+            Some(pattern),
             query.types.clone(),
             Operation::Identity,
             true,
@@ -401,7 +449,6 @@ fn compile_stages<'a>(
             false,
         ),
         SetNode::Aggregate(_)
-        | SetNode::Values
         | SetNode::ProcedureCall(_)
         | SetNode::CrossJoin { .. }
         | SetNode::Join { .. }

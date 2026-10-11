@@ -201,28 +201,54 @@ impl core::fmt::Debug for PreparedBufferedAggregate {
 }
 
 impl PreparedNativeRead {
-    /// Bind native COUNT/SUM/AVG/MIN/MAX and admit a local asynchronous vertex
-    /// or fixed-hop edge source before database opening. Computed inputs, HAVING,
-    /// computed visible output, RETURN DISTINCT and exact numeric ordering use
-    /// the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT arguments use
-    /// bounded external support passes. Unary WITH projection/filter/UNWIND
-    /// pipelines retain intermediate expansion, DISTINCT, ordering and
-    /// pagination in external stages. COLLECT, relational joins, source-free
-    /// relations, OPTIONAL/variable-length expansion and probes refuse at
-    /// preparation. Join routing and one record per hop use the view pool;
+    /// Bind native COUNT/SUM/AVG/MIN/MAX and admit a native singleton, local
+    /// asynchronous vertex or fixed-hop edge source before database opening.
+    /// Source-free expressions and UNWIND charge no graph records. Their
+    /// numeric groups retain returned keys/summaries, HAVING, RETURN DISTINCT
+    /// and ordering by returned aliases. Existing graph aggregate computed
+    /// outputs use the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT
+    /// arguments use bounded external support passes. Unary WITH
+    /// projection/filter/UNWIND pipelines retain intermediate expansion, DISTINCT, ordering and
+    /// pagination in external stages. COLLECT, relational joins,
+    /// OPTIONAL/variable-length expansion and probes refuse at preparation.
+    /// Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.
     pub fn prepare_buffered_aggregate(
         &self,
         params: &GqlParameters,
     ) -> Result<PreparedBufferedAggregate> {
-        let BoundAggregate {
-            definition,
-            columns,
-            slots,
-            as_of,
-        } = bind(self, params)?;
-        let plan = AsyncSpillAggregatePlan::compile(&definition)
-            .map_err(|_| NativeAggregateSpoolError::Unsupported)?;
+        let (plan, columns, slots, as_of) = match self {
+            Self::PipelineAggregate(template) => {
+                // Bind the complete relation through its native source-aware
+                // owner. A singleton is not a graph scan, and a failed graph
+                // binder is never retried through a different execution path.
+                let relation = template.bind_relation_parameters(params).map_err(|error| {
+                    NativeAggregateSpoolError::Prepare(Box::new(QueryError::PipelineText(error)))
+                })?;
+                (
+                    AsyncSpillAggregatePlan::compile_relation(&relation)
+                        .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
+                    template.columns().to_vec(),
+                    template.output_slots().to_vec(),
+                    None,
+                )
+            }
+            _ => {
+                let BoundAggregate {
+                    definition,
+                    columns,
+                    slots,
+                    as_of,
+                } = bind(self, params)?;
+                (
+                    AsyncSpillAggregatePlan::compile(&definition)
+                        .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
+                    columns,
+                    slots,
+                    as_of,
+                )
+            }
+        };
         let definition = plan.definition();
         if !crate::query::aggregate_stream::valid_layout(
             &columns,

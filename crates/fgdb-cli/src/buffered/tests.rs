@@ -612,6 +612,112 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
 }
 
 #[test]
+fn buffered_external_values_preserve_native_rows_and_complete_group_output_contracts() {
+    let ((), report) = run_async_under_lab(0xc01d_4204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        for (text, seq) in [
+            ("RETURN 42 AS answer", 2),
+            ("UNWIND [3,1,3,NULL] AS item RETURN item ORDER BY item", 2),
+            (
+                "WITH 2 AS x UNWIND [x,x+1,x] AS item RETURN item ORDER BY item",
+                2,
+            ),
+            (
+                "UNWIND [{items:[1,2]},{items:[]},{items:NULL}] AS record UNWIND record.items AS item RETURN item ORDER BY item",
+                2,
+            ),
+            (
+                "UNWIND [3,1,3] AS item WITH DISTINCT item ORDER BY item DESC LIMIT 1 RETURN item+10 AS value",
+                2,
+            ),
+            ("RETURN COUNT(*) AS rows,SUM(7) AS total", 2),
+            (
+                "UNWIND NULL AS item RETURN COUNT(*) AS rows,SUM(item) AS total",
+                2,
+            ),
+            (
+                "UNWIND [] AS item RETURN item,COUNT(*) AS rows GROUP BY item",
+                2,
+            ),
+            (
+                "UNWIND [{category:'a',amount:5},{category:'b',amount:7},{category:'a',amount:3}] AS row RETURN row.category AS category, sum(row.amount) AS total ORDER BY total DESC",
+                2,
+            ),
+            (
+                "UNWIND [4,1,3,4,NULL] AS x WITH x WHERE x IS NOT NULL RETURN x%2 AS bucket,COUNT(*) AS rows,SUM(x) AS total GROUP BY x%2 HAVING total>3 ORDER BY total DESC SKIP 1 LIMIT 1",
+                2,
+            ),
+            (
+                "UNWIND [4,1,3,4] AS x RETURN DISTINCT COUNT(*) AS rows GROUP BY x%2 ORDER BY rows DESC",
+                2,
+            ),
+            (
+                "UNWIND [4,1,3,4,NULL] AS x RETURN COUNT(DISTINCT x) AS rows,SUM(DISTINCT x) AS total",
+                2,
+            ),
+            (
+                "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 1 RETURN item",
+                1,
+            ),
+            ("RETURN 42 AS answer LIMIT 0", 2),
+            ("RETURN COUNT(*) AS rows LIMIT 0", 2),
+        ] {
+            let mut options = spill_options(&directory, text);
+            options.budget.records = Some(0);
+            let prepared = okay(prepare_query(&options));
+            let eager = resident
+                .query(
+                    &cx,
+                    text,
+                    &options.params,
+                    &options,
+                    options.budget.policy(),
+                )
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let mut expected = Vec::new();
+            okay(crate::render(eager, seq, "rows", true, &mut expected));
+            options.budget.rows = Some(rows(&expected).len() as u64);
+            let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                pool.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let buffer = view.buffer_stats();
+            let mut output = Vec::new();
+            okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+            assert_eq!(rows(&output), rows(&expected), "{text}");
+            let output = std::str::from_utf8(&output).unwrap();
+            assert!(
+                output.starts_with(&format!(
+                    r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"#
+                )),
+                "{text}: {output}"
+            );
+            assert!(output.contains(r#""event":"result""#));
+            assert_eq!(
+                view.buffer_stats(),
+                buffer,
+                "{text}: no graph page is loaded"
+            );
+            no_scratch(&directory);
+            drop(view);
+            assert_eq!(pool.used(), 0, "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn buffered_external_admission_limits_and_late_expressions_never_publish_partial_results() {
     let ((), report) = run_async_under_lab(0x636c_7511, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -636,7 +742,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
             "MATCH (n) WITH n.p AS value RETURN collect(value) LIMIT 0",
-            "UNWIND [1,2] AS item RETURN sum(item) LIMIT 0",
+            "UNWIND [1,2] AS item RETURN collect(item) LIMIT 0",
             "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
             assert!(
@@ -707,6 +813,26 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             (
                 "MATCH (n) WITH n.p AS p UNWIND [p,p,p] AS item RETURN COUNT(*) AS rows",
                 Some(("--max-spill-rows", "8")),
+            ),
+            ("UNWIND [1,0] AS item RETURN 1/item AS value LIMIT 0", None),
+            (
+                "UNWIND [1,0] AS item RETURN SUM(1/item) AS total LIMIT 0",
+                None,
+            ),
+            ("RETURN SUM(1/0) AS total LIMIT 0", None),
+            ("RETURN 1 AS value LIMIT 0", Some(("--max-spill-rows", "0"))),
+            (
+                "UNWIND [] AS item RETURN COUNT(*) AS rows",
+                Some(("--max-spill-rows", "0")),
+            ),
+            (
+                "UNWIND [1,2,3] AS item RETURN COUNT(*) AS rows",
+                Some(("--max-spill-rows", "2")),
+            ),
+            ("RETURN 1 AS value LIMIT 0", Some(("--max-sort-work", "0"))),
+            (
+                "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ 3 RETURN item LIMIT 0",
+                None,
             ),
             (
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",

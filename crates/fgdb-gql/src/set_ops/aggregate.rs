@@ -52,6 +52,13 @@ impl PreparedGraphSetAggregate {
             .then_some(Self { summary })
     }
 
+    /// Keep source ownership private while the native physical compiler reuses
+    /// complete-group normalization. Every input and output clause remains in
+    /// this definition; the consumer separately admits the entire relation.
+    pub(crate) fn prepare_spill_output(&self) -> Option<PreparedGraphAggregate> {
+        self.summary.prepare_complete_group_output()
+    }
+
     /// Reuse native post-HAVING expressions without exposing a graph executor.
     pub fn with_output_projection(
         mut self,

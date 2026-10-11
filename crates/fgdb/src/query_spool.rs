@@ -27,14 +27,25 @@ pub enum NativeSpoolError {
     Prepare(Box<QueryError>),
     Execute(Box<GqlQueryError<ScanError<ReadError>, Cancel>>),
     BufferedExecute(Box<GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>>),
+    /// Snapshot admission for a source that opens no graph scan.
+    BufferedRead(Box<crate::BufferedReadError>),
     SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
     Spill(SpillError),
     Encode(fgdb_types::ScalarEncodeError),
     Decode(fgdb_gql::algebra::GraphValueDecodeError),
-    RowTooLarge { bytes: usize, limit: usize },
+    RowTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     SortOrder(fgdb_gql::algebra::GraphOrderError),
-    SortRunLimit { required: u64, limit: usize },
-    SortWorkLimit { attempted: u64, limit: u64 },
+    SortRunLimit {
+        required: u64,
+        limit: usize,
+    },
+    SortWorkLimit {
+        attempted: u64,
+        limit: u64,
+    },
     IncompleteCursor,
 }
 impl core::fmt::Display for NativeSpoolError {
@@ -43,6 +54,7 @@ impl core::fmt::Display for NativeSpoolError {
             Self::Prepare(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
             Self::BufferedExecute(e) => e.fmt(f),
+            Self::BufferedRead(e) => e.fmt(f),
             Self::SetExecution(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
@@ -70,6 +82,7 @@ impl core::error::Error for NativeSpoolError {
             Self::Prepare(e) => Some(e.as_ref()),
             Self::Execute(e) => Some(e.as_ref()),
             Self::BufferedExecute(e) => Some(e.as_ref()),
+            Self::BufferedRead(e) => Some(e.as_ref()),
             Self::SetExecution(e) => Some(e),
             Self::Spill(e) => Some(e),
             Self::Encode(e) => Some(e),

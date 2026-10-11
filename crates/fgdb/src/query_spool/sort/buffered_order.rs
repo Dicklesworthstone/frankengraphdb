@@ -6,16 +6,17 @@ use crate::BufferedReadView;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
 };
-use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetValuesPlan};
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
 
 #[derive(Clone)]
 enum Input {
-    Vertex(AsyncVertexScanPlan<GraphValueRow>),
-    Edge(AsyncEdgeScanPlan),
-    Join(AsyncEdgeJoinPlan),
+    Values(SpillSetValuesPlan),
+    Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
+    Edge(AsyncEdgeScanPlan, ScanSortTail),
+    Join(AsyncEdgeJoinPlan, ScanSortTail),
     Set(AsyncSpillSetPlan),
 }
 
@@ -27,7 +28,6 @@ enum Input {
 pub struct PreparedBufferedOrder {
     columns: Vec<String>,
     input: Input,
-    tail: ScanSortTail,
     as_of: Option<CommitSeq>,
 }
 impl core::fmt::Debug for PreparedBufferedOrder {
@@ -37,14 +37,15 @@ impl core::fmt::Debug for PreparedBufferedOrder {
 }
 
 impl PreparedNativeRead {
-    /// Bind once and admit a vertex, single-edge or fixed-hop source for external
-    /// ordering. Property-only output, local predicates, hidden ordering keys,
+    /// Bind once and admit a native singleton, vertex, single-edge or fixed-hop
+    /// source for external ordering. Source-free expressions/UNWIND open no
+    /// graph cursor. Property-only output, local predicates, hidden ordering keys,
     /// edge orientation and row DISTINCT use their existing GLA semantics.
     /// Native unary Project/Filter/Scope/UNWIND relations preserve every
     /// expansion, canonicalization, DISTINCT, order and window through external
     /// stages. UNWIND retains one input/list and one expanded row at a time.
-    /// Probes, OPTIONAL/variable-length paths, relational joins and source-free
-    /// relations refuse. Numeric aggregate plans have their own preparation.
+    /// Probes, OPTIONAL/variable-length paths and relational joins refuse.
+    /// Numeric aggregate plans have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
         let set = match self {
@@ -70,7 +71,6 @@ impl PreparedNativeRead {
             })?;
             return Ok(PreparedBufferedOrder {
                 columns: plan.columns().to_vec(),
-                tail: plan.source_tail().clone(),
                 input: Input::Set(plan),
                 as_of,
             });
@@ -94,7 +94,7 @@ impl PreparedNativeRead {
                 }));
             }
         };
-        let (input, tail) = if matches!(
+        let input = if matches!(
             query.plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
         ) {
@@ -111,11 +111,11 @@ impl PreparedNativeRead {
             {
                 let (plan, tail) =
                     AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
-                (Input::Join(plan), tail)
+                Input::Join(plan, tail)
             } else {
                 let (plan, tail) =
                     AsyncEdgeScanPlan::compile_sort_input(query.plan()).map_err(error)?;
-                (Input::Edge(plan), tail)
+                Input::Edge(plan, tail)
             }
         } else {
             let (plan, tail) =
@@ -124,12 +124,11 @@ impl PreparedNativeRead {
                         VertexScanError::Plan(error),
                     )))
                 })?;
-            (Input::Vertex(plan), tail)
+            Input::Vertex(plan, tail)
         };
         Ok(PreparedBufferedOrder {
             columns: query.columns().to_vec(),
             input,
-            tail,
             as_of,
         })
     }
@@ -141,7 +140,6 @@ impl PreparedBufferedOrder {
     pub(crate) fn from_relation(input: AsyncSpillSetPlan, as_of: Option<CommitSeq>) -> Self {
         Self {
             columns: input.columns().to_vec(),
-            tail: input.source_tail().clone(),
             input: Input::Set(input),
             as_of,
         }
@@ -244,24 +242,32 @@ impl PreparedBufferedOrder {
     {
         let as_of = self.as_of.unwrap_or_else(|| view.frontier());
         let columns = self.columns.clone();
-        let tail = self.tail.clone();
         let input_policy = input_policy(policy, max_input_rows);
         match &self.input {
             Input::Set(plan) => {
                 let plan = plan.clone();
-                let source = Self {
-                    columns: plan.source_columns().to_vec(),
-                    input: match plan.source() {
-                        AsyncSpillSetSourcePlan::Vertex(source) => Input::Vertex(source.clone()),
-                        AsyncSpillSetSourcePlan::Edge(source) => Input::Edge(source.clone()),
-                        AsyncSpillSetSourcePlan::Join(source) => Input::Join(source.clone()),
-                    },
-                    tail,
-                    as_of: Some(as_of),
-                };
                 // Source rows and every intermediate page have their own
                 // allowance. Only the last native stage spends final rows.
                 Box::pin(async move {
+                    let tail = || plan.source_tail().cloned().ok_or(SpillError::InvalidRun);
+                    let source = Self {
+                        columns: plan.source_columns().to_vec(),
+                        input: match plan.source() {
+                            AsyncSpillSetSourcePlan::Values(source) => {
+                                Input::Values(source.clone())
+                            }
+                            AsyncSpillSetSourcePlan::Vertex(source) => {
+                                Input::Vertex(source.clone(), tail()?)
+                            }
+                            AsyncSpillSetSourcePlan::Edge(source) => {
+                                Input::Edge(source.clone(), tail()?)
+                            }
+                            AsyncSpillSetSourcePlan::Join(source) => {
+                                Input::Join(source.clone(), tail()?)
+                            }
+                        },
+                        as_of: Some(as_of),
+                    };
                     let (input, work) = source
                         .spool_in_view_with_resolver(
                             view,
@@ -297,7 +303,36 @@ impl PreparedBufferedOrder {
                     .await
                 })
             }
-            Input::Vertex(plan) => {
+            Input::Values(plan) => {
+                let plan = plan.clone();
+                let publication = view.frontier();
+                Box::pin(async move {
+                    if as_of > publication {
+                        return Err(NativeSpoolError::BufferedRead(Box::new(
+                            crate::BufferedReadError::BeyondPublication {
+                                requested: as_of,
+                                publication,
+                            },
+                        )));
+                    }
+                    super::staged::seed_values(
+                        &plan,
+                        as_of,
+                        cx,
+                        input_policy,
+                        destination,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_input_rows,
+                        max_sort_work,
+                    )
+                    .await
+                })
+            }
+            Input::Vertex(plan, tail) => {
+                let tail = tail.clone();
                 let opened = view
                     .open_vertex_input(cx, plan.clone(), as_of, input_policy)
                     .map_err(|error| {
@@ -323,7 +358,8 @@ impl PreparedBufferedOrder {
                     .await
                 })
             }
-            Input::Join(plan) => {
+            Input::Join(plan, tail) => {
+                let tail = tail.clone();
                 let opened = view
                     .open_edge_join_input(cx, plan.clone(), as_of, input_policy)
                     .map_err(|error| {
@@ -349,7 +385,8 @@ impl PreparedBufferedOrder {
                     .await
                 })
             }
-            Input::Edge(plan) => {
+            Input::Edge(plan, tail) => {
+                let tail = tail.clone();
                 let opened = view
                     .open_edge_input(cx, plan.clone(), as_of, input_policy)
                     .map_err(|error| {

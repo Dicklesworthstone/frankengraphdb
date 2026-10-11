@@ -4,7 +4,7 @@
 
 use super::*;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
-use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetRowError, SpillSetStage};
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetRowError, SpillSetStage, SpillSetValuesPlan};
 use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded};
 use fgdb_types::CanonicalScalarResolver;
 
@@ -64,6 +64,122 @@ fn native_event(
         scratch_entries,
     };
     Ok(())
+}
+
+/// Materialize the native Values source using ordinary canonical row frames.
+/// No graph cursor, schema-carrier pattern or graph record is manufactured.
+/// Its one private occurrence precedes every native stage and output window.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn seed_values<F>(
+    plan: &SpillSetValuesPlan,
+    snapshot: CommitSeq,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    destination: &mut SpillFile<F>,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_sort_work: u64,
+) -> Result<(NativeResultSpool, u64)>
+where
+    F: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+{
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(SpillError::Interrupted)?;
+    super::validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
+    let pool = destination.memory_pool().clone();
+    let mut evaluator = GlaExecutionStats::default();
+    let mut charge = pool.reserve(cx, 0).map_err(SpillError::Memory)?;
+    let cursor = plan
+        .start(&mut |event| {
+            native_event(cx, policy, &mut evaluator, event)?;
+            if event == GlaExecutionEvent::ScratchEntry {
+                charge
+                    .grow(
+                        cx,
+                        8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                    )
+                    .map_err(SpillError::Memory)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| match error {
+            SpillSetRowError::Control(error) => error,
+            SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
+        })?;
+    let mut state = (cursor, charge);
+    let mut work = Work {
+        cx,
+        used: 0,
+        limit: max_sort_work,
+    };
+    let mut writer = destination.paged_writer(cx, page_bytes)?;
+    let mut rows = 0;
+    let mut largest = 0;
+    loop {
+        let next = state
+            .0
+            .next_with_control(&mut |event| {
+                native_event(cx, policy, &mut evaluator, event)?;
+                if event == GlaExecutionEvent::ScratchEntry {
+                    state
+                        .1
+                        .grow(
+                            cx,
+                            8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                        )
+                        .map_err(SpillError::Memory)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| match error {
+                SpillSetRowError::Control(error) => error,
+                SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
+            })?;
+        let Some((row, remaining)) = next else {
+            break;
+        };
+        state.0 = remaining;
+        if !row.is_empty() || rows != 0 {
+            return Err(SpillError::InvalidRun.into());
+        }
+        GqlExecutionBudget::result_rows(max_input_rows)
+            .check(GqlBudgetDimension::ResultRows, 1)
+            .map_err(|error| {
+                NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
+            })?;
+        // The source's state reservation stays live through this row's entire
+        // encoded write, even though its remaining cursor is already empty.
+        let encoded = codec::encode(&pool, &mut work, &row, max_row_bytes)?;
+        write_row(&mut writer, &encoded.0, &mut work).await?;
+        largest = encoded.0.len();
+        rows = 1;
+        drop(encoded);
+        drop(row);
+    }
+    if rows != 1 {
+        return Err(NativeSpoolError::IncompleteCursor);
+    }
+    work.charge(1)?;
+    let run = writer.finish(cx).await?;
+    Ok((
+        NativeResultSpool {
+            columns: Vec::new().into(),
+            encoded_columns: 0,
+            snapshot,
+            kind: ScanKind::Values,
+            rows: GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: rows,
+            },
+            evaluator,
+            max_row_bytes: largest,
+            run,
+        },
+        work.used,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
