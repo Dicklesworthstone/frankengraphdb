@@ -4,14 +4,14 @@
 mod procedures {
     use super::{Database, Vfs, WriteTxn, WriteTxnError};
     use crate::gql_exec::{AdmissionUsage, source::SourceEvent};
-    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow, VertexPredicate};
     use fgdb_gql::{
         GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
         PreparedProcedureCall,
     };
     use fgdb_prism::{
-        FnxReadError, FnxReadOptions, ProjectionBuildError, ProjectionEdge, SnapshotBinding,
-        SnapshotGraphView,
+        FnxReadError, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
+        SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
     };
     use fgdb_types::{QueryCx, VId};
 
@@ -53,7 +53,7 @@ mod procedures {
             // This source admits snapshot records and work independently.
             // The immutable host's work-as-record proxy would incorrectly
             // spend a row allowance on overlay normalization and witnesses.
-            let options = FnxReadOptions::whole_graph_for(&spec, Some(self.basis));
+            let options = spec.options_at(self.basis);
             let mut usage = AdmissionUsage::default();
             let mut source_policy = policy;
             source_policy.evaluator.max_work_units = source_policy
@@ -70,18 +70,27 @@ mod procedures {
                     usage.observe(source_policy, event)
                 })?;
 
-            // Native CALL currently selects the whole graph and unit weights,
-            // exactly as the Database/EmbeddedReadView hosts do. Keep isolated
-            // vertices and concrete EIds; the registered projection owns the
-            // directedness, self-loop and parallel-edge laws.
+            // Select the induced graph from the canonical overlay, retaining
+            // isolates and concrete EIds. Keep the existing complete scan
+            // witnesses: a selected label, relation or weight may change after
+            // this read, including when no output row survives LIMIT.
+            // Excluded edges and dropped loops never resolve their weights.
             let mut staging_bytes = 0usize;
             let mut vertices = Vec::new();
-            for &(vertex, _) in &source.vertices {
+            for (vertex, row) in &source.vertices {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe(policy, SourceEvent::Work)?;
+                if options
+                    .selection
+                    .vertex_label
+                    .is_some_and(|label| !row.matches(&VertexPredicate::HasLabel(label)))
+                {
+                    continue;
+                }
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
                 crate::query::push_prism_staged(
                     &mut vertices,
-                    vertex,
+                    *vertex,
                     "vertices",
                     options.projection_limits.max_vertices,
                     &mut staging_bytes,
@@ -90,16 +99,50 @@ mod procedures {
                 .map_err(prism_failure)?;
             }
             let mut edges = Vec::new();
-            for &((eid, from, _, to), _) in &source.edges {
+            for ((eid, from, relation, to), row) in &source.edges {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe(policy, SourceEvent::Work)?;
+                if options
+                    .selection
+                    .relation
+                    .is_some_and(|selected| selected != *relation)
+                    || vertices.binary_search(from).is_err()
+                    || vertices.binary_search(to).is_err()
+                {
+                    continue;
+                }
+                if from == to {
+                    match options.projection.self_loops {
+                        SelfLoopPolicy::Drop => continue,
+                        SelfLoopPolicy::Reject => {
+                            return Err(prism_failure(FnxReadError::Projection(
+                                ProjectionError::SelfLoop(*eid),
+                            )));
+                        }
+                        SelfLoopPolicy::Keep => {}
+                    }
+                }
+                let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit
+                {
+                    1.0
+                } else {
+                    let value = options
+                        .selection
+                        .weight
+                        .property_key()
+                        .and_then(|key| row.property(key));
+                    options.selection.weight.resolve(value).map_err(|reason| {
+                        prism_failure(FnxReadError::Weight { edge: *eid, reason })
+                    })?
+                };
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
                 crate::query::push_prism_staged(
                     &mut edges,
                     ProjectionEdge {
-                        eid,
-                        source: from,
-                        target: to,
-                        weight: 1.0,
+                        eid: *eid,
+                        source: *from,
+                        target: *to,
+                        weight,
                     },
                     "input edges",
                     options.projection_limits.max_input_edges,

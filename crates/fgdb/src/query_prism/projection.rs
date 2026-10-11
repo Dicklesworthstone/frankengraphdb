@@ -3,13 +3,23 @@
 
 use super::*;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_prism::{FnxWeightSpec, MissingWeightPolicy};
+use fgdb_prism::{FnxExecutionError, FnxGraphKind, FnxWeightSpec, MissingWeightPolicy};
 
 /// A registered kernel and its inseparable input recipe. Existing executors
 /// borrow the kernel, and obtain options from this complete binding.
 pub(crate) struct BoundProcedure {
     spec: FnxCallSpec,
     options: FnxReadOptions,
+}
+
+impl BoundProcedure {
+    /// Keep the query's selected graph and policies while pinning its host's
+    /// snapshot. Transaction sources meter records and work independently.
+    pub(crate) fn options_at(&self, as_of: CommitSeq) -> FnxReadOptions {
+        let mut options = self.options;
+        options.as_of = Some(as_of);
+        options
+    }
 }
 
 impl core::ops::Deref for BoundProcedure {
@@ -143,6 +153,19 @@ pub(crate) fn bind_procedure<C>(
         options.selection.weight = FnxWeightSpec::Property { key, missing };
     } else if let Some(index) = missing_index {
         return Err(invalid(index, "missing requires an explicit weight property"));
+    }
+    // Reject incompatible graph laws before any host scans its source.
+    // Reversal still supplies a directed graph; only Undirected changes kind.
+    let required = spec.signature().graph_kind;
+    let compatible = match required {
+        FnxGraphKind::Any => true,
+        FnxGraphKind::Directed => options.projection.directedness != Directedness::Undirected,
+        FnxGraphKind::Undirected => options.projection.directedness == Directedness::Undirected,
+    };
+    if !compatible {
+        return Err(procedure_failure(FnxReadError::Execution(
+            FnxExecutionError::GraphKind { required },
+        )));
     }
     Ok(BoundProcedure { spec, options })
 }
