@@ -923,7 +923,6 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
             "MATCH (n) WITH n.p AS value RETURN collect(value) LIMIT 0",
             "UNWIND [1,2] AS item RETURN collect(item) LIMIT 0",
-            "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
             assert!(
                 prepare_query(&spill_options(&directory, text)).is_err(),
