@@ -993,3 +993,66 @@ fn existing_group_names_and_private_projection_names_cannot_be_captured() {
     assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(8)));
     assert_eq!(row.values()[0].as_integer(), Some(8));
 }
+
+/// A leading UNWIND joined by a MATCH, then a WITH, feeds an aggregate RETURN
+/// (`UNWIND $ids AS id MATCH (n {id: id}) WITH ... RETURN count(*)`), as the
+/// same rows do behind a leading WITH: one row per joined occurrence, a
+/// repeated value matching once per repeat, and an unmatched value none.
+#[test]
+fn a_leading_unwind_joined_by_match_feeds_an_aggregate_return() {
+    let input = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(3),
+    ];
+    let totals = |text: &str| {
+        let row = run(&query(text), &input, wide()).value.remove(0);
+        (
+            row.values()[0].as_count().unwrap(),
+            row.values()[1].as_integer().unwrap(),
+        )
+    };
+    let unwound = "UNWIND [2, 2, 3, 9] AS wanted MATCH (n {p: wanted}) WITH n.p AS matched \
+                   RETURN COUNT(*) AS rows, SUM(matched) AS total";
+    assert_eq!(totals(unwound), (3, 7));
+    // Without a WITH the RETURN reads the implicit row: the unwound column
+    // and the matched vertex, whose property is a hidden graph read.
+    assert_eq!(
+        totals(
+            "UNWIND [2, 2, 3, 9] AS wanted MATCH (n {p: wanted}) \
+             RETURN COUNT(*) AS rows, SUM(n.p) AS total"
+        ),
+        (3, 7)
+    );
+    assert_eq!(
+        totals(&format!("WITH 1 AS one {unwound}")),
+        totals(unwound),
+        "{unwound}"
+    );
+    // Grouped by the matched value, in the written key order.
+    let grouped = run(
+        &query(
+            "UNWIND [2, 2, 3] AS wanted MATCH (n {p: wanted}) WITH n.p AS matched \
+             RETURN matched, COUNT(*) AS copies ORDER BY matched",
+        ),
+        &input,
+        wide(),
+    );
+    let groups: Vec<_> = grouped
+        .value
+        .iter()
+        .map(|row| {
+            (
+                row.keys()[0].as_scalar().cloned(),
+                row.values()[0].as_count().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            (Some(CanonicalScalar::Int(2)), 2),
+            (Some(CanonicalScalar::Int(3)), 1)
+        ]
+    );
+}
