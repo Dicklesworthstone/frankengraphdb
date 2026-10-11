@@ -6,7 +6,7 @@
 
 #[path = "session/stream.rs"]
 mod stream;
-pub use stream::{AuthorizedAggregateCursor, AuthorizedRowCursor};
+pub use stream::{AuthorizedAggregateCursor, AuthorizedRowCursor, AuthorizedSendRowCursor};
 
 use super::*;
 use crate::EmbeddedReadView;

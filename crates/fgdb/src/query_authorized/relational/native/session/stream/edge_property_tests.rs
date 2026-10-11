@@ -96,14 +96,14 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
     let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
     let permit = verified.begin_read_at(BRANCH, 100).unwrap();
     let samples = Cell::new(0);
-    let clock = || {
+    let mut clock = || {
         samples.set(samples.get() + 1);
         100
     };
-    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(clock))));
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
     let source = ScopedSource {
         inner: raw,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut work = 0;
     let result = source
@@ -227,11 +227,11 @@ fn repeated_edge_fields_share_a_single_terminal_node_allowance() {
         let token = issuer.issue_at(&grant, 100).unwrap();
         let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
         let permit = verified.begin_read_at(BRANCH, 100).unwrap();
-        let execution: Shared<'_> =
-            Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
+        let mut clock = || 100;
+        let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
         let source = ScopedSource {
             inner: Raw::new(vec![(PropertyKeyId(17), CanonicalScalar::Int(7))]),
-            execution: Rc::clone(&execution),
+            execution: execution.clone(),
         };
         let mut control = |_| execution.borrow_mut().checkpoint();
         let value = source

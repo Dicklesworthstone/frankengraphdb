@@ -35,6 +35,8 @@ use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+mod source_stream;
+
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
 /// client may grant credit for a stream the server has just ended.
 const RECENTLY_FINISHED: usize = 64;
@@ -984,10 +986,33 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        if let Statement::Native(statement) = &statement
+            && statement.mode == ExecuteMode::ReadStream
+        {
+            let delivered = self
+                .source_read(cx, waiter, db, token, request, stream, binding, statement)
+                .await;
+            let delivered = match delivered {
+                Err(Stop::Recovery(error)) => {
+                    self.refuse(cx, request, stream, binding, error.code(), error.message())
+                        .await
+                }
+                other => other,
+            };
+            let _ = self
+                .conn
+                .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
+            self.finish(stream);
+            self.send_generation = None;
+            return delivered;
+        }
         let answer = match statement {
             Statement::Native(statement) => match statement.mode {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
-                _ => write(cx, db, token, &statement).await,
+                ExecuteMode::Write => write(cx, db, token, &statement).await,
+                ExecuteMode::Subscribe | ExecuteMode::ReadStream => {
+                    unreachable!("stream dispatched above")
+                }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
             Statement::Prepared {

@@ -162,7 +162,7 @@ redacted from `Debug`.
 | AUTH_REFRESHED | unchanged `session_transcript [32]`, successor `auth_generation u64` |
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
-| EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
 | PREPARED | nonzero connection-owned `handle [16]` |
@@ -319,6 +319,51 @@ application output is admitted.
   ).await?;
   client.release_prepared(cx, handle).await?;
   ```
+- **Native source streams.** `EXECUTE` mode 3 (`ExecuteMode::ReadStream`)
+  opens one authorized native cursor and lets row and byte credit drive its
+  source. The immutable generation, native source position and one signed
+  execution allowance stay attached through every pause. The writer lock is
+  released before delivery. Recovery and live authority guards fence source
+  pulls and physical output; cancellation or disconnect drops the cursor
+  without reading the remaining graph. A late error is an ERROR after the
+  previously delivered prefix, never a successful END or an automatic retry.
+
+  The supported row profile is the native cursor's identity-leading order:
+  vertex rows begin with the scanned vertex; fixed-edge rows begin with the
+  captured root edge and its root-source vertex, followed by additional edge
+  identities for connected fixed joins. Admitted masked scalar columns and
+  native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
+  semantics. Unsupported projections, orders, aggregate/compound facades and
+  source shapes return a statement refusal before candidate reads. Ordinary
+  `Read` and prepared reads retain their broader eager execution semantics.
+  Using a row callback with those modes changes delivery, not source execution.
+
+  The adapter retains at most a negotiated frame of rows and one pending row
+  whose encoded size is known but awaits byte credit. A row exceeding the frame
+  bound is refused. Native source/probe scratch and the pinned generation have
+  their existing separate policy/lifetime bounds. With zero row credit, no
+  source pull occurs, including an EOF probe. A LIMIT-exhausted cursor can send
+  END with byte credit alone; natural exhaustion may need one further row
+  grant after an exact full window. Raw clients must replenish consumed row
+  credit until END or ERROR. The Rust client does this automatically:
+
+  ```rust
+  use fgdb_protocol::body::ExecuteMode;
+
+  let outcome = client.execute_streaming(
+      cx,
+      ExecuteMode::ReadStream,
+      "MATCH (n:Person) RETURN n AS person, n.age AS age",
+      vec![],
+      |columns| println!("{columns:?}"),
+      |row| { println!("{row:?}"); Ok(()) },
+  ).await?;
+  ```
+
+  This remains an ephemeral FGP result: there is no resume token, retained
+  durable result, background query task, spill, or per-page requery. Embedded
+  callers use `AuthorizedReadSession::stream_send` for the same Send-capable
+  cursor. The original `stream` API still accepts thread-local host clocks.
 - **Results.** Every result is the session-owned, ephemeral
   SNAPSHOT_RESULT class on a server-minted 128-bit child stream. The first
   chunk carries the columns. Each chunk is sized to the stream's available

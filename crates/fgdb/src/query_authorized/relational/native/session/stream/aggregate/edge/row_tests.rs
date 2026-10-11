@@ -208,6 +208,44 @@ fn scoped_rows_preserve_direction_multiplicity_pages_and_masked_fields() {
 }
 
 #[test]
+fn send_edge_cursor_uses_the_same_identified_masked_source_and_retirement_fence() {
+    context!(runtime, cx, commit);
+    let db = runtime.block_on(database(&commit, true));
+    let issuer = authority();
+    let token = issuer.issue_at(&grant(), 100).unwrap();
+    let params = GqlParameters::new();
+    let mut session = db
+        .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, ROWS, &params).unwrap();
+    let expected = session.execute(&cx, &prepared, &params).unwrap();
+    {
+        let mut cursor = session.stream_send(&cx, &prepared, &params).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        let columns = cursor.columns().to_vec();
+        let rows = cursor
+            .by_ref()
+            .map(|row| row.unwrap().values().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(native(&columns, &rows), expected);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+    }
+    {
+        let mut cursor = session.stream_send(&cx, &prepared, &params).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        issuer.retire();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Denied::AuthorityRetired)))
+        ));
+        assert!(cursor.next().is_none());
+    }
+    assert!(session.is_closed());
+}
+
+#[test]
 fn connected_rows_keep_captured_paths_and_rebind_scoped_predicates() {
     context!(runtime, cx, commit);
     let db = runtime.block_on(database(&commit, true));

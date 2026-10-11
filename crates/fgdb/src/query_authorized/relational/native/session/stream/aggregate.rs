@@ -11,7 +11,7 @@ use fgdb_gql::{
 };
 
 #[path = "aggregate/edge.rs"]
-mod edge;
+pub(super) mod edge;
 
 struct Layout {
     slots: Vec<GraphAggregateTextSlot>,
@@ -226,11 +226,11 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
-fn build<'q>(
+fn build<'q, C: FnMut() -> u64>(
     bound: Bound,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
-    execution: Shared<'q>,
+    execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphAggregateRow, Layout> {
     let Bound {
@@ -250,14 +250,14 @@ fn build<'q>(
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
     let source = ScopedSource {
         inner,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
-    let control = Rc::clone(&execution);
+    let control = execution.clone();
     let mut cursor = VertexAggregateCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver = Box::new(move || {
+    let driver: Pull<'q, GraphAggregateRow> = Box::new(move || {
         let row = cursor.next().transpose().map_err(error)?;
         // This also guards group delivery after the reducer releases its source,
         // plus natural EOF and empty selected pages. Input rows are not delivery.
@@ -265,16 +265,7 @@ fn build<'q>(
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
     });
-    Ok((
-        AuthorizedRowCursor {
-            driver: Some(driver),
-            guard: None,
-            columns,
-            snapshot_seq: at,
-            state: VertexScanState::Open,
-        },
-        layout,
-    ))
+    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {

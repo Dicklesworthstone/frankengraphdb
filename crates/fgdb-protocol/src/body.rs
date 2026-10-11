@@ -826,6 +826,10 @@ pub enum ExecuteMode {
     /// `SUBSCRIBE TO <read>`: a baseline, then one delta batch per change,
     /// pushed as SUBSCRIPTION_BATCH frames until the client cancels.
     Subscribe,
+    /// Demand drives the authorized native source cursor. Only its admitted
+    /// identity-leading row plans are supported; no eager fallback is allowed.
+    /// Result framing is the ordinary chunk/end protocol.
+    ReadStream,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -850,6 +854,7 @@ body!(
             ExecuteMode::Read => 0,
             ExecuteMode::Write => 1,
             ExecuteMode::Subscribe => 2,
+            ExecuteMode::ReadStream => 3,
         });
         out.text(&s.statement);
         out.len(s.parameters.len());
@@ -865,6 +870,7 @@ body!(
             0 => ExecuteMode::Read,
             1 => ExecuteMode::Write,
             2 => ExecuteMode::Subscribe,
+            3 => ExecuteMode::ReadStream,
             _ => return Err(BodyError::UnknownTag),
         };
         let statement = input.text(MAX_STATEMENT_BYTES)?;
@@ -1730,6 +1736,35 @@ mod tests {
             ExecutePrepared::decode(&duplicate_bytes),
             Err(BodyError::Noncanonical)
         );
+    }
+
+    #[test]
+    fn native_read_stream_mode_is_explicit_and_retains_existing_discriminators() {
+        for (mode, tag) in [
+            (ExecuteMode::Read, 0),
+            (ExecuteMode::Write, 1),
+            (ExecuteMode::Subscribe, 2),
+            (ExecuteMode::ReadStream, 3),
+        ] {
+            let statement = Execute {
+                mode,
+                statement: "MATCH (n) RETURN n".into(),
+                parameters: vec![],
+            };
+            let bytes = statement.encode().unwrap();
+            assert_eq!(bytes[0], tag);
+            assert_eq!(Execute::decode(&bytes).unwrap(), statement);
+            every_prefix_refuses::<Execute>(&bytes);
+        }
+        let mut bytes = Execute {
+            mode: ExecuteMode::ReadStream,
+            statement: "MATCH (n) RETURN n".into(),
+            parameters: vec![],
+        }
+        .encode()
+        .unwrap();
+        bytes[0] = 4;
+        assert_eq!(Execute::decode(&bytes), Err(BodyError::UnknownTag));
     }
 
     #[test]

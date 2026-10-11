@@ -642,9 +642,12 @@ pub(crate) async fn respond<'s>(
         match mode {
             ExecuteMode::Read => read(cx, db, &token, &statement).await,
             ExecuteMode::Write => write(cx, db, &token, &statement).await,
-            // A change stream needs a long-lived, flow-controlled connection.
-            ExecuteMode::Subscribe => {
-                return refusal_response(ErrorCode::Protocol, "subscriptions are served over FGP");
+            // Source and change streams need a flow-controlled connection.
+            ExecuteMode::Subscribe | ExecuteMode::ReadStream => {
+                return refusal_response(
+                    ErrorCode::Protocol,
+                    "source and change streams are served over FGP",
+                );
             }
         }
     } else {

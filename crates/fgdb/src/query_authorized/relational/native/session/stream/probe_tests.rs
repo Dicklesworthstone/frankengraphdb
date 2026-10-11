@@ -69,11 +69,13 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
-    let execution: Shared<'_> =
-        Rc::new(RefCell::new(Execution::new(&cx, permit, Box::new(|| 100))));
+    let mut clock = || 100;
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(
+        &cx, permit, &mut clock,
+    ))));
     let source = ScopedSource {
         inner: NoReads,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut control = |_| execution.borrow_mut().checkpoint();
     for direction in [
@@ -208,12 +210,13 @@ fn property_observation(
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
-    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
+    let mut clock = || 100;
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
     let source = ScopedSource {
         inner: PropertyRow {
             fields: fields.to_vec(),
         },
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut work = 0;
     let mut scratch = 0;

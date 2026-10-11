@@ -28,7 +28,7 @@ pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use authorized::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
 pub(crate) use beacon::procedure::{

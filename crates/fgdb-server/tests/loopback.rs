@@ -19,6 +19,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "loopback/source_stream.rs"]
+mod source_stream;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }

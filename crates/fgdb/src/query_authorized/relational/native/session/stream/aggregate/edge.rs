@@ -11,9 +11,9 @@ use fgdb_gql::edge_stream::{
     EdgeScanState,
 };
 
-struct Source<'q, Edges, Vertices> {
+struct Source<'q, Edges, Vertices, Clock> {
     edges: Edges,
-    vertices: ScopedSource<'q, Vertices>,
+    vertices: ScopedSource<'q, Vertices, Clock>,
     after: Option<EId>,
 }
 
@@ -29,7 +29,7 @@ fn private_error<C>(
     })
 }
 
-impl<E, V> Source<'_, E, V>
+impl<E, V, Clock: FnMut() -> u64> Source<'_, E, V, Clock>
 where
     E: EdgeScanSource<Error = ReadError>,
     V: VertexScanSource<Error = ReadError>,
@@ -94,7 +94,7 @@ where
     }
 }
 
-impl<E, V> EdgeScanSource for Source<'_, E, V>
+impl<E, V, Clock: FnMut() -> u64> EdgeScanSource for Source<'_, E, V, Clock>
 where
     E: EdgeScanSource<Error = ReadError>,
     V: VertexScanSource<Error = ReadError>,
@@ -340,62 +340,52 @@ fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> Que
     }
 }
 
-impl<'q> AuthorizedRowCursor<'q> {
-    // An inherent factory lets the enclosing stream dispatcher reuse this
-    // private source without exporting it or changing the aggregate interface.
-    // Source and permit ownership never escape to the calling application.
-    pub(in super::super) fn from_edge_plan(
-        selected: (EdgeScanPlan, CommitSeq, Vec<String>),
-        view: &EmbeddedReadView,
-        cx: &'q QueryCx,
-        execution: Shared<'q>,
-        policy: GqlQueryPolicy,
-    ) -> Opened<'q, GraphValueRow, ()> {
-        let (plan, at, columns) = selected;
-        let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
-        let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
-        let source = Source {
-            edges,
-            vertices: ScopedSource {
-                inner,
-                execution: Rc::clone(&execution),
-            },
-            after: None,
-        };
-        let control = Rc::clone(&execution);
-        let mut cursor = EdgeScanCursor::new(source, plan, policy, move || {
-            control.borrow_mut().checkpoint()
-        });
-        execution.borrow_mut().checkpoint()?;
-        let driver = Box::new(move || {
-            let row = cursor.next().transpose().map_err(row_error)?;
-            // Delivery is charged only after matching, projection and native
-            // admission. Natural EOF and LIMIT 0 still recheck live authority.
-            execution.borrow_mut().deliver(usize::from(row.is_some()))?;
-            Ok((row, cursor.state() != EdgeScanState::Open))
-        });
-        Ok((
-            AuthorizedRowCursor {
-                driver: Some(driver),
-                guard: None,
-                columns,
-                snapshot_seq: at,
-                state: VertexScanState::Open,
-            },
-            (),
-        ))
-    }
+// Both row constructors erase this SAME native driver; only Send capability
+// differs. Sources and permit never escape independently to the application.
+pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
+    plan: EdgeScanPlan,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    impl FnMut() -> Result<(Option<GraphValueRow>, bool), QueryError> + use<'q, C>,
+    QueryError,
+> {
+    let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let source = Source {
+        edges,
+        vertices: ScopedSource {
+            inner,
+            execution: execution.clone(),
+        },
+        after: None,
+    };
+    let control = execution.clone();
+    let mut cursor = EdgeScanCursor::new(source, plan, policy, move || {
+        control.borrow_mut().checkpoint()
+    });
+    execution.borrow_mut().checkpoint()?;
+    Ok(move || {
+        let row = cursor.next().transpose().map_err(row_error)?;
+        // Delivery is charged only after matching, projection and native
+        // admission. Natural EOF and LIMIT 0 still recheck live authority.
+        execution.borrow_mut().deliver(usize::from(row.is_some()))?;
+        Ok((row, cursor.state() != EdgeScanState::Open))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build<'q>(
+pub(super) fn build<'q, C: FnMut() -> u64>(
     plan: EdgeAggregatePlan,
     at: CommitSeq,
     columns: Vec<String>,
     layout: Layout,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
-    execution: Shared<'q>,
+    execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphAggregateRow, Layout> {
     // Both factories borrow the SAME view and cut; neither can refresh from a
@@ -406,30 +396,21 @@ pub(super) fn build<'q>(
         edges,
         vertices: ScopedSource {
             inner,
-            execution: Rc::clone(&execution),
+            execution: execution.clone(),
         },
         after: None,
     };
-    let control = Rc::clone(&execution);
+    let control = execution.clone();
     let mut cursor = EdgeAggregateCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver = Box::new(move || {
+    let driver: Pull<'q, GraphAggregateRow> = Box::new(move || {
         let row = cursor.next().transpose().map_err(error)?;
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         Ok((row, cursor.state() != EdgeScanState::Open))
     });
-    Ok((
-        AuthorizedRowCursor {
-            driver: Some(driver),
-            guard: None,
-            columns,
-            snapshot_seq: at,
-            state: VertexScanState::Open,
-        },
-        layout,
-    ))
+    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
 }
 
 #[cfg(test)]

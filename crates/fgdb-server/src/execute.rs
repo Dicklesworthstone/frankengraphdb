@@ -114,6 +114,34 @@ pub(crate) struct ReadSession<'a> {
     generation: Generation,
 }
 
+/// A native source position, never a collected result. Each synchronous pull
+/// enters the retained recovery generation; no generation guard or writer
+/// lock remains held while the connection waits for client credit.
+pub(crate) struct ReadCursor<'q> {
+    native: fgdb::AuthorizedSendRowCursor<'q>,
+    generation: Generation,
+}
+
+impl ReadCursor<'_> {
+    pub(crate) fn columns(&self) -> &[String] {
+        self.native.columns()
+    }
+    pub(crate) fn snapshot_seq(&self) -> u64 {
+        self.native.snapshot_seq().0
+    }
+    pub(crate) fn exhausted(&self) -> bool {
+        self.native.state() == fgdb_gql::stream::VertexScanState::Exhausted
+    }
+    pub(crate) fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
+        let _operation = self.generation.enter().map_err(Refusal::from)?;
+        let result = self.native.next().transpose();
+        self.generation.check().map_err(Refusal::from)?;
+        result
+            .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()))
+            .map_err(query_refusal)
+    }
+}
+
 pub(crate) enum SessionError {
     Query(QueryError),
     Unavailable(Unavailable),
@@ -142,6 +170,25 @@ impl ReadSession<'_> {
         // when its immutable snapshot remains readable in the engine.
         self.generation.check().map_err(SessionError::Unavailable)?;
         result.map_err(SessionError::Query)
+    }
+
+    pub(crate) fn stream<'q>(
+        &'q mut self,
+        cx: &'q fgdb_types::QueryCx,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<ReadCursor<'q>, Refusal> {
+        let generation = self.generation.clone();
+        let _operation = generation.enter().map_err(Refusal::from)?;
+        let prepared = self.native.prepare(cx, text, parameters);
+        generation.check().map_err(Refusal::from)?;
+        let prepared = prepared.map_err(query_refusal)?;
+        let cursor = self.native.stream_send(cx, &prepared, parameters);
+        generation.check().map_err(Refusal::from)?;
+        Ok(ReadCursor {
+            native: cursor.map_err(query_refusal)?,
+            generation,
+        })
     }
 }
 
@@ -591,6 +638,18 @@ pub(crate) fn query_refusal(error: impl Into<SessionError>) -> Refusal {
         QueryError::Pattern(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Aggregate(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Set(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::Stream(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::EdgeStream(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::Pattern(GqlQueryError::Interrupted(_))
+        | QueryError::Aggregate(GqlQueryError::Interrupted(_))
+        | QueryError::Set(GqlQueryError::Interrupted(_))
+        | QueryError::Stream(GqlQueryError::Interrupted(_))
+        | QueryError::EdgeStream(GqlQueryError::Interrupted(_)) => ErrorCode::Cancelled,
+        QueryError::Stream(GqlQueryError::Source(fgdb_gql::stream::VertexScanError::Plan(_)))
+        | QueryError::EdgeStream(GqlQueryError::Source(
+            fgdb_gql::edge_stream::EdgeScanError::Plan(_),
+        )) => ErrorCode::Statement,
+        QueryError::Stream(_) | QueryError::EdgeStream(_) => ErrorCode::Execution,
         QueryError::Set(e) if procedure_statement(e) => ErrorCode::Statement,
         QueryError::Pattern(_) | QueryError::Aggregate(_) | QueryError::Set(_) => {
             ErrorCode::Execution

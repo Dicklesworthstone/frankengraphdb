@@ -37,7 +37,7 @@ mod overlay;
 mod relational;
 pub use relational::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
 };
 
 type Fault = GqlQueryError<ReadError, QueryError>;
@@ -54,6 +54,9 @@ struct Execution<'cx, 'permit, Clock> {
     cx: &'cx QueryCx,
     permit: ExecutionPermit<'permit, ReadAccess>,
     clock: Clock,
+    // Pull cursors borrow the actual clock type so a Send clock can remain
+    // Send across suspension. The session still remembers every sampled time.
+    clock_floor: Option<&'cx mut u64>,
     // Warden stops a permit after its first failed charge. Retain that exact
     // cause across outer completion checks instead of losing expiry/retirement
     // to ExecutionStopped and accidentally restoring a terminal session.
@@ -65,15 +68,35 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             cx,
             permit,
             clock,
+            clock_floor: None,
             failure: None,
         }
+    }
+    fn tracking(
+        cx: &'cx QueryCx,
+        permit: ExecutionPermit<'permit, ReadAccess>,
+        clock: Clock,
+        floor: &'cx mut u64,
+    ) -> Self {
+        Self {
+            clock_floor: Some(floor),
+            ..Self::new(cx, permit, clock)
+        }
+    }
+    fn now(&mut self) -> u64 {
+        let now = (self.clock)();
+        if let Some(floor) = &mut self.clock_floor {
+            **floor = (**floor).max(now);
+        }
+        now
     }
     fn refusal(&mut self, error: fgdb_warden::Error) -> QueryError {
         QueryError::Authorization(*self.failure.get_or_insert(error))
     }
     fn checkpoint(&mut self) -> Result<(), QueryError> {
         self.poll()?;
-        let charged = self.permit.charge_work_at((self.clock)(), 1);
+        let now = self.now();
+        let charged = self.permit.charge_work_at(now, 1);
         charged.map_err(|error| self.refusal(error))
     }
     /// Cancellation and a retained refusal only; no signed or native charge.
@@ -87,13 +110,15 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     }
     fn node(&mut self) -> Result<(), QueryError> {
         self.checkpoint()?;
-        let charged = self.permit.charge_nodes_at((self.clock)(), 1);
+        let now = self.now();
+        let charged = self.permit.charge_nodes_at(now, 1);
         charged.map_err(|error| self.refusal(error))
     }
     fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;
         let rows = u64::try_from(rows).map_err(|_| self.refusal(fgdb_warden::Error::TooLarge))?;
-        let charged = self.permit.charge_rows_at((self.clock)(), rows);
+        let now = self.now();
+        let charged = self.permit.charge_rows_at(now, rows);
         charged.map_err(|error| self.refusal(error))?;
         self.checkpoint()
     }

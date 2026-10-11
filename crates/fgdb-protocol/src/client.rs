@@ -468,6 +468,14 @@ impl Client {
     /// Run one statement, handing over its columns once and then each row as
     /// it arrives. An error from `on_row` cancels and drains the stream before
     /// returning that error, leaving the connection ready for another request.
+    /// `ReadStream` additionally makes flow credit drive the server's actual
+    /// native source, retaining one pinned generation and execution allowance.
+    /// It requires the native cursor's identity-leading projection/order profile
+    /// and refuses unsupported plans. `Read` retains its broader eager execution
+    /// semantics; callbacks alone do not make that server source lazy.
+    /// The client replenishes an exactly exhausted row window before waiting
+    /// for END, allowing a native source to discover natural EOF without an
+    /// unauthorized pull at zero credit. No automatic query retry occurs.
     pub async fn execute_streaming(
         &mut self,
         cx: &Cx,
@@ -1071,6 +1079,86 @@ mod tests {
             frames.push(part.frame.expect("complete sent frame"));
         }
         frames
+    }
+
+    #[test]
+    fn native_stream_replenishes_exact_row_windows_and_never_retries_a_late_refusal() {
+        let ((), report) = run_async_under_lab(0x79a0_0313, |root| async move {
+            for fails in [false, true] {
+                let values: Vec<i64> = (0..32).collect();
+                let terminal = if fails {
+                    rpc(
+                        FrameKind::Error,
+                        4,
+                        StreamId([5; 16]),
+                        &ErrorBody {
+                            code: ErrorCode::Budget,
+                            message: "source allowance exhausted after the delivered prefix".into(),
+                        },
+                    )
+                } else {
+                    result_end(4, 32)
+                };
+                let io = script(vec![result_chunk(4, &values), terminal]);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let mut delivered = Vec::new();
+                let result = client
+                    .execute_streaming(
+                        &root,
+                        ExecuteMode::ReadStream,
+                        "MATCH (n) RETURN n",
+                        vec![],
+                        |_| {},
+                        |row| {
+                            delivered.push(row);
+                            Ok(())
+                        },
+                    )
+                    .await;
+                assert_eq!(delivered.len(), 32);
+                if fails {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Server {
+                            code: ErrorCode::Budget,
+                            ..
+                        })
+                    ));
+                } else {
+                    assert_eq!(result.unwrap(), Outcome::Rows { seq: 3 });
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                let executes: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::Execute)
+                    .collect();
+                assert_eq!(
+                    executes.len(),
+                    1,
+                    "a source stream is never retried as an eager query"
+                );
+                assert_eq!(
+                    Execute::decode(executes[0].payload()).unwrap().mode,
+                    ExecuteMode::ReadStream
+                );
+                let grants: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::WindowUpdate)
+                    .collect();
+                assert_eq!(
+                    grants.len(),
+                    1,
+                    "natural EOF requires demand after an exact row window"
+                );
+                let grant = WindowUpdate::decode(grants[0].payload()).unwrap();
+                assert_eq!(grant.rows, 32);
+                assert_eq!(grant.sequence, 1);
+                assert_eq!(grants[0].header().stream_id(), StreamId([5; 16]));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

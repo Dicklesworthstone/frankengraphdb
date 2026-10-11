@@ -97,10 +97,9 @@ fn streamed_predicates_and_projection_see_masked_fields_with_exact_order_and_pag
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-// Authorized sessions and cursors are single-task by design (!Send;
-// fgdb-authorized-cursor-send-qbfn1). This law holds a cursor across an
-// .await, so it runs on the real runtime's block_on, which accepts a non-Send
-// future, instead of the Send-only lab runner. The body is unchanged.
+// Keep the actual Send cursor alive across a write suspension. Its compile-time
+// Send proof covers the retained permit/source/pin, while the old Cell clocks
+// in the other laws continue to exercise the thread-local constructor.
 #[test]
 fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() {
     let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
@@ -133,7 +132,9 @@ fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() 
             .unwrap();
         // Eager admission sees more than one permitted vertex before the page.
         assert!(session.execute(&cx, &prepared, &args).is_err());
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
         drop(prepared); // Opening freezes the native physical definition.
         let at = cursor.snapshot_seq();
         let before_pause = calls.load(std::sync::atomic::Ordering::Relaxed);
@@ -165,7 +166,7 @@ fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() 
         let prepared = session
             .prepare(&cx, "MATCH (n) RETURN n AS id", &args)
             .unwrap();
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
         let before_close = calls.load(std::sync::atomic::Ordering::Relaxed);
         cursor.close();
         assert_eq!(cursor.state(), VertexScanState::Closed);
@@ -256,7 +257,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
             let prepared = session
                 .prepare(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &args)
                 .unwrap();
-            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
             assert!(
                 // ubs:ignore -- test assertion on a limit dimension, not secret material.
@@ -275,7 +276,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
                 .unwrap();
             assert_eq!(
                 session
-                    .stream(&cx, &prepared, &args)
+                    .stream_send(&cx, &prepared, &args)
                     .unwrap()
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
@@ -297,7 +298,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
         let prepared = session
             .prepare(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &args)
             .unwrap();
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
         assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
         // Candidate id=2 is hidden. Its history still consumes native admission,
         // and that refusal must not become apparent end-of-stream.

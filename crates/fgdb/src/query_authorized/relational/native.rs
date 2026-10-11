@@ -6,7 +6,7 @@
 mod session;
 pub use session::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
 };
 
 use super::*;
