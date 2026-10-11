@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
     PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, EId, VId};
+use fgdb_types::{CanonicalDate, CanonicalScalar, CanonicalScalarKind, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -999,4 +999,35 @@ fn every_unwind_property_is_validated_before_the_first_identity() {
         );
         assert!(result.is_err(), "{text}");
     }
+}
+
+/// A CREATE property may be any scalar the value language computes: a
+/// temporal constructor (fgdb-txbg9), or a composite operand such as size()
+/// of a list (fgdb-o5o9t), which the scalar compiler reads only through a
+/// let slot. A list-valued property still refuses where it starts.
+#[test]
+fn a_create_property_may_be_a_temporal_or_composite_value() {
+    let query =
+        prepare("CREATE (:Copy {p: date({year: 1910, month: 5, day: 6}), q: size([1, 2, 3])})");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| Err(GqlQueryError::Source(())),
+        identity,
+        || Ok(()),
+    );
+    let date = CanonicalDate::from_civil(1910, 5, 6).unwrap();
+    assert_eq!(
+        result.unwrap().intents(),
+        vec![GraphInsertIntent::Vertex {
+            vertex: VId(100),
+            labels: vec![COPY],
+            properties: vec![
+                (P, CanonicalScalar::Date(date)),
+                (Q, CanonicalScalar::Int(3)),
+            ],
+        }]
+    );
+    let text = "CREATE (:Copy {p: [x IN [1, 2] | x]})";
+    let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
+    assert_eq!(error.offset, 18, "{text}: {error:?}");
 }

@@ -197,6 +197,40 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Hold a value-language CREATE property to the scalar property law.
+    fn scalar_property_value(
+        &self,
+        value: ReadValueTemplate,
+        at: usize,
+        imports: &[(Name<'a>, GraphSetColumnType)],
+        inputs: &[Projection<'a>],
+    ) -> Result<ReadValueTemplate, GraphInsertTextError> {
+        let types = self.insertion_input_types(imports, inputs);
+        if !matches!(
+            value.column_type(&types, &self.syntax.parameters),
+            GraphSetColumnType::Scalar | GraphSetColumnType::Any
+        ) {
+            return Err(expected(at, "scalar CREATE property expression"));
+        }
+        // A list or map is never a stored property. A list index, a map
+        // entry (`row.name`), size(), IN, a quantifier or reduce() may be
+        // scalar and is checked per row at execution.
+        if matches!(
+            value,
+            ReadValueTemplate::List(_)
+                | ReadValueTemplate::Local(_)
+                | ReadValueTemplate::Comprehension { .. }
+                | ReadValueTemplate::Slice { .. }
+                | ReadValueTemplate::Range { .. }
+                | ReadValueTemplate::MapLiteral { .. }
+                | ReadValueTemplate::MapOverlay { .. }
+                | ReadValueTemplate::Keys(_)
+        ) {
+            return Err(expected(at, "scalar CREATE property expression"));
+        }
+        Ok(value)
+    }
+
     fn insertion_properties(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
@@ -229,30 +263,16 @@ impl<'a> Parser<'a> {
                 } else {
                     self.insertion_source_value(inputs, schema)?
                 };
-                let types = self.insertion_input_types(schema, inputs);
-                if !matches!(
-                    value.column_type(&types, &self.syntax.parameters),
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Any
-                ) {
-                    return Err(expected(at, "scalar CREATE property expression"));
-                }
-                // A list or map is never a stored property. A list index, a
-                // map entry (`row.name`), size(), IN, a quantifier or reduce()
-                // may be scalar and is checked per row at execution.
-                if matches!(
-                    value,
-                    ReadValueTemplate::List(_)
-                        | ReadValueTemplate::Local(_)
-                        | ReadValueTemplate::Comprehension { .. }
-                        | ReadValueTemplate::Slice { .. }
-                        | ReadValueTemplate::Range { .. }
-                        | ReadValueTemplate::MapLiteral { .. }
-                        | ReadValueTemplate::MapOverlay { .. }
-                        | ReadValueTemplate::Keys(_)
-                ) {
-                    return Err(expected(at, "scalar CREATE property expression"));
-                }
-                value
+                self.scalar_property_value(value, at, schema, inputs)?
+            } else if self.starts_let_operand()? {
+                // A temporal constructor, a quantifier, a list function,
+                // keys() or size() is a value-language operand that the
+                // scalar compiler reads only through a let slot, which a
+                // CREATE property has none of: read the whole property in
+                // the value language, as a row-fed CREATE does
+                // (fgdb-txbg9, fgdb-o5o9t).
+                let value = self.insertion_source_value(inputs, &[])?;
+                self.scalar_property_value(value, at, &[], inputs)?
             } else if matches!(self.current.kind, TokenKind::Parameter(name)
                 if self.parameter_types.get(name) == Some(&GqlParameterType::Map))
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
