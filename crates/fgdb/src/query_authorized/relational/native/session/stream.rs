@@ -500,13 +500,12 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         // This check precedes both endpoint resolution and incidence access.
         // The outer control is the SAME live permit even for a denied relation.
-        if relation.one().is_some_and(|relation| {
-            !self
-                .execution
-                .borrow()
-                .permit
-                .predicates()
-                .allows_relation(relation)
+        if relation.relations().is_some_and(|members| {
+            let execution = self.execution.borrow();
+            let predicates = execution.permit.predicates();
+            members
+                .iter()
+                .all(|member| !predicates.allows_relation(*member))
         }) {
             return Ok(None);
         }

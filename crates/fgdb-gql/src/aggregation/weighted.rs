@@ -78,7 +78,7 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     // A mixed-type atom must retain each concrete relationship's multiplicity.
     // Until the weighted topology has a selector-aware normalization law, use
     // the ordinary governed GLA evaluator for those plans.
-    if aggregate.input.plan().edge_relations().is_none()
+    if !aggregate.input.plan().single_typed_edges()
         || !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
         || aggregate.aggregates.iter().any(|a| {
             !matches!(

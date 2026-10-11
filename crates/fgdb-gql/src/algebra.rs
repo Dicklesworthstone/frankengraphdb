@@ -59,10 +59,33 @@ pub enum GlaDirection {
 
 /// Relationship types admitted by one graph atom. `Any` ranges over the
 /// already-authorized edge source; it never grants access to hidden types.
+/// `Set` is a type alternation, openCypher `-[:A|B]->`: an executor must
+/// admit exactly its members, so `one() == None` never means "every type"
+/// unless the selector is `Any`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeRelation {
     One(RelationId),
     Any,
+    Set(EdgeRelationSet),
+}
+
+/// The most relationship types one alternation may name.
+pub const MAX_EDGE_RELATION_ALTERNATIVES: usize = 8;
+
+/// Two to `MAX_EDGE_RELATION_ALTERNATIVES` distinct relation types in
+/// ascending order. Unused slots stay zero, so derived equality and order
+/// are canonical. Built only by `EdgeRelation::alternation`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EdgeRelationSet {
+    len: u8,
+    ids: [RelationId; MAX_EDGE_RELATION_ALTERNATIVES],
+}
+
+impl EdgeRelationSet {
+    #[must_use]
+    pub fn relations(&self) -> &[RelationId] {
+        &self.ids[..usize::from(self.len)]
+    }
 }
 
 impl EdgeRelation {
@@ -71,14 +94,49 @@ impl EdgeRelation {
         match self {
             Self::One(expected) => expected == relation,
             Self::Any => true,
+            Self::Set(set) => set.relations().binary_search(&relation).is_ok(),
         }
     }
 
+    /// The single admitted type. `None` for `Any` AND for an alternation:
+    /// test `relations()` or `matches()` before treating `None` as untyped.
     #[must_use]
     pub const fn one(self) -> Option<RelationId> {
         match self {
             Self::One(relation) => Some(relation),
+            Self::Any | Self::Set(_) => None,
+        }
+    }
+
+    /// Every admitted type in ascending order, or `None` for `Any`.
+    #[must_use]
+    pub fn relations(&self) -> Option<&[RelationId]> {
+        match self {
+            Self::One(relation) => Some(core::slice::from_ref(relation)),
             Self::Any => None,
+            Self::Set(set) => Some(set.relations()),
+        }
+    }
+
+    /// `:A|B|...`: duplicates collapse, one distinct type is `One`, and more
+    /// than `MAX_EDGE_RELATION_ALTERNATIVES` distinct types is `None`.
+    #[must_use]
+    pub fn alternation(relations: &[RelationId]) -> Option<Self> {
+        let mut sorted = relations.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        match sorted.as_slice() {
+            [] => None,
+            [relation] => Some(Self::One(*relation)),
+            members if members.len() <= MAX_EDGE_RELATION_ALTERNATIVES => {
+                let mut ids = [RelationId(0); MAX_EDGE_RELATION_ALTERNATIVES];
+                ids[..members.len()].copy_from_slice(members);
+                Some(Self::Set(EdgeRelationSet {
+                    len: u8::try_from(members.len()).ok()?,
+                    ids,
+                }))
+            }
+            _ => None,
         }
     }
 }
@@ -667,15 +725,29 @@ impl<Row> GlaPlan<Row> {
     /// inserted after the read. `Some(empty)` means the plan reads no edges.
     #[must_use]
     pub fn edge_relations(&self) -> Option<std::collections::BTreeSet<RelationId>> {
-        self.operators
-            .iter()
-            .filter_map(|operator| match operator {
-                GlaOperator::ScanEdges { relation, .. }
-                | GlaOperator::Expand { relation, .. }
-                | GlaOperator::VarLengthExpand { relation, .. } => Some(relation.one()),
-                _ => None,
-            })
-            .collect()
+        let mut relations = std::collections::BTreeSet::new();
+        for operator in &self.operators {
+            if let GlaOperator::ScanEdges { relation, .. }
+            | GlaOperator::Expand { relation, .. }
+            | GlaOperator::VarLengthExpand { relation, .. } = operator
+            {
+                // An alternation reads each member, never every type.
+                relations.extend(relation.relations()?.iter().copied());
+            }
+        }
+        Some(relations)
+    }
+
+    /// Whether every edge atom names exactly one relation type: neither an
+    /// untyped atom nor a type alternation.
+    #[must_use]
+    pub fn single_typed_edges(&self) -> bool {
+        self.operators.iter().all(|operator| match operator {
+            GlaOperator::ScanEdges { relation, .. }
+            | GlaOperator::Expand { relation, .. }
+            | GlaOperator::VarLengthExpand { relation, .. } => relation.one().is_some(),
+            _ => true,
+        })
     }
 
     /// Which vertices this plan's vertex scans can bind (fgdb-h1d6l). Slot 0
@@ -863,6 +935,27 @@ impl<Row> GlaPlan<Row> {
         let mut bytes = b"fgdb:bounded-gla:v1\0".to_vec();
         bytes.extend_from_slice(&(self.operators.len() as u64).to_be_bytes());
         for operator in &self.operators {
+            // A type alternation prefixes its members (tag 40), then encodes
+            // the operator in its untyped form. One and Any keep their bytes.
+            if let GlaOperator::ScanEdges {
+                relation: EdgeRelation::Set(set),
+                ..
+            }
+            | GlaOperator::Expand {
+                relation: EdgeRelation::Set(set),
+                ..
+            }
+            | GlaOperator::VarLengthExpand {
+                relation: EdgeRelation::Set(set),
+                ..
+            } = operator
+            {
+                bytes.push(40);
+                bytes.push(set.len);
+                for relation in set.relations() {
+                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                }
+            }
             match operator {
                 GlaOperator::Empty => bytes.push(0),
                 GlaOperator::ScanVertices => bytes.push(1),
@@ -875,7 +968,7 @@ impl<Row> GlaPlan<Row> {
                             bytes.push(2);
                             bytes.extend_from_slice(&relation.0.to_be_bytes());
                         }
-                        EdgeRelation::Any => bytes.push(32),
+                        EdgeRelation::Any | EdgeRelation::Set(_) => bytes.push(32),
                     }
                     bytes.push(direction_tag(*direction));
                 }

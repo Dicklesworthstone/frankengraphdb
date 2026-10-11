@@ -24,10 +24,9 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncEdgeCandidate<Record>>, EdgeExpansionSourceError<BufferedReadError, C>>
     {
-        let relation = match relation {
-            EdgeRelation::One(relation) => Some(relation),
-            EdgeRelation::Any => None,
-        };
+        // An alternation reads every relation's incidence; the async join
+        // admits only its members through `EdgeRelation::matches`.
+        let relation = relation.one();
         let direction = match direction {
             GlaDirection::Forward => BufferedEdgeDirection::Outgoing,
             GlaDirection::Reverse => BufferedEdgeDirection::Incoming,

@@ -489,6 +489,8 @@ struct Edge<'a> {
     variable: Option<Name<'a>>,
     source: Name<'a>,
     relation: Option<Name<'a>>,
+    /// The further types of an alternation `:A|B|:C`, after `relation`.
+    alternatives: Vec<Name<'a>>,
     direction: GlaDirection,
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,

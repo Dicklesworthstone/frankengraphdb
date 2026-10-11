@@ -262,6 +262,32 @@ fn sift_neighbors<E>(
     Ok(())
 }
 
+/// The distinct type-alternation selectors a plan registered in its index.
+fn alternation_selectors(selectors: impl Iterator<Item = EdgeRelation>) -> Vec<EdgeRelation> {
+    let mut alternations: Vec<_> = selectors
+        .filter(|selector| matches!(selector, EdgeRelation::Set(_)))
+        .collect();
+    alternations.sort_unstable();
+    alternations.dedup();
+    alternations
+}
+
+/// Every index selector one edge of `relation` belongs to: its own type,
+/// the untyped selector, and each registered alternation naming the type.
+fn edge_selectors(
+    relation: RelationId,
+    alternations: &[EdgeRelation],
+) -> impl Iterator<Item = EdgeRelation> + '_ {
+    [EdgeRelation::One(relation), EdgeRelation::Any]
+        .into_iter()
+        .chain(
+            alternations
+                .iter()
+                .copied()
+                .filter(move |selector| selector.matches(relation)),
+        )
+}
+
 fn build_index<E>(
     operators: &[GlaOperator],
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
@@ -288,6 +314,7 @@ fn build_index<E>(
         }
     }
     join::register_indexes(operators, &mut index, control)?;
+    let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         for direction in [
@@ -295,7 +322,7 @@ fn build_index<E>(
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            for selector in [EdgeRelation::One(relation), EdgeRelation::Any] {
+            for selector in edge_selectors(relation, &alternations) {
                 let Some(adjacency) = index.get_mut(&(selector, direction)) else {
                     continue;
                 };
@@ -363,6 +390,7 @@ fn build_identified_index<E>(
             }
         }
     }
+    let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
     for (edge, source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         for direction in [
@@ -370,7 +398,7 @@ fn build_identified_index<E>(
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            for selector in [EdgeRelation::One(relation), EdgeRelation::Any] {
+            for selector in edge_selectors(relation, &alternations) {
                 let Some(adjacency) = index.get_mut(&(selector, direction)) else {
                     continue;
                 };

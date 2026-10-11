@@ -49,7 +49,7 @@ where
     fn visible<'a, C>(
         &'a self,
         eid: EId,
-        requested: Option<RelationId>,
+        requested: EdgeRelation,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<QueryError, C>> {
         self.poll()?;
         let execution = &self.vertices.execution;
@@ -57,7 +57,7 @@ where
         let Some(edge) = self.edges.edge(eid, &mut poll).map_err(private_error)? else {
             return Ok(None);
         };
-        if requested.is_some_and(|relation| edge.relation != relation)
+        if !requested.matches(edge.relation)
             || !execution
                 .borrow()
                 .permit
@@ -120,14 +120,14 @@ where
     ) -> Result<Option<EId>, EdgeScanSourceError<QueryError, C>> {
         self.poll()?;
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        if relation.one().is_some_and(|relation| {
-            !self
-                .vertices
-                .execution
-                .borrow()
-                .permit
-                .predicates()
-                .allows_relation(relation)
+        // A typed selector whose every type this capability hides has no
+        // candidate directory; an alternation needs one visible member.
+        if relation.relations().is_some_and(|members| {
+            let execution = self.vertices.execution.borrow();
+            let predicates = execution.permit.predicates();
+            members
+                .iter()
+                .all(|member| !predicates.allows_relation(*member))
         }) {
             return Ok(None); // No candidate directory, even for a nonempty raw graph.
         }
@@ -147,7 +147,7 @@ where
                 )));
             }
             self.after = Some(eid);
-            if self.visible::<C>(eid, relation.one())?.is_some() {
+            if self.visible::<C>(eid, relation)?.is_some() {
                 control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
                 return Ok(Some(eid));
             }
@@ -159,7 +159,7 @@ where
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
@@ -176,7 +176,7 @@ where
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRecord<'a>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
@@ -202,7 +202,7 @@ where
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;

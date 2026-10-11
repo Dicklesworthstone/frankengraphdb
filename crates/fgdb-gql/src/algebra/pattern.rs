@@ -255,7 +255,13 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
 }
 
 fn relations_overlap(left: EdgeRelation, right: EdgeRelation) -> bool {
-    left == right || left == EdgeRelation::Any || right == EdgeRelation::Any
+    match (left.relations(), right.relations()) {
+        (Some(left), Some(right)) => left
+            .iter()
+            .any(|relation| right.binary_search(relation).is_ok()),
+        // An untyped atom overlaps every relation.
+        _ => true,
+    }
 }
 
 /// Whether DIFFERENT EDGES must check this atom against itself: a quantified
@@ -369,7 +375,15 @@ impl GraphPatternBuilder {
             .edges
             .iter()
             .any(|edge| edge.relation == EdgeRelation::Any);
-        let mut bytes = if untyped {
+        // A type alternation gets its own version; v1 and v2 templates keep
+        // their bytes.
+        let alternation = self
+            .edges
+            .iter()
+            .any(|edge| matches!(edge.relation, EdgeRelation::Set(_)));
+        let mut bytes = if alternation {
+            b"fgdb:gql:pattern-template:v3\0".to_vec()
+        } else if untyped {
             b"fgdb:gql:pattern-template:v2\0".to_vec()
         } else {
             b"fgdb:gql:pattern-template:v1\0".to_vec()
@@ -412,11 +426,28 @@ impl GraphPatternBuilder {
         for edge in &self.edges {
             ordinal(&mut bytes, edge.source);
             ordinal(&mut bytes, edge.destination);
-            if untyped {
-                bytes.push(u8::from(edge.relation == EdgeRelation::Any));
-            }
-            if let EdgeRelation::One(relation) = edge.relation {
-                bytes.extend_from_slice(&relation.0.to_be_bytes());
+            if alternation {
+                match edge.relation {
+                    EdgeRelation::One(relation) => {
+                        bytes.push(0);
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
+                    EdgeRelation::Any => bytes.push(1),
+                    EdgeRelation::Set(set) => {
+                        bytes.push(2);
+                        ordinal(&mut bytes, set.relations().len());
+                        for relation in set.relations() {
+                            bytes.extend_from_slice(&relation.0.to_be_bytes());
+                        }
+                    }
+                }
+            } else {
+                if untyped {
+                    bytes.push(u8::from(edge.relation == EdgeRelation::Any));
+                }
+                if let EdgeRelation::One(relation) = edge.relation {
+                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                }
             }
             bytes.push(super::direction_tag(edge.direction));
             bytes.push(u8::from(edge.walk.is_some()));
@@ -1346,7 +1377,7 @@ mod tests {
                 .all(|test| (assignment[test.left] == assignment[test.right]) == test.equal);
             let matches = b.edges.iter().all(|atom| {
                 edges.iter().any(|&(s, r, d)| {
-                    if matches!(atom.relation, EdgeRelation::One(expected) if r != expected) {
+                    if !atom.relation.matches(r) {
                         return false;
                     }
                     let left = assignment[atom.source];

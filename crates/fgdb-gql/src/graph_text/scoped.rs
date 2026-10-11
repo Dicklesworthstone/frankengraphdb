@@ -170,11 +170,23 @@ fn resolve_pattern_with_captures<'a>(
     for (edge_at, edge) in edges.iter().enumerate() {
         let relation = match edge.relation {
             Some(name) => {
-                let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, name)?
-                else {
-                    unreachable!("symbol domain is checked by the shared resolver")
-                };
-                EdgeRelation::One(relation)
+                let mut relations = Vec::with_capacity(1 + edge.alternatives.len());
+                for name in core::iter::once(name).chain(edge.alternatives.iter().copied()) {
+                    let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, name)?
+                    else {
+                        unreachable!("symbol domain is checked by the shared resolver")
+                    };
+                    relations.push(relation);
+                }
+                // The parser bounded the alternation; duplicates collapse.
+                EdgeRelation::alternation(&relations).ok_or_else(|| {
+                    error(
+                        name.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "at most 8 relationship types in an alternation",
+                        ),
+                    )
+                })?
             }
             None => EdgeRelation::Any,
         };
@@ -665,6 +677,7 @@ impl<'a> Parser<'a> {
                 )?;
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
+                let mut alternatives = Vec::new();
                 let (variable, relation, walk) = if self.take(b'[')? {
                     let variable = if matches!(self.current.kind, TokenKind::Word(_)) {
                         Some(self.name()?)
@@ -676,6 +689,20 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
+                    // openCypher type alternation `:A|B|:C` (Match2 [6]).
+                    while relation.is_some() && self.take(b'|')? {
+                        if alternatives.len() + 1 == crate::algebra::MAX_EDGE_RELATION_ALTERNATIVES
+                        {
+                            return Err(error(
+                                self.current.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "at most 8 relationship types in an alternation",
+                                ),
+                            ));
+                        }
+                        self.take(b':')?;
+                        alternatives.push(self.name()?);
+                    }
                     let walk = self.pattern_walk_bounds()?;
                     // openCypher `-[r:T {k: v}]->` filters that one captured
                     // relationship. A walk's map would range over a list.
@@ -717,6 +744,7 @@ impl<'a> Parser<'a> {
                     variable,
                     source: left,
                     relation,
+                    alternatives,
                     destination: right,
                     direction: match (incoming, outgoing) {
                         (true, false) => GlaDirection::Reverse,

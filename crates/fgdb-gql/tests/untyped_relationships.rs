@@ -1,4 +1,5 @@
 //! Untyped atoms range over concrete edge occurrences, including mixed paths.
+//! A type alternation `-[:A|B]->` ranges over exactly its members' edges.
 
 use fgdb_delta_types::RelationId;
 use fgdb_gql::algebra::{EdgeRelation, GraphValueRow, PreparedGraphPattern};
@@ -11,6 +12,8 @@ type Edge = (EId, VId, RelationId, VId);
 fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(7))),
+        (GraphSymbolKind::Relation, "Z") => Some(GraphSymbol::Relation(RelationId(0))),
+        (GraphSymbolKind::Relation, "M") => Some(GraphSymbol::Relation(RelationId(u64::MAX))),
         _ => None,
     })
     .unwrap_or_else(|error| panic!("{text}: {error}"))
@@ -216,5 +219,100 @@ fn typed_plan_bytes_keep_the_existing_transcript_and_cannot_alias_any() {
         "MATCH (a)-[*1..]->(b) RETURN a",
     ] {
         assert!(PreparedGraphText::prepare(invalid, |_, _: &str| None).is_err());
+    }
+}
+
+/// `-[:Z|M]->` is the union of the `-[:Z]->` and `-[:M]->` occurrences and
+/// never admits the third type R. Member order and repeats do not matter,
+/// and naming every type present equals the untyped atom, also as a walk.
+#[test]
+fn an_alternation_matches_exactly_the_union_of_its_member_atoms() {
+    let edges = fixture();
+    for atom in [
+        "(a)-[TYPES]->(b)",
+        "(a)<-[TYPES]-(b)",
+        "(a)-[TYPES]-(b)",
+        "(a)-[rTYPES]->(b)",
+    ] {
+        let text = |types: &str| format!("MATCH {} RETURN ALL a,b", atom.replace("TYPES", types));
+        let mut union = run(&text(":Z"), &edges);
+        union.extend(run(&text(":M"), &edges));
+        union.sort();
+        assert!(!union.is_empty());
+        assert_eq!(run(&text(":Z|M"), &edges), union, "{atom}");
+        assert_eq!(run(&text(":M|:Z"), &edges), union, "{atom}");
+        assert_eq!(
+            run(&text(":Z|Z"), &edges),
+            run(&text(":Z"), &edges),
+            "{atom}"
+        );
+        assert_eq!(
+            run(&text(":Z|M|R"), &edges),
+            run(&text(""), &edges),
+            "{atom}"
+        );
+    }
+    assert_eq!(
+        run("MATCH (a)-[:Z|M|R*1..2]->(b) RETURN ALL a,b", &edges),
+        run("MATCH (a)-[*1..2]->(b) RETURN ALL a,b", &edges)
+    );
+}
+
+/// An alternation's plan has its own transcript, which ignores member order
+/// and repeats; `:Z|Z` is the `:Z` plan. Its relation witness names exactly
+/// its members. More than eight types refuse before any catalog callback.
+#[test]
+fn an_alternation_has_its_own_transcript_and_reads_only_its_members() {
+    let both = prepare("MATCH (a)-[:Z|M]->(b) RETURN a,b");
+    assert_eq!(
+        both.canonical_bytes(),
+        prepare("MATCH (a)-[:M|:Z|M]->(b) RETURN a,b").canonical_bytes()
+    );
+    for other in [
+        "MATCH (a)-[:Z]->(b) RETURN a,b",
+        "MATCH (a)-[:M]->(b) RETURN a,b",
+        "MATCH (a)-->(b) RETURN a,b",
+    ] {
+        assert_ne!(
+            both.canonical_bytes(),
+            prepare(other).canonical_bytes(),
+            "{other}"
+        );
+    }
+    assert_eq!(
+        prepare("MATCH (a)-[:Z|Z]->(b) RETURN a,b").canonical_bytes(),
+        prepare("MATCH (a)-[:Z]->(b) RETURN a,b").canonical_bytes()
+    );
+    assert_eq!(
+        both.plan().edge_relations(),
+        Some([RelationId(0), RelationId(u64::MAX)].into())
+    );
+    let set = EdgeRelation::alternation(&[RelationId(u64::MAX), RelationId(0)]).unwrap();
+    assert!(set.matches(RelationId(0)) && set.matches(RelationId(u64::MAX)));
+    assert!(!set.matches(RelationId(7)));
+    assert_eq!(set.one(), None);
+    assert_eq!(
+        EdgeRelation::alternation(&[RelationId(3), RelationId(3)]),
+        Some(EdgeRelation::One(RelationId(3)))
+    );
+    assert_eq!(
+        EdgeRelation::alternation(&(0..9).map(RelationId).collect::<Vec<_>>()),
+        None
+    );
+    for invalid in [
+        "MATCH (a)-[:A|B|C|D|E|F|G|H|I]->(b) RETURN a",
+        "MATCH (a)-[:Z|]->(b) RETURN a",
+        "MATCH (a)-[|Z]->(b) RETURN a",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphText::prepare(invalid, |_, _: &str| {
+                calls += 1;
+                None
+            })
+            .is_err(),
+            "{invalid}"
+        );
+        assert_eq!(calls, 0, "{invalid}");
     }
 }

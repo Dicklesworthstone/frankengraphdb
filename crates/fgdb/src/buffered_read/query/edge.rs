@@ -115,10 +115,9 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
         relation: EdgeRelation,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> CandidateResult<C> {
-        let relation = match relation {
-            EdgeRelation::One(relation) => Some(relation),
-            EdgeRelation::Any => None,
-        };
+        // An alternation reads every relation's candidates; the async cursor
+        // admits only its members through `EdgeRelation::matches`.
+        let relation = relation.one();
         // Keep every awaitable source operation in the narrowed query context,
         // even though the public cursor is the ordinary native async operator.
         let candidate = self
