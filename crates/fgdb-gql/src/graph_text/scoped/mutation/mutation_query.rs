@@ -22,6 +22,10 @@ enum Binding<'a> {
         key: Name<'a>,
         current: usize,
     },
+    Properties {
+        target: usize,
+        current: usize,
+    },
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
@@ -35,9 +39,21 @@ impl Binding<'_> {
                     target: b, key: bk, ..
                 },
             ) => a == b && ak.text == bk.text,
+            (Self::Properties { target: a, .. }, Self::Properties { target: b, .. }) => a == b,
             _ => false,
         }
     }
+}
+
+/// A map projection uses the same parsed source name for its NULL guard,
+/// selected properties and wildcard. Write owners bind each read to their
+/// final staged values; the shared grammar never synthesizes expression text.
+#[derive(Clone, Copy)]
+pub(super) enum ReturnMapInput<'a> {
+    Identity,
+    Guard,
+    Property(Name<'a>),
+    Properties,
 }
 
 /// Leaf resolution for one write statement's RETURN items: a leaf is a
@@ -46,6 +62,17 @@ pub(super) trait ReturnLeaves<'a> {
     /// The binding column of the leaf at the current token, consuming it;
     /// `None` consumes nothing and leaves the token to the expression parser.
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>;
+    fn map_input(
+        &mut self,
+        _parser: &mut Parser<'a>,
+        source: Name<'a>,
+        _input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        Err(error(
+            source.at,
+            GraphPatternTextErrorKind::Expected("map projection over a readable write binding"),
+        ))
+    }
     /// The implicit output name of a binding column.
     fn name(&self, column: usize) -> Name<'a>;
     /// Every binding column's type, in column order.
@@ -115,7 +142,7 @@ impl<'a> Parser<'a> {
                         GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
                     )
                 } else {
-                    self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?
+                    self.read_write_value(leaves, 0)?
                 };
                 self.punct(b')', "one aggregate argument")?;
                 if matches!(function, F::SumInt | F::AverageInt)
@@ -143,10 +170,7 @@ impl<'a> Parser<'a> {
                 }
                 (value, Some(function))
             } else {
-                (
-                    self.read_resolved_value(&mut |parser| leaves.leaf(parser), 0)?,
-                    None,
-                )
+                (self.read_write_value(leaves, 0)?, None)
             };
             let end = self.current.at;
             items.spellings.push(self.source_name(at, end));
@@ -311,6 +335,15 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         self.returning.leaf(parser, self.columns, self.scope)
     }
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        self.returning
+            .map_input(parser, self.columns, self.scope, source, input)
+    }
     fn name(&self, column: usize) -> Name<'a> {
         self.returning.bindings[column].1
     }
@@ -383,6 +416,31 @@ impl<'a> ParsedMutationReturn<'a> {
             text: word,
             at: parser.current.at,
         };
+        if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let mut lookahead = parser.lexer.clone();
+            lookahead.next()?;
+            if let TokenKind::Word(variable) = lookahead.next()?.kind
+                && matches!(
+                    parser.insertion_match_kind(variable),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                )
+                && !parser.elements.contains(&variable)
+                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+            {
+                parser.advance()?;
+                parser.punct(b'(', "(")?;
+                let variable = parser.name()?;
+                parser.punct(b')', ")")?;
+                return self
+                    .map_input(parser, columns, scope, variable, ReturnMapInput::Properties)
+                    .map(Some);
+            }
+            // properties(MAP/NULL) and keys(MAP/NULL) belong to the shared
+            // row evaluator, whose argument may contain post-write leaves.
+            return Ok(None);
+        }
         if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
             // Graph functions are ordinary source projections, exactly as in
             // a SET right-hand side; scalar functions stay with the shared
@@ -409,14 +467,7 @@ impl<'a> ParsedMutationReturn<'a> {
                     Ok(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
                     Ok(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
                     Ok(GraphPathFunction::Labels) => GraphSetColumnType::List,
-                    Ok(GraphPathFunction::Properties) => {
-                        return Err(error(
-                            name.at,
-                            GraphPatternTextErrorKind::Expected(
-                                "explicit post-statement property reads in mutation RETURN",
-                            ),
-                        ));
-                    }
+                    Ok(GraphPathFunction::Properties) => unreachable!("handled above"),
                     Err(_) => return Ok(None),
                 }
             };
@@ -434,6 +485,33 @@ impl<'a> ParsedMutationReturn<'a> {
             return self.column(Binding::Input(column), name, kind).map(Some);
         }
         let key = parser.name()?;
+        self.map_input(parser, columns, scope, name, ReturnMapInput::Property(key))
+            .map(Some)
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        columns: &mut Vec<Projection<'a>>,
+        scope: ReturnScope,
+        name: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let kind = parser
+            .insertion_match_kind(name.text)
+            .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownVariable))?;
+        if matches!(input, ReturnMapInput::Guard)
+            && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+        {
+            return Err(error(
+                name.at,
+                GraphPatternTextErrorKind::Expected("vertex or edge map source"),
+            ));
+        }
+        if matches!(input, ReturnMapInput::Identity | ReturnMapInput::Guard) {
+            let target = parser.mutation_projection(columns, name, None)?;
+            return self.column(Binding::Input(target), name, kind);
+        }
         match kind {
             GraphSetColumnType::Vertex => {}
             GraphSetColumnType::Edge if !scope.deleting => {}
@@ -453,17 +531,38 @@ impl<'a> ParsedMutationReturn<'a> {
             }
         }
         let target = parser.mutation_projection(columns, name, None)?;
-        let current = parser.mutation_projection(columns, name, Some(key))?;
-        self.column(
-            Binding::Property {
-                target,
-                key,
-                current,
-            },
-            key,
-            GraphSetColumnType::Scalar,
-        )
-        .map(Some)
+        match input {
+            ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                unreachable!("identity guard handled above")
+            }
+            ReturnMapInput::Property(key) => {
+                let current = parser.mutation_projection(columns, name, Some(key))?;
+                self.column(
+                    Binding::Property {
+                        target,
+                        key,
+                        current,
+                    },
+                    key,
+                    GraphSetColumnType::Scalar,
+                )
+            }
+            ReturnMapInput::Properties => {
+                let current = parser.projection_slot(
+                    columns,
+                    Projection {
+                        variable: name,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                    },
+                )?;
+                self.column(
+                    Binding::Properties { target, current },
+                    name,
+                    GraphSetColumnType::Any,
+                )
+            }
+        }
     }
 
     fn types(&self) -> Vec<GraphSetColumnType> {
@@ -504,6 +603,9 @@ impl<'a> ParsedMutationReturn<'a> {
                         key,
                         current,
                     }
+                }
+                Binding::Properties { target, current } => {
+                    GraphMutationBinding::Properties { target, current }
                 }
             });
         }
@@ -755,7 +857,7 @@ impl PreparedGraphMutationQueryText {
     pub fn prepare(
         statement: &str,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphMutationTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
@@ -764,7 +866,7 @@ impl PreparedGraphMutationQueryText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphMutationTextError> {
         let body = statement_body(statement, "one SET/REMOVE RETURN statement")?;
         let (mutation, returning) = PreparedGraphMutationText::prepare_definition(

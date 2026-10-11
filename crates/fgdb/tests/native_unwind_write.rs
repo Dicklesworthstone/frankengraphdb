@@ -202,7 +202,7 @@ fn native_late_type_refusal_calls_neither_catalog_nor_allocator() {
                 &commit,
                 COUNTER,
                 &arguments,
-                |kind, name| {
+                |kind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },

@@ -31,7 +31,7 @@ fn policy() -> GraphMutationPolicy {
     )
 }
 fn mutation(text: &str) -> PreparedGraphMutation {
-    PreparedGraphMutationText::prepare(text, R, |kind, name| match (kind, name) {
+    PreparedGraphMutationText::prepare(text, R, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),

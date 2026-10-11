@@ -258,7 +258,7 @@ fn malformed_or_overexpanded_tail_cannot_resolve_allocate_or_publish_a_prefix() 
                     &commit,
                     text,
                     arguments,
-                    |_, _| panic!("no catalog access before complete input admission"),
+                    |_, _: &str| panic!("no catalog access before complete input admission"),
                     R,
                     writes(),
                     |_| -> Result<ElementId, Infallible> {

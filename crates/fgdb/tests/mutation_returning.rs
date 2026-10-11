@@ -280,7 +280,7 @@ fn unknowable_post_statement_reads_refuse_at_preparation() {
         "MATCH (n:Item) SET n.p = 1 RETURN n.p AS x, n.q AS x",
     ] {
         let mut calls = 0;
-        let refused = PreparedGraphMutationQueryText::prepare(text, R, |kind, name| {
+        let refused = PreparedGraphMutationQueryText::prepare(text, R, |kind, name: &str| {
             calls += 1;
             symbols(kind, name)
         });

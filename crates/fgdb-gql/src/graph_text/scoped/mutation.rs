@@ -14,6 +14,7 @@ mod return_projection;
 mod script;
 
 use super::*;
+use crate::GraphSymbolResolver;
 use crate::graph_text::GraphPathFunction;
 use crate::mutation_text::{
     MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate,
@@ -397,7 +398,7 @@ impl PreparedGraphMutationText {
     pub fn prepare(
         statement: &str,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphMutationTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
@@ -409,7 +410,7 @@ impl PreparedGraphMutationText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphMutationTextError> {
         Self::prepare_definition(statement, relation, declarations, resolve, false)
             .map(|(mutation, _)| mutation)
@@ -421,7 +422,7 @@ impl PreparedGraphMutationText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl GraphSymbolResolver,
         returning: bool,
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
@@ -452,7 +453,8 @@ impl PreparedGraphMutationText {
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
             }
-            let value = resolve(kind, name.text)
+            let value = resolve
+                .resolve_symbol(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
                 return Err(error(
@@ -574,6 +576,21 @@ impl PreparedGraphMutationText {
             at,
             builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
         )?;
+        let reverse_catalog = columns
+            .iter()
+            .any(|column| {
+                matches!(
+                    column.path,
+                    Some(
+                        GraphPathFunction::Labels
+                            | GraphPathFunction::Type
+                            | GraphPathFunction::Properties
+                    )
+                )
+            })
+            .then(|| {
+                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement))
+            });
         let selection = PreparedGraphText {
             statement: statement.to_owned(),
             builder,
@@ -588,7 +605,7 @@ impl PreparedGraphMutationText {
             distinct: false,
             visible_columns: None,
             return_at: at,
-            reverse_catalog: None,
+            reverse_catalog,
         };
         Ok((
             Self {

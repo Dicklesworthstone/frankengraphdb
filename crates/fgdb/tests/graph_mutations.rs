@@ -36,7 +36,7 @@ fn mutation(text: &str) -> PreparedGraphMutation {
 }
 fn mutation_at(text: &str, relation: RelationId) -> PreparedGraphMutation {
     use fgdb_gql::{GraphSymbol, GraphSymbolKind};
-    PreparedGraphMutationText::prepare(text, relation, |kind, name| match (kind, name) {
+    PreparedGraphMutationText::prepare(text, relation, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),

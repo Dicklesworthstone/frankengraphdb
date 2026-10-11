@@ -1509,6 +1509,92 @@ fn committed_writes_survive_a_server_restart() {
 }
 
 #[test]
+fn mutation_returning_property_maps_use_the_server_catalog_and_post_write_scope() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "mutation-returning-property-maps").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'Ann', age:30})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let changed = owner.execute(cx, ExecuteMode::Write,
+            "MATCH (p:Person) SET p.age = p.age + 1 RETURN properties(p) AS props, keys(p) AS names, p{.*, name:'override'} AS projected", vec![]).await.unwrap();
+        assert_eq!(changed.columns, ["props", "names", "projected"]);
+        assert_eq!(
+            changed.rows,
+            [vec![
+                WireValue::Map(vec![
+                    ("age".into(), WireValue::Int(31)),
+                    ("name".into(), text("Ann"))
+                ]),
+                WireValue::List(vec![text("age"), text("name")]),
+                WireValue::Map(vec![
+                    ("age".into(), WireValue::Int(31)),
+                    ("name".into(), text("override"))
+                ]),
+            ]]
+        );
+        assert!(matches!(
+            changed.outcome,
+            Outcome::WriteCommitted { seq: 2, .. }
+        ));
+
+        let mut scope = grant(Rights::ReadWrite);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut limited = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
+        let changed = limited.execute(cx, ExecuteMode::Write,
+            "MATCH (p:Person) SET p.age = p.age + 1 RETURN properties(p) AS props, keys(p) AS names", vec![]).await.unwrap();
+        assert_eq!(
+            changed.rows,
+            [vec![
+                WireValue::Map(vec![("age".into(), WireValue::Int(32))]),
+                WireValue::List(vec![text("age")]),
+            ]]
+        );
+        let failure = limited
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (p:Person) SET p.age = 99 RETURN properties(p), 1 / 0",
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(failure), ErrorCode::Statement);
+        limited.close(cx).await.unwrap();
+        let current = owner
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (p:Person) RETURN properties(p) AS props",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            current.rows,
+            [vec![WireValue::Map(vec![
+                ("age".into(), WireValue::Int(32)),
+                ("name".into(), text("Ann")),
+            ])]]
+        );
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn mutation_returning_is_atomic_and_capability_masked_over_fgp() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "mutation-returning").await;

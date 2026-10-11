@@ -98,6 +98,14 @@ pub enum GraphMutationBinding {
         key: PropertyKeyId,
         current: usize,
     },
+    /// The target's complete post-statement property map. `current` holds
+    /// the frozen admitted map, and the selection plan's reverse catalog
+    /// names every final assignment merged into it. REMOVE omits a field;
+    /// SET retains its scalar, including canonical NULL. A NULL OPTIONAL
+    /// target returns NULL; a deleted target or unmapped assignment refuses.
+    /// Edge maps with DETACH DELETE are refused at preparation because an
+    /// incident edge can disappear through a vertex's cascade.
+    Properties { target: usize, current: usize },
 }
 
 impl core::fmt::Debug for GraphMutationAction {
@@ -173,6 +181,16 @@ pub enum GraphMutationError<E> {
         row: usize,
         binding: usize,
     },
+    /// A complete-map RETURN binding did not receive a bounded scalar map.
+    InvalidPropertyMap {
+        row: usize,
+        binding: usize,
+    },
+    /// A final assignment has no name in the trusted reverse catalog.
+    UnmappedProperty {
+        row: usize,
+        binding: usize,
+    },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -209,6 +227,14 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::DeletedElementRead { row, binding } => write!(
                 f,
                 "mutation RETURN row {row} binding {binding}: property of an element this statement deletes"
+            ),
+            Self::InvalidPropertyMap { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: invalid property map"
+            ),
+            Self::UnmappedProperty { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: unmapped property"
             ),
         }
     }

@@ -129,22 +129,29 @@ fn selected_document_rows_upsert_in_order_and_survive_compaction_and_reopen() {
         )
         .await
         .unwrap();
-        assert_eq!(next, 102, "a duplicate key must match the earlier row's vertex");
+        assert_eq!(
+            next, 102,
+            "a duplicate key must match the earlier row's vertex"
+        );
         assert_eq!(arguments.canonical_bytes(), frozen);
         assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
         let wanted = expected(&[[1, 30], [2, 20]]);
         assert_eq!(
-            db.query(&cx, READ, &GqlParameters::new(), symbols, reads()).unwrap(),
+            db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
             wanted
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &dir, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &dir, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         assert_eq!(
-            db.query(&cx, READ, &GqlParameters::new(), symbols, reads()).unwrap(),
+            db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
             wanted
         );
     });
@@ -162,7 +169,10 @@ fn document_shape_and_late_row_type_refusals_never_enter_catalog_or_publish() {
         let wrong_root = GqlParameters::new().with_int64("payload", 42).unwrap();
         let wrong_tail = arguments(vec![
             row(1, 10),
-            object(vec![("id", int(2)), ("score", GraphValue::Scalar(CanonicalScalar::Bool(true)))]),
+            object(vec![
+                ("id", int(2)),
+                ("score", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            ]),
         ]);
         let empty = arguments(vec![]);
         for (at, arguments) in [wrong_root, wrong_tail, empty].iter().enumerate() {
@@ -173,7 +183,7 @@ fn document_shape_and_late_row_type_refusals_never_enter_catalog_or_publish() {
                     &commit,
                     UPSERT,
                     arguments,
-                    |_, _| panic!("complete document admission precedes the catalog"),
+                    |_, _: &str| panic!("complete document admission precedes the catalog"),
                     R,
                     writes(),
                     |_| -> Result<ElementId, Infallible> { panic!("no identity allocation") },
@@ -181,17 +191,23 @@ fn document_shape_and_late_row_type_refusals_never_enter_catalog_or_publish() {
                 .await
                 .unwrap_err();
             match (at, error) {
-                (0, QueryWriteError::UnwindBinding(GraphUnwindWriteError::Expansion {
-                    row: 0,
-                    clause: 0,
-                    offset,
-                    kind: GraphUnwindRowError::ExpectedMapField,
-                })) => assert_eq!(offset, UPSERT.find("$payload").unwrap()),
-                (1, QueryWriteError::UnwindBinding(GraphUnwindWriteError::Row {
-                    row: 1,
-                    kind: GraphUnwindRowError::IncompatibleFieldTypes,
-                    ..
-                })) => {}
+                (
+                    0,
+                    QueryWriteError::UnwindBinding(GraphUnwindWriteError::Expansion {
+                        row: 0,
+                        clause: 0,
+                        offset,
+                        kind: GraphUnwindRowError::ExpectedMapField,
+                    }),
+                ) => assert_eq!(offset, UPSERT.find("$payload").unwrap()),
+                (
+                    1,
+                    QueryWriteError::UnwindBinding(GraphUnwindWriteError::Row {
+                        row: 1,
+                        kind: GraphUnwindRowError::IncompatibleFieldTypes,
+                        ..
+                    }),
+                ) => {}
                 (2, QueryWriteError::UnwindBinding(GraphUnwindWriteError::Empty)) => {}
                 (_, error) => panic!("wrong admission refusal: {error:?}"),
             }
@@ -250,21 +266,27 @@ fn late_document_row_failure_rolls_back_only_that_batch_inside_outer_transaction
             .unwrap_err();
         assert!(matches!(error, QueryWriteError::Execute(_)), "{error:?}");
         assert_eq!(
-            txn.query(&db, &cx, READ, &GqlParameters::new(), symbols, reads()).unwrap(),
+            txn.query(&db, &cx, READ, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
             wanted
         );
         assert_eq!(db.frontier().unwrap(), CommitSeq(0));
         assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
         assert!(matches!(
             txn.finish(&mut db, &commit).await.unwrap(),
-            EmbeddedTxnCompletion::WriteCommitted { commit_seq: CommitSeq(1) }
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(1)
+            }
         ));
         assert_eq!(txcx.outstanding_obligations(), 0);
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &dir, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &dir, keys())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         assert_eq!(
-            db.query(&cx, READ, &GqlParameters::new(), symbols, reads()).unwrap(),
+            db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
             wanted
         );
     });

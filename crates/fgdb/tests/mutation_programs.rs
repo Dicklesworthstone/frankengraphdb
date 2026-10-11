@@ -39,7 +39,7 @@ fn program_at(statements: &[&str], relation: RelationId) -> PreparedGraphMutatio
         statements
             .iter()
             .map(|text| {
-                PreparedGraphMutationText::prepare(text, relation, |kind, name| {
+                PreparedGraphMutationText::prepare(text, relation, |kind, name: &str| {
                     match (kind, name) {
                         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
                         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),

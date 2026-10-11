@@ -443,7 +443,7 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
         PreparedGraphMutationQueryText::prepare(
             "MATCH (n:Item) SET n.p=2 RETURN sum(n)",
             R,
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             },

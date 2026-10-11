@@ -307,8 +307,22 @@ scratch. Transaction maps merge the pinned basis with staged additions,
 updates and removals. Map cells, names and scalar payload copies consume the
 same cumulative allowance as source admission and query execution. Stored
 properties remain atomic `CanonicalScalar` values; this does not add stored
-recursive maps. Mutation `RETURN` clauses still refuse graph-element maps;
-their post-write projection path has no complete-map accessor yet.
+recursive maps.
+
+`MATCH ... SET/REMOVE ... RETURN` also supports complete element maps, keys,
+wildcard projections and explicit overrides, including grouping and aggregate
+arguments. The mutation collector combines the frozen selection's maps with
+the statement's complete, conflict-checked assignment table before staging.
+Aliases of one element therefore see the same final properties, and every
+returned occurrence retains its original match multiplicity. `REMOVE` omits
+the field; `SET ... = NULL` retains the existing write API's stored scalar NULL
+semantics. A deleted target refuses property-map access. Projection failures,
+catalog failures and budget refusals stage no part of the statement, while
+`LIMIT 0` suppresses only output rows. The same behavior is available through
+the library's `query_write` and `query_write_engine`, the CLI's `write`, and
+FGP write execution. Complete graph maps in `CREATE`/`INSERT` and `MERGE`
+`RETURN` remain outside this mutation slice.
+
 Nullable imported bindings across multipart `OPTIONAL MATCH` boundaries also
 refuse; project their maps before that boundary. Mixed row/graph multipart
 projections support `properties(n)` and `keys(n)`, while `n{.*}` there remains

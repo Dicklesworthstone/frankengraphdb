@@ -277,7 +277,7 @@ fn prepare_insert_return(
 fn prepare_mutation_return(
     text: &str,
     params: &GqlParameters,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    resolver: impl GraphSymbolResolver,
     relation: RelationId,
 ) -> Result<PreparedGraphMutationQuery, GraphMutationTextError> {
     let declarations = write_return_declarations(params);
@@ -405,7 +405,7 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx: &CommitCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
@@ -413,8 +413,13 @@ impl<V: Vfs + Clone> Database<V> {
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
-            let query = prepare_insert_return(text, params, resolver, relation)
-                .map_err(QueryWriteError::InsertText)?;
+            let query = prepare_insert_return(
+                text,
+                params,
+                |kind, name| resolver.resolve_symbol(kind, name),
+                relation,
+            )
+            .map_err(QueryWriteError::InsertText)?;
             let columns = query.columns().to_vec();
             let (_, rows, _) = self
                 .execute_graph_insert_query_autocommit_governed(
@@ -455,8 +460,13 @@ impl<V: Vfs + Clone> Database<V> {
         if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::VertexUpsertText)?
         {
-            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
-                .map_err(QueryWriteError::VertexUpsertText)?;
+            let query = prepare_vertex_upsert_return(
+                text,
+                params,
+                |kind, name| resolver.resolve_symbol(kind, name),
+                relation,
+            )
+            .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
             let (_, _, rows, _) = self
                 .execute_graph_vertex_upsert_query_autocommit_governed(
@@ -476,8 +486,10 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
-            .map_err(QueryWriteError::from)?;
+        let bound = BoundNativeGraphWrite::bind(text, params, relation, |kind, name| {
+            resolver.resolve_symbol(kind, name)
+        })
+        .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
             .execute_graph_write_program_returning_autocommit_governed(
                 txcx,
@@ -512,7 +524,7 @@ impl WriteTxn {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
@@ -520,8 +532,13 @@ impl WriteTxn {
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
-            let query = prepare_insert_return(text, params, resolver, relation)
-                .map_err(QueryWriteError::InsertText)?;
+            let query = prepare_insert_return(
+                text,
+                params,
+                |kind, name| resolver.resolve_symbol(kind, name),
+                relation,
+            )
+            .map_err(QueryWriteError::InsertText)?;
             let columns = query.columns().to_vec();
             let (_, rows) = self
                 .execute_graph_insert_query_governed(
@@ -553,8 +570,13 @@ impl WriteTxn {
         if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::VertexUpsertText)?
         {
-            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
-                .map_err(QueryWriteError::VertexUpsertText)?;
+            let query = prepare_vertex_upsert_return(
+                text,
+                params,
+                |kind, name| resolver.resolve_symbol(kind, name),
+                relation,
+            )
+            .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
             let (_, _, rows) = self
                 .execute_graph_vertex_upsert_query_governed(
@@ -572,8 +594,10 @@ impl WriteTxn {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
-            .map_err(QueryWriteError::from)?;
+        let bound = BoundNativeGraphWrite::bind(text, params, relation, |kind, name| {
+            resolver.resolve_symbol(kind, name)
+        })
+        .map_err(QueryWriteError::from)?;
         let receipt = self
             .execute_graph_write_program_returning_governed(
                 database,
@@ -864,7 +888,7 @@ mod write_return_tests {
                         &commit,
                         text,
                         &GqlParameters::new(),
-                        |kind, name| {
+                        |kind, name: &str| {
                             calls.fetch_add(1, Ordering::Relaxed);
                             symbols(kind, name)
                         },

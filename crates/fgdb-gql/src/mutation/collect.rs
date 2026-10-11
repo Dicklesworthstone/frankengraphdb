@@ -152,6 +152,123 @@ fn element(value: &crate::algebra::GraphValue) -> Option<ElementId> {
     }
 }
 
+enum MapField<'a> {
+    Frozen(&'a crate::algebra::GraphValue),
+    Assigned(&'a CanonicalScalar),
+}
+
+/// Merge the final proposal range for this actual element into its frozen
+/// admitted map. No expression runs here and no graph source is consulted.
+/// Catalog names were checked for injectivity when the query was prepared,
+/// including IDs absent from the original map but introduced by this SET.
+#[allow(clippy::too_many_arguments)]
+fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
+    target: ElementId,
+    current: &crate::algebra::GraphValue,
+    row_at: usize,
+    binding_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    meter: &mut Meter<F>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    use crate::algebra::GraphValue;
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row: row_at,
+            binding: binding_at,
+        })
+    };
+    meter.event(GlaExecutionEvent::Work)?;
+    if proposals.contains_key(&(target, Field::Delete)) {
+        return Err(GqlQueryError::Source(
+            GraphMutationError::DeletedElementRead {
+                row: row_at,
+                binding: binding_at,
+            },
+        ));
+    }
+    let (old_keys, old_values) = current.as_map().ok_or_else(invalid)?;
+    if old_keys.len() != old_values.len() || old_keys.len() >= GraphValue::MAX_LIST_NODES {
+        return Err(invalid());
+    }
+    for (at, (key, value)) in old_keys.iter().zip(old_values).enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        if !matches!(value, GraphValue::Scalar(_))
+            || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes()
+        {
+            return Err(invalid());
+        }
+    }
+    let mut updates = BTreeMap::new();
+    meter.event(GlaExecutionEvent::Work)?;
+    for ((_, field), proposal) in proposals
+        .range((target, Field::Property(PropertyKeyId(0)))..(target, Field::Label(LabelId(0))))
+    {
+        meter.event(GlaExecutionEvent::Work)?;
+        let Field::Property(key) = field else {
+            unreachable!("the property range ends before labels and deletion")
+        };
+        let name = catalog
+            .and_then(|catalog| catalog.properties.get(key))
+            .ok_or(GqlQueryError::Source(
+                GraphMutationError::UnmappedProperty {
+                    row: row_at,
+                    binding: binding_at,
+                },
+            ))?;
+        let value = match &proposal.value {
+            Value::Property(value) => *value,
+            Value::Computed(value) => Some(value),
+            _ => unreachable!("property fields hold property proposals"),
+        };
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        updates.insert(name.as_str(), value);
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    let mut keys = Vec::<Box<str>>::new();
+    let mut values = Vec::new();
+    let mut append = |key: &str, value: MapField<'_>| -> ResultOf<(), E, C> {
+        meter.event(GlaExecutionEvent::Work)?;
+        if keys.len() >= GraphValue::MAX_LIST_NODES - 1 {
+            return Err(invalid());
+        }
+        // Reserve the key cell and its payload before either output grows.
+        for _ in 0..=key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let value = match value {
+            MapField::Frozen(value) => value.copy_with_control(&mut |event| meter.event(event))?,
+            MapField::Assigned(value) => {
+                reserve_copy(value, &mut |event| meter.event(event))?;
+                GraphValue::Scalar(value.clone())
+            }
+        };
+        keys.push(key.into());
+        values.push(value);
+        Ok(())
+    };
+    let mut old = 0;
+    for (key, value) in updates {
+        while old < old_keys.len() && old_keys[old].as_bytes() < key.as_bytes() {
+            append(&old_keys[old], MapField::Frozen(&old_values[old]))?;
+            old += 1;
+        }
+        if old < old_keys.len() && old_keys[old].as_ref() == key {
+            old += 1;
+        }
+        if let Some(value) = value {
+            append(key, MapField::Assigned(value))?;
+        }
+    }
+    for at in old..old_keys.len() {
+        append(&old_keys[at], MapField::Frozen(&old_values[at]))?;
+    }
+    Ok(GraphValue::Map {
+        keys: keys.into_boxed_slice(),
+        values: values.into_boxed_slice(),
+    })
+}
+
 /// One RETURN input row per selection row, read after every proposal is
 /// known: a property the statement assigns reads its proposal, any other
 /// reads the frozen selection value. Values are copied, never moved, since
@@ -161,6 +278,7 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
     row: &GraphValueRow,
     row_at: usize,
     proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
     meter: &mut Meter<F>,
 ) -> ResultOf<GraphValueRow, E, C> {
     use crate::algebra::GraphValue;
@@ -222,6 +340,23 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
                     }
                 }
             },
+            GraphMutationBinding::Properties { target, current } => {
+                match element(&row.values()[target]) {
+                    None => {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                    Some(target) => returned_properties(
+                        target,
+                        &row.values()[current],
+                        row_at,
+                        binding_at,
+                        proposals,
+                        catalog,
+                        meter,
+                    )?,
+                }
+            }
         };
         values.push(value);
     }
@@ -410,7 +545,14 @@ pub(super) fn execute<E, C>(
     let mut returned = Vec::new();
     if let Some(bindings) = bindings {
         for (row_at, row) in selected.value.iter().enumerate() {
-            returned.push(returned_row(bindings, row, row_at, &proposals, &mut meter)?);
+            returned.push(returned_row(
+                bindings,
+                row,
+                row_at,
+                &proposals,
+                mutation.selection.plan().reverse_catalog.as_deref(),
+                &mut meter,
+            )?);
         }
     }
     let mut intents = Vec::new();

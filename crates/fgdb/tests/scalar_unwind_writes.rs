@@ -372,7 +372,7 @@ fn malformed_scalar_matrix_and_overexpanded_sources_refuse_before_catalog_or_all
                     &commit,
                     query,
                     input,
-                    |_, _| panic!("input admission must precede every catalog callback"),
+                    |_, _: &str| panic!("input admission must precede every catalog callback"),
                     R,
                     policy(100_000, 100_000),
                     no_allocation,

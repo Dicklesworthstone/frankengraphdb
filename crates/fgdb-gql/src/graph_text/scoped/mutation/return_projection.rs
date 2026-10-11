@@ -6,6 +6,7 @@ mod aggregate;
 pub(super) mod pipeline;
 pub(super) mod with_aggregate;
 
+use super::mutation_query::{ReturnLeaves, ReturnMapInput};
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;
 use crate::set_text::{
@@ -15,6 +16,36 @@ use crate::{
     GraphSetColumnType, GraphSetProjection, GraphSetTextError, GraphSetTextErrorKind,
     GraphSetValue, PreparedGraphSet,
 };
+
+/// Expression leaves and write leaves share one value grammar. Only the
+/// owner of a write can bind a parsed map selector to post-statement data.
+enum ValueResolver<'r, 'a> {
+    Columns(&'r mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>),
+    Write(&'r mut dyn ReturnLeaves<'a>),
+}
+impl<'a> ValueResolver<'_, 'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        match self {
+            Self::Columns(resolve) => resolve(parser),
+            Self::Write(leaves) => leaves.leaf(parser),
+        }
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        match self {
+            Self::Write(leaves) => leaves.map_input(parser, source, input),
+            Self::Columns(_) => Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected("a map source in the current projection scope"),
+            )),
+        }
+    }
+}
 
 fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     let kind = match source.kind {
@@ -850,9 +881,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mut columns: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<
-            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-        >,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
@@ -867,7 +896,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if columns.is_none() && carried.is_none() {
+        if columns.is_none() && carried.is_none() && resolve.is_none() {
             return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable).into());
         }
         self.punct(b'{', "{")?;
@@ -896,6 +925,12 @@ impl<'a> Parser<'a> {
                             source,
                             Some(key),
                         )?)
+                    } else if let Some(resolve) = resolve.as_mut() {
+                        ReadValueTemplate::Column(resolve.map_input(
+                            self,
+                            source,
+                            ReturnMapInput::Property(key),
+                        )?)
                     } else {
                         ReadValueTemplate::MapGet {
                             map: Box::new(ReadValueTemplate::Column(
@@ -919,6 +954,9 @@ impl<'a> Parser<'a> {
                         schema.iter().position(|(name, _)| name.text == key.text)
                     {
                         (key.text.into(), ReadValueTemplate::Column(index))
+                    } else if let Some(resolve) = resolve.as_mut() {
+                        let column = resolve.map_input(self, key, ReturnMapInput::Identity)?;
+                        (key.text.into(), ReadValueTemplate::Column(column))
                     } else if columns.is_some()
                         && (self
                             .syntax
@@ -957,6 +995,10 @@ impl<'a> Parser<'a> {
         if all {
             let column = match columns.as_deref_mut() {
                 Some(columns) => self.property_map_projection(columns, source)?,
+                None if resolve.is_some() => resolve
+                    .as_mut()
+                    .expect("resolver checked")
+                    .map_input(self, source, ReturnMapInput::Properties)?,
                 None => carried.expect("carried map source checked"),
             };
             return Ok(ReadValueTemplate::MapOverlay {
@@ -968,6 +1010,13 @@ impl<'a> Parser<'a> {
         let guard = match columns {
             Some(columns) => {
                 ReadValueTemplate::Column(self.mutation_projection(columns, source, None)?)
+            }
+            None if resolve.is_some() => {
+                ReadValueTemplate::Column(resolve.as_mut().expect("resolver checked").map_input(
+                    self,
+                    source,
+                    ReturnMapInput::Guard,
+                )?)
             }
             None => ReadValueTemplate::MapOverlay {
                 base: Box::new(ReadValueTemplate::Column(
@@ -1007,7 +1056,15 @@ impl<'a> Parser<'a> {
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
-        self.read_recursive_value(None, &[], &mut Some(resolve), depth)
+        self.read_recursive_value(None, &[], &mut Some(ValueResolver::Columns(resolve)), depth)
+    }
+
+    pub(super) fn read_write_value(
+        &mut self,
+        leaves: &mut impl ReturnLeaves<'a>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_recursive_value(None, &[], &mut Some(ValueResolver::Write(leaves)), depth)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1015,9 +1072,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<
-            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-        >,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
@@ -1126,8 +1181,8 @@ impl<'a> Parser<'a> {
         {
             let keys = self.is_word("KEYS");
             let resolved = if inputs.is_none() && schema.is_empty() {
-                match resolve.as_deref_mut() {
-                    Some(resolve) => resolve(self)?,
+                match resolve.as_mut() {
+                    Some(resolve) => resolve.leaf(self)?,
                     None => None,
                 }
             } else {
@@ -1221,19 +1276,20 @@ impl<'a> Parser<'a> {
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
-        } else if let Some(resolve) = resolve.as_deref_mut() {
-            let operand = self
-                .resolved_expression(resolve)
-                .map_err(expression_error)?;
-            self.read_value_template(operand, at)?
         } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
                         || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())
-                        || schema.iter().any(|(name, _)| name.text == word)))
+                        || schema.iter().any(|(name, _)| name.text == word)
+                        || resolve.is_some()))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        } else if let Some(resolve) = resolve.as_mut() {
+            let operand = self
+                .resolved_expression(&mut |parser| resolve.leaf(parser))
+                .map_err(expression_error)?;
+            self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
@@ -1377,9 +1433,7 @@ impl<'a> Parser<'a> {
         function: ListFunction,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<
-            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-        >,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
@@ -1453,9 +1507,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<
-            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-        >,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
         projection: bool,
     ) -> Result<
@@ -1481,9 +1533,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<
-            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-        >,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
         depth: usize,
         projection: bool,
     ) -> Result<(Option<ReadValueTemplate>, Option<ReadValueTemplate>), GraphSetTextError> {
@@ -1491,8 +1541,8 @@ impl<'a> Parser<'a> {
             // A predicate parses the whole Boolean expression in every scope,
             // including the operand-only aggregate-resolution scope.
             let at = self.current.at;
-            let operand = if let Some(resolve) = resolve.as_deref_mut() {
-                self.resolved_predicate(resolve)
+            let operand = if let Some(resolve) = resolve.as_mut() {
+                self.resolved_predicate(&mut |parser| resolve.leaf(parser))
             } else if let Some(columns) = inputs.as_deref_mut() {
                 self.mutation_expression(columns)
             } else {

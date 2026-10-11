@@ -167,7 +167,7 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
         text,
         R,
         &[("t", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
             symbols(kind, name)
         },
@@ -258,7 +258,7 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphMutationText::prepare(text, R, |kind, name| {
+            PreparedGraphMutationText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -290,7 +290,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
         "MATCH (a) SET a += {{{}}}",
         fields(MAX_GRAPH_MUTATION_ACTIONS)
     );
-    let plan = PreparedGraphMutationText::prepare(&exact, R, |kind, name| {
+    let plan = PreparedGraphMutationText::prepare(&exact, R, |kind, name: &str| {
         if kind != GraphSymbolKind::Property {
             return None;
         }
@@ -328,7 +328,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
         ),
     ] {
         let calls = Cell::new(0);
-        let error = PreparedGraphMutationText::prepare(&text, R, |kind, name| {
+        let error = PreparedGraphMutationText::prepare(&text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })
@@ -503,7 +503,7 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
         text,
         R,
         &[("t", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
             symbols(kind, name)
         },
@@ -579,7 +579,7 @@ fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphMutationText::prepare(text, R, |kind, name| {
+            PreparedGraphMutationText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -593,7 +593,7 @@ fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks
         vec!["a.p=1"; MAX_GRAPH_MUTATION_ACTIONS + 1].join(",")
     );
     let calls = Cell::new(0);
-    let failed = PreparedGraphMutationText::prepare(&text, R, |kind, name| {
+    let failed = PreparedGraphMutationText::prepare(&text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })

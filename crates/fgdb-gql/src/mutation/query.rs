@@ -9,11 +9,19 @@ use crate::{GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphMutationQueryBuildError {
-    Binding { binding: usize },
-    TooManyBindings { limit: usize, observed: usize },
+    Binding {
+        binding: usize,
+    },
+    TooManyBindings {
+        limit: usize,
+        observed: usize,
+    },
     Projection(RowProjectionBuildError),
     Aggregate(crate::GraphAggregateBuildError),
     InputDepth(crate::GraphSetBuildError),
+    /// Distinct property IDs must have distinct output names before a
+    /// frozen named map can safely merge newly assigned properties.
+    PropertyMapCatalog,
 }
 impl core::fmt::Display for GraphMutationQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -101,6 +109,10 @@ impl PreparedGraphMutationQuery {
                 .map_err(GraphMutationQueryBuildError::InputDepth)?;
         }
         let columns = &mutation.columns;
+        let deleting = mutation
+            .actions
+            .iter()
+            .any(|action| matches!(action, GraphMutationAction::DetachDelete { .. }));
         let mut input_types = Vec::new();
         for (at, binding) in bindings.iter().enumerate() {
             let kind = match *binding {
@@ -115,8 +127,25 @@ impl PreparedGraphMutationQuery {
                     Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
                 ))
                 .then_some(GraphSetColumnType::Scalar),
+                GraphMutationBinding::Properties { target, current } => (matches!(
+                    columns.get(target),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                ) && !(deleting
+                    && columns.get(target) == Some(&GraphSetColumnType::Edge))
+                    && matches!(columns.get(current), Some(GraphSetColumnType::Any)))
+                .then_some(GraphSetColumnType::Any),
             };
             input_types.push(kind.ok_or(GraphMutationQueryBuildError::Binding { binding: at })?);
+        }
+        if bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphMutationBinding::Properties { .. }))
+            && let Some(catalog) = &mutation.selection.plan().reverse_catalog
+        {
+            let mut names = std::collections::BTreeSet::new();
+            if !catalog.properties.values().all(|name| names.insert(name)) {
+                return Err(GraphMutationQueryBuildError::PropertyMapCatalog);
+            }
         }
         let grouping = grouping
             .map(|group| group.prepare(input_types.clone()))
@@ -273,6 +302,11 @@ impl PreparedGraphMutationQuery {
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                     bytes.extend_from_slice(&(current as u64).to_be_bytes());
                 }
+                GraphMutationBinding::Properties { target, current } => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(target as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(current as u64).to_be_bytes());
+                }
             }
         }
         bytes.extend_from_slice(&(self.projection.len() as u64).to_be_bytes());
@@ -292,6 +326,16 @@ impl PreparedGraphMutationQuery {
         }
         if let Some(grouping) = &self.grouping {
             grouping.append_canonical_bytes(&mut bytes);
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphMutationBinding::Properties { .. }))
+        {
+            crate::algebra::append_property_catalog_transcript(
+                self.mutation.selection.plan().reverse_catalog.as_deref(),
+                &mut bytes,
+            );
         }
         bytes
     }

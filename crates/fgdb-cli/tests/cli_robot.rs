@@ -3152,6 +3152,44 @@ fn graph_property_maps_use_declared_names_and_render_lossless_robot_cells() {
 }
 
 #[test]
+fn write_return_maps_use_post_statement_values_and_preserve_unmentioned_fields() {
+    let db = TestDb::new("write-return-property-maps");
+    db.create();
+    db.write(&[
+        "CREATE (a:Person {name:'Ann',born:1980}),(b:Person),(a)-[:KNOWS {active:true}]->(b)",
+    ]);
+    assert_rows(
+        &db.command(
+            "write",
+            &["MATCH (n:Person) WHERE n.name='Ann' SET n.born=n.born+1 \
+               RETURN properties(n) AS props, n{.*,name:'view'} AS projected, keys(n) AS keys"],
+        ),
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"1981"},"name":{"type":"text","value":"Ann"}}},{"type":"map","value":{"born":{"type":"int","value":"1981"},"name":{"type":"text","value":"view"}}},{"type":"list","value":[{"type":"text","value":"born"},{"type":"text","value":"name"}]}]]"#,
+    );
+    assert_rows(
+        &db.command(
+            "write",
+            &["MATCH (a)-[r:KNOWS]->(b) REMOVE r.active \
+               RETURN properties(r) AS props, keys(r) AS keys"],
+        ),
+        r#"[[{"type":"map","value":{}},{"type":"list","value":[]}]]"#,
+    );
+    db.command(
+        "write",
+        &["MATCH (n:Person) WHERE n.name='Ann' SET n.born=999 \
+           RETURN n{.*,failed:1/0} AS props"],
+    )
+    .failure(3, "query");
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (n:Person) WHERE n.name='Ann' RETURN properties(n) AS props"],
+        ),
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"1981"},"name":{"type":"text","value":"Ann"}}}]]"#,
+    );
+}
+
+#[test]
 fn json_map_fields_drive_scalar_predicates_and_write_returning() {
     let db = TestDb::new("json-map-fields");
     db.create();

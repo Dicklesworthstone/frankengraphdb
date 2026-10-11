@@ -205,7 +205,7 @@ fn a_malformed_late_document_cannot_execute_or_allocate_a_valid_prefix() {
                 &commit,
                 QUERY,
                 &arguments,
-                |_, _| panic!("no catalog before whole-input validation"),
+                |_, _: &str| panic!("no catalog before whole-input validation"),
                 R,
                 policy(),
                 |_| -> Result<ElementId, Infallible> {

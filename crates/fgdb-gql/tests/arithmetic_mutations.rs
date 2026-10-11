@@ -316,7 +316,7 @@ fn typed_rhs_parameters_reuse_the_statement_schema_catalog_and_original_offsets(
         text,
         R,
         &[("base", GqlParameterType::Scalar(integer))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -370,7 +370,7 @@ fn typed_rhs_parameters_reuse_the_statement_schema_catalog_and_original_offsets(
         text,
         R,
         &[("base", GqlParameterType::Scalar(textual))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -405,7 +405,7 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
             PreparedGraphMutationText::prepare(
                 &format!("MATCH (n) SET n.q={expression}"),
                 R,
-                |kind, name| {
+                |kind, name: &str| {
                     calls.set(calls.get() + 1);
                     symbols(kind, name)
                 }
@@ -426,7 +426,7 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
     let failed = PreparedGraphMutationText::prepare(
         &format!("MATCH (n) SET n.q={}", vec!["1"; 513].join("+")),
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
