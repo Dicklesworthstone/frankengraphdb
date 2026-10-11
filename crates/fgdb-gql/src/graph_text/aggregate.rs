@@ -1424,7 +1424,11 @@ impl<'a> Parser<'a> {
                 }
                 (function, false) => function,
             };
-            (Some(self.aggregate_expression(computed)?), function)
+            // The call's own argument, not a grouping key.
+            let outer = core::mem::replace(&mut self.aggregate_argument, true);
+            let argument = self.aggregate_expression(computed);
+            self.aggregate_argument = outer;
+            (Some(argument?), function)
         };
         self.punct(b')', ")")?;
         Ok(result)

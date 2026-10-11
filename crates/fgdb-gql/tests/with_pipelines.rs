@@ -518,6 +518,29 @@ fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
         !matches!(refused, Some(Ok(_))),
         "an aggregate output numbers no rows"
     );
+    // openCypher refuses rand() inside an aggregate's argument at compile
+    // time (Return6 [15], NonConstantExpression); an aggregate over a value
+    // drawn by an earlier stage is ordinary.
+    for text in [
+        "RETURN count(rand()) AS c",
+        "MATCH (n) RETURN count(rand()) AS c",
+        "MATCH (n) RETURN sum(n.p * rand()) AS s",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+    for text in [
+        "RETURN count(1) AS c",
+        "MATCH (n) RETURN sum(n.p) AS s",
+        "MATCH (n) WITH rand() AS r RETURN count(r) AS c",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_ok(),
+            "{text}"
+        );
+    }
 }
 
 /// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'

@@ -636,6 +636,9 @@ struct Parser<'a> {
     projected_sources: Option<ProjectedSources>,
     /// The rand() calls read so far: the next call's site (fgdb-13l85).
     random_sites: u32,
+    /// An aggregate function's argument is being read. openCypher refuses a
+    /// non-constant rand() there (Return6 [15], NonConstantExpression).
+    aggregate_argument: bool,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -699,6 +702,7 @@ impl<'a> Parser<'a> {
             let_base: 0,
             projected_sources: None,
             random_sites: 0,
+            aggregate_argument: false,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

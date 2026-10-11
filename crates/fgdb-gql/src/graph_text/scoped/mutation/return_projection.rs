@@ -2080,6 +2080,14 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     fn random_value(&mut self) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
+        if self.aggregate_argument {
+            return Err(GraphSetTextError {
+                offset: at,
+                kind: GraphSetTextErrorKind::Expected(
+                    "a deterministic aggregate argument: rand() inside an aggregate is a non-constant expression",
+                ),
+            });
+        }
         self.advance()?;
         self.punct(b'(', "(")?;
         self.punct(b')', "() without arguments")?;
