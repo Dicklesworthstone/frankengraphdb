@@ -426,6 +426,8 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
         "CREATE (n:Item {p:1}) RETURN count(DISTINCT *)",
         "CREATE (n:Item {p:1}) RETURN sum(n.p)+1",
         "CREATE (n:Item {p:1}) RETURN count(*) AS same,max(n.p) AS same",
+        // rand() in an aggregate's argument is a non-constant expression.
+        "CREATE (n:Item {p:1}) RETURN count(rand())",
     ] {
         let calls = Cell::new(0);
         assert!(

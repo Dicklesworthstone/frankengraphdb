@@ -572,6 +572,8 @@ fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
         "RETURN count(rand()) AS c",
         "MATCH (n) RETURN count(rand()) AS c",
         "MATCH (n) RETURN sum(n.p * rand()) AS s",
+        "MATCH (n) WITH count(rand()) AS c RETURN c",
+        "UNWIND [1, 2] AS x WITH sum(x * rand()) AS s RETURN s",
     ] {
         let (accepted, errors) = fronts(text);
         assert!(!accepted, "{text}");
@@ -584,6 +586,7 @@ fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
         "RETURN count(1) AS c",
         "MATCH (n) RETURN sum(n.p) AS s",
         "MATCH (n) WITH rand() AS r RETURN count(r) AS c",
+        "UNWIND [1, 2] AS x WITH sum(x) AS s RETURN s",
     ] {
         assert!(fronts(text).0, "{text}: {}", fronts(text).1);
     }

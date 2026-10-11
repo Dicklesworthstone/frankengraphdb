@@ -144,7 +144,11 @@ impl<'a> Parser<'a> {
                         GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
                     )
                 } else {
-                    self.read_write_value(leaves, 0)?
+                    // rand() in the argument is a non-constant expression.
+                    let outer = core::mem::replace(&mut self.aggregate_argument, true);
+                    let value = self.read_write_value(leaves, 0);
+                    self.aggregate_argument = outer;
+                    value?
                 };
                 self.punct(b')', "one aggregate argument")?;
                 if matches!(function, F::SumInt | F::AverageInt)

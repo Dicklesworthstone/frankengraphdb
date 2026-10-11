@@ -369,7 +369,11 @@ impl<'a> Parser<'a> {
                     function = Function::CountRows;
                     (None, GraphSetColumnType::Scalar)
                 } else {
-                    let (column, kind, _) = self.with_input(schema, &mut inputs)?;
+                    // rand() in the argument is a non-constant expression.
+                    let outer = core::mem::replace(&mut self.aggregate_argument, true);
+                    let input = self.with_input(schema, &mut inputs);
+                    self.aggregate_argument = outer;
+                    let (column, kind, _) = input?;
                     (Some(column), kind)
                 };
                 self.punct(b')', "one expression as the aggregate argument")?;
