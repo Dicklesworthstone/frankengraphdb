@@ -399,7 +399,7 @@ impl PreparedBufferedOrder {
             }
             Input::Aggregate(plan) => {
                 let plan = plan.clone();
-                Box::pin(crate::query_spool::aggregate::spool_group_stage(
+                Box::pin(crate::query::view::spool::aggregate::spool_group_stage(
                     plan,
                     as_of,
                     view,

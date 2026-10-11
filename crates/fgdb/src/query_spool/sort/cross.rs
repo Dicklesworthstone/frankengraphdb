@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::BufferedReadView;
-use crate::query_spool::sort::{Input as RunInput, Run};
+use crate::query::view::spool::sort::{Input as RunInput, Run};
 use fgdb_gql::GlaExecutionEvent;
-use fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use fgdb_gql::spill_set::{SpillSetCrossPlan, SpillSetRowError};
 use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_types::CanonicalScalarResolver;
