@@ -659,6 +659,197 @@ async fn sync_dir<V: Vfs>(vfs: &FaultVfs<V>, dir: &Path) -> std::io::Result<()> 
 }
 
 #[test]
+fn directory_aliases_settle_the_same_debt_but_each_ancestor_still_needs_a_sync() {
+    for sync_root in [false, true] {
+        run_and_expect_lab_green(0xfa04, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            let vfs = FaultVfs::new(
+                backing.clone(),
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            vfs.create_dir_all(Path::new("keys/nested"))
+                .await
+                .expect("create both names without a dot anchor");
+            assert_eq!(vfs.pending_dirent_ops(), 2);
+            assert_eq!(
+                backing.canonicalize(Path::new("keys")).await.unwrap(),
+                backing.canonicalize(Path::new("./keys")).await.unwrap(),
+                "the backing namespace identifies both spellings"
+            );
+            sync_dir(&vfs, Path::new("./keys"))
+                .await
+                .expect("sync through the other spelling");
+            assert_eq!(
+                vfs.pending_dirent_ops(),
+                1,
+                "the nested name is settled, but keys still owes the root"
+            );
+            if sync_root {
+                sync_dir(&vfs, Path::new("."))
+                    .await
+                    .expect("settle the originally empty parent path");
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with every loss armed");
+            if sync_root {
+                assert!(
+                    vfs.metadata(Path::new("keys/nested"))
+                        .await
+                        .expect("both fenced names survive")
+                        .is_dir()
+                );
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.metadata(Path::new("./keys/nested"))
+                        .await
+                        .expect_err("an unfenced ancestor loses the whole subtree")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, Path::new("keys"));
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "created" });
+            }
+        });
+    }
+}
+
+#[test]
+fn created_and_removed_files_accept_directory_alias_barriers() {
+    run_and_expect_lab_green(0xfa05, |_| async move {
+        let vfs = FaultVfs::new(
+            fgdb::MemVfs::new().expect("memory filesystem"),
+            FaultPlan {
+                dirent_loss: Trigger::Always,
+                ..FaultPlan::faultless()
+            },
+        );
+        vfs.create_dir(Path::new("keys"))
+            .await
+            .expect("create directory");
+        sync_dir(&vfs, Path::new("."))
+            .await
+            .expect("fence its name");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        write_and_sync(&vfs, Path::new("journal"), b"root bytes")
+            .await
+            .expect("create bare relative file");
+        write_and_sync(&vfs, Path::new("keys/log"), b"nested bytes")
+            .await
+            .expect("create nested file");
+        assert_eq!(vfs.pending_dirent_ops(), 2);
+        sync_dir(&vfs, Path::new(".")).await.expect("root barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 1);
+        sync_dir(&vfs, Path::new("./keys"))
+            .await
+            .expect("alias barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        vfs.crash().await.expect("first crash");
+        assert_eq!(vfs.read(Path::new("journal")).await.unwrap(), b"root bytes");
+        assert_eq!(
+            vfs.read(Path::new("keys/log")).await.unwrap(),
+            b"nested bytes"
+        );
+        vfs.remove_file(Path::new("./keys/log"))
+            .await
+            .expect("unlink alias");
+        assert_eq!(vfs.pending_dirent_ops(), 1);
+        sync_dir(&vfs, Path::new("keys"))
+            .await
+            .expect("unlink barrier");
+        assert_eq!(vfs.pending_dirent_ops(), 0);
+        vfs.crash().await.expect("second crash");
+        assert_eq!(
+            vfs.read(Path::new("keys/log"))
+                .await
+                .expect_err("unlink stays durable")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(vfs.read(Path::new("journal")).await.unwrap(), b"root bytes");
+        assert!(vfs.events().is_empty());
+    });
+}
+
+#[test]
+fn rename_aliases_deduplicate_one_parent_but_do_not_skip_a_distinct_parent() {
+    for (destination, settle_source) in [("./keys/b", false), ("other/b", false), ("other/b", true)]
+    {
+        run_and_expect_lab_green(0xfa06, move |_| async move {
+            let backing = fgdb::MemVfs::new().expect("memory filesystem");
+            backing
+                .create_dir(Path::new("keys"))
+                .await
+                .expect("durable source directory");
+            backing
+                .create_dir(Path::new("other"))
+                .await
+                .expect("durable target directory");
+            let vfs = FaultVfs::new(
+                backing,
+                FaultPlan {
+                    dirent_loss: Trigger::Always,
+                    ..FaultPlan::faultless()
+                },
+            );
+            write_and_sync(&vfs, Path::new("keys/a"), b"renamed bytes")
+                .await
+                .unwrap();
+            sync_dir(&vfs, Path::new("keys")).await.unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), 0);
+            vfs.rename(Path::new("keys/a"), Path::new(destination))
+                .await
+                .unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), 1);
+            let same_parent = destination == "./keys/b";
+            let destination_parent = if same_parent { "./keys" } else { "./other" };
+            sync_dir(&vfs, Path::new(destination_parent)).await.unwrap();
+            assert_eq!(vfs.pending_dirent_ops(), usize::from(!same_parent));
+            if settle_source {
+                sync_dir(&vfs, Path::new("./keys")).await.unwrap();
+                assert_eq!(vfs.pending_dirent_ops(), 0);
+            }
+            vfs.crash().await.expect("crash with rename loss armed");
+            if same_parent || settle_source {
+                assert_eq!(
+                    vfs.read(Path::new(destination)).await.unwrap(),
+                    b"renamed bytes"
+                );
+                assert_eq!(
+                    vfs.read(Path::new("keys/a"))
+                        .await
+                        .expect_err("source stays absent")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                assert!(vfs.events().is_empty());
+            } else {
+                assert_eq!(
+                    vfs.read(Path::new("keys/a")).await.unwrap(),
+                    b"renamed bytes"
+                );
+                assert_eq!(
+                    vfs.read(Path::new(destination))
+                        .await
+                        .expect_err("rename was not fully fenced")
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                let events = vfs.events();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].path, Path::new(destination));
+                assert_eq!(events[0].kind, FaultKind::DirentLoss { op: "renamed" });
+            }
+        });
+    }
+}
+
+#[test]
 fn an_unsynced_dirent_loses_a_synced_files_name_across_a_crash() {
     let dir = scratch_dir("dirent-unsynced");
     let path = dir.join("log");

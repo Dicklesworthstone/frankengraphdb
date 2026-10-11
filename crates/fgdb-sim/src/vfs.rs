@@ -621,7 +621,8 @@ fn trace_fault_point(lab: &Lab, class: Class, ordinal: u64) {
 /// still owed to one or two parent-directory syncs.
 struct NamespaceOp {
     /// Parent directories that must honestly sync before this operation is
-    /// durable. Two entries only for a cross-directory rename.
+    /// durable, identified by the backing VFS's canonical paths. Two
+    /// entries only for a cross-directory rename.
     owing: Vec<PathBuf>,
     kind: NamespaceKind,
 }
@@ -1053,6 +1054,22 @@ impl<V: Vfs> FaultVfs<V> {
         self.lab.lock().namespace.len()
     }
 
+    /// Resolve the barrier identity before changing the namespace. A bare
+    /// relative name has the current directory as its parent, not an empty
+    /// path for the backing VFS to interpret. Leave alias resolution to
+    /// that VFS: lexical normalization is wrong in the presence of symlinks.
+    async fn namespace_parent(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        self.backing.canonicalize(parent).await.map(Some)
+    }
+
     fn record_namespace(&self, owing: Vec<PathBuf>, kind: NamespaceKind) {
         // An operation with no parent to sync (a root-level path) has no
         // barrier to model; it is durable the moment the backing store
@@ -1128,6 +1145,7 @@ pub struct FaultFile<V: Vfs> {
     backing: Arc<V>,
     lab: Arc<Lab>,
     path: PathBuf,
+    canonical_path: PathBuf,
     generation: u64,
     is_dir: bool,
     inode: Arc<Inode<V::File>>,
@@ -1262,7 +1280,7 @@ impl<V: Vfs> FaultFile<V> {
             let lab = self.lab.lock();
             lab.namespace
                 .iter()
-                .filter(|op| op.owing.contains(&self.path))
+                .filter(|op| op.owing.contains(&self.canonical_path))
                 .count() as u64
         };
         if pending_ops == 0 {
@@ -1289,13 +1307,13 @@ impl<V: Vfs> FaultFile<V> {
         }
 
         // Honest: every pending operation stops owing this directory, and an
-        // operation owing nothing further is durable. Matching is by the
-        // path this handle was opened with — the same spelling callers pass
-        // when they create under a directory and then sync it.
+        // operation owing nothing further is durable. The backing VFS's
+        // identity binds different spellings of the same directory; the
+        // original caller spelling remains in fault events and rollback.
         {
             let mut lab = self.lab.lock();
             for op in &mut lab.namespace {
-                op.owing.retain(|dir| dir != &self.path);
+                op.owing.retain(|dir| dir != &self.canonical_path);
             }
             lab.namespace.retain(|op| !op.owing.is_empty());
         }
@@ -1685,13 +1703,18 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
         } else {
             truncates(opts).await?
         };
+        let parent = if existed {
+            None
+        } else {
+            self.namespace_parent(path).await?
+        };
         let opened = self
             .backing
             .open(path, &opts.clone().truncate(false))
             .await?;
         if !existed {
             self.record_namespace(
-                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                parent.into_iter().collect(),
                 NamespaceKind::Created {
                     path: path.to_path_buf(),
                     entry_kind: CreatedEntryKind::File,
@@ -1733,7 +1756,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             self.inodes
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .entry(key)
+                .entry(key.clone())
                 .or_insert(candidate)
                 .clone()
         };
@@ -1748,6 +1771,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             backing: Arc::clone(&self.backing),
             lab: Arc::clone(&self.lab),
             path: path.to_path_buf(),
+            canonical_path: key,
             generation: self.lab.lock().generation,
             is_dir: is_directory,
             inode,
@@ -1768,9 +1792,10 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     }
 
     async fn create_dir(&self, path: &Path) -> io::Result<()> {
+        let parent = self.namespace_parent(path).await?;
         self.backing.create_dir(path).await?;
         self.record_namespace(
-            path.parent().map(Path::to_path_buf).into_iter().collect(),
+            parent.into_iter().collect(),
             NamespaceKind::Created {
                 path: path.to_path_buf(),
                 entry_kind: CreatedEntryKind::Directory,
@@ -1802,13 +1827,10 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
                 Err(error) => return Err(error),
             }
 
+            let parent = self.namespace_parent(component).await?;
             match self.backing.create_dir(component).await {
                 Ok(()) => self.record_namespace(
-                    component
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .into_iter()
-                        .collect(),
+                    parent.into_iter().collect(),
                     NamespaceKind::Created {
                         path: component.to_path_buf(),
                         entry_kind: CreatedEntryKind::Directory,
@@ -1852,6 +1874,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let parent = self.namespace_parent(path).await?;
         self.backing.remove_file(path).await?;
         self.inodes
             .lock()
@@ -1859,7 +1882,7 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             .remove(path);
         if let Some(durable) = durable {
             self.record_namespace(
-                path.parent().map(Path::to_path_buf).into_iter().collect(),
+                parent.into_iter().collect(),
                 NamespaceKind::Removed {
                     path: path.to_path_buf(),
                     durable,
@@ -1879,6 +1902,13 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let mut owing: Vec<PathBuf> = self
+            .namespace_parent(from)
+            .await?
+            .into_iter()
+            .chain(self.namespace_parent(to).await?)
+            .collect();
+        owing.dedup();
         self.backing.rename(from, to).await?;
         {
             let mut inodes = self.inodes.lock().unwrap_or_else(|p| p.into_inner());
@@ -1887,13 +1917,6 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
                 inodes.insert(to.to_path_buf(), inode);
             }
         }
-        let mut owing: Vec<PathBuf> = from
-            .parent()
-            .into_iter()
-            .chain(to.parent())
-            .map(Path::to_path_buf)
-            .collect();
-        owing.dedup();
         self.record_namespace(
             owing,
             NamespaceKind::Renamed {
