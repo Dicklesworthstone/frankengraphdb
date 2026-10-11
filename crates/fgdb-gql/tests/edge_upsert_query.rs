@@ -26,7 +26,10 @@ fn upsert() -> PreparedGraphEdgeUpsert {
 fn query() -> PreparedGraphEdgeUpsertQuery {
     PreparedGraphEdgeUpsertQuery::prepare(
         upsert(),
-        vec![GraphEdgeReturnBinding::Edge, GraphEdgeReturnBinding::Property(PropertyKeyId(1))],
+        vec![
+            GraphEdgeReturnBinding::Edge,
+            GraphEdgeReturnBinding::Property(PropertyKeyId(1)),
+        ],
         vec![
             GraphSetProjection::new("edge", GraphSetValue::Column(0)),
             GraphSetProjection::new("value", GraphSetValue::Column(1)),
@@ -40,7 +43,10 @@ fn query() -> PreparedGraphEdgeUpsertQuery {
 fn return_schema_preserves_edge_identity_and_final_property_slots() {
     let query = query();
     assert_eq!(query.columns(), &["edge", "value"]);
-    assert_eq!(query.column_types(), &[GraphSetColumnType::Edge, GraphSetColumnType::Scalar]);
+    assert_eq!(
+        query.column_types(),
+        &[GraphSetColumnType::Edge, GraphSetColumnType::Scalar]
+    );
     assert_eq!(query.upsert(), &upsert());
     assert_eq!(query.bindings().len(), 2);
     assert!(!format!("{query:?}").contains("817239"));
@@ -58,7 +64,10 @@ fn malformed_projection_is_rejected_before_the_host_can_write() {
     ] {
         assert!(matches!(
             PreparedGraphEdgeUpsertQuery::prepare(
-                upsert(), vec![GraphEdgeReturnBinding::Edge], projection, GraphSetQuantifier::All,
+                upsert(),
+                vec![GraphEdgeReturnBinding::Edge],
+                projection,
+                GraphSetQuantifier::All,
             ),
             Err(GraphEdgeUpsertQueryBuildError::Projection(_))
         ));
@@ -66,7 +75,8 @@ fn malformed_projection_is_rejected_before_the_host_can_write() {
     let limit = fgdb_gql::algebra::MAX_PATTERN_VERTICES;
     assert!(matches!(
         PreparedGraphEdgeUpsertQuery::prepare(
-            upsert(), vec![GraphEdgeReturnBinding::Edge; limit + 1],
+            upsert(),
+            vec![GraphEdgeReturnBinding::Edge; limit + 1],
             vec![GraphSetProjection::new("edge", GraphSetValue::Column(0))],
             GraphSetQuantifier::All,
         ),
@@ -76,9 +86,16 @@ fn malformed_projection_is_rejected_before_the_host_can_write() {
 
 #[test]
 fn order_validation_is_over_the_final_return_schema() {
-    let key = GraphValueOrder { column: 1, descending: true, nulls_first: false };
+    let key = GraphValueOrder {
+        column: 1,
+        descending: true,
+        nulls_first: false,
+    };
     assert!(query().with_order_by(&[key]).is_ok());
-    assert!(matches!(query().with_order_by(&[]), Err(GraphOrderError::EmptyOrder)));
+    assert!(matches!(
+        query().with_order_by(&[]),
+        Err(GraphOrderError::EmptyOrder)
+    ));
     assert!(matches!(
         query().with_order_by(&[key, key]),
         Err(GraphOrderError::DuplicateColumn { column: 1 })
@@ -94,22 +111,35 @@ fn canonical_identity_includes_pagination_order_and_selected_fields() {
     let query = query();
     let original = query.canonical_bytes();
     assert_eq!(original, query.clone().canonical_bytes());
-    assert_ne!(original, query.clone().with_page(0, Some(0)).canonical_bytes());
+    assert_ne!(
+        original,
+        query.clone().with_page(0, Some(0)).canonical_bytes()
+    );
     assert_ne!(original, query.clone().with_page(1, None).canonical_bytes());
     assert_ne!(
         original,
-        query.clone().with_order_by(&[GraphValueOrder {
-            column: 1, descending: true, nulls_first: false,
-        }]).unwrap().canonical_bytes()
+        query
+            .clone()
+            .with_order_by(&[GraphValueOrder {
+                column: 1,
+                descending: true,
+                nulls_first: false,
+            }])
+            .unwrap()
+            .canonical_bytes()
     );
     let changed = PreparedGraphEdgeUpsertQuery::prepare(
         upsert(),
-        vec![GraphEdgeReturnBinding::Edge, GraphEdgeReturnBinding::Property(PropertyKeyId(2))],
+        vec![
+            GraphEdgeReturnBinding::Edge,
+            GraphEdgeReturnBinding::Property(PropertyKeyId(2)),
+        ],
         vec![
             GraphSetProjection::new("edge", GraphSetValue::Column(0)),
             GraphSetProjection::new("value", GraphSetValue::Column(1)),
         ],
         GraphSetQuantifier::All,
-    ).unwrap();
+    )
+    .unwrap();
     assert_ne!(original, changed.canonical_bytes());
 }

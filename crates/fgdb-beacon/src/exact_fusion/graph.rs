@@ -291,9 +291,18 @@ mod filtered_tests {
 
     fn graph() -> [GraphHit; 3] {
         [
-            GraphHit { id: VId(1), hops: 0 },
-            GraphHit { id: VId(3), hops: 1 },
-            GraphHit { id: VId(4), hops: 2 },
+            GraphHit {
+                id: VId(1),
+                hops: 0,
+            },
+            GraphHit {
+                id: VId(3),
+                hops: 1,
+            },
+            GraphHit {
+                id: VId(4),
+                hops: 2,
+            },
         ]
     }
 
@@ -329,12 +338,24 @@ mod filtered_tests {
         let snapshot = index();
         for graph in [
             vec![
-                GraphHit { id: VId(1), hops: 1 },
-                GraphHit { id: VId(1), hops: 2 },
+                GraphHit {
+                    id: VId(1),
+                    hops: 1,
+                },
+                GraphHit {
+                    id: VId(1),
+                    hops: 2,
+                },
             ],
             vec![
-                GraphHit { id: VId(2), hops: 1 },
-                GraphHit { id: VId(1), hops: 1 },
+                GraphHit {
+                    id: VId(2),
+                    hops: 1,
+                },
+                GraphHit {
+                    id: VId(1),
+                    hops: 1,
+                },
             ],
         ] {
             assert!(matches!(
@@ -359,7 +380,10 @@ mod filtered_tests {
         let snapshot = index();
         let mut q = query();
         q.graph_weight = 0;
-        let malformed = [GraphHit { id: VId(99), hops: 2 }; 4];
+        let malformed = [GraphHit {
+            id: VId(99),
+            hops: 2,
+        }; 4];
         let rows = snapshot
             .hybrid_search_graph_filtered(
                 q,

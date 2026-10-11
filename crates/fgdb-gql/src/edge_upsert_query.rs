@@ -208,7 +208,8 @@ impl PreparedGraphEdgeUpsertQuery {
         };
         work()?;
         if let Some(row) = &row {
-            let invalid = || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
+            let invalid =
+                || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
             if row.len() != self.bindings.len() {
                 return Err(invalid());
             }
@@ -225,7 +226,10 @@ impl PreparedGraphEdgeUpsertQuery {
         }
         drop(work);
         let mut returning = GqlQueryExecution {
-            value: row.into_iter().map(GraphValueRow::from_owned_values).collect(),
+            value: row
+                .into_iter()
+                .map(GraphValueRow::from_owned_values)
+                .collect(),
             rows: selection,
             evaluator,
         };
