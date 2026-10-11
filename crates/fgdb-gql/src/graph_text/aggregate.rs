@@ -1084,7 +1084,16 @@ impl<'a> Parser<'a> {
         &mut self,
         computed: &mut ComputedInputs<'a>,
     ) -> Result<Expression<'a>, GraphPatternTextError> {
-        self.aggregate_scalar_expression(computed)
+        self.aggregate_scalar_expression(computed, false)
+    }
+
+    /// A RETURN item's grouping key: a whole expression, so `n.p > 1 AS big`
+    /// groups by its three-valued Boolean.
+    fn aggregate_item_key(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<Expression<'a>, GraphPatternTextError> {
+        self.aggregate_scalar_expression(computed, true)
     }
 
     fn starts_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
@@ -1304,7 +1313,7 @@ impl<'a> Parser<'a> {
                 }),
             )
         } else {
-            let expression = self.aggregate_expression(computed)?;
+            let expression = self.aggregate_item_key(computed)?;
             // A projected function is named by the function, as the pattern
             // facade names `type(r)` `type`; a reference by its property or
             // variable.

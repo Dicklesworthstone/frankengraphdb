@@ -68,9 +68,13 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
 }
 
 impl<'a> Parser<'a> {
+    /// One grouping key or aggregate argument. `predicates` admits a whole
+    /// expression, comparisons and connectors included, as a RETURN item's
+    /// key is (`RETURN n.p > 1 AS big, COUNT(*)`).
     pub(in crate::graph_text) fn aggregate_scalar_expression(
         &mut self,
         computed: &mut ComputedInputs<'a>,
+        predicates: bool,
     ) -> Result<Expression<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let mut sources: Vec<_> = computed
@@ -122,7 +126,7 @@ impl<'a> Parser<'a> {
             )?))
         } else {
             Some(
-                self.aggregate_value_expression(&mut sources)
+                self.aggregate_value_expression(&mut sources, predicates)
                     .map_err(scalar_error)?,
             )
         };

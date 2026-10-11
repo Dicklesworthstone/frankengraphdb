@@ -220,9 +220,11 @@ impl<'a> Parser<'a> {
     pub(super) fn aggregate_value_expression(
         &mut self,
         columns: &mut Vec<Projection<'a>>,
+        predicates: bool,
     ) -> Result<Operand, GraphMutationTextError> {
-        // HAVING owns predicates around grouping keys and aggregate arguments.
-        self.checked_expression(&mut ExpressionColumns::Graph(columns), false)
+        // HAVING owns predicates around GROUP BY keys and aggregate
+        // arguments; a RETURN item's key is a whole expression (`predicates`).
+        self.checked_expression(&mut ExpressionColumns::Graph(columns), predicates)
     }
 
     /// A whole expression over graph columns whose composite operands
