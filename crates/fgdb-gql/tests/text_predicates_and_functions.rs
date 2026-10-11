@@ -1646,6 +1646,210 @@ fn durations_build_print_read_and_compare_only_for_equality() {
     }
 }
 
+/// fgdb-txbg9: duration.between and its inMonths, inDays and inSeconds
+/// projections. With both offsets the right side is read at the left's;
+/// with both dates the months, days and time left share one sign; with a
+/// side lacking a date only the times of day differ. Expected texts are the
+/// TCK's (Temporal10 [1]-[7] and [9]-[11]).
+#[test]
+fn duration_between_follows_the_tck() {
+    let x = text("x");
+    let as_text = |expression: &str| scalar(&format!("toString({expression})"), &x);
+    let zoned = "datetime('2014-07-21T21:40:36.143+0200')";
+    for (function, lhs, rhs, expected) in [
+        (
+            "between",
+            "date('1984-10-11')",
+            "date('2015-06-24')",
+            "P30Y8M13D",
+        ),
+        (
+            "between",
+            "date('1984-10-11')",
+            "localdatetime('2016-07-21T21:45:22.142')",
+            "P31Y9M10DT21H45M22.142S",
+        ),
+        (
+            "between",
+            "date('1984-10-11')",
+            "datetime('2015-07-21T21:40:32.142+0100')",
+            "P30Y9M10DT21H40M32.142S",
+        ),
+        (
+            "between",
+            "date('1984-10-11')",
+            "localtime('16:30')",
+            "PT16H30M",
+        ),
+        (
+            "between",
+            "localtime('14:30')",
+            "date('2015-06-24')",
+            "PT-14H-30M",
+        ),
+        (
+            "between",
+            "time('14:30')",
+            "datetime('2015-07-21T21:40:32.142+0100')",
+            "PT6H10M32.142S",
+        ),
+        ("between", "time('14:30')", "time('16:30+0100')", "PT1H"),
+        (
+            "between",
+            "localtime('14:30')",
+            "time('16:30+0100')",
+            "PT2H",
+        ),
+        (
+            "between",
+            "localdatetime('2015-07-21T21:40:32.142')",
+            "date('2015-06-24')",
+            "P-27DT-21H-40M-32.142S",
+        ),
+        (
+            "between",
+            "localdatetime('2015-07-21T21:40:32.142')",
+            "datetime('2015-07-21T21:40:32.142+0100')",
+            "PT0S",
+        ),
+        (
+            "between",
+            zoned,
+            "date('2015-06-24')",
+            "P11M2DT2H19M23.857S",
+        ),
+        (
+            "between",
+            zoned,
+            "datetime('2015-07-21T21:40:32.142+0100')",
+            "P1YT59M55.999S",
+        ),
+        ("between", zoned, "time('16:30+0100')", "PT-4H-10M-36.143S"),
+        (
+            "between",
+            "localdatetime('2018-01-02T10:00:00.1')",
+            "localdatetime('2018-01-01T10:00:00.2')",
+            "PT-23H-59M-59.9S",
+        ),
+        (
+            "between",
+            "date('-999999999-01-01')",
+            "date('+999999999-12-31')",
+            "P1999999998Y11M30D",
+        ),
+        (
+            "inMonths",
+            "date('1984-10-11')",
+            "date('2015-06-24')",
+            "P30Y8M",
+        ),
+        (
+            "inMonths",
+            "date('1984-10-11')",
+            "localtime('16:30')",
+            "PT0S",
+        ),
+        (
+            "inMonths",
+            "date('2018-03-11')",
+            "date('2016-06-24')",
+            "P-1Y-8M",
+        ),
+        (
+            "inMonths",
+            "date('2018-07-21')",
+            "datetime('2016-07-21T21:40:32.142+0100')",
+            "P-1Y-11M",
+        ),
+        (
+            "inMonths",
+            "datetime('2018-07-21T21:40:36.143+0500')",
+            "datetime('1984-07-21T22:40:36.143+0200')",
+            "P-33Y-11M",
+        ),
+        (
+            "inDays",
+            "date('1984-10-11')",
+            "date('2015-06-24')",
+            "P11213D",
+        ),
+        (
+            "inDays",
+            "date('1984-10-11')",
+            "localdatetime('2016-07-21T21:45:22.142')",
+            "P11606D",
+        ),
+        ("inDays", "localtime('14:30')", "date('2015-06-24')", "PT0S"),
+        (
+            "inSeconds",
+            "date('1984-10-11')",
+            "date('2015-06-24')",
+            "PT269112H",
+        ),
+        (
+            "inSeconds",
+            zoned,
+            "datetime('2015-07-21T21:40:32.142+0100')",
+            "PT8760H59M55.999S",
+        ),
+        (
+            "inSeconds",
+            "localdatetime('2014-07-21T21:40:36.143')",
+            "localdatetime('2014-07-21T21:40:36.142')",
+            "PT-0.001S",
+        ),
+        (
+            "inSeconds",
+            "localdatetime('-999999999-01-01')",
+            "localdatetime('+999999999-12-31T23:59:59')",
+            "PT17531639991215H59M59S",
+        ),
+        (
+            "inSeconds",
+            "localtime('12:44:54.7')",
+            "localtime('12:34:55.3')",
+            "PT-9M-59.4S",
+        ),
+        (
+            "inSeconds",
+            "localtime('12:34:56.3')",
+            "localtime('12:34:54.7')",
+            "PT-1.6S",
+        ),
+    ] {
+        let expression = format!("duration.{function}({lhs}, {rhs})");
+        assert_eq!(as_text(&expression), text(expected), "{expression}");
+    }
+    // Temporal10 [1]: a negative time part splits into floored seconds and
+    // a positive fraction.
+    let reverse = "duration.between(localdatetime('2018-01-02T10:00:00.1'), \
+                   localdatetime('2018-01-01T10:00:00.2'))";
+    for (field, expected) in [
+        ("days", 0),
+        ("seconds", -86_400),
+        ("nanosecondsOfSecond", 100_000_000),
+    ] {
+        assert_eq!(
+            scalar(&format!("{reverse}.{field}"), &x),
+            CanonicalScalar::Int(expected),
+            "{field}"
+        );
+    }
+    for function in ["between", "inMonths", "inDays", "inSeconds"] {
+        assert_eq!(
+            scalar(&format!("duration.{function}(null, null)"), &x),
+            CanonicalScalar::Null,
+            "{function}"
+        );
+    }
+    let query = prepare("MATCH (n) RETURN duration.between(date('2015-07-21'), 1) AS value");
+    let error = execute(&query, &x, policy()).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("TemporalConstruction"),
+        "{error:?}"
+    );
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

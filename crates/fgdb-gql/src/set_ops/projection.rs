@@ -172,6 +172,15 @@ pub enum GraphTemporalFunction {
     /// `duration(x)`: from a map of counts, ISO 8601 text, a duration, or
     /// NULL.
     Duration,
+    /// `duration.between(a, b)`: whole months, then days, then the time
+    /// from `a` to `b`.
+    Between,
+    /// `duration.inMonths(a, b)`: the whole months of `between`.
+    InMonths,
+    /// `duration.inDays(a, b)`: the whole days from `a` to `b`.
+    InDays,
+    /// `duration.inSeconds(a, b)`: the whole time from `a` to `b`.
+    InSeconds,
 }
 
 impl GraphTemporalFunction {
@@ -191,6 +200,10 @@ impl GraphTemporalFunction {
             Self::FromEpoch => 11,
             Self::FromEpochMillis => 12,
             Self::Duration => 13,
+            Self::Between => 14,
+            Self::InMonths => 15,
+            Self::InDays => 16,
+            Self::InSeconds => 17,
         }
     }
 
@@ -227,6 +240,17 @@ impl GraphTemporalFunction {
             && operation.eq_ignore_ascii_case("FROMEPOCHMILLIS")
         {
             Self::FromEpochMillis
+        } else if name.eq_ignore_ascii_case("DURATION") {
+            [
+                ("BETWEEN", Self::Between),
+                ("INMONTHS", Self::InMonths),
+                ("INDAYS", Self::InDays),
+                ("INSECONDS", Self::InSeconds),
+            ]
+            .into_iter()
+            .find_map(|(spelling, function)| {
+                operation.eq_ignore_ascii_case(spelling).then_some(function)
+            })?
         } else {
             return None;
         };
@@ -242,7 +266,9 @@ impl GraphTemporalFunction {
             | Self::TruncateTime
             | Self::TruncateLocalDateTime
             | Self::TruncateDateTime => Some((2, 3)),
-            Self::FromEpoch => Some((2, 2)),
+            Self::FromEpoch | Self::Between | Self::InMonths | Self::InDays | Self::InSeconds => {
+                Some((2, 2))
+            }
             Self::FromEpochMillis => Some((1, 1)),
             Self::Date
             | Self::LocalTime

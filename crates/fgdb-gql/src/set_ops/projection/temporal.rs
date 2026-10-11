@@ -152,7 +152,170 @@ pub(crate) fn construct(
             from_epoch_call(function, arguments(argument)?)
         }
         GraphTemporalFunction::Duration => duration(argument).map(CanonicalScalar::Duration),
+        GraphTemporalFunction::Between
+        | GraphTemporalFunction::InMonths
+        | GraphTemporalFunction::InDays
+        | GraphTemporalFunction::InSeconds => between(function, arguments(argument)?),
     }
+}
+
+/// A temporal value as a point: its date if it has one, its local time of
+/// day (midnight for a date), and its offset if it has one.
+struct Moment {
+    date: Option<CanonicalDate>,
+    time: CanonicalLocalTime,
+    offset: Option<i32>,
+}
+
+fn moment(value: &GraphValue) -> Result<Moment, GraphIntegerErrorKind> {
+    let (date, time, offset) = match value {
+        GraphValue::Scalar(CanonicalScalar::Date(day)) => {
+            (Some(*day), CanonicalLocalTime::MIDNIGHT, None)
+        }
+        GraphValue::Scalar(CanonicalScalar::LocalTime(time)) => (None, *time, None),
+        GraphValue::Scalar(CanonicalScalar::Time(time)) => {
+            (None, time.local(), Some(time.offset_seconds()))
+        }
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => {
+            (Some(value.date()), value.time(), None)
+        }
+        GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
+            let wall = wall_clock(value)?;
+            (
+                Some(wall.date()),
+                wall.time(),
+                Some(value.utc_offset_seconds()),
+            )
+        }
+        _ => return Err(Invalid),
+    };
+    Ok(Moment { date, time, offset })
+}
+
+/// `duration.between(a, b)` and its `inMonths`, `inDays` and `inSeconds`
+/// projections; NULL for a NULL side. When both sides have an offset, `b`
+/// is read at `a`'s offset, the same instant. When both have a date,
+/// `between` counts the whole months from `a` that do not pass `b` (a
+/// month added to the 31st stops at the month's last day), then the whole
+/// days, then the time left, all of one sign; `inMonths` is those months,
+/// `inDays` the whole days of the whole span and `inSeconds` all of it as
+/// time. When either lacks a date, only the times of day differ (a date's
+/// is midnight): `between` and `inSeconds` are that difference, and
+/// `inMonths` and `inDays` are zero.
+fn between(
+    function: GraphTemporalFunction,
+    items: &[GraphValue],
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    let [left, right] = items else {
+        return Err(Invalid);
+    };
+    if [left, right]
+        .iter()
+        .any(|value| matches!(value, GraphValue::Scalar(CanonicalScalar::Null)))
+    {
+        return Ok(CanonicalScalar::Null);
+    }
+    let (from, to) = (moment(left)?, moment(right)?);
+    let second = NANOS_PER_SECOND;
+    let shift = match (from.offset, to.offset) {
+        (Some(from), Some(to)) => i128::from(from) - i128::from(to),
+        _ => 0,
+    };
+    let (months, days, nanos) = match (from.date, to.date) {
+        (Some(from_date), Some(to_date)) => {
+            let start = point(from_date, from.time);
+            let end = point(to_date, to.time) + shift * second;
+            let span = |months: i64| -> Result<(i64, i64, i128), GraphIntegerErrorKind> {
+                let day = i128::from(NANOS_PER_DAY);
+                let after_months = add_months(start, months)?;
+                let mut days = i64::try_from((end - after_months) / day).map_err(|_| Invalid)?;
+                // Days that overshoot `end` once the time of day counts.
+                let landed = after_months + i128::from(days) * day;
+                if end >= start && landed > end {
+                    days -= 1;
+                } else if end < start && landed < end {
+                    days += 1;
+                }
+                let rest = end - (after_months + i128::from(days) * day);
+                Ok((months, days, rest))
+            };
+            match function {
+                GraphTemporalFunction::InDays => {
+                    let days = i64::try_from((end - start) / i128::from(NANOS_PER_DAY))
+                        .map_err(|_| Invalid)?;
+                    (0, days, 0)
+                }
+                GraphTemporalFunction::InSeconds => (0, 0, end - start),
+                _ => {
+                    let months = whole_months(start, end)?;
+                    let (months, days, rest) = span(months)?;
+                    if function == GraphTemporalFunction::InMonths {
+                        (months, 0, 0)
+                    } else {
+                        (months, days, rest)
+                    }
+                }
+            }
+        }
+        _ => match function {
+            GraphTemporalFunction::Between | GraphTemporalFunction::InSeconds => {
+                let start = i128::from(from.time.nanos_of_day());
+                let end = i128::from(to.time.nanos_of_day()) + shift * second;
+                (0, 0, end - start)
+            }
+            _ => (0, 0, 0),
+        },
+    };
+    CanonicalDuration::new(months, days, nanos)
+        .map(CanonicalScalar::Duration)
+        .map_err(|_| Invalid)
+}
+
+/// A local date and time as nanoseconds since 1970-01-01T00:00.
+fn point(date: CanonicalDate, time: CanonicalLocalTime) -> i128 {
+    i128::from(date.epoch_day()) * i128::from(NANOS_PER_DAY) + i128::from(time.nanos_of_day())
+}
+
+/// `point` plus `months` calendar months, its day clamped to the month.
+fn add_months(point: i128, months: i64) -> Result<i128, GraphIntegerErrorKind> {
+    let day = i128::from(NANOS_PER_DAY);
+    let epoch_day = i64::try_from(point.div_euclid(day)).map_err(|_| Invalid)?;
+    let time = point.rem_euclid(day);
+    let (year, month, of_month) = CanonicalDate::from_epoch_day(epoch_day)
+        .map_err(|_| Invalid)?
+        .civil();
+    let total = i128::from(year) * 12 + i128::from(month - 1) + i128::from(months);
+    let year = i64::try_from(total.div_euclid(12)).map_err(|_| Invalid)?;
+    let month = u8::try_from(total.rem_euclid(12) + 1).map_err(|_| Invalid)?;
+    if !fgdb_types::temporal::calendar::year_in_range(year) {
+        return Err(Invalid);
+    }
+    let of_month = of_month.min(fgdb_types::temporal::calendar::days_in_month(year, month));
+    let date = CanonicalDate::from_civil(year, month, of_month).map_err(|_| Invalid)?;
+    Ok(i128::from(date.epoch_day()) * day + time)
+}
+
+/// The whole calendar months from `start` that do not pass `end`, toward it.
+fn whole_months(start: i128, end: i128) -> Result<i64, GraphIntegerErrorKind> {
+    let day = i128::from(NANOS_PER_DAY);
+    let civil = |point: i128| {
+        CanonicalDate::from_epoch_day(i64::try_from(point.div_euclid(day)).map_err(|_| Invalid)?)
+            .map(CanonicalDate::civil)
+            .map_err(|_| Invalid)
+    };
+    let ((start_year, start_month, _), (end_year, end_month, _)) = (civil(start)?, civil(end)?);
+    let mut months = i64::try_from(
+        (i128::from(end_year) - i128::from(start_year)) * 12 + i128::from(end_month)
+            - i128::from(start_month),
+    )
+    .map_err(|_| Invalid)?;
+    let landed = add_months(start, months)?;
+    if end >= start && landed > end {
+        months -= 1;
+    } else if end < start && landed < end {
+        months += 1;
+    }
+    Ok(months)
 }
 
 /// `duration(x)`: ISO 8601 text, a duration, or a map of counts of years,
@@ -220,31 +383,40 @@ fn count(value: &GraphValue) -> Result<(i128, i128), GraphIntegerErrorKind> {
 
 /// A duration's openCypher fields: the whole count in each unit, and the
 /// count of a unit within the next larger one (`monthsOfYear`,
-/// `secondsOfMinute`, ...), each truncated toward zero.
+/// `secondsOfMinute`, ...). As openCypher splits it, the time part is whole
+/// seconds floored and a fraction of 0-999999999 nanoseconds (PT-1.9S is
+/// -2 seconds and 100000000 nanosecondsOfSecond); every other count is
+/// truncated toward zero.
 fn duration_field(value: CanonicalDuration, key: &str) -> Option<i64> {
     let (months, days, nanos) = (value.months(), value.days(), value.nanos());
-    let nanos_in = |unit: i128| i64::try_from(nanos / unit).ok();
+    let seconds = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
+    let fraction = i64::try_from(nanos.rem_euclid(NANOS_PER_SECOND)).ok()?;
+    let finer = |per_second: i64| {
+        seconds
+            .checked_mul(per_second)?
+            .checked_add(fraction / (1_000_000_000 / per_second))
+    };
     match key {
         "years" => Some(months / 12),
         "quarters" => Some(months / 3),
         "months" => Some(months),
         "weeks" => Some(days / 7),
         "days" => Some(days),
-        "hours" => nanos_in(3_600 * NANOS_PER_SECOND),
-        "minutes" => nanos_in(60 * NANOS_PER_SECOND),
-        "seconds" => nanos_in(NANOS_PER_SECOND),
-        "milliseconds" => nanos_in(1_000_000),
-        "microseconds" => nanos_in(1_000),
-        "nanoseconds" => nanos_in(1),
+        "hours" => Some(seconds / 3_600),
+        "minutes" => Some(seconds / 60),
+        "seconds" => Some(seconds),
+        "milliseconds" => finer(1_000),
+        "microseconds" => finer(1_000_000),
+        "nanoseconds" => finer(1_000_000_000),
         "quartersOfYear" => Some(months % 12 / 3),
         "monthsOfQuarter" => Some(months % 3),
         "monthsOfYear" => Some(months % 12),
         "daysOfWeek" => Some(days % 7),
-        "minutesOfHour" => nanos_in(60 * NANOS_PER_SECOND).map(|minutes| minutes % 60),
-        "secondsOfMinute" => nanos_in(NANOS_PER_SECOND).map(|seconds| seconds % 60),
-        "millisecondsOfSecond" => nanos_in(1_000_000).map(|millis| millis % 1_000),
-        "microsecondsOfSecond" => nanos_in(1_000).map(|micros| micros % 1_000_000),
-        "nanosecondsOfSecond" => i64::try_from(nanos % NANOS_PER_SECOND).ok(),
+        "minutesOfHour" => Some(seconds / 60 % 60),
+        "secondsOfMinute" => Some(seconds % 60),
+        "millisecondsOfSecond" => Some(fraction / 1_000_000),
+        "microsecondsOfSecond" => Some(fraction / 1_000),
+        "nanosecondsOfSecond" => Some(fraction),
         _ => None,
     }
 }
