@@ -14,6 +14,8 @@
 
 use crate::ids::ObjectId;
 
+pub mod calendar;
+
 /// Maximum absolute UTC offset admitted by `STRICT_PORTABLE`.
 ///
 /// Eighteen hours is the closed range used by ISO-style fixed-offset temporal
