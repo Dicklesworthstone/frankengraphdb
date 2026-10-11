@@ -4,8 +4,10 @@
 #[cfg(test)]
 mod map_overlay_tests;
 mod membership;
+mod temporal;
 
 pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
+pub(crate) use temporal::{construct as construct_temporal, date_field};
 
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
@@ -127,6 +129,29 @@ pub enum GraphSetValue {
         values: Vec<GraphSetValue>,
         body: Box<GraphSetValue>,
     },
+    /// A temporal constructor (fgdb-txbg9), such as `date({year: 1984})` or
+    /// `date('2015-07-21')`. NULL is NULL.
+    Temporal {
+        function: GraphTemporalFunction,
+        argument: Box<GraphSetValue>,
+    },
+}
+
+/// The openCypher temporal constructors in the value language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphTemporalFunction {
+    /// `date(x)`: from a map of one calendar's fields (optionally over a
+    /// `date` base), ISO 8601 text, a date, or NULL.
+    Date,
+}
+
+impl GraphTemporalFunction {
+    /// Its byte in the value transcripts.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::Date => 1,
+        }
+    }
 }
 
 /// The openCypher list predicate functions.
@@ -510,6 +535,12 @@ fn admit(
             admit(right, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::Scalar
         }
+        // A temporal value reads its fields like a map entry (`d.year`), so
+        // it is dynamically typed for the operators after it.
+        GraphSetValue::Temporal { argument, .. } => {
+            admit(argument, types, column, depth + 1, nodes, locals)?;
+            GraphSetColumnType::Any
+        }
         // openCypher size(): a list's length or a text's character count
         // (fgdb-xakp1). A literal that is neither refuses here; any other
         // scalar is a typed failure when evaluated.
@@ -822,6 +853,10 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             append_value_transcript(left, bytes);
             append_value_transcript(right, bytes);
         }
+        GraphSetValue::Temporal { function, argument } => {
+            bytes.extend_from_slice(&[21, function.tag()]);
+            append_value_transcript(argument, bytes);
+        }
     }
 }
 
@@ -1107,6 +1142,12 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
+        GraphSetValue::Temporal { function, argument } => {
+            let argument = operand(argument, row, column, control, depth + 1, nodes)?;
+            let value = temporal::construct(*function, argument.as_ref()).map_err(failure)?;
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(value)
+        }
         GraphSetValue::Size(list) => {
             let list = operand(list, row, column, control, depth + 1, nodes)?;
             let size = if list.is_null() {
@@ -1323,6 +1364,12 @@ fn evaluate_value_at<E>(
             if map.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
+            } else if let GraphValue::Scalar(CanonicalScalar::Date(day)) = map.as_ref() {
+                // A date's fields (fgdb-txbg9); any other key is an error.
+                let field = temporal::date_field(*day, key)
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::TemporalField))?;
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Int(field))
             } else {
                 let (keys, values) = map
                     .as_map()

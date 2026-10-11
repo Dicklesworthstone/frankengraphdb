@@ -24,6 +24,7 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Size(list) => constant(list),
         GraphSetValue::In { value, list } => constant(value) && constant(list),
         GraphSetValue::Equal { left, right } => constant(left) && constant(right),
+        GraphSetValue::Temporal { argument, .. } => constant(argument),
         // An element is fixed by its comprehension's list (fgdb-20foe).
         GraphSetValue::Local(_) => true,
         GraphSetValue::Comprehension { list, filter, map } => {

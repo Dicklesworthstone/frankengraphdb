@@ -713,6 +713,7 @@ impl Properties {
                 | GraphSetValue::Size(_)
                 | GraphSetValue::In { .. }
                 | GraphSetValue::Equal { .. }
+                | GraphSetValue::Temporal { .. }
                 | GraphSetValue::Local(_)
                 | GraphSetValue::Comprehension { .. }
                 | GraphSetValue::Quantifier { .. }

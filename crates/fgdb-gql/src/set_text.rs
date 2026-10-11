@@ -158,6 +158,11 @@ pub(crate) enum ReadValueTemplate {
         values: Vec<ReadValueTemplate>,
         body: Box<ReadValueTemplate>,
     },
+    /// A temporal constructor (fgdb-txbg9).
+    Temporal {
+        function: crate::GraphTemporalFunction,
+        argument: Box<ReadValueTemplate>,
+    },
 }
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
@@ -201,6 +206,7 @@ impl ReadValueTemplate {
             Self::Size(inner) => inner.binds_elements(),
             Self::In { value, list } => value.binds_elements() || list.binds_elements(),
             Self::Equal { left, right } => left.binds_elements() || right.binds_elements(),
+            Self::Temporal { argument, .. } => argument.binds_elements(),
             Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
                 false
             }
@@ -218,10 +224,12 @@ impl ReadValueTemplate {
             | Self::Comprehension { .. }
             | Self::Slice { .. }
             | Self::Range { .. } => GraphSetColumnType::List,
+            // A temporal value reads its fields like a map entry (`d.year`).
             Self::Reduce { .. }
             | Self::MapLiteral { .. }
             | Self::MapOverlay { .. }
-            | Self::MapGet { .. } => GraphSetColumnType::Any,
+            | Self::MapGet { .. }
+            | Self::Temporal { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
             Self::Let { body, .. } => body.column_type(input, parameters),
             Self::Local(_) => GraphSetColumnType::Any,
@@ -399,6 +407,10 @@ impl ReadValueTemplate {
                 bytes.push(20);
                 left.append_template_transcript(bytes);
                 right.append_template_transcript(bytes);
+            }
+            Self::Temporal { function, argument } => {
+                bytes.extend_from_slice(&[21, function.tag()]);
+                argument.append_template_transcript(bytes);
             }
         }
     }

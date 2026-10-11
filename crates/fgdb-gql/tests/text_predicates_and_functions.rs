@@ -685,6 +685,129 @@ fn composite_literals_compare_three_valued() {
     );
 }
 
+/// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
+/// optional `date` base), from ISO 8601 text, from a date or from NULL, and a
+/// date reads its fields as `d.year`. Expected days are the TCK's (Temporal1
+/// [1] and [4], Temporal2 [1], Temporal5 [1] and [2]).
+#[test]
+fn date_builds_from_fields_text_and_a_base_and_reads_its_fields() {
+    let date = |year, month, day| {
+        CanonicalScalar::Date(fgdb_types::CanonicalDate::from_civil(year, month, day).unwrap())
+    };
+    let x = text("x");
+    for (expression, expected) in [
+        ("date({year: 1984, month: 10, day: 11})", date(1984, 10, 11)),
+        ("date({year: 1984, month: 10})", date(1984, 10, 1)),
+        (
+            "date({year: 1984, week: 10, dayOfWeek: 3})",
+            date(1984, 3, 7),
+        ),
+        ("date({year: 1984, week: 10})", date(1984, 3, 5)),
+        ("date({year: 1984})", date(1984, 1, 1)),
+        ("date({year: 1984, ordinalDay: 202})", date(1984, 7, 20)),
+        (
+            "date({year: 1984, quarter: 3, dayOfQuarter: 45})",
+            date(1984, 8, 14),
+        ),
+        ("date({year: 1984, quarter: 3})", date(1984, 7, 1)),
+        ("date({year: 1816, week: 1})", date(1816, 1, 1)),
+        ("date({year: 1818, week: 53})", date(1818, 12, 28)),
+        (
+            "date({dayOfWeek: 2, year: 1817, week: 1})",
+            date(1816, 12, 31),
+        ),
+        (
+            "date({date: date('1816-12-30'), week: 2, dayOfWeek: 3})",
+            date(1817, 1, 8),
+        ),
+        (
+            "date({date: date('1816-12-31'), week: 2})",
+            date(1817, 1, 7),
+        ),
+        (
+            "date({date: date('1816-12-31'), year: 1817, week: 2})",
+            date(1817, 1, 7),
+        ),
+        (
+            "date({date: date('1984-10-11'), month: 3})",
+            date(1984, 3, 11),
+        ),
+        ("date('2015-W30-2')", date(2015, 7, 21)),
+        ("date('2015202')", date(2015, 7, 21)),
+        ("date('2015-07')", date(2015, 7, 1)),
+        ("date(date('2015-07-21'))", date(2015, 7, 21)),
+        ("date(null)", CanonicalScalar::Null),
+        (
+            "date({year: 1984, month: 10, day: 11}).year",
+            CanonicalScalar::Int(1984),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).quarter",
+            CanonicalScalar::Int(4),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).week",
+            CanonicalScalar::Int(41),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).weekYear",
+            CanonicalScalar::Int(1984),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).ordinalDay",
+            CanonicalScalar::Int(285),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).weekDay",
+            CanonicalScalar::Int(4),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).dayOfQuarter",
+            CanonicalScalar::Int(11),
+        ),
+        (
+            "date({year: 1984, month: 1, day: 1}).week",
+            CanonicalScalar::Int(52),
+        ),
+        (
+            "date({year: 1984, month: 1, day: 1}).weekYear",
+            CanonicalScalar::Int(1983),
+        ),
+        (
+            "date({year: 1984, month: 1, day: 1}).weekDay",
+            CanonicalScalar::Int(7),
+        ),
+    ] {
+        assert_eq!(scalar(expression, &x), expected, "{expression}");
+    }
+    // Text, map fields and accessors that name no day or field refuse with
+    // their typed kind, never NULL or a guess.
+    for (expression, kind) in [
+        ("date({month: 10})", "TemporalConstruction"),
+        ("date({year: 1984, month: 13})", "TemporalConstruction"),
+        (
+            "date({year: 1984, month: 2, day: 30})",
+            "TemporalConstruction",
+        ),
+        (
+            "date({year: 1984, week: 1, month: 2})",
+            "TemporalConstruction",
+        ),
+        ("date({year: 1984, hour: 1})", "TemporalConstruction"),
+        ("date({year: '1984'})", "TemporalConstruction"),
+        ("date('2015-13-01')", "TemporalConstruction"),
+        ("date(1984)", "TemporalConstruction"),
+        ("date({year: 1984}).hour", "TemporalField"),
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains(kind),
+            "{expression}: {error:?}"
+        );
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

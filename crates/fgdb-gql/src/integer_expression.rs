@@ -313,6 +313,12 @@ pub enum GraphIntegerErrorKind {
     /// openCypher range() with a step of 0 (fgdb-20foe).
     InvalidRangeStep,
     TextConstruction,
+    /// A temporal constructor's argument names no value: an unknown or
+    /// non-integer field, a mix of calendars, malformed text, or a day that
+    /// does not exist (fgdb-txbg9).
+    TemporalConstruction,
+    /// A field a temporal value does not have, such as `d.hour` of a date.
+    TemporalField,
 }
 impl GraphIntegerErrorKind {
     /// An arithmetic data exception (GQL class 22: division by zero, numeric

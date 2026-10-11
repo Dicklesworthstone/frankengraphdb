@@ -25,10 +25,11 @@ pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
+    GraphTemporalFunction,
 };
 pub(crate) use projection::{
-    ProjectionFailure, evaluate_equality, evaluate_membership, evaluate_value, map_keys,
-    overlay_map, range_values, slice_bounds,
+    ProjectionFailure, construct_temporal, date_field, evaluate_equality, evaluate_membership,
+    evaluate_value, map_keys, overlay_map, range_values, slice_bounds,
 };
 
 use crate::algebra::{

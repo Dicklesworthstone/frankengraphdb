@@ -161,12 +161,14 @@ fn map_capable(
     parameters: &[GqlParameterSpec],
 ) -> bool {
     match value {
+        // A temporal value's `.year` reads as a map entry does.
         ReadValueTemplate::MapLiteral { .. }
         | ReadValueTemplate::MapOverlay { .. }
         | ReadValueTemplate::MapGet { .. }
         | ReadValueTemplate::Local(_)
         | ReadValueTemplate::Index { .. }
-        | ReadValueTemplate::Reduce { .. } => true,
+        | ReadValueTemplate::Reduce { .. }
+        | ReadValueTemplate::Temporal { .. } => true,
         ReadValueTemplate::Column(at) => schema
             .and_then(|schema| schema.get(*at))
             .is_some_and(|(_, kind)| *kind == GraphSetColumnType::Any),
@@ -1474,6 +1476,20 @@ impl<'a> Parser<'a> {
                 self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
+        } else if self.is_word("DATE")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            // date(map | text | date | NULL) (fgdb-txbg9). date() reads the
+            // statement clock, which no read has yet.
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let argument =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::Temporal {
+                function: crate::GraphTemporalFunction::Date,
+                argument: Box::new(argument),
+            }
         } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
@@ -2067,6 +2083,10 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Equal { left, right } => GraphSetValue::Equal {
             left: Box::new(bind_read_value(left, values)?),
             right: Box::new(bind_read_value(right, values)?),
+        },
+        ReadValueTemplate::Temporal { function, argument } => GraphSetValue::Temporal {
+            function: *function,
+            argument: Box::new(bind_read_value(argument, values)?),
         },
         ReadValueTemplate::Size(value) => {
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))

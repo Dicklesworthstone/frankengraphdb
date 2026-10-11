@@ -232,6 +232,15 @@ fn expression<'g, E, C>(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
         }
+        // Temporal constructors with the row evaluator's law (fgdb-txbg9).
+        GraphSetValue::Temporal { function, argument } => {
+            let argument = expression(argument, input, column, control)?.into_owned(control)?;
+            let argument = graph_value(argument, column)?;
+            let value = crate::set_ops::construct_temporal(*function, &argument)
+                .map_err(|kind| failure(column, kind))?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))
+        }
         // Three-valued equality with the row evaluator's law (fgdb-9cawv).
         GraphSetValue::Equal { left, right } => {
             let left = expression(left, input, column, control)?.into_owned(control)?;
@@ -332,6 +341,15 @@ fn expression<'g, E, C>(
                         )),
                         Err(_) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
                     }
+                }
+                // A date's fields (fgdb-txbg9), as in row projections.
+                Cell::Value(ValueRef::Scalar(CanonicalScalar::Date(day))) => {
+                    let field = crate::set_ops::date_field(*day, key)
+                        .ok_or_else(|| failure(column, GraphIntegerErrorKind::TemporalField))?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Int(field),
+                    )))
                 }
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
             }
