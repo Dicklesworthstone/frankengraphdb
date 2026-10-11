@@ -1429,3 +1429,60 @@ fn a_list_operation_over_a_null_scalar_column_is_null() {
         assert!(fails(text), "{text}");
     }
 }
+
+/// A CASE whose result reads a dynamically typed column (`input.list` over
+/// an UNWIND of maps) is read in the value language, typed per row: its
+/// result may be a list, where the scalar program would fail when it ran
+/// (TCK Quantifier9-12). A CASE with only scalar results keeps its answer.
+#[test]
+fn a_case_returning_a_dynamic_entry_is_typed_per_row() {
+    use fgdb_gql::algebra::GraphValue;
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let list = |items: &[i64]| GraphValue::List(items.iter().map(|&n| int(n)).collect());
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let bag = |text: &str| {
+        let mut values: Vec<_> = run(&prepare(text), &[], wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect();
+        values.sort();
+        values
+    };
+    let mut expected = vec![vec![list(&[1])], vec![null.clone()]];
+    expected.sort();
+    assert_eq!(
+        bag(
+            "UNWIND [{list: [1], f: true}, {list: [2], f: false}] AS input \
+             RETURN CASE WHEN input.f THEN input.list ELSE null END AS l"
+        ),
+        expected
+    );
+    let mut expected = vec![vec![int(1)], vec![list(&[2, 3])]];
+    expected.sort();
+    assert_eq!(
+        bag("UNWIND [{v: 1}, {v: [2, 3]}] AS input RETURN CASE WHEN true THEN input.v END AS v"),
+        expected
+    );
+    // The TCK's input stage: both CASEs, through a WITH.
+    let mut expected = vec![vec![list(&[2]), list(&[1])], vec![null, list(&[1, 2, 3])]];
+    expected.sort();
+    assert_eq!(
+        bag(
+            "UNWIND [{list: [2], fixed: true}, {list: [1, 2, 3], fixed: false}] AS input \
+             WITH CASE WHEN input.fixed THEN input.list ELSE null END AS fixedList, \
+                  CASE WHEN NOT input.fixed THEN input.list ELSE [1] END AS inputList \
+             RETURN fixedList, inputList"
+        ),
+        expected
+    );
+    // Scalar results keep the scalar CASE's answers.
+    let mut expected = vec![vec![int(1)], vec![int(2)]];
+    expected.sort();
+    assert_eq!(
+        bag("UNWIND [{f: true}, {f: false}] AS input \
+             RETURN CASE WHEN input.f THEN 1 ELSE 2 END AS v"),
+        expected
+    );
+}

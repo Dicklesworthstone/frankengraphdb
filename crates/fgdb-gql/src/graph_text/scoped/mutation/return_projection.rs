@@ -243,13 +243,38 @@ fn case_has_list(
             {
                 let mut ahead = lexer.clone();
                 let result = ahead.next()?;
-                if list_operand_at(result, &ahead, row)? {
+                if list_operand_at(result, &ahead, row)? || dynamic_column_at(result, &ahead, row)?
+                {
                     return Ok(true);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Whether `token` (with `lexer` just past it) starts a read of a dynamically
+/// typed row column, bare or through its postfix reads: `input.list` over an
+/// UNWIND of maps may be a list or a map as well as a scalar. A CASE that
+/// returns one is read in the value language, typed per row, since the scalar
+/// program refuses a non-scalar result when it runs (TCK Quantifier9-12's
+/// `CASE WHEN input.fixed THEN input.list ELSE null END`).
+fn dynamic_column_at(
+    token: Token<'_>,
+    lexer: &Lexer<'_>,
+    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+) -> Result<bool, GraphPatternTextError> {
+    let TokenKind::Word(word) = token.kind else {
+        return Ok(false);
+    };
+    if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
+        return Ok(false);
+    }
+    Ok(row.is_some_and(|schema| {
+        schema
+            .iter()
+            .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::Any)
+    }))
 }
 
 /// The column domain of one graph input: a property is a scalar, a bare
