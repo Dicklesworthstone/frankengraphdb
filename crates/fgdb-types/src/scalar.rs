@@ -7,9 +7,9 @@
 //!   `encode(a) == encode(b)`,
 //! - `Ord` is total and transitive over all scalars (cross-type order is the
 //!   fixed profile type rank: Null < Bool < Int < Decimal < Float < Text <
-//!   Timestamp < Bytes < Date < LocalTime < Time < LocalDateTime; the
-//!   temporal tags follow the property-value List and Map tags, so they rank
-//!   last),
+//!   Timestamp < Bytes < Date < LocalTime < Time < LocalDateTime <
+//!   Duration; the temporal tags follow the property-value List and Map tags,
+//!   so they rank last),
 //! - `a.cmp(b) == encode(a).cmp(encode(b))`, so byte-keyed maps and `LexMin`
 //!   use exactly the semantic scalar order,
 //! - `decode(encode(v)) == v` for every value, and decode rejects malformed
@@ -58,8 +58,8 @@ use crate::{
     decimal::{CanonicalDecimal, DecimalDecodeError},
     ids::ObjectId,
     temporal::{
-        CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
-        CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
+        CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime,
+        CanonicalTime, CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
         MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY, TimestampDecodeError,
         TzdbResolver, calendar, validate_zone_identifier,
     },
@@ -89,6 +89,7 @@ const TAG_DATE: u8 = 0x0A;
 const TAG_LOCAL_TIME: u8 = 0x0B;
 const TAG_TIME: u8 = 0x0C;
 const TAG_LOCAL_DATETIME: u8 = 0x0D;
+const TAG_DURATION: u8 = 0x0E;
 
 const BOOL_FALSE_BYTE: u8 = 0;
 const BOOL_TRUE_BYTE: u8 = 1;
@@ -152,6 +153,7 @@ const LOCAL_TIME_ORDER_NANOS_OF_DAY_BIG_ENDIAN: u8 = 1;
 const TIME_ORDER_UTC_NANOS_SIGN_FLIP_THEN_LOCAL: u8 = 1;
 const TIME_NO_LEAP_SECOND: u8 = 1;
 const LOCAL_DATETIME_ORDER_DATE_THEN_TIME: u8 = 1;
+const DURATION_ORDER_MONTHS_DAYS_NANOS_SIGN_FLIP: u8 = 1;
 /// The rules version 2 adds after every version 1 rule.
 const SCALAR_DESCRIPTOR_V2_RULE_BYTES: &[u8] = &[
     TAG_DATE,
@@ -164,6 +166,8 @@ const SCALAR_DESCRIPTOR_V2_RULE_BYTES: &[u8] = &[
     TIME_NO_LEAP_SECOND,
     TAG_LOCAL_DATETIME,
     LOCAL_DATETIME_ORDER_DATE_THEN_TIME,
+    TAG_DURATION,
+    DURATION_ORDER_MONTHS_DAYS_NANOS_SIGN_FLIP,
 ];
 
 /// The scalar semantics a profile binds (fgdb-txbg9). Versions are ordered
@@ -175,7 +179,7 @@ const SCALAR_DESCRIPTOR_V2_RULE_BYTES: &[u8] = &[
 pub enum ScalarProfileVersion {
     /// Null, Bool, Int, Decimal, Float, Text, Timestamp and Bytes.
     V1 = 1,
-    /// Version 1 plus Date, LocalTime, Time and LocalDateTime.
+    /// Version 1 plus Date, LocalTime, Time, LocalDateTime and Duration.
     V2 = 2,
 }
 
@@ -187,7 +191,8 @@ impl ScalarProfileVersion {
             CanonicalScalar::Date(_)
             | CanonicalScalar::LocalTime(_)
             | CanonicalScalar::Time(_)
-            | CanonicalScalar::LocalDateTime(_) => Self::V2,
+            | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Duration(_) => Self::V2,
             _ => Self::V1,
         }
     }
@@ -356,6 +361,8 @@ pub enum CanonicalScalar {
     Time(CanonicalTime),
     /// A date and time of day without an offset; admitted by version 2.
     LocalDateTime(CanonicalLocalDateTime),
+    /// Months, days and nanoseconds; admitted by version 2.
+    Duration(CanonicalDuration),
 }
 
 impl CanonicalScalar {
@@ -386,6 +393,7 @@ impl CanonicalScalar {
             CanonicalScalar::LocalTime(_) => TAG_LOCAL_TIME,
             CanonicalScalar::Time(_) => TAG_TIME,
             CanonicalScalar::LocalDateTime(_) => TAG_LOCAL_DATETIME,
+            CanonicalScalar::Duration(_) => TAG_DURATION,
         }
     }
 
@@ -410,6 +418,7 @@ impl CanonicalScalar {
             Self::Bool(_) => 1,
             Self::Int(_) | Self::Float(_) | Self::Date(_) | Self::LocalTime(_) => 8,
             Self::Decimal(_) | Self::Time(_) | Self::LocalDateTime(_) => 16,
+            Self::Duration(_) => 32,
             Self::Text(value) => text_scalar_payload_len(value)?,
             Self::Timestamp(value) => timestamp_scalar_payload_len(value)?,
             Self::Bytes(value) => comparable_encoded_len(value.as_slice())?,
@@ -478,6 +487,12 @@ impl CanonicalScalar {
                 out.push(TAG_LOCAL_DATETIME);
                 out.extend_from_slice(&ordered_i64(value.date().epoch_day()).to_be_bytes());
                 out.extend_from_slice(&value.time().nanos_of_day().to_be_bytes());
+            }
+            CanonicalScalar::Duration(value) => {
+                out.push(TAG_DURATION);
+                out.extend_from_slice(&ordered_i64(value.months()).to_be_bytes());
+                out.extend_from_slice(&ordered_i64(value.days()).to_be_bytes());
+                out.extend_from_slice(&ordered_i128(value.nanos()).to_be_bytes());
             }
         }
         if out.len() != requested {
@@ -588,6 +603,20 @@ impl CanonicalScalar {
                     date, time,
                 )))
             }
+            TAG_DURATION => {
+                let raw = array_from_exact::<32>(exact(32)?, tag)?;
+                let field = |at: usize| {
+                    let mut bytes = [0; 8];
+                    bytes.copy_from_slice(&raw[at..at + 8]);
+                    decode_ordered_i64(u64::from_be_bytes(bytes))
+                };
+                let mut nanos = [0; 16];
+                nanos.copy_from_slice(&raw[16..]);
+                let nanos = decode_ordered_i128(u128::from_be_bytes(nanos));
+                CanonicalDuration::new(field(0), field(8), nanos)
+                    .map(CanonicalScalar::Duration)
+                    .map_err(|_| ScalarDecodeError::DurationOutOfRange { nanos })
+            }
             other => Err(ScalarDecodeError::UnknownTag(other)),
         }
     }
@@ -610,7 +639,7 @@ fn decode_time_of_day(raw: [u8; 8]) -> Result<CanonicalLocalTime, ScalarDecodeEr
 /// Whether `tag` leads a canonical scalar encoding (the property-value List
 /// and Map tags sit between Bytes and the temporal tags).
 pub(crate) const fn is_scalar_tag(tag: u8) -> bool {
-    matches!(tag, TAG_NULL..=TAG_BYTES | TAG_DATE..=TAG_LOCAL_DATETIME)
+    matches!(tag, TAG_NULL..=TAG_BYTES | TAG_DATE..=TAG_DURATION)
 }
 
 /// Returns the complete scalar encoding length for a borrowed Map key.
@@ -1089,6 +1118,7 @@ impl Ord for CanonicalScalar {
             (S::LocalTime(a), S::LocalTime(b)) => a.cmp(b),
             (S::Time(a), S::Time(b)) => a.cmp(b),
             (S::LocalDateTime(a), S::LocalDateTime(b)) => a.cmp(b),
+            (S::Duration(a), S::Duration(b)) => a.cmp(b),
             _ => self.type_rank().cmp(&other.type_rank()),
         }
     }
@@ -1227,6 +1257,10 @@ pub enum ScalarDecodeError {
         utc_nanos_of_day: i64,
         nanos_of_day: u64,
     },
+    /// A duration tag whose time part exceeds an `i64` of whole seconds.
+    DurationOutOfRange {
+        nanos: i128,
+    },
     Decimal(DecimalDecodeError),
     Bytes(BoundedBytesError),
     Text(CanonicalTextError),
@@ -1299,6 +1333,12 @@ impl std::fmt::Display for ScalarDecodeError {
             }
             ScalarDecodeError::TimeOfDayOutOfRange { nanos_of_day } => {
                 write!(f, "time of day {nanos_of_day} ns is a day or more")
+            }
+            ScalarDecodeError::DurationOutOfRange { nanos } => {
+                write!(
+                    f,
+                    "duration time part {nanos} ns exceeds the supported range"
+                )
             }
             ScalarDecodeError::TimeOffsetInvalid {
                 utc_nanos_of_day,
@@ -1455,7 +1495,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("seeded time rejected: {error}"))
         }
         fn scalar(&mut self) -> CanonicalScalar {
-            match self.next() % 14 {
+            match self.next() % 15 {
                 0 => CanonicalScalar::Null,
                 1 => CanonicalScalar::Bool(self.next() % 2 == 1),
                 2 => CanonicalScalar::Int(self.next() as i64),
@@ -1517,7 +1557,16 @@ mod tests {
                     self.date(),
                     self.local_time(),
                 )),
-                _ => unreachable!("modulo fourteen is within the scalar arm table"),
+                14 => CanonicalScalar::Duration(
+                    CanonicalDuration::new(
+                        self.next() as i64,
+                        self.next() as i64,
+                        i128::from(self.next() as i64 / 2) * 1_000_000_000
+                            + i128::from(self.next() % 1_000_000_000),
+                    )
+                    .unwrap_or_else(|error| panic!("seeded duration rejected: {error}")),
+                ),
+                _ => unreachable!("modulo fifteen is within the scalar arm table"),
             }
         }
     }
@@ -1855,6 +1904,14 @@ mod tests {
                 })
             );
         }
+        let mut long_duration = vec![TAG_DURATION];
+        long_duration.extend_from_slice(&ordered_i64(0).to_be_bytes());
+        long_duration.extend_from_slice(&ordered_i64(0).to_be_bytes());
+        long_duration.extend_from_slice(&ordered_i128(i128::MAX).to_be_bytes());
+        assert_eq!(
+            CanonicalScalar::decode(&long_duration),
+            Err(E::DurationOutOfRange { nanos: i128::MAX })
+        );
         assert_eq!(
             CanonicalScalar::decode(&[TAG_TIME, 0, 0]),
             Err(E::WrongPayloadLength {

@@ -55,8 +55,8 @@ use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::{
-    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, CommitSeq, EId,
-    PurposeContexts, VId,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
+    CommitSeq, EId, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1064,6 +1064,23 @@ fn argument(value: &Value) -> Result<WireValue, Failure> {
                 _ => return Err(unsupported("malformed local date-time")),
             }
         }
+        Value::Struct { tag, fields } if *tag == structure::DURATION => match fields.as_slice() {
+            [
+                Value::Int(months),
+                Value::Int(days),
+                Value::Int(seconds),
+                Value::Int(nanos),
+            ] => WireValue::Duration(
+                CanonicalDuration::new(
+                    *months,
+                    *days,
+                    i128::from(*seconds) * 1_000_000_000 + i128::from(*nanos),
+                )
+                .map_err(|_| unsupported("out-of-range duration"))?
+                .to_string(),
+            ),
+            _ => return Err(unsupported("malformed duration")),
+        },
         Value::Struct { .. } => return Err(unsupported("this structure's")),
     })
 }
@@ -1457,6 +1474,17 @@ fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
                 nanos % 1_000_000_000,
             )
         }
+        WireValue::Duration(text) => {
+            let value = CanonicalDuration::parse_iso(&text)
+                .map_err(|_| feature_not_supported("A non-canonical duration"))?;
+            let second = 1_000_000_000_i128;
+            // The time part is bounded by an i64 of whole seconds.
+            let seconds = i64::try_from(value.nanos().div_euclid(second))
+                .map_err(|_| feature_not_supported("An out-of-range duration"))?;
+            let nanos = i64::try_from(value.nanos().rem_euclid(second))
+                .expect("a remainder of one second fits an i64");
+            structure::duration(value.months(), value.days(), seconds, nanos)
+        }
         WireValue::Bytes(bytes) => Value::Bytes(bytes),
         WireValue::Timestamp(timestamp) => {
             let seconds = timestamp.instant_utc_nanos.div_euclid(1_000_000_000);
@@ -1591,6 +1619,11 @@ mod tests {
                 0x64,
                 vec![1_437_514_800, 0],
             ),
+            (
+                WireValue::Duration("P1Y-2DT-1.999S".into()),
+                0x45,
+                vec![12, -2, -2, 1_000_000],
+            ),
         ] {
             let encoded = Value::Struct {
                 tag,
@@ -1615,6 +1648,10 @@ mod tests {
             Value::Struct {
                 tag: 0x64,
                 fields: vec![Value::Int(0)],
+            },
+            Value::Struct {
+                tag: 0x45,
+                fields: vec![Value::Int(0), Value::Int(0), Value::Int(0)],
             },
         ] {
             assert!(argument(&malformed).is_err(), "{malformed:?}");

@@ -66,7 +66,8 @@ pub(crate) fn collect<'a, E>(
             | CanonicalScalar::Date(_)
             | CanonicalScalar::LocalTime(_)
             | CanonicalScalar::Time(_)
-            | CanonicalScalar::LocalDateTime(_) => [0, 0],
+            | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Duration(_) => [0, 0],
         };
         for bytes in sizes {
             payload(bytes, control)?;

@@ -692,7 +692,7 @@ pub enum WriteError {
         tzdb_oid: ObjectId,
     },
     /// A property value of a kind only scalar profile version 2 admits: a
-    /// Date, LocalTime, Time or LocalDateTime. These are query values;
+    /// Date, LocalTime, Time, LocalDateTime or Duration. These are query values;
     /// storing one waits on container format versions that record the
     /// profile version (fgdb-txbg9).
     ScalarKindNotStorable {

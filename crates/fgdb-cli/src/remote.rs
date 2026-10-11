@@ -593,7 +593,8 @@ fn human(value: &WireValue) -> String {
         | WireValue::Date(v)
         | WireValue::LocalTime(v)
         | WireValue::Time(v)
-        | WireValue::LocalDateTime(v) => v.clone(),
+        | WireValue::LocalDateTime(v)
+        | WireValue::Duration(v) => v.clone(),
         WireValue::Float(v) => float_text(*v),
         WireValue::Timestamp(_) => cell(value),
         WireValue::Bytes(v) => format!("0x{}", hex(v)),

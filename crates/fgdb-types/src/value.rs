@@ -614,6 +614,7 @@ pub enum CanonicalScalarKind {
     LocalTime = 11,
     Time = 12,
     LocalDateTime = 13,
+    Duration = 14,
 }
 
 impl CanonicalScalarKind {
@@ -632,6 +633,7 @@ impl CanonicalScalarKind {
             CanonicalScalar::LocalTime(_) => Self::LocalTime,
             CanonicalScalar::Time(_) => Self::Time,
             CanonicalScalar::LocalDateTime(_) => Self::LocalDateTime,
+            CanonicalScalar::Duration(_) => Self::Duration,
         }
     }
 }
@@ -645,7 +647,7 @@ impl CanonicalScalarKind {
 ///
 /// Order is canonical byte order: values of different kinds order by their
 /// leading encoding tag, so the scalar ranks 0x00-0x07 come before List
-/// (0x08) and Map (0x09), and the temporal scalars (0x0A-0x0D) after both.
+/// (0x08) and Map (0x09), and the temporal scalars (0x0A-0x0E) after both.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CanonicalPropertyValue {
     Scalar(CanonicalScalar),

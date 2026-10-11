@@ -429,7 +429,7 @@ fn check_cell(cell: &Json, schema: &Json) {
             value.string().parse::<i128>().unwrap();
         }
         "average" | "decimal" | "float" | "bytes" | "vertex" | "edge" | "date" | "localtime"
-        | "time" | "localdatetime" => {
+        | "time" | "localdatetime" | "duration" => {
             value.string();
         }
         "timestamp" => {

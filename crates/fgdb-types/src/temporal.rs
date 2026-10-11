@@ -16,9 +16,11 @@ use crate::ids::ObjectId;
 
 pub mod calendar;
 mod date;
+mod duration;
 mod time;
 
 pub use date::{CanonicalDate, DateError};
+pub use duration::{CanonicalDuration, DurationError, DurationUnit, SECONDS_PER_AVERAGE_MONTH};
 pub use time::{
     CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, NANOS_PER_DAY, TimeError,
     format_utc_offset, parse_utc_offset,

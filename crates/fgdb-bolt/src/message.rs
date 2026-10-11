@@ -480,6 +480,22 @@ pub mod structure {
         }
     }
 
+    /// `Duration{months, days, seconds, nanoseconds}` (tag `E`), the
+    /// nanoseconds 0-999999999.
+    #[must_use]
+    pub fn duration(months: i64, days: i64, seconds: i64, nanoseconds: i64) -> Value {
+        Value::Struct {
+            tag: DURATION,
+            fields: vec![
+                Value::Int(months),
+                Value::Int(days),
+                Value::Int(seconds),
+                Value::Int(nanoseconds),
+            ],
+        }
+    }
+
+    pub const DURATION: u8 = 0x45;
     pub const DATE: u8 = 0x44;
     pub const DATE_TIME: u8 = 0x49;
     pub const DATE_TIME_ZONE_ID: u8 = 0x69;

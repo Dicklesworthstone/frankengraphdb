@@ -455,6 +455,19 @@ fn check_cell(cell: &Json, schema: &Json) {
             check_date(date);
             assert_eq!(check_clock(time), "", "{text}");
         }
+        // ISO 8601: P, signed counts with Y M D designators, then T and
+        // signed H M S, the seconds possibly fractional.
+        "duration" => {
+            let text = value.string();
+            let body = text.strip_prefix('P').unwrap_or_else(|| fail(text));
+            assert!(
+                !body.is_empty()
+                    && body
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || b"-.YMDTHS".contains(&byte)),
+                "{text}"
+            );
+        }
         "timestamp" => {
             exact_fields(value, &["instant_utc_nanos", "utc_offset_seconds", "zone"]);
             let instant = value.get("instant_utc_nanos").string();

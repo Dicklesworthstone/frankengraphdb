@@ -184,8 +184,9 @@ offset seconds, optional zone identifier plus tzdb object id), date (canonical
 ISO 8601 calendar text, at most 16 bytes), localtime (canonical java.time text
 such as `21:40:32.142`, at most 18 bytes), time (a local time and `Z` or
 `±hh:mm[:ss]`, at most 27 bytes), localdatetime (a date, `T` and a local time,
-at most 35 bytes) — a temporal argument must be exactly the canonical text a
-server emits — vertex, edge
+at most 35 bytes), duration (ISO 8601 text with a sign per component such as
+`P12Y5M-14DT16H` or `PT-1.999S`, at most 96 bytes) — a temporal argument must be
+exactly the canonical text a server emits — vertex, edge
 (u128 identities), path, vertices, edges, list, map, count, wide integer
 (i128) and exact average. Error codes are the closed set `protocol`,
 `unsupported_version`, `unauthenticated`, `not_found_or_unauthorized`,

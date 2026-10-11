@@ -14,7 +14,7 @@ use fgdb_gql::{
     GraphWriteProgramPolicy,
 };
 use fgdb_types::{
-    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
     CanonicalScalarKind, CanonicalTime, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId,
     EId, PurposeContexts, QueryCx, VId,
 };
@@ -690,6 +690,10 @@ fn a_version_2_temporal_property_refuses_before_any_commit() {
             (
                 CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, time)),
                 CanonicalScalarKind::LocalDateTime,
+            ),
+            (
+                CanonicalScalar::Duration(CanonicalDuration::new(1, 2, 3).unwrap()),
+                CanonicalScalarKind::Duration,
             ),
         ] {
             // Sync: the lab task holds these across its awaits.

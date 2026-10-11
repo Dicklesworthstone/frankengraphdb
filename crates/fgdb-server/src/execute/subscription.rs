@@ -171,7 +171,8 @@ impl Work<'_> {
             | WireValue::Date(text)
             | WireValue::LocalTime(text)
             | WireValue::Time(text)
-            | WireValue::LocalDateTime(text) => self.bytes(text.len()),
+            | WireValue::LocalDateTime(text)
+            | WireValue::Duration(text) => self.bytes(text.len()),
             WireValue::Bytes(bytes) => self.bytes(bytes.len()),
             WireValue::List(items) => {
                 for item in items {
@@ -225,6 +226,9 @@ impl Work<'_> {
             }
             GraphValue::Scalar(CanonicalScalar::LocalDateTime(_)) => {
                 self.charge(fgdb_protocol::body::MAX_LOCAL_DATETIME_BYTES as u64)
+            }
+            GraphValue::Scalar(CanonicalScalar::Duration(_)) => {
+                self.charge(fgdb_protocol::body::MAX_DURATION_BYTES as u64)
             }
             GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => match value.zone() {
                 Some(zone) => self.bytes(zone.identifier().len()),

@@ -343,6 +343,7 @@ pub fn cell(value: &WireValue) -> String {
         WireValue::LocalDateTime(v) => {
             format!(r#"{{"type":"localdatetime","value":{}}}"#, quote(v))
         }
+        WireValue::Duration(v) => format!(r#"{{"type":"duration","value":{}}}"#, quote(v)),
         WireValue::Float(v) => format!(r#"{{"type":"float","value":{}}}"#, quote(&float_text(*v))),
         WireValue::Timestamp(v) => format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp(v)),
         WireValue::Bytes(v) => format!(r#"{{"type":"bytes","value":{}}}"#, quote(&hex(v))),
@@ -571,6 +572,10 @@ mod tests {
         assert_eq!(
             cell(&WireValue::LocalDateTime("2015-07-21T21:40".into())),
             r#"{"type":"localdatetime","value":"2015-07-21T21:40"}"#
+        );
+        assert_eq!(
+            cell(&WireValue::Duration("PT-1.999S".into())),
+            r#"{"type":"duration","value":"PT-1.999S"}"#
         );
     }
 }

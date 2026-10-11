@@ -269,6 +269,9 @@ pub enum WireValue {
     /// A local date-time as its canonical text (`2015-07-21T21:40:32.142`),
     /// at most [`MAX_LOCAL_DATETIME_BYTES`] bytes.
     LocalDateTime(String),
+    /// A duration as its canonical ISO 8601 text (`P12Y5M-14DT16H`,
+    /// `PT-1.999S`), at most [`MAX_DURATION_BYTES`] bytes.
+    Duration(String),
     Vertex(u128),
     Edge(u128),
     /// A path: its start vertex, then one (edge, vertex) pair per step.
@@ -315,6 +318,7 @@ mod tag {
     pub const LOCAL_TIME: u8 = 19;
     pub const TIME: u8 = 20;
     pub const LOCAL_DATETIME: u8 = 21;
+    pub const DURATION: u8 = 22;
 }
 
 /// Longest canonical date text: a sign, nine year digits and `-MM-DD`.
@@ -329,6 +333,11 @@ pub const MAX_TIME_BYTES: usize = MAX_LOCAL_TIME_BYTES + 9;
 /// Longest canonical local date-time text: a date, `T` and a local time.
 pub const MAX_LOCAL_DATETIME_BYTES: usize = MAX_DATE_BYTES + 1 + MAX_LOCAL_TIME_BYTES;
 
+/// A bound on canonical duration text: `P`, signed years, months and days of
+/// i64 range, `T`, signed hours, minutes and seconds with nine fraction
+/// digits (about 85 bytes at the extremes).
+pub const MAX_DURATION_BYTES: usize = 96;
+
 impl WireValue {
     fn check(&self, depth: usize) -> Result<(), BodyError> {
         if depth > MAX_VALUE_DEPTH {
@@ -340,6 +349,7 @@ impl WireValue {
             Self::LocalTime(v) => check_len(v.len(), MAX_LOCAL_TIME_BYTES),
             Self::Time(v) => check_len(v.len(), MAX_TIME_BYTES),
             Self::LocalDateTime(v) => check_len(v.len(), MAX_LOCAL_DATETIME_BYTES),
+            Self::Duration(v) => check_len(v.len(), MAX_DURATION_BYTES),
             Self::Bytes(v) => check_len(v.len(), MAX_SCALAR_BYTES),
             Self::Timestamp(t) => t
                 .zone
@@ -405,6 +415,10 @@ impl WireValue {
             }
             Self::LocalDateTime(v) => {
                 out.u8(tag::LOCAL_DATETIME);
+                out.text(v);
+            }
+            Self::Duration(v) => {
+                out.u8(tag::DURATION);
                 out.text(v);
             }
             Self::Bytes(v) => {
@@ -502,6 +516,7 @@ impl WireValue {
             tag::LOCAL_TIME => Self::LocalTime(input.text(MAX_LOCAL_TIME_BYTES)?),
             tag::TIME => Self::Time(input.text(MAX_TIME_BYTES)?),
             tag::LOCAL_DATETIME => Self::LocalDateTime(input.text(MAX_LOCAL_DATETIME_BYTES)?),
+            tag::DURATION => Self::Duration(input.text(MAX_DURATION_BYTES)?),
             tag::BYTES => Self::Bytes(input.bytes(MAX_SCALAR_BYTES)?.to_vec()),
             tag::TIMESTAMP => {
                 let instant_utc_nanos = input.i128()?;
@@ -1582,6 +1597,7 @@ mod tests {
             WireValue::LocalTime("23:59:59.999999999".into()),
             WireValue::Time("23:59:59.999999999-02:05:07".into()),
             WireValue::LocalDateTime("+999999999-12-31T23:59:59.999999999".into()),
+            WireValue::Duration("P12Y5M-14DT16H13M10.000000001S".into()),
             WireValue::Bytes(vec![0, 255]),
             WireValue::Timestamp(WireTimestamp {
                 instant_utc_nanos: -5,

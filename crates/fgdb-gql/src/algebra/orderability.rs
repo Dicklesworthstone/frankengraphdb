@@ -104,6 +104,7 @@ impl ValueRef<'_> {
             Self::Scalar(CanonicalScalar::Date(_)) => 7,
             Self::Scalar(CanonicalScalar::Time(_)) => 8,
             Self::Scalar(CanonicalScalar::LocalTime(_)) => 9,
+            Self::Scalar(CanonicalScalar::Duration(_)) => 10,
             Self::Scalar(CanonicalScalar::Bytes(_)) => 11,
             Self::Scalar(CanonicalScalar::Text(_)) => 12,
             Self::Scalar(CanonicalScalar::Bool(_)) => 13,

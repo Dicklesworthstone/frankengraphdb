@@ -23,8 +23,8 @@
 
 use fgdb_types::temporal::calendar;
 use fgdb_types::{
-    CanonicalBytes, CanonicalDate, CanonicalDecimal, CanonicalF64, CanonicalList,
-    CanonicalLocalDateTime, CanonicalLocalTime, CanonicalMap, CanonicalMapEntry,
+    CanonicalBytes, CanonicalDate, CanonicalDecimal, CanonicalDuration, CanonicalF64,
+    CanonicalList, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalMap, CanonicalMapEntry,
     CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar,
     CanonicalScalarCoercionError, CanonicalScalarKind, CanonicalScalarProfile,
     CanonicalScalarProfileError, CanonicalScalarProfileIdentityVerifier, CanonicalText,
@@ -145,6 +145,23 @@ fn scalar_corpus() -> Vec<CanonicalScalar> {
                 date, time,
             )));
         }
+    }
+
+    // Durations: each component's sign boundary and extreme, and two that
+    // are equal in total seconds but not in components (P1D and PT24H),
+    // which a normalising kernel would collapse.
+    for (months, days, nanos) in [
+        (0, 0, 0),
+        (0, 1, 0),
+        (0, 0, 86_400_000_000_000),
+        (-1, 0, 0),
+        (i64::MAX, i64::MIN, -1),
+        (0, 0, i128::from(i64::MAX) * 1_000_000_000 + 999_999_999),
+        (0, 0, -(i128::from(i64::MAX) * 1_000_000_000 + 999_999_999)),
+    ] {
+        values.push(CanonicalScalar::Duration(
+            CanonicalDuration::new(months, days, nanos).expect("in range"),
+        ));
     }
 
     values
@@ -493,6 +510,7 @@ fn hash_separates_distinct_values_within_every_arm() {
             CanonicalScalar::LocalTime(_) => "LocalTime",
             CanonicalScalar::Time(_) => "Time",
             CanonicalScalar::LocalDateTime(_) => "LocalDateTime",
+            CanonicalScalar::Duration(_) => "Duration",
         }
     }
 
@@ -1118,9 +1136,10 @@ fn a_version_2_profile_adds_the_temporal_kinds_without_changing_version_1()
     range.extend_from_slice(&calendar::MAX_EPOCH_DAY.to_le_bytes());
     range.extend_from_slice(&NANOS_PER_DAY.to_le_bytes());
     assert!(contains(&v2, &range) && !contains(&v1, &range));
-    // Same-length domains; ten temporal rule bytes (Date three, LocalTime
-    // two, Time three, LocalDateTime two) and the 24 bytes of bounds.
-    assert_eq!(v2.len(), v1.len() + 10 + 24);
+    // Same-length domains; twelve temporal rule bytes (Date three, LocalTime
+    // two, Time three, LocalDateTime two, Duration two) and the 24 bytes of
+    // bounds.
+    assert_eq!(v2.len(), v1.len() + 12 + 24);
 
     let version_1 = profile_at(V1, &resolver)?;
     let version_2 = profile_at(V2, &resolver)?;
@@ -1145,6 +1164,10 @@ fn a_version_2_profile_adds_the_temporal_kinds_without_changing_version_1()
         (
             CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, time)),
             CanonicalScalarKind::LocalDateTime,
+        ),
+        (
+            CanonicalScalar::Duration(CanonicalDuration::new(14, -2, 3).expect("in range")),
+            CanonicalScalarKind::Duration,
         ),
     ] {
         assert_eq!(ScalarProfileVersion::required_for(&temporal), V2);
@@ -1323,6 +1346,15 @@ fn profiled_property_encoding_round_trips_and_byte_order_equals_value_order()
         )),
         scalar_value(CanonicalScalar::LocalDateTime(
             CanonicalLocalDateTime::parse_iso("1970-01-01T00:00").expect("date-time"),
+        )),
+        scalar_value(CanonicalScalar::Duration(
+            CanonicalDuration::parse_iso("PT-1S").expect("duration"),
+        )),
+        scalar_value(CanonicalScalar::Duration(
+            CanonicalDuration::parse_iso("P1D").expect("duration"),
+        )),
+        scalar_value(CanonicalScalar::Duration(
+            CanonicalDuration::parse_iso("PT24H").expect("duration"),
         )),
     ];
     let encoded: Vec<Vec<u8>> = corpus

@@ -52,11 +52,12 @@ pub use scalar::{
     MAX_SCALAR_PAYLOAD, ScalarDecodeError, ScalarEncodeError, ScalarField, ScalarProfileVersion,
 };
 pub use temporal::{
-    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, CanonicalTimestamp,
-    DateError, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS, MAX_ZONE_IDENTIFIER_BYTES,
-    MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY, TimeError, TimestampArtifactError,
-    TimestampConstructionError, TimestampDecodeError, TimestampEncodeError, TimestampZone,
-    TzdbResolver, format_utc_offset, parse_utc_offset,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
+    CanonicalTimestamp, DateError, DurationError, DurationUnit, MAX_TIMESTAMP_UTC_NANOS,
+    MAX_UTC_OFFSET_SECONDS, MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY,
+    SECONDS_PER_AVERAGE_MONTH, TimeError, TimestampArtifactError, TimestampConstructionError,
+    TimestampDecodeError, TimestampEncodeError, TimestampZone, TzdbResolver, format_utc_offset,
+    parse_utc_offset,
 };
 pub use text::{
     CanonicalText, CanonicalTextError, CollationResolver, CollationResolverError,

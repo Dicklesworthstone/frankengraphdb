@@ -13,8 +13,8 @@ use fgdb_gql::{
 };
 use fgdb_protocol::body::{WireTimestamp, WireValue, WireZone};
 use fgdb_types::{
-    CanonicalDate, CanonicalF64, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
-    CanonicalTime, CanonicalTimestamp, ObjectId, TzdbResolver,
+    CanonicalDate, CanonicalDuration, CanonicalF64, CanonicalLocalDateTime, CanonicalLocalTime,
+    CanonicalScalar, CanonicalTime, CanonicalTimestamp, ObjectId, TzdbResolver,
 };
 
 /// One result cell.
@@ -78,6 +78,7 @@ fn scalar_value(scalar: &CanonicalScalar) -> WireValue {
         CanonicalScalar::LocalTime(v) => WireValue::LocalTime(v.to_string()),
         CanonicalScalar::Time(v) => WireValue::Time(v.to_string()),
         CanonicalScalar::LocalDateTime(v) => WireValue::LocalDateTime(v.to_string()),
+        CanonicalScalar::Duration(v) => WireValue::Duration(v.to_string()),
     }
 }
 
@@ -215,6 +216,10 @@ fn argument_scalar(
             Ok(value) if value.to_string() == *v => CanonicalScalar::LocalDateTime(value),
             _ => return Err("a local date-time argument must be canonical ISO 8601 text"),
         },
+        WireValue::Duration(v) => match CanonicalDuration::parse_iso(v) {
+            Ok(value) if value.to_string() == *v => CanonicalScalar::Duration(value),
+            _ => return Err("a duration argument must be canonical ISO 8601 text"),
+        },
         WireValue::Decimal(_) => return Err("decimal arguments are not supported"),
         WireValue::Vertex(_)
         | WireValue::Edge(_)
@@ -308,6 +313,12 @@ mod tests {
                 local
             )))
         );
+        assert_eq!(
+            bind(WireValue::Duration("P1Y2M-3DT4.5S".into())),
+            Ok(CanonicalScalar::Duration(
+                CanonicalDuration::new(14, -3, 4_500_000_000).unwrap()
+            ))
+        );
         for value in [
             WireValue::LocalTime("2140".into()),
             WireValue::LocalTime("21:40:00".into()),
@@ -315,6 +326,8 @@ mod tests {
             WireValue::Time("21:40".into()),
             WireValue::LocalDateTime("20150721T21:40".into()),
             WireValue::LocalDateTime("2015-07-21T24:00".into()),
+            WireValue::Duration("P14M".into()),
+            WireValue::Duration("PT70S".into()),
         ] {
             assert_eq!(bind(value.clone()), Err("t".into()), "{value:?}");
         }
