@@ -1586,15 +1586,15 @@ fn cartesian_sources_preserve_child_occurrences_pages_and_zero_column_products()
     assert!(unit_plan.column_types().is_empty());
     assert_eq!(
         staged_plan(&graph, &unit_plan).unwrap(),
-        vec![GraphValueRow::unit(); 6]
+        vec![GraphValueRow::from_owned_values(Vec::new()); 6]
     );
     assert_eq!(
         graph.native(&units).unwrap(),
-        vec![GraphValueRow::unit(); 6]
+        vec![GraphValueRow::from_owned_values(Vec::new()); 6]
     );
     assert_eq!(
         staged(&graph, &units.with_page(4, Some(1))).unwrap(),
-        vec![GraphValueRow::unit()]
+        vec![GraphValueRow::from_owned_values(Vec::new())]
     );
 
     let nested = left
@@ -1994,8 +1994,16 @@ fn cartesian_pair_copy_preserves_original_domains_and_every_allocation_checkpoin
         any[2]
     );
     for (left, right, operand) in [
-        (GraphValueRow::unit(), right.clone(), 0),
-        (left.clone(), GraphValueRow::unit(), 1),
+        (
+            GraphValueRow::from_owned_values(Vec::new()),
+            right.clone(),
+            0,
+        ),
+        (
+            left.clone(),
+            GraphValueRow::from_owned_values(Vec::new()),
+            1,
+        ),
         (
             row(vec![
                 GraphValue::List(vec![].into_boxed_slice()),
