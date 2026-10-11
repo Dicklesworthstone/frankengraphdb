@@ -110,6 +110,7 @@ const KEYWORDS: &[&str] = &[
     "SYSTEM_TIME",
     "THEN",
     "TO",
+    "TOBOOLEAN",
     "TOFLOAT",
     "TOINTEGER",
     "TOLOWER",

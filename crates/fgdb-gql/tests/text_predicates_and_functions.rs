@@ -2083,6 +2083,47 @@ fn temporal_arithmetic_follows_the_tck() {
     }
 }
 
+/// openCypher toBoolean (TCK TypeConversion1): a Boolean is itself, the text
+/// `true` or `false` in any case converts, other text is NULL untrimmed, and
+/// NULL stays NULL. An integer is FALSE only at zero. A float is a typed
+/// failure, never a guessed truth value.
+#[test]
+fn opencypher_to_boolean_converts_booleans_text_and_integers() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    for (case, (input, expected)) in [
+        (CanonicalScalar::Bool(true), truth(true)),
+        (CanonicalScalar::Bool(false), truth(false)),
+        (text("true"), truth(true)),
+        (text("FALSE"), truth(false)),
+        (text("True"), truth(true)),
+        (text(""), CanonicalScalar::Null),
+        (text(" tru "), CanonicalScalar::Null),
+        (text(" true"), CanonicalScalar::Null),
+        (text("f alse"), CanonicalScalar::Null),
+        (CanonicalScalar::Null, CanonicalScalar::Null),
+        (CanonicalScalar::Int(0), truth(false)),
+        (CanonicalScalar::Int(-3), truth(true)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(scalar("toBoolean(n.text)", &input), expected, "case {case}");
+    }
+    assert_eq!(
+        scalar("toBoolean('true') AND NOT TOBOOLEAN('false')", &text("x")),
+        truth(true)
+    );
+    let float = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0));
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN toBoolean(n.text) AS value"),
+            &float,
+            policy()
+        )
+        .is_err()
+    );
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

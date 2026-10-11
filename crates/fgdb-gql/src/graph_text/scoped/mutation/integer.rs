@@ -1091,6 +1091,8 @@ impl<'a> Parser<'a> {
                 Some(GraphIntegerOp::ToText)
             } else if function.eq_ignore_ascii_case("TOINTEGER") {
                 Some(GraphIntegerOp::ToInteger)
+            } else if function.eq_ignore_ascii_case("TOBOOLEAN") {
+                Some(GraphIntegerOp::ToBoolean)
             } else if spelled(["CHAR_LENGTH", "SIZE"]) {
                 Some(GraphIntegerOp::CharLength)
             } else {

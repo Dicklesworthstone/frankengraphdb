@@ -95,6 +95,10 @@ pub enum GraphIntegerOp {
     /// integer; other text is NULL, as in openCypher. A float truncates
     /// toward zero; a non-finite float is NULL.
     ToInteger,
+    /// openCypher toBoolean: NULL, a Boolean, or the text `true` or `false` in
+    /// any case to a Boolean; other text is NULL. An integer is FALSE only at
+    /// zero. A float or any other value is an error.
+    ToBoolean,
     /// openCypher toFloat, floor, ceil, round and sqrt over a number.
     Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
@@ -200,6 +204,7 @@ impl GraphIntegerOp {
             Self::CharLength => bytes.push(20),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
+            Self::ToBoolean => bytes.push(37),
             Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
@@ -252,6 +257,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::CharLength => f.write_str("CharLength"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
+            Self::ToBoolean => f.write_str("ToBoolean"),
             Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
@@ -472,6 +478,7 @@ enum Instruction {
     CharLength,
     ToText,
     ToInteger,
+    ToBoolean,
     Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
@@ -858,6 +865,11 @@ impl GraphIntegerExpression {
                     let result = convert(value, matches!(op, Instruction::ToText), at, control)?;
                     *value = result.into();
                 }
+                Instruction::ToBoolean => {
+                    let value = stack.last_mut().expect("validated conversion operand");
+                    let result = to_boolean(value, at, control)?;
+                    *value = result.into();
+                }
                 Instruction::Numeric(function) => {
                     let value = stack.last_mut().expect("validated numeric operand");
                     let result = numeric(value, *function, at, control)?;
@@ -1131,6 +1143,7 @@ impl GraphIntegerExpression {
                 Instruction::CharLength => bytes.push(20),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
+                Instruction::ToBoolean => bytes.push(37),
                 Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
@@ -1223,6 +1236,43 @@ fn charge_payload<E>(
 /// is not an i64 literal converts to NULL under toInteger, as openCypher
 /// defines it. Decimal, float, timestamp, bytes and average cells are a typed
 /// failure, never a guessed rendering.
+/// openCypher toBoolean (TCK TypeConversion1): NULL stays NULL, a Boolean is
+/// itself, and the text `true` or `false` in any case converts. Any other
+/// text is NULL, untrimmed (`' tru '` is NULL). An integer is FALSE only at
+/// zero, as in Neo4j. A float, an average or any other value is an error.
+fn to_boolean<E>(
+    cell: &ExpressionCell<'_>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    Ok(match cell {
+        ExpressionCell::Count(value) => CanonicalScalar::Bool(*value != 0),
+        ExpressionCell::Integer(value) => CanonicalScalar::Bool(*value != 0),
+        ExpressionCell::Average(_) => {
+            return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+        }
+        ExpressionCell::Scalar(value) => match value.as_ref() {
+            CanonicalScalar::Null => CanonicalScalar::Null,
+            CanonicalScalar::Bool(value) => CanonicalScalar::Bool(*value),
+            CanonicalScalar::Int(value) => CanonicalScalar::Bool(*value != 0),
+            CanonicalScalar::Text(text) => {
+                let text = text.as_str();
+                charge_payload(text.len(), false, control)?;
+                if text.eq_ignore_ascii_case("true") {
+                    CanonicalScalar::Bool(true)
+                } else if text.eq_ignore_ascii_case("false") {
+                    CanonicalScalar::Bool(false)
+                } else {
+                    CanonicalScalar::Null
+                }
+            }
+            _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+        },
+    })
+}
+
 fn convert<E>(
     cell: &ExpressionCell<'_>,
     to_text: bool,

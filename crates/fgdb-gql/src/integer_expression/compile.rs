@@ -100,6 +100,7 @@ fn prepare_root(
             | Op::CharLength
             | Op::ToText
             | Op::ToInteger
+            | Op::ToBoolean
             | Op::Numeric(_)
             | Op::Matches(_) => 1,
             Op::Binary(_)
@@ -426,6 +427,7 @@ fn prepare_root(
                     Op::CharLength => Some(Instruction::CharLength),
                     Op::ToText => Some(Instruction::ToText),
                     Op::ToInteger => Some(Instruction::ToInteger),
+                    Op::ToBoolean => Some(Instruction::ToBoolean),
                     Op::Numeric(function) => Some(Instruction::Numeric(*function)),
                     Op::Matches(regex) => Some(Instruction::Matches(regex.clone())),
                     _ => None,
@@ -508,6 +510,7 @@ fn prepare_root(
                     | Op::CharLength
                     | Op::ToText
                     | Op::ToInteger
+                    | Op::ToBoolean
                     | Op::Numeric(_)
                     | Op::Matches(_)
                     | Op::Concat
