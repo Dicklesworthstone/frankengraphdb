@@ -116,8 +116,9 @@
 //!   cross-directory rename);
 //! * the backing store is updated immediately — pre-crash readers see the
 //!   new namespace exactly as a page cache would show it;
-//! * an **honest directory sync** settles every pending operation owing that
-//!   directory (and syncs the backing directory);
+//! * an **honest directory sync** captures the pending operations owing that
+//!   directory and settles only those operations after the backing sync
+//!   succeeds in the same crash generation;
 //! * a **lying directory sync** ([`FaultPlan::dirent_lie`]) reports success
 //!   and settles nothing — the names are still volatile;
 //! * at [`FaultVfs::crash`], each still-pending operation is put to
@@ -620,6 +621,9 @@ fn trace_fault_point(lab: &Lab, class: Class, ordinal: u64) {
 /// One namespace operation applied to the backing store whose durability is
 /// still owed to one or two parent-directory syncs.
 struct NamespaceOp {
+    /// Stable identity across awaits and vector compaction. A captured clone
+    /// keeps the allocation alive, so a later operation cannot reuse it.
+    identity: Arc<()>,
     /// Parent directories that must honestly sync before this operation is
     /// durable, identified by the backing VFS's canonical paths. Two
     /// entries only for a cross-directory rename.
@@ -1077,7 +1081,11 @@ impl<V: Vfs> FaultVfs<V> {
         if owing.is_empty() {
             return;
         }
-        self.lab.lock().namespace.push(NamespaceOp { owing, kind });
+        self.lab.lock().namespace.push(NamespaceOp {
+            identity: Arc::new(()),
+            owing,
+            kind,
+        });
     }
 
     /// How many crashes have been simulated.
@@ -1276,13 +1284,18 @@ impl<V: Vfs> FaultFile<V> {
     /// The directory half of the sync surface: settle or lie about the
     /// pending dirent operations owing this directory.
     async fn sync_dirents(&self) -> io::Result<()> {
-        let pending_ops = {
+        let captured = {
             let lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
             lab.namespace
                 .iter()
                 .filter(|op| op.owing.contains(&self.canonical_path))
-                .count() as u64
+                .map(|op| Arc::clone(&op.identity))
+                .collect::<Vec<_>>()
         };
+        let pending_ops = captured.len() as u64;
         if pending_ops == 0 {
             // Nothing owes this directory, so no fault class is eligible: an
             // honest no-op must not consume a trigger count. This is also
@@ -1293,6 +1306,9 @@ impl<V: Vfs> FaultFile<V> {
 
         let decision = {
             let mut lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
             let decision = lab.decide(Class::DirentLie);
             if decision.fires {
                 lab.record(&self.path, FaultKind::DirentSyncLie { pending_ops });
@@ -1306,22 +1322,33 @@ impl<V: Vfs> FaultFile<V> {
             return Ok(());
         }
 
-        // Honest: every pending operation stops owing this directory, and an
-        // operation owing nothing further is durable. The backing VFS's
-        // identity binds different spellings of the same directory; the
-        // original caller spelling remains in fault events and rollback.
-        {
-            let mut lab = self.lab.lock();
-            for op in &mut lab.namespace {
-                op.owing.retain(|dir| dir != &self.canonical_path);
-            }
-            lab.namespace.retain(|op| !op.owing.is_empty());
-        }
         let directory = self
             .backing
             .open(&self.path, &OpenOptions::new().read(true))
             .await?;
-        directory.sync_all().await
+        self.alive()?;
+        directory.sync_all().await?;
+
+        // Neither a backing failure nor cancellation retires debt. After a
+        // successful barrier, settle only its captured operations: a new
+        // operation may have arrived while open or sync was pending, and a
+        // concurrent barrier may already have removed a captured operation.
+        {
+            let mut lab = self.lab.lock();
+            if lab.generation != self.generation {
+                return Err(lost_handle());
+            }
+            for op in &mut lab.namespace {
+                if captured
+                    .iter()
+                    .any(|identity| Arc::ptr_eq(identity, &op.identity))
+                {
+                    op.owing.retain(|dir| dir != &self.canonical_path);
+                }
+            }
+            lab.namespace.retain(|op| !op.owing.is_empty());
+        }
+        Ok(())
     }
 
     async fn flush_through(&self) -> io::Result<()> {
