@@ -85,7 +85,7 @@ fn native_queries_refuse_unnamed_with_expressions_and_accept_explicit_bindings()
                     &c.query(),
                     text,
                     &params,
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls.set(calls.get() + 1);
                         symbols(kind, name)
                     },
