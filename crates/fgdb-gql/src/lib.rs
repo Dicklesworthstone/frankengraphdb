@@ -18,6 +18,7 @@ mod deletion;
 mod edge_merge;
 pub mod edge_stream;
 mod edge_upsert;
+mod edge_upsert_query;
 mod edge_upsert_text;
 mod evidence_artifact;
 mod evidence_cursor;
@@ -116,6 +117,10 @@ pub use edge_upsert::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertError,
     GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, GraphEdgeUpsertValue,
     MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeUpsert,
+};
+pub use edge_upsert_query::{
+    GraphEdgeReturnBinding, GraphEdgeUpsertQueryBuildError, GraphEdgeUpsertQueryError,
+    PreparedGraphEdgeUpsertQuery,
 };
 pub use edge_upsert_text::{
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
