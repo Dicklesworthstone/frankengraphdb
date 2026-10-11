@@ -1561,16 +1561,12 @@ impl<'a> Parser<'a> {
         list_operand_at(self.current, &self.lexer, row)
     }
 
-    /// Whether a searched CASE with a list result starts here
-    /// (case_has_list).
+    /// Whether a CASE with a list result starts here (case_has_list).
     pub(super) fn list_case_follows(
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("CASE")
-            && matches!(self.lexer.clone().next()?.kind,
-                TokenKind::Word(word) if word.eq_ignore_ascii_case("WHEN"))
-            && case_has_list(&self.lexer, row)?)
+        Ok(self.is_word("CASE") && case_has_list(&self.lexer, row)?)
     }
 
     /// Whether a list operand here is a whole CASE result: WHEN, THEN, ELSE

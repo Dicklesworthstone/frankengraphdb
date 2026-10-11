@@ -330,11 +330,27 @@ impl<'a> Parser<'a> {
         }
         self.advance()?;
         let nesting = self.let_base + depth + 1;
+        // A simple CASE compares its subject with each WHEN value: equality
+        // is three-valued, so a NULL subject or value never selects.
+        let subject = if self.is_word("WHEN") {
+            None
+        } else {
+            Some(self.case_result(columns, nesting, at)?)
+        };
         let mut arms = Vec::new();
         while self.take_word("WHEN")? {
-            let condition = self.case_result(columns, nesting, at)?;
+            let mut condition = self.case_result(columns, nesting, at)?;
+            if let Some(subject) = &subject {
+                condition = ReadValueTemplate::Equal {
+                    left: Box::new(subject.clone()),
+                    right: Box::new(condition),
+                };
+            }
             self.word("THEN")?;
             arms.push((condition, self.case_result(columns, nesting, at)?));
+        }
+        if arms.is_empty() {
+            self.word("WHEN")?;
         }
         let otherwise = if self.take_word("ELSE")? {
             Some(Box::new(self.case_result(columns, nesting, at)?))

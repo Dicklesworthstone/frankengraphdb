@@ -2336,6 +2336,13 @@ fn plus_concatenates_lists_and_appends_or_prepends_values() {
         ("CASE WHEN true THEN [1] ELSE [2] END + 3", ints(&[1, 3])),
         ("size(CASE WHEN true THEN [1, 2] ELSE [] END)", int(2)),
         ("CASE WHEN false THEN [1] ELSE 5 + 1 END", int(6)),
+        // The simple form compares its subject with each WHEN value.
+        ("CASE n.text WHEN 'ab' THEN [1] ELSE [2] END", ints(&[1])),
+        (
+            "CASE n.text WHEN 'x' THEN [1] WHEN 'ab' THEN [2, 3] END",
+            ints(&[2, 3]),
+        ),
+        ("CASE null WHEN null THEN [1] ELSE [2] END", ints(&[2])),
     ] {
         assert_eq!(value(expression), expected, "{expression}");
     }
