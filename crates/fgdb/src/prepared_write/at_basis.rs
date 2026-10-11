@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 /// An exact native fold at this writer lifetime's lazy-open cut. Keep the
 /// writer, including its spent identities, rather than deriving old state from
-/// newer partition rows. Sealed bytes are retained because the ordinary fold
-/// and per-commit seal remain the reconstruction implementation.
+/// newer partition rows. Immutable sealed payloads are shared with the live
+/// writer; staging and live maps remain independent. The ordinary fold and
+/// per-commit seal remain the reconstruction implementation.
 pub(crate) struct PreparationAnchor {
     basis: CommitSeq,
     writer: BlockWriter,

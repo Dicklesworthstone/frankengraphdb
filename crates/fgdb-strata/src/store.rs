@@ -2442,11 +2442,14 @@ impl<V: Vfs> BlockStore<V> {
         for (reference, read) in read {
             let property_patch = read.property_patch.map(|(patch_id, bytes)| {
                 property_patches.insert(patch_id);
-                crate::writer::SealedPropertyPatch { patch_id, bytes }
+                crate::writer::SealedPropertyPatch {
+                    patch_id,
+                    bytes: bytes.into(),
+                }
             });
             sealed_blocks.push(crate::writer::SealedBlock {
                 block_id: reference.block_id,
-                bytes: read.bytes,
+                bytes: read.bytes.into(),
                 first_seq: reference.first_seq,
                 last_seq: reference.last_seq,
                 property_patch,
@@ -2474,7 +2477,7 @@ impl<V: Vfs> BlockStore<V> {
         for (reference, (rows, bytes)) in read {
             sealed_patches.push(crate::writer::SealedPatch {
                 patch_id: reference.patch_id,
-                bytes,
+                bytes: bytes.into(),
                 first_seq: reference.first_seq,
                 last_seq: reference.last_seq,
             });

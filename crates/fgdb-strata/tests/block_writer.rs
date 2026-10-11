@@ -178,7 +178,7 @@ fn a_retirement_after_a_seal_publishes_an_encodable_root() {
         owned
             .iter()
             .find(|block| block.block_id == wanted)
-            .map(|block| block.bytes.clone())
+            .map(|block| block.bytes.to_vec())
     })
     .expect("the overlapping ranges remain truthful");
     assert_eq!(
@@ -602,7 +602,7 @@ fn a_published_root_resolves_against_the_writers_own_blocks() {
         owned
             .iter()
             .find(|b| b.block_id == wanted)
-            .map(|b| b.bytes.clone())
+            .map(|b| b.bytes.to_vec())
     })
     .expect("every named block resolves and matches its declared range");
     assert_eq!(resolved.len(), 2);

@@ -1151,6 +1151,15 @@ impl<'a> Parser<'a> {
         let value = self
             .read_resolved_item(
                 &mut |parser| {
+                    // Identity functions resolve their argument directly here.
+                    // A scoped element must never fall back to a same-named
+                    // graph binding while that element shadows it.
+                    if matches!(parser.current.kind, TokenKind::Word(word)
+                        if parser.elements.contains(&word))
+                        && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    {
+                        return Ok(None);
+                    }
                     let leaf = if parser.starts_aggregate_call()? {
                         let name = parser.name()?;
                         parser.punct(b'(', "(")?;
@@ -1238,16 +1247,6 @@ impl<'a> Parser<'a> {
                 };
                 error(source.offset, kind)
             })?;
-        // The aggregate-output evaluator binds no element scope (fgdb-20foe):
-        // collect first with WITH, then comprehend the collected list.
-        if value.binds_elements() {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Expected(
-                    "a list comprehension over a WITH-carried list, not an aggregate output",
-                ),
-            ));
-        }
         let end = self.current.at;
         let alias = if self.take_word("AS")? {
             self.name()?
