@@ -870,9 +870,10 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     /// Open a prepared vertex or fixed-edge stream under this session's policy
-    /// and capability. Vertex projection must lead with its unique VId. Edge
-    /// projection must lead with the captured root EId and root-source VId;
-    /// connected fixed joins then name each appended EId in traversal order.
+    /// and capability. Vertex projection must lead with its unique VId. Directed
+    /// edge projection must lead with the captured root EId; undirected roots
+    /// also require the root-source VId to distinguish orientations. Connected
+    /// fixed joins then name each appended EId in traversal order.
     /// These prefixes prove native canonical ordering and ALL/DISTINCT semantics
     /// without a result bag or seen-set. Remaining edge columns may project
     /// endpoints, masked vertex/edge properties and admitted fixed-path values.

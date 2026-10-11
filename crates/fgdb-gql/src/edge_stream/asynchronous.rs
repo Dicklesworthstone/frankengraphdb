@@ -89,8 +89,9 @@ pub trait AsyncEdgeScanSource: Send {
 /// The existing ordered single-edge profile, with awaitable source access.
 /// No join/probe, variable-length traversal, hidden sort key or eager fallback
 /// is admitted. Those readers need their own asynchronous access contracts.
-/// Edge identity then oriented source identity still prove order/uniqueness;
-/// both ALL and DISTINCT reuse that proof without retaining a result bag.
+/// Edge identity proves order/uniqueness for directed roots; an undirected root
+/// also requires its oriented source identity. Both ALL and DISTINCT reuse
+/// that proof without retaining a result bag.
 #[derive(Clone)]
 pub struct AsyncEdgeScanPlan {
     inner: EdgeScanPlan,
