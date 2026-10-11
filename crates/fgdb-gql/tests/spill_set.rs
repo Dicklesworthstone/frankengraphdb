@@ -153,11 +153,13 @@ fn compare(a: &GraphValueRow, b: &GraphValueRow, order: &[GraphValueOrder]) -> O
                     Ordering::Less
                 }
             }
+            // Explicit ORDER BY keys use openCypher orderability (42fb01c3);
+            // maps order by size, then keys, then values, not canonically.
             (false, false) => {
                 if key.descending {
-                    b.cmp(a)
+                    b.compare_orderability(a)
                 } else {
-                    a.cmp(b)
+                    a.compare_orderability(b)
                 }
             }
         };

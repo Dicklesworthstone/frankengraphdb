@@ -272,13 +272,15 @@ fn every_mixed_input_cursor_cut_and_inclusive_native_limit_remains_fail_closed()
 
 #[test]
 fn mixed_domain_replacements_admit_payload_before_mutation_and_never_copy_losers() {
+    // openCypher orderability (42fb01c3) puts a list before text, so MAX
+    // replaces the list with the text and MIN keeps the list.
     let prior = GraphValue::List(Box::new([]));
     let candidate =
         GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"visible".repeat(100)).unwrap());
     let initial = || {
         let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(());
         let mut state =
-            NumericState::new_governed(GraphAggregateFunction::Min, &mut control).unwrap();
+            NumericState::new_governed(GraphAggregateFunction::Max, &mut control).unwrap();
         state
             .update_governed(Input::from_value(&prior), 0, &mut control)
             .unwrap();
@@ -311,7 +313,7 @@ fn mixed_domain_replacements_admit_payload_before_mutation_and_never_copy_losers
         );
     }
     let mut state =
-        NumericState::new_governed(GraphAggregateFunction::Max, &mut |_| Ok::<_, ()>(())).unwrap();
+        NumericState::new_governed(GraphAggregateFunction::Min, &mut |_| Ok::<_, ()>(())).unwrap();
     state
         .update_governed(Input::from_value(&prior), 0, &mut |_| {
             Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())

@@ -263,7 +263,17 @@ fn ranker_preserves_dynamic_value_domains_and_full_width_identities() {
         .cloned()
         .map(|value| GraphValueRow::from_owned_values(vec![value]))
         .collect();
-    expected.sort();
+    // ORDER BY ascending, NULLs first: NULL, then openCypher orderability
+    // (42fb01c3: vertices, lists, bytes, text, numbers), then the canonical
+    // row as the tie-break between equal keys.
+    let null = |value: &GraphValue| matches!(value, GraphValue::Scalar(CanonicalScalar::Null));
+    expected.sort_by(|left, right| {
+        let (a, b) = (&left.values()[0], &right.values()[0]);
+        null(b)
+            .cmp(&null(a))
+            .then_with(|| a.compare_orderability(b))
+            .then_with(|| left.cmp(right))
+    });
     let mut ranked = Ranked::new(&order, 1, 6);
     for value in values {
         ranked
