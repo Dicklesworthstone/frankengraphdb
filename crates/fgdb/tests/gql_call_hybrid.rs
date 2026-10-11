@@ -1030,3 +1030,399 @@ fn transaction_hybrid_calls_share_allowances_and_preserve_interruption() {
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
+
+/// Eligibility applies before each lane's candidate limit. Node 5 loses the
+/// unrestricted top-one searches, and graph traversal reaches it only through
+/// three ineligible intermediate vertices.
+#[test]
+fn transaction_eligible_precedes_lane_limits_and_preserves_transit_and_corpus() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let txn = db.begin(txcx).unwrap();
+        let params = GqlParameters::new();
+        let cases = [
+            (
+                "text => 'engine', text_property => 'body'",
+                [None, Some(1), None, None],
+            ),
+            (
+                "vector => [1.0, 0.0], vector_properties => ['e0', 'e1']",
+                [Some(1), None, None, None],
+            ),
+            (
+                "vector => [1.0, 0.0], vector_property => 'emb'",
+                [Some(1), None, None, None],
+            ),
+            (
+                "text => 'quasar', text_property => 'body', seeds => [1], \
+                 relation => 'CITES', max_hops => 4, graph_candidates => 1",
+                [None, None, Some(1), Some(4)],
+            ),
+            (
+                "text => 'engine', text_property => 'body', vector => [1.0, 0.0], \
+                 vector_properties => ['e0', 'e1'], seeds => [1], relation => 'CITES', \
+                 max_hops => 4, graph_candidates => 1",
+                [Some(1), Some(1), Some(1), Some(4)],
+            ),
+        ];
+        for (arguments, ranks_and_hops) in cases {
+            let unrestricted =
+                format!("CALL hybrid.search({arguments}, candidates => 1, k => 1) {OUTPUTS}");
+            let control = rows(
+                txn.query(&db, cx, &unrestricted, &params, symbols, policy())
+                    .unwrap(),
+            );
+            assert_eq!(control.1.len(), 1, "{arguments}");
+            assert_ne!(control.1[0][0], GraphValue::Vertex(VId(5)), "{arguments}");
+            let filtered = format!(
+                "CALL hybrid.search({arguments}, eligible => [5], candidates => 1, k => 1) \
+                 {OUTPUTS}"
+            );
+            let actual = rows(
+                txn.query(&db, cx, &filtered, &params, symbols, policy())
+                    .unwrap(),
+            );
+            assert_eq!(actual.1.len(), 1, "{arguments}");
+            assert_eq!(actual.1[0][0], GraphValue::Vertex(VId(5)), "{arguments}");
+            let expected = ranks_and_hops.map(|value| {
+                GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+            });
+            assert_eq!(actual.1[0][2..], expected, "{arguments}");
+            assert_eq!(
+                actual,
+                rows(db.query(cx, &filtered, &params, symbols, policy()).unwrap()),
+                "immutable and transaction hosts disagree: {arguments}",
+            );
+        }
+        // Ranks change after eligibility, but the raw BM25 score must still
+        // use all six documents. Compare to an unrestricted, untruncated read.
+        let corpus = rows(
+            txn.query(
+                &db,
+                cx,
+                "CALL hybrid.search(text => 'engine', text_property => 'body', \
+                 candidates => 6, k => 6) YIELD node, text_score RETURN node, text_score",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        );
+        let wanted = corpus
+            .1
+            .iter()
+            .find(|row| row[0] == GraphValue::Vertex(VId(5)))
+            .unwrap();
+        let selected = rows(
+            txn.query(
+                &db,
+                cx,
+                "CALL hybrid.search(text => 'engine', text_property => 'body', \
+                 eligible => [5], candidates => 1, k => 1) \
+                 YIELD node, text_score RETURN node, text_score",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(selected.1, [wanted.clone()]);
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn transaction_eligible_reads_staged_changes_and_matches_the_committed_result() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let frontier = db.frontier().unwrap();
+        let params = GqlParameters::new();
+        let statement = "CALL hybrid.search(text => 'engine', text_property => 'body', \
+                         vector => [1.0, 0.0], vector_properties => ['e0', 'e1'], \
+                         eligible => [5, 6, 7], label => 'Doc', seeds => [1], \
+                         relation => 'CITES', max_hops => 2, candidates => 10, k => 3) \
+                         YIELD node, score, graph_hops \
+                         RETURN node, node.title AS title, score, graph_hops ORDER BY node";
+        let before = db.query(cx, statement, &params, symbols, policy()).unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut change = WriteBatch::new(CITES);
+        change.delete_vertex(VId(5));
+        change.set_vertex_property(VId(6), TITLE, Some(text("Updated Shannon")));
+        change.set_vertex_property(VId(6), BODY, Some(text("engine engine")));
+        change.set_vertex_property(VId(6), E0, Some(float(1.0)));
+        change.set_vertex_property(VId(6), E1, Some(float(0.0)));
+        change.create_vertex(
+            VId(7),
+            vec![DOC],
+            vec![
+                (TITLE, text("New eligible document")),
+                (BODY, text("analytical engine")),
+                (E0, float(0.75)),
+                (E1, float(0.25)),
+            ],
+        );
+        change.add_edge(EId(70), VId(1), VId(6), vec![]);
+        change.add_edge(EId(71), VId(6), VId(7), vec![]);
+        txn.write(&mut db, change).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let answer = txn
+            .query(&db, cx, statement, &params, symbols, policy())
+            .unwrap();
+        let actual = rows(answer.clone()).1;
+        assert_eq!(
+            actual.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+            [GraphValue::Vertex(VId(6)), GraphValue::Vertex(VId(7))],
+        );
+        assert_eq!(actual[0][1], GraphValue::Scalar(text("Updated Shannon")));
+        assert_eq!(
+            actual[1][1],
+            GraphValue::Scalar(text("New eligible document"))
+        );
+        assert_eq!(actual[0][3], GraphValue::Scalar(CanonicalScalar::Int(1)));
+        assert_eq!(actual[1][3], GraphValue::Scalar(CanonicalScalar::Int(2)));
+        assert_ne!(answer, before);
+        assert_eq!(
+            db.query(cx, statement, &params, symbols, policy()).unwrap(),
+            before
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert!(matches!(
+            txn.finish(&mut db, commit).await.unwrap(),
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. },
+        ));
+        assert_eq!(
+            db.query(cx, statement, &params, symbols, policy()).unwrap(),
+            answer
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn transaction_eligible_distinguishes_omission_empty_duplicates_and_bad_ids() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let mut wide = WriteBatch::new(CITES);
+        wide.create_vertex(
+            VId(u128::MAX),
+            vec![DOC],
+            vec![(E0, float(0.25)), (E1, float(0.75))],
+        );
+        db.write(commit, wide).await.unwrap();
+        let frontier = db.frontier().unwrap();
+        let txn = db.begin(txcx).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let params = GqlParameters::new();
+        let read = |extra: &str, params: &GqlParameters| {
+            txn.query(
+                &db,
+                cx,
+                &format!(
+                    "CALL hybrid.search(vector => [1.0, 0.0], \
+                     vector_properties => ['e0', 'e1'], candidates => 1, k => 1{extra}) \
+                     YIELD node RETURN node"
+                ),
+                params,
+                symbols,
+                policy(),
+            )
+        };
+        let unrestricted = read("", &params).unwrap();
+        assert_eq!(read(", eligible => NULL", &params).unwrap(), unrestricted);
+        assert!(
+            rows(read(", eligible => []", &params).unwrap())
+                .1
+                .is_empty()
+        );
+        let selected = read(", eligible => [5]", &params).unwrap();
+        assert_eq!(rows(selected.clone()).1, [vec![GraphValue::Vertex(VId(5))]]);
+        assert_eq!(read(", eligible => [5, 5, 5]", &params).unwrap(), selected);
+        let typed = GqlParameters::new()
+            .with_list(
+                "allowed",
+                vec![
+                    GraphValue::Vertex(VId(5)),
+                    GraphValue::Scalar(CanonicalScalar::Int(5)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(read(", eligible => $allowed", &typed).unwrap(), selected);
+        let wide = GqlParameters::new()
+            .with_list("allowed", vec![GraphValue::Vertex(VId(u128::MAX))])
+            .unwrap();
+        assert_eq!(
+            rows(read(", eligible => $allowed", &wide).unwrap()).1,
+            [vec![GraphValue::Vertex(VId(u128::MAX))]],
+        );
+        for invalid in ["TRUE", "[NULL]", "[-1]", "['5']", "[1.0]"] {
+            let error = read(&format!(", eligible => {invalid}"), &params).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    QueryError::TransactionSet(ref error) if matches!(error.as_ref(),
+                        GqlQueryError::Source(GraphSetExecutionError::Source(
+                            fgdb::WriteTxnError::Gql(GqlError::Procedure(ProcedureError::Search(
+                                HybridCallError::Argument { name: "eligible", .. }
+                                | HybridCallError::Index(fgdb_beacon::BeaconError::InvalidQuery(_))
+                            )))
+                        ))
+                    )
+                ),
+                "{invalid}: {error:?}"
+            );
+        }
+        assert_eq!(read(", eligible => [5]", &params).unwrap(), selected);
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+/// Excluded documents still determine BM25 statistics; excluded intermediate
+/// vertices and edges still determine reachability. Both remain dependencies
+/// even when the caller rolls back the savepoint that surrounded the search.
+#[test]
+fn transaction_eligible_keeps_pinned_excluded_reads_and_savepoint_conflicts() {
+    run_transaction(async |commit, cx, txcx| {
+        for change_edge in [false, true] {
+            let mut db = open(commit, false).await;
+            let mut txn = db.begin(txcx).unwrap();
+            txn.savepoint(&db, "before_eligible_search").unwrap();
+            let params = GqlParameters::new();
+            let statement = "CALL hybrid.search(text => 'engine', text_property => 'body', \
+                             seeds => [1], relation => 'CITES', max_hops => 4, \
+                             eligible => [5], candidates => 1, graph_candidates => 1, k => 1) \
+                             YIELD node, text_score, graph_hops RETURN node, text_score, graph_hops";
+            let pinned = txn
+                .query(&db, cx, statement, &params, symbols, policy())
+                .unwrap();
+            assert_eq!(rows(pinned.clone()).1[0][0], GraphValue::Vertex(VId(5)));
+            let mut winner = WriteBatch::new(CITES);
+            if change_edge {
+                winner.delete_edge(EId(2)); // ineligible 2 -> ineligible 3
+            } else {
+                // An excluded nonmatching document joins the term's corpus.
+                winner.set_vertex_property(VId(6), BODY, Some(text("engine engine")));
+            }
+            db.write(commit, winner).await.unwrap();
+            let frontier = db.frontier().unwrap();
+            let live = db.query(cx, statement, &params, symbols, policy()).unwrap();
+            assert_ne!(live, pinned, "the excluded change must affect the control");
+            assert_eq!(
+                txn.query(&db, cx, statement, &params, symbols, policy())
+                    .unwrap(),
+                pinned,
+                "the open transaction must keep its original corpus and topology",
+            );
+            txn.rollback_to_savepoint(&db, "before_eligible_search")
+                .unwrap();
+            // There is deliberately no read after rollback to restore a
+            // witness accidentally discarded with the savepoint's writes.
+            assert!(matches!(
+                txn.finish(&mut db, commit).await,
+                Err(fgdb::WriteTxnError::Write(
+                    fgdb::WriteError::FirstCommitterWins { .. }
+                )),
+            ));
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn transaction_eligible_shares_budgets_and_never_publishes_a_refused_prefix() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit, false).await;
+        let frontier = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut prefix = WriteBatch::new(CITES);
+        prefix.set_vertex_property(VId(6), TITLE, Some(text("Uncommitted title")));
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let statement = "CALL hybrid.search(text => 'engine', text_property => 'body', \
+                         vector => [1.0, 0.0], vector_properties => ['e0', 'e1'], \
+                         seeds => [1], max_hops => 4, eligible => [5, 6], \
+                         candidates => 2, graph_candidates => 2, k => 2) YIELD node RETURN node";
+        let plan = fgdb_gql::PreparedGraphSetText::prepare(
+            &format!("{statement} UNION ALL {statement}"),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        // Warm the existing read-set witnesses before measuring the same
+        // execution's exact shared boundaries across both filtered calls.
+        txn.execute_graph_set_governed(&db, cx, &plan, policy())
+            .unwrap();
+        let expected = txn
+            .execute_graph_set_governed(&db, cx, &plan, policy())
+            .unwrap();
+        assert_eq!(expected.value.len(), 4);
+        let exact = GqlQueryPolicy::new(
+            expected.rows.snapshot_records,
+            expected.rows.result_rows,
+            expected.evaluator.work_units,
+            expected.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            txn.execute_graph_set_governed(&db, cx, &plan, exact)
+                .unwrap(),
+            expected
+        );
+        for work in [false, true] {
+            let mut short = exact;
+            if work {
+                short.evaluator.max_work_units -= 1;
+            } else {
+                short.evaluator.max_scratch_entries -= 1;
+            }
+            assert!(
+                txn.execute_graph_set_governed(&db, cx, &plan, short)
+                    .is_err()
+            );
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        }
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        assert_eq!(
+            txn.execute_graph_set_governed(
+                &db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &plan,
+                policy(),
+            )
+            .unwrap(),
+            expected,
+        );
+        let checkpoints = probe.calls();
+        assert!(checkpoints > 20);
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let result = txn.execute_graph_set_governed(
+                &db,
+                &cx.with_checkpoint_probe(probe.clone()),
+                &plan,
+                policy(),
+            );
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(_))),
+                "{result:?}"
+            );
+            assert_eq!(probe.calls(), stop, "continued after cancellation");
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        }
+        assert_eq!(
+            txn.execute_graph_set_governed(&db, cx, &plan, policy())
+                .unwrap(),
+            expected
+        );
+        txn.abort();
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}

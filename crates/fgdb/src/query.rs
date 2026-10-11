@@ -31,10 +31,11 @@ pub use authorized::{
     AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
     AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
 };
-pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
 pub(crate) use beacon::procedure::{
-    HybridSearch, is_hybrid, privileged as hybrid_procedure, refuse as hybrid_refusal,
+    EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
+    refuse as hybrid_refusal,
 };
+pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
 pub use beacon::{PinnedIndex, RefreshReport, ResidentIndex, ResidentIndexError};
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};

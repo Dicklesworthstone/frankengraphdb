@@ -1,8 +1,8 @@
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, VId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, VId};
 
 fn okay<T>(result: Result<T, Failure>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
@@ -158,6 +158,119 @@ fn hybrid_reads_compose_with_staged_writes_and_commit_only_after_output_admissio
                 );
             }
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn filtered_hybrid_transaction_rows_follow_savepoints_and_atomic_delivery() {
+    let ((), report) = run_async_under_lab(0x7478_6321, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+            vector => [0], vector_properties => ['p'], label => 'Person', \
+            seeds => [1], relation => 'R', max_hops => 2, \
+            eligible => $allowed, candidates => 1, graph_candidates => 1, k => 1) \
+            YIELD node, graph_hops, vector_rank, text_rank \
+            RETURN node.p AS p, graph_hops, vector_rank, text_rank";
+        let options = options(&[
+            "--property",
+            "bio=2",
+            "--relation",
+            "R=1",
+            "--write",
+            "MATCH (n:Person {p:3}) SET n.p = 4",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3,3]",
+            "--savepoint",
+            "selected",
+            "--write",
+            "MATCH (n:Person {p:4}) SET n.p = 9",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3]",
+            "--rollback-to",
+            "selected",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3]",
+        ]);
+        for max_rows in [2, 1] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
+                        (
+                            PropertyKeyId(2),
+                            CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                        ),
+                    ],
+                );
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            seed.add_edge(EId(2), VId(2), VId(3), vec![]);
+            db.write(&contexts.commit(), seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut bytes = Vec::new();
+            let result = run_with_limits(
+                &mut db,
+                &contexts,
+                &options,
+                None,
+                true,
+                &mut bytes,
+                Limits {
+                    rows: max_rows,
+                    output_bytes: 100_000,
+                },
+                None,
+            )
+            .await;
+            if max_rows == 1 {
+                let error =
+                    result.expect_err("filtered rows still spend the shared delivery allowance");
+                assert_eq!(error.code, 3, "{}", error.message);
+                assert!(
+                    bytes.is_empty(),
+                    "a refused transaction exposed buffered search rows"
+                );
+                assert_eq!(db.frontier().unwrap(), basis);
+            } else {
+                okay(result);
+                let text = output(bytes);
+                let cells = r#""cells":[{"type":"int","value":"4"},{"type":"int","value":"2"},{"type":"int","value":"1"},{"type":"int","value":"1"}]"#;
+                assert_eq!(text.matches(cells).count(), 2, "{text}");
+                assert!(
+                    text.contains(&format!(r#""statement":2,{cells}"#)),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(&format!(r#""statement":7,{cells}"#)),
+                    "{text}"
+                );
+                assert!(!text.contains(r#""event":"row","statement":5"#), "{text}");
+                assert_eq!(text.matches("\"event\":\"result\"").count(), 1);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+            }
+            let vertices = db.vertices_at(db.frontier().unwrap()).unwrap();
+            let selected = vertices.iter().find(|row| row.vid == VId(3)).unwrap();
+            let expected = if max_rows == 1 { 3 } else { 4 };
+            assert!(
+                selected
+                    .props
+                    .contains(&(PropertyKeyId(1), CanonicalScalar::Int(expected)))
+            );
+            assert_eq!(contexts.outstanding_obligations(), 0);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

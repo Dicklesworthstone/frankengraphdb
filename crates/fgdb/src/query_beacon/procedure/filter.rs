@@ -8,13 +8,13 @@ use fgdb_beacon::{BeaconError, WorkControl};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_types::{CanonicalScalar, VId};
 
-pub(super) struct EndpointFilter {
+pub(crate) struct EndpointFilter {
     ids: Option<BTreeSet<VId>>,
     failure: RefCell<Option<BeaconError>>,
 }
 
 impl EndpointFilter {
-    pub(super) fn prepare(
+    pub(crate) fn prepare(
         values: Option<&[GraphValue]>,
         result_capacity: usize,
         scratch_limit: u64,
@@ -58,14 +58,14 @@ impl EndpointFilter {
         })
     }
 
-    pub(super) fn scratch_entries(&self) -> u64 {
+    pub(crate) fn scratch_entries(&self) -> u64 {
         self.ids.as_ref().map_or(0, |ids| ids.len() as u64)
     }
 
     /// The native predicate ABI returns bool. Retain a failed work/authority
     /// check separately so it can NEVER be mistaken for ordinary ineligibility.
     /// The caller must finish the entire retrieval through `finish` below.
-    pub(super) fn admits(&self, id: VId, work: &RefCell<impl WorkControl>) -> bool {
+    pub(crate) fn admits(&self, id: VId, work: &RefCell<impl WorkControl>) -> bool {
         if self.failure.borrow().is_some() {
             return false;
         }
@@ -85,7 +85,7 @@ impl EndpointFilter {
     /// No successful prefix or later error may replace the first refusal in
     /// the bool predicate. The host meter separately retains typed expiry and
     /// cancellation causes and maps them after this private result is discarded.
-    pub(super) fn finish<T>(&self, result: Result<T, BeaconError>) -> Result<T, BeaconError> {
+    pub(crate) fn finish<T>(&self, result: Result<T, BeaconError>) -> Result<T, BeaconError> {
         match self.failure.borrow().as_ref() {
             Some(error) => Err(error.clone()),
             None => result,
@@ -110,7 +110,8 @@ mod tests {
             GraphValue::Scalar(CanonicalScalar::Int(0)),
             GraphValue::Vertex(VId(u128::MAX)),
         ];
-        let selected = EndpointFilter::prepare(Some(&values), 1, 4, &mut *work.borrow_mut()).unwrap();
+        let selected =
+            EndpointFilter::prepare(Some(&values), 1, 4, &mut *work.borrow_mut()).unwrap();
         assert_eq!(selected.scratch_entries(), 2);
         assert!(selected.admits(VId(0), &work));
         assert!(selected.admits(VId(u128::MAX), &work));
@@ -123,7 +124,10 @@ mod tests {
         let values = [GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(1))];
         assert!(matches!(
             EndpointFilter::prepare(Some(&values), 1, 2, &mut WorkBudget::new(100)),
-            Err(BeaconError::ResourceLimit { resource: "eligible vertex scratch entries", limit: 2 })
+            Err(BeaconError::ResourceLimit {
+                resource: "eligible vertex scratch entries",
+                limit: 2
+            })
         ));
         for value in [
             GraphValue::Scalar(CanonicalScalar::Null),
@@ -140,27 +144,44 @@ mod tests {
     #[test]
     fn lookup_refusal_cannot_be_returned_as_an_empty_success_or_replaced() {
         let filter = EndpointFilter::prepare(
-            Some(&[GraphValue::Vertex(VId(1))]), 1, 2, &mut WorkBudget::new(100),
-        ).unwrap();
+            Some(&[GraphValue::Vertex(VId(1))]),
+            1,
+            2,
+            &mut WorkBudget::new(100),
+        )
+        .unwrap();
         let work = RefCell::new(WorkBudget::new(0));
         assert!(!filter.admits(VId(1), &work));
-        assert!(matches!(filter.finish(Ok(Vec::<VId>::new())), Err(BeaconError::WorkBudgetExceeded)));
+        assert!(matches!(
+            filter.finish(Ok(Vec::<VId>::new())),
+            Err(BeaconError::WorkBudgetExceeded)
+        ));
         assert!(matches!(
             filter.finish::<()>(Err(BeaconError::InvalidQuery("later refusal"))),
             Err(BeaconError::WorkBudgetExceeded)
         ));
         let replenished = RefCell::new(WorkBudget::new(100));
         assert!(!filter.admits(VId(1), &replenished));
-        assert!(matches!(filter.finish(Ok(())), Err(BeaconError::WorkBudgetExceeded)));
+        assert!(matches!(
+            filter.finish(Ok(())),
+            Err(BeaconError::WorkBudgetExceeded)
+        ));
     }
 
     #[test]
     fn every_preparation_and_lookup_checkpoint_can_cancel_without_a_result() {
-        struct Cut { count: usize, stop: usize }
+        struct Cut {
+            count: usize,
+            stop: usize,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.count += 1;
-                if self.count == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.count == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let run = |stop| {
@@ -227,9 +248,12 @@ mod native_tests {
     }
 
     fn expected() -> Vec<Vec<QueryValue>> {
-        vec![[3, 2, 1, 1].into_iter().map(|n| {
-            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(n)))
-        }).collect()]
+        vec![
+            [3, 2, 1, 1]
+                .into_iter()
+                .map(|n| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(n))))
+                .collect(),
+        ]
     }
 
     #[test]
@@ -238,15 +262,20 @@ mod native_tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let cx = contexts.query();
-            let mut db = Database::open_memory(
-                &commit, DatabaseKeys::new([0xa1; 32], NS, [0xa3; 32]),
-            ).await.unwrap();
+            let mut db =
+                Database::open_memory(&commit, DatabaseKeys::new([0xa1; 32], NS, [0xa3; 32]))
+                    .await
+                    .unwrap();
             let mut batch = WriteBatch::new(RelationId(1));
             for id in [1, 2, 3, 90] {
                 batch.create_vertex(
-                    VId(id), vec![LabelId(if id == 90 { 99 } else { 1 })],
+                    VId(id),
+                    vec![LabelId(if id == 90 { 99 } else { 1 })],
                     vec![
-                        (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph").unwrap()),
+                        (
+                            PropertyKeyId(1),
+                            CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                        ),
                         (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
                     ],
                 );
@@ -258,33 +287,66 @@ mod native_tests {
             let params = GqlParameters::new();
             for allowed in ["[3]", "[3, 3, 999]"] {
                 assert_eq!(
-                    rows(db.query(&cx, &statement(allowed), &params, symbols, policy()).unwrap()),
+                    rows(
+                        db.query(&cx, &statement(allowed), &params, symbols, policy())
+                            .unwrap()
+                    ),
                     expected()
                 );
             }
-            assert!(rows(db.query(&cx, &statement("[]"), &params, symbols, policy()).unwrap()).is_empty());
-            assert!(db.query(&cx, &statement("[-1]"), &params, symbols, policy()).is_err());
-            let unrestricted = rows(db.query(&cx, &statement("null"), &params, symbols, policy()).unwrap());
+            assert!(
+                rows(
+                    db.query(&cx, &statement("[]"), &params, symbols, policy())
+                        .unwrap()
+                )
+                .is_empty()
+            );
+            assert!(
+                db.query(&cx, &statement("[-1]"), &params, symbols, policy())
+                    .is_err()
+            );
+            let unrestricted = rows(
+                db.query(&cx, &statement("null"), &params, symbols, policy())
+                    .unwrap(),
+            );
             assert_eq!(unrestricted.len(), 1);
-            assert_eq!(unrestricted[0][0], QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))));
+            assert_eq!(
+                unrestricted[0][0],
+                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2)))
+            );
 
             let authority = Authority::new(
-                AuthKey::from_seed(3401), NS, "hybrid-filter-host", SchemaEpoch(0), 1,
-            ).unwrap();
+                AuthKey::from_seed(3401),
+                NS,
+                "hybrid-filter-host",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
             let mut grant = Grant::read_only(
-                "main", 1000,
-                QueryLimits { max_nodes: 100, max_work: 1_000_000, max_rows: 10 },
+                "main",
+                1000,
+                QueryLimits {
+                    max_nodes: 100,
+                    max_work: 1_000_000,
+                    max_rows: 10,
+                },
             );
             grant.labels = Scope::only([LabelId(1)]);
             grant.relations = Scope::only([RelationId(1)]);
             grant.properties = Scope::only([PropertyKeyId(1), PropertyKeyId(2)]);
             let token = authority.issue_at(&grant, 100).unwrap();
-            let mut session = db.authorized_read_session(
-                &cx, &authority, &token, "main", symbols, policy(), || 100,
-            ).unwrap();
+            let mut session = db
+                .authorized_read_session(&cx, &authority, &token, "main", symbols, policy(), || 100)
+                .unwrap();
             // The hidden supplied ID cannot win, route, or unmask any property.
-            let prepared = session.prepare(&cx, &statement("[90, 3]"), &params).unwrap();
-            assert_eq!(rows(session.execute(&cx, &prepared, &params).unwrap()), expected());
+            let prepared = session
+                .prepare(&cx, &statement("[90, 3]"), &params)
+                .unwrap();
+            assert_eq!(
+                rows(session.execute(&cx, &prepared, &params).unwrap()),
+                expected()
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

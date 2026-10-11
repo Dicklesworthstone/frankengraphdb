@@ -188,6 +188,23 @@ impl WriteTxn {
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_filtered(database, cx, options, query, |_| true)
+    }
+
+    /// Restrict result endpoints before text/vector candidate limits and
+    /// fusion. Eligibility does not remove documents from BM25 statistics or
+    /// ANN routing, and every corpus observation remains a read dependency.
+    /// Derive data-dependent eligibility from this same transaction overlay.
+    /// The predicate must be stable, bounded computation over IDs, not I/O or
+    /// an authorization check. Reject-all retains validation and source limits.
+    pub fn beacon_search_filtered<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, ReadError<WriteTxnError, Cancel>> {
         self.beacon_read(
             database,
             cx,
@@ -199,7 +216,7 @@ impl WriteTxn {
                 Ok(config)
             },
             |_, _| Ok(()),
-            |index, _, work| query.execute(index, &mut Shared(work)),
+            |index, _, work| query.execute_filtered(index, eligible, &mut Shared(work)),
         )
     }
 
@@ -219,13 +236,15 @@ impl WriteTxn {
         fgdb_gql::GqlQueryError<WriteTxnError, Cancel>,
     > {
         use crate::gql_exec::AdmissionUsage;
-        use crate::query::{HybridSearch, hybrid_refusal};
+        use crate::query::{EndpointFilter, HybridSearch, hybrid_refusal};
         use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution};
 
-        let search = HybridSearch::bind(call, arguments, self.basis, policy)
-            .map_err(|error| hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
+        let (search, eligible) =
+            HybridSearch::bind_filtered(call, arguments, self.basis, policy)
+                .map_err(|error| hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
         let usage = RefCell::new(AdmissionUsage::default());
         let failure = RefCell::new(None);
+        let filter = RefCell::new(None::<EndpointFilter>);
         let result = {
             let observe = |event| {
                 if failure.borrow().is_some() {
@@ -242,13 +261,49 @@ impl WriteTxn {
                     BeaconError::Cancelled
                 })
             };
-            self.beacon_search_graph_observed(
+            self.beacon_search_graph_filtered_observed(
                 database,
                 cx,
                 search.options(),
                 search.query(),
                 search.expansion(),
                 Some(&observe),
+                |work| {
+                    let source_scratch = {
+                        let control = work.borrow();
+                        u64::try_from(control.limit.saturating_sub(control.scratch))
+                            .unwrap_or(u64::MAX)
+                    };
+                    let prepared = EndpointFilter::prepare(
+                        eligible,
+                        search.query().retrieval.k,
+                        policy.evaluator.max_scratch_entries.min(source_scratch),
+                        &mut Shared(work),
+                    )?;
+                    // Reserve the actual set in the SAME source and enclosing
+                    // query scratch allowances before any corpus is observed.
+                    // The preparation gate separately bounds all input
+                    // occurrences, including duplicates, before allocation.
+                    for _ in 0..prepared.scratch_entries() {
+                        work.borrow_mut().source(SourceEvent::ScratchEntry)?;
+                    }
+                    *filter.borrow_mut() = Some(prepared);
+                    Ok(())
+                },
+                |id, work| {
+                    filter
+                        .borrow()
+                        .as_ref()
+                        .expect("endpoint filter prepared before retrieval")
+                        .admits(id, work)
+                },
+                |result| {
+                    filter
+                        .borrow()
+                        .as_ref()
+                        .expect("endpoint filter prepared before retrieval")
+                        .finish(result)
+                },
             )
         };
         if let Some(error) = failure.into_inner() {
