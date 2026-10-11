@@ -89,6 +89,11 @@ pub(crate) enum ReadValueTemplate {
         value: Box<ReadValueTemplate>,
         list: Box<ReadValueTemplate>,
     },
+    /// Three-valued `left = right` over composite values (fgdb-9cawv).
+    Equal {
+        left: Box<ReadValueTemplate>,
+        right: Box<ReadValueTemplate>,
+    },
     Literal(crate::GqlScalarParameter),
     Parameter {
         index: usize,
@@ -195,6 +200,7 @@ impl ReadValueTemplate {
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
             Self::Size(inner) => inner.binds_elements(),
             Self::In { value, list } => value.binds_elements() || list.binds_elements(),
+            Self::Equal { left, right } => left.binds_elements() || right.binds_elements(),
             Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
                 false
             }
@@ -388,6 +394,11 @@ impl ReadValueTemplate {
                     value.append_template_transcript(bytes);
                 }
                 body.append_template_transcript(bytes);
+            }
+            Self::Equal { left, right } => {
+                bytes.push(20);
+                left.append_template_transcript(bytes);
+                right.append_template_transcript(bytes);
             }
         }
     }

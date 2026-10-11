@@ -239,6 +239,10 @@ impl PreparedGraphAggregateText {
                 value: Box::new(Self::bind_input_value(value, values)?),
                 list: Box::new(Self::bind_input_value(list, values)?),
             }),
+            ReadValueTemplate::Equal { left, right } => Ok(GraphSetValue::Equal {
+                left: Box::new(Self::bind_input_value(left, values)?),
+                right: Box::new(Self::bind_input_value(right, values)?),
+            }),
             ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
             ReadValueTemplate::Comprehension { list, filter, map } => {
                 let part = |part: &Option<Box<ReadValueTemplate>>| {

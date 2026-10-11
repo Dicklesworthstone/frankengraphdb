@@ -546,6 +546,7 @@ fn bind_fields(
             ReadValueTemplate::Index { .. }
             | ReadValueTemplate::Size(_)
             | ReadValueTemplate::In { .. }
+            | ReadValueTemplate::Equal { .. }
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapGet { .. }

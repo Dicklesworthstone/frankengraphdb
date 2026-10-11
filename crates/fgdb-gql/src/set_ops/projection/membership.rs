@@ -24,7 +24,11 @@ pub(crate) fn evaluate<E>(
     Ok(result)
 }
 
-fn equal<E>(
+/// Three-valued `left = right` under the same law as membership. A list or
+/// map compares element by element: a definite mismatch is FALSE, else an
+/// UNKNOWN element makes it UNKNOWN. Maps with different key sets are FALSE
+/// whatever their values (fgdb-9cawv).
+pub(crate) fn equal<E>(
     left: &GraphValue,
     right: &GraphValue,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -43,8 +47,17 @@ fn equal<E>(
         if let Some((left, right)) = pending.take() {
             control(GlaExecutionEvent::Work)?;
             for value in [left, right] {
-                if let GraphValue::Scalar(value) = value {
-                    crate::algebra_exec::charge_payload(value, control)?;
+                match value {
+                    GraphValue::Scalar(value) => {
+                        crate::algebra_exec::charge_payload(value, control)?;
+                    }
+                    // Comparing two maps reads every key once.
+                    GraphValue::Map { keys, .. } => {
+                        for _ in keys {
+                            control(GlaExecutionEvent::Work)?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             result = if left.is_null() || right.is_null() {
@@ -66,7 +79,21 @@ fn equal<E>(
                     (GraphValue::Edges(left), GraphValue::Edges(right)) => {
                         Some(equal_sequence(left, right, control)?)
                     }
-                    (GraphValue::List(left), GraphValue::List(right)) => {
+                    // Keys are unique and ascending, so equal key sets are
+                    // equal slices.
+                    (
+                        GraphValue::Map {
+                            keys: left_keys, ..
+                        },
+                        GraphValue::Map {
+                            keys: right_keys, ..
+                        },
+                    ) if left_keys != right_keys => Some(false),
+                    (GraphValue::List(left), GraphValue::List(right))
+                    | (
+                        GraphValue::Map { values: left, .. },
+                        GraphValue::Map { values: right, .. },
+                    ) => {
                         if left.len() != right.len() {
                             Some(false)
                         } else if left.is_empty() {

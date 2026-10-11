@@ -611,6 +611,80 @@ fn composite_values_are_operands_of_scalar_operators() {
     );
 }
 
+/// fgdb-9cawv: a list or map literal compared with `=`, `<>`, `!=` or IN is
+/// one three-valued comparison: a definite mismatch is FALSE, else an
+/// UNKNOWN element makes it UNKNOWN, and maps with different key sets are
+/// FALSE whatever their values (TCK Comparison1 [6], [7], List5). Mixed
+/// domains keep the engine's row-predicate law: UNKNOWN, where openCypher
+/// says FALSE.
+#[test]
+fn composite_literals_compare_three_valued() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    let null = CanonicalScalar::Null;
+    for (expression, expected) in [
+        // Comparison1 [6].
+        ("[1, 2] = [1]", truth(false)),
+        ("[null] = [1]", null.clone()),
+        ("[[1]] = [[1], [null]]", truth(false)),
+        ("[[1], [2]] = [[1], [null]]", null.clone()),
+        ("[[1], [2, 3]] = [[1], [null]]", truth(false)),
+        ("['a'] = [1]", null.clone()),
+        ("[1, 2] = [1, 2]", truth(true)),
+        ("[1] = null", null.clone()),
+        // Comparison1 [7].
+        ("{} = {}", truth(true)),
+        ("{k: true} = {k: true}", truth(true)),
+        ("{k: 1.0} = {k: 1.0}", truth(true)),
+        ("{k: 'a', l: 2} = {k: 'a', l: 2}", truth(true)),
+        ("{} = {k: null}", truth(false)),
+        ("{k: null} = {}", truth(false)),
+        ("{k: 1} = {k: 1, l: null}", truth(false)),
+        ("{k: null, l: 1} = {l: 1}", truth(false)),
+        ("{k: 1} = {l: 1}", truth(false)),
+        ("{k: null} = {k: null}", null.clone()),
+        ("{k: 1, l: null} = {k: null, l: 1}", null.clone()),
+        ("{k: 1, l: null} = {k: 1, l: 1}", null.clone()),
+        // Inequality is the negated equality, UNKNOWN staying UNKNOWN.
+        ("[1, 2] <> [1]", truth(true)),
+        ("[1, 2] != [1, 2]", truth(false)),
+        ("{k: null} <> {k: null}", null.clone()),
+        // List5: a composite left operand of IN.
+        ("[1] IN [1, 2, [1]]", truth(true)),
+        ("[[1, 2], [3, 4]] IN [5, [[1, 2], [3, 4]]]", truth(true)),
+        ("[1, 2] IN [[2, 1]]", truth(false)),
+        ("[] IN [1, []]", truth(true)),
+        ("[] IN []", truth(false)),
+        ("[null] IN [[null]]", null.clone()),
+        // The comparison is one operand of the operators around it, after
+        // the literal's own postfix reads.
+        ("[1] = [1] AND [2] <> [3]", truth(true)),
+        ("NOT [1] = [2]", truth(true)),
+        ("[1, 2][0] = 1", truth(true)),
+        ("{k: 1}.k = 1", truth(true)),
+        // A graph property inside the literal reads the matched row.
+        ("{k: n.text} = {k: 'x'}", truth(true)),
+        ("[n.text] = ['y']", truth(false)),
+    ] {
+        assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
+    }
+    // The TCK's bare RETURN form, over the unit row.
+    let result = execute(
+        &prepare("RETURN [1, 2] = [1] AS list, {k: null} = {} AS map"),
+        &text("x"),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 1);
+    assert_eq!(
+        result.value[0]
+            .values()
+            .iter()
+            .map(|value| value.as_scalar().unwrap().clone())
+            .collect::<Vec<_>>(),
+        vec![truth(false), truth(false)]
+    );
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

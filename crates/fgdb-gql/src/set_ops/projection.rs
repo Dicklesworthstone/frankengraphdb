@@ -5,7 +5,7 @@
 mod map_overlay_tests;
 mod membership;
 
-pub(crate) use membership::evaluate as evaluate_membership;
+pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
 
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
@@ -44,6 +44,13 @@ pub enum GraphSetValue {
     In {
         value: Box<GraphSetValue>,
         list: Box<GraphSetValue>,
+    },
+    /// Three-valued `left = right` under the membership law (fgdb-9cawv):
+    /// lists and maps compare element by element, and a NULL operand is
+    /// UNKNOWN. Both operands address the original row and execute once.
+    Equal {
+        left: Box<GraphSetValue>,
+        right: Box<GraphSetValue>,
     },
     Value(GraphValue),
     /// A list-comprehension element (fgdb-20foe): the value `k` positions
@@ -498,6 +505,11 @@ fn admit(
             }
             GraphSetColumnType::Scalar
         }
+        GraphSetValue::Equal { left, right } => {
+            admit(left, types, column, depth + 1, nodes, locals)?;
+            admit(right, types, column, depth + 1, nodes, locals)?;
+            GraphSetColumnType::Scalar
+        }
         // openCypher size(): a list's length or a text's character count
         // (fgdb-xakp1). A literal that is neither refuses here; any other
         // scalar is a typed failure when evaluated.
@@ -805,6 +817,11 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             }
             append_value_transcript(body, bytes);
         }
+        GraphSetValue::Equal { left, right } => {
+            bytes.push(20);
+            append_value_transcript(left, bytes);
+            append_value_transcript(right, bytes);
+        }
     }
 }
 
@@ -1079,6 +1096,14 @@ fn evaluate_value_at<E>(
                 membership::evaluate(value.as_ref(), members, control)
                     .map_err(ProjectionFailure::Control)?
             };
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+        }
+        GraphSetValue::Equal { left, right } => {
+            let left = operand(left, row, column, control, depth + 1, nodes)?;
+            let right = operand(right, row, column, control, depth + 1, nodes)?;
+            let truth = membership::equal(left.as_ref(), right.as_ref(), control)
+                .map_err(ProjectionFailure::Control)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }

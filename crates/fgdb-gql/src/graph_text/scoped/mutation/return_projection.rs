@@ -109,6 +109,30 @@ fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextError> {
     }
 }
 
+/// The first token after a value's postfix reads (`[...]` subscripts and
+/// `.key` entries), with `lexer` just past the value itself.
+fn after_postfix<'t>(lexer: &mut Lexer<'t>) -> Result<Token<'t>, GraphPatternTextError> {
+    let mut next = lexer.next()?;
+    loop {
+        match next.kind {
+            TokenKind::Punct(b'[') => {
+                skip_group(lexer)?;
+                next = lexer.next()?;
+            }
+            TokenKind::Punct(b'.')
+                if matches!(
+                    lexer.clone().next()?.kind,
+                    TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+                ) =>
+            {
+                lexer.next()?;
+                next = lexer.next()?;
+            }
+            _ => return Ok(next),
+        }
+    }
+}
+
 /// The column domain of one graph input: a property is a scalar, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
@@ -1193,6 +1217,9 @@ impl<'a> Parser<'a> {
     /// (fgdb-o5o9t). The lookahead skips the value and its postfix reads on
     /// a cloned lexer, so nothing is consumed or registered.
     fn composite_operand_continues(&self) -> Result<bool, GraphPatternTextError> {
+        if self.starts_composite_comparison()? {
+            return Ok(true);
+        }
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         if !size && !self.starts_let_operand()? {
@@ -1203,30 +1230,30 @@ impl<'a> Parser<'a> {
             lexer.next()?;
         }
         skip_group(&mut lexer)?;
-        let mut next = lexer.next()?;
-        loop {
-            match next.kind {
-                TokenKind::Punct(b'[') => {
-                    skip_group(&mut lexer)?;
-                    next = lexer.next()?;
-                }
-                TokenKind::Punct(b'.')
-                    if matches!(
-                        lexer.clone().next()?.kind,
-                        TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
-                    ) =>
-                {
-                    lexer.next()?;
-                    next = lexer.next()?;
-                }
-                _ => break,
-            }
-        }
-        Ok(match next.kind {
+        Ok(match after_postfix(&mut lexer)?.kind {
             TokenKind::Punct(byte) => b"=<>!+-*/%^".contains(&byte),
             TokenKind::Word(word) => ["AND", "OR", "XOR", "IS", "IN", "STARTS", "ENDS", "CONTAINS"]
                 .iter()
                 .any(|operator| word.eq_ignore_ascii_case(operator)),
+            _ => false,
+        })
+    }
+
+    /// Whether a list or map literal starts here and, after its postfix
+    /// reads, is compared with `=`, `<>`, `!=` or IN, as in `[1, 2] = [1]`
+    /// or `{k: 1} <> {}` (fgdb-9cawv). The scalar compiler reads such a
+    /// comparison whole in the value language; it never compares composites.
+    pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
+        if !(self.is_punct(b'{') || (self.is_punct(b'[') && !self.starts_let_operand()?)) {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        skip_group(&mut lexer)?;
+        Ok(match after_postfix(&mut lexer)?.kind {
+            TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
             _ => false,
         })
     }
@@ -2036,6 +2063,10 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::In { value, list } => GraphSetValue::In {
             value: Box::new(bind_read_value(value, values)?),
             list: Box::new(bind_read_value(list, values)?),
+        },
+        ReadValueTemplate::Equal { left, right } => GraphSetValue::Equal {
+            left: Box::new(bind_read_value(left, values)?),
+            right: Box::new(bind_read_value(right, values)?),
         },
         ReadValueTemplate::Size(value) => {
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))

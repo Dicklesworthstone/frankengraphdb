@@ -165,6 +165,7 @@ fn fields<E, A, C>(
             | GraphSetValue::Index { .. }
             | GraphSetValue::Size(_)
             | GraphSetValue::In { .. }
+            | GraphSetValue::Equal { .. }
             | GraphSetValue::Local(_)
             | GraphSetValue::Comprehension { .. }
             | GraphSetValue::Quantifier { .. }

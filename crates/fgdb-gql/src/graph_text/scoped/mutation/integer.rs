@@ -251,6 +251,80 @@ impl<'a> Parser<'a> {
         emit(program, ParsedOp::LetRef(slot), at)
     }
 
+    /// One composite operand read in the value language, as a let slot
+    /// carries it (fgdb-o5o9t).
+    fn composite_value(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        Ok(match columns {
+            ExpressionColumns::Graph(columns) => {
+                self.read_composite_operand(Some(&mut **columns), &[], nesting)?
+            }
+            ExpressionColumns::Row(schema) => self.read_composite_operand(None, schema, nesting)?,
+            ExpressionColumns::Resolved(_) => {
+                return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
+            }
+        })
+    }
+
+    // The two let-slot readers below are out of line on purpose: their
+    // templates would otherwise sit in `integer_unary`'s frame, which repeats
+    // once per nested parenthesis up to MAX_INTEGER_NESTING, and a wider frame
+    // overflows a test thread's stack at that depth (fgdb-9cawv).
+
+    /// One composite operand read through a let slot (fgdb-o5o9t).
+    #[inline(never)]
+    fn composite_slot(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let nesting = self.let_base + depth + 1;
+        let value = self.composite_value(columns, nesting, at)?;
+        self.let_slot(program, value, at)
+    }
+
+    /// `[..] = rhs`, `{..} <> rhs` or `[..] IN list`, read whole in the
+    /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
+    /// equality.
+    #[inline(never)]
+    fn composite_comparison(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let nesting = self.let_base + depth + 1;
+        let left = self.composite_value(columns, nesting, at)?;
+        let (value, negate) = if self.take_word("IN")? {
+            let list = self.composite_value(columns, nesting, at)?;
+            let value = ReadValueTemplate::In {
+                value: Box::new(left),
+                list: Box::new(list),
+            };
+            (value, false)
+        } else {
+            let negate = self.comparison()? == IntegerComparison::NotEqual;
+            let right = self.composite_value(columns, nesting, at)?;
+            let value = ReadValueTemplate::Equal {
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            (value, negate)
+        };
+        self.let_slot(program, value, at)?;
+        if negate {
+            emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
+        }
+        Ok(())
+    }
+
     /// `.key` reads after `value`, each one a map entry.
     fn map_entries(
         &mut self,
@@ -835,22 +909,15 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
+        // A list or map literal compared with `=`, `<>`, `!=` or IN is one
+        // three-valued comparison in the value language (fgdb-9cawv).
+        if self.lets.is_some() && self.starts_composite_comparison()? {
+            return self.composite_comparison(columns, depth, program, at);
+        }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.
         if self.lets.is_some() && self.starts_let_operand()? {
-            let nesting = self.let_base + depth + 1;
-            let value = match columns {
-                ExpressionColumns::Graph(columns) => {
-                    self.read_composite_operand(Some(&mut **columns), &[], nesting)?
-                }
-                ExpressionColumns::Row(schema) => {
-                    self.read_composite_operand(None, schema, nesting)?
-                }
-                ExpressionColumns::Resolved(_) => {
-                    return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
-                }
-            };
-            return self.let_slot(program, value, at);
+            return self.composite_slot(columns, depth, program, at);
         }
         // `m.key` of a dynamically typed row column, such as a map from WITH
         // or UNWIND, reads the entry through a let slot (fgdb-o5o9t). A

@@ -27,8 +27,8 @@ pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
 };
 pub(crate) use projection::{
-    ProjectionFailure, evaluate_membership, evaluate_value, map_keys, overlay_map, range_values,
-    slice_bounds,
+    ProjectionFailure, evaluate_equality, evaluate_membership, evaluate_value, map_keys,
+    overlay_map, range_values, slice_bounds,
 };
 
 use crate::algebra::{
