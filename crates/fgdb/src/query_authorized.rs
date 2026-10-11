@@ -14,6 +14,7 @@
 use super::{Cancel, QueryError};
 use crate::gql_exec::{
     AdmissionUsage,
+    property_maps::{self, PropertyMaps},
     source::{self, SourceEvent},
 };
 use crate::{Database, GqlError, ReadError, Snapshot, VertexRow};
@@ -212,6 +213,7 @@ struct Tables<'a> {
     edges: BTreeMap<EId, Edge<'a>>,
     labels: BTreeMap<VId, Vec<GraphValue>>,
     types: BTreeMap<EId, CanonicalScalar>,
+    property_maps: PropertyMaps,
     records: u64,
 }
 impl<'a> Tables<'a> {
@@ -256,6 +258,7 @@ impl<'a> Tables<'a> {
             edges: BTreeMap::new(),
             labels: BTreeMap::new(),
             types: BTreeMap::new(),
+            property_maps: PropertyMaps::default(),
             records: 0,
         }
     }
@@ -353,6 +356,32 @@ impl<'a> Tables<'a> {
                 })?;
                 control(SourceEvent::ScratchEntry)?;
                 self.types.insert(eid, name);
+            }
+        }
+        if plan.projects_vertex_property_maps() {
+            for row in self.vertices.values() {
+                let map = property_maps::collect(
+                    row.props.iter().map(|(key, value)| (*key, value)),
+                    plan.reverse_catalog.as_deref(),
+                    |key| predicates.allows_property(key),
+                    control,
+                    &GqlQueryError::Source,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.vertices.insert(row.vid, map);
+            }
+        }
+        if plan.projects_edge_property_maps() {
+            for (&eid, (_, properties)) in &self.edges {
+                let map = property_maps::collect(
+                    properties.iter().map(|(key, value)| (*key, value)),
+                    plan.reverse_catalog.as_deref(),
+                    |key| predicates.allows_property(key),
+                    control,
+                    &GqlQueryError::Source,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.edges.insert(eid, map);
             }
         }
         Ok(())
@@ -477,7 +506,7 @@ fn execute_tables<Row: GlaOutput>(
     usage: AdmissionUsage,
     checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
 ) -> Governed<Row> {
-    let result = pattern.plan().execute_governed_with_element_accessors(
+    let result = pattern.plan().execute_governed_with_element_maps(
         tables.records,
         tables.vertices.keys().copied(),
         tables.edges.values().map(|(edge, _)| *edge),
@@ -486,6 +515,8 @@ fn execute_tables<Row: GlaOutput>(
         |eid, key| Ok(tables.edge_property(eid, key, scope)),
         |vid| Ok(tables.labels.get(&vid).map(Vec::as_slice)),
         |eid| Ok(tables.types.get(&eid)),
+        |vid| Ok(tables.property_maps.vertices.get(&vid)),
+        |eid| Ok(tables.property_maps.edges.get(&eid)),
         usage.remaining(policy),
         checkpoint,
     );

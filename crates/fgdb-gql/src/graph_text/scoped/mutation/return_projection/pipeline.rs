@@ -71,7 +71,36 @@ fn boundary_binding<'a>(
         return None;
     };
     let input = head.inputs.get(column.checked_sub(offset)?)?;
-    (input.property.is_none() && input.path.is_none()).then_some(input.variable)
+    (input.property.is_none() && matches!(input.path, None | Some(GraphPathFunction::Edge)))
+        .then_some(input.variable)
+}
+
+/// Recognize only a complete graph-element map request. Nested map-valued
+/// expressions keep their ordinary scalar leaves and are not catalog reads.
+pub(super) fn property_map_source<'a>(
+    word: &'a str,
+    at: usize,
+    lexer: &Lexer<'a>,
+) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+    let mut lookahead = lexer.clone();
+    let next = lookahead.next()?;
+    if matches!(next.kind, TokenKind::Punct(b'{')) {
+        return Ok(Some(Name { text: word, at }));
+    }
+    if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+        && matches!(next.kind, TokenKind::Punct(b'('))
+    {
+        let argument = lookahead.next()?;
+        if let TokenKind::Word(text) = argument.kind
+            && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(Some(Name {
+                text,
+                at: argument.at,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
@@ -178,6 +207,43 @@ impl<'a> Parser<'a> {
                     if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>
                 {
                     break;
+                }
+                TokenKind::Word(word) if !after_dot => {
+                    if let Some(source) = property_map_source(word, token.at, &lexer)?
+                        && let Some(variable) = boundary_binding(head, offset, source.text)
+                        && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
+                            alias == source.text && key.text == "*"
+                        })
+                    {
+                        let name = BOUNDARY_READ_NAMES
+                            .iter()
+                            .copied()
+                            .find(|name| {
+                                head.outputs.iter().all(|(output, _)| output.text != *name)
+                            })
+                            .ok_or_else(|| {
+                                expected(
+                                    source.at,
+                                    "at most 16 carried-element property reads after a WITH",
+                                )
+                            })?;
+                        let input = self.property_map_projection(&mut head.inputs, variable)?;
+                        head.outputs.push((
+                            Name {
+                                text: name,
+                                at: source.at,
+                            },
+                            ReadValueTemplate::Column(offset + input),
+                        ));
+                        reads.push((
+                            source.text,
+                            Name {
+                                text: "*",
+                                at: source.at,
+                            },
+                            head.outputs.len() - 1,
+                        ));
+                    }
                 }
                 TokenKind::Word(property) if after_dot => {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));

@@ -51,13 +51,14 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
         Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
         Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
         Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+        Some(GraphPathFunction::Properties) => GraphSetColumnType::Any,
     }
 }
 
 /// Whether a value can statically hold a map, so `.key` may read it
 /// (fgdb-2jw3z). A row column qualifies only when its type is dynamic
-/// (`schema` is the row scope; graph and resolved scopes pass None, and
-/// their columns are graph values or aggregates, never maps).
+/// (`schema` is the row scope). A graph property-map projection is identified
+/// separately by the parser, without admitting an arbitrary graph identity.
 fn map_capable(
     value: &ReadValueTemplate,
     schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
@@ -65,6 +66,7 @@ fn map_capable(
 ) -> bool {
     match value {
         ReadValueTemplate::MapLiteral { .. }
+        | ReadValueTemplate::MapOverlay { .. }
         | ReadValueTemplate::MapGet { .. }
         | ReadValueTemplate::Local(_)
         | ReadValueTemplate::Index { .. }
@@ -114,6 +116,7 @@ impl<'a> GraphProjectionHead<'a> {
                     Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
                     Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
                     Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+                    Some(GraphPathFunction::Properties) => GraphSetColumnType::Any,
                     None => GraphSetColumnType::Vertex,
                 }
             })
@@ -126,6 +129,51 @@ impl<'a> GraphProjectionHead<'a> {
 }
 
 impl<'a> Parser<'a> {
+    fn property_map_projection(
+        &self,
+        columns: &mut Vec<Projection<'a>>,
+        source: Name<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        self.require_property_variable(source)?;
+        self.projection_slot(
+            columns,
+            Projection {
+                variable: source,
+                property: None,
+                path: Some(GraphPathFunction::Properties),
+            },
+        )
+    }
+
+    /// A function call resolved by a graph/row boundary callback. KEYS uses
+    /// the same map source; its list conversion stays in the row evaluator.
+    fn property_map_function(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<usize, GraphPatternTextError> {
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        let source = self.property_variable()?;
+        self.punct(b')', ")")?;
+        self.property_map_projection(columns, source)
+    }
+
+    fn boundary_property_map(
+        &self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        alias: &str,
+    ) -> Option<usize> {
+        let boundary = self.boundary_reads.as_ref()?;
+        if boundary.width != schema.len() {
+            return None;
+        }
+        boundary
+            .reads
+            .iter()
+            .find(|(name, key, _)| *name == alias && key.text == "*")
+            .map(|(_, _, column)| *column)
+    }
+
     /// Parse a MATCH leaf exactly once. Composition owns the enclosing set
     /// delimiters and pagination; this parser owns names, expressions and the
     /// original shared parameter table. No statement substring is rewritten.
@@ -467,6 +515,18 @@ impl<'a> Parser<'a> {
                     let TokenKind::Word(word) = parser.current.kind else {
                         return Ok(None);
                     };
+                    if (word.eq_ignore_ascii_case("properties")
+                        || word.eq_ignore_ascii_case("keys"))
+                        && let Some(argument) =
+                            pipeline::property_map_source(word, parser.current.at, &parser.lexer)?
+                        && parser
+                            .visible_graph_bindings()
+                            .any(|name| name.text == argument.text)
+                    {
+                        return parser
+                            .property_map_function(inputs)
+                            .map(|column| Some(width + column));
+                    }
                     if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
                         return Ok(None);
                     }
@@ -737,12 +797,12 @@ impl<'a> Parser<'a> {
     /// n's property a, `k: e` is any value, and `v` is the binding v itself.
     /// Keys are sorted and must be unique, as in a map literal. The source is
     /// the map's guard: a NULL n (an OPTIONAL MATCH without a witness) makes
-    /// the whole projection NULL, never `{a: NULL}`. `.*` needs the complete
-    /// property catalog and refuses.
+    /// the whole projection NULL, never `{a: NULL}`. `.*` reads the complete
+    /// admitted property map, and explicit entries replace its named fields.
     #[allow(clippy::type_complexity)]
     fn map_projection(
         &mut self,
-        columns: &mut Vec<Projection<'a>>,
+        mut columns: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
         resolve: &mut Option<
             &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
@@ -750,9 +810,23 @@ impl<'a> Parser<'a> {
         depth: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
-        let source = self.any_variable()?;
+        let source = self.name()?;
+        let carried = if columns.is_none() {
+            self.boundary_property_map(schema, source.text).or_else(|| {
+                schema.iter().position(|(name, kind)| {
+                    name.text == source.text
+                        && matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Scalar)
+                })
+            })
+        } else {
+            None
+        };
+        if columns.is_none() && carried.is_none() {
+            return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable).into());
+        }
         self.punct(b'{', "{")?;
         let mut entries: Vec<(Box<str>, ReadValueTemplate)> = Vec::new();
+        let mut all = false;
         if !self.take(b'}')? {
             loop {
                 self.capacity(
@@ -761,35 +835,57 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let entry = if self.take(b'.')? {
-                    if self.is_punct(b'*') {
-                        return Err(GraphSetTextError {
-                            offset: self.current.at,
-                            kind: GraphSetTextErrorKind::Expected(
-                                "explicit property keys in a map projection (.* needs the property catalog)",
-                            ),
-                        });
+                    if self.take(b'*')? {
+                        all = true;
+                        if self.take(b'}')? {
+                            break;
+                        }
+                        self.punct(b',', ", or }")?;
+                        continue;
                     }
                     let key = self.map_key()?;
-                    let column = self.mutation_projection(columns, source, Some(key))?;
-                    (key.text.into(), ReadValueTemplate::Column(column))
+                    let value = if let Some(columns) = columns.as_deref_mut() {
+                        ReadValueTemplate::Column(self.mutation_projection(
+                            columns,
+                            source,
+                            Some(key),
+                        )?)
+                    } else {
+                        ReadValueTemplate::MapGet {
+                            map: Box::new(ReadValueTemplate::Column(
+                                carried.expect("carried map source checked"),
+                            )),
+                            key: key.text.into(),
+                        }
+                    };
+                    (key.text.into(), value)
                 } else {
                     let key = self.map_key()?;
                     if self.take(b':')? {
                         let value = self.read_recursive_value(
-                            Some(&mut *columns),
+                            columns.as_deref_mut(),
                             schema,
                             resolve,
                             depth + 1,
                         )?;
                         (key.text.into(), value)
-                    } else if self
-                        .syntax
-                        .variables
-                        .iter()
-                        .any(|name| name.text == key.text)
-                        || self.syntax.visible_edge(key.text).is_some()
+                    } else if let Some(index) =
+                        schema.iter().position(|(name, _)| name.text == key.text)
                     {
-                        let column = self.mutation_projection(columns, key, None)?;
+                        (key.text.into(), ReadValueTemplate::Column(index))
+                    } else if columns.is_some()
+                        && (self
+                            .syntax
+                            .variables
+                            .iter()
+                            .any(|name| name.text == key.text)
+                            || self.syntax.visible_edge(key.text).is_some())
+                    {
+                        let column = self.mutation_projection(
+                            columns.as_deref_mut().expect("graph columns checked"),
+                            key,
+                            None,
+                        )?;
                         (key.text.into(), ReadValueTemplate::Column(column))
                     } else {
                         return Err(
@@ -811,12 +907,34 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::Expected("unique keys in a map projection"),
             });
         }
-        let guard = self.mutation_projection(columns, source, None)?;
         let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        if all {
+            let column = match columns.as_deref_mut() {
+                Some(columns) => self.property_map_projection(columns, source)?,
+                None => carried.expect("carried map source checked"),
+            };
+            return Ok(ReadValueTemplate::MapOverlay {
+                base: Box::new(ReadValueTemplate::Column(column)),
+                keys: keys.into_boxed_slice(),
+                values,
+            });
+        }
+        let guard = match columns {
+            Some(columns) => {
+                ReadValueTemplate::Column(self.mutation_projection(columns, source, None)?)
+            }
+            None => ReadValueTemplate::MapOverlay {
+                base: Box::new(ReadValueTemplate::Column(
+                    carried.expect("carried map source checked"),
+                )),
+                keys: Box::new([]),
+                values: Vec::new(),
+            },
+        };
         Ok(ReadValueTemplate::MapLiteral {
             keys: keys.into_boxed_slice(),
             values,
-            guard: Some(Box::new(ReadValueTemplate::Column(guard))),
+            guard: Some(Box::new(guard)),
         })
     }
 
@@ -863,6 +981,7 @@ impl<'a> Parser<'a> {
                 kind: GraphSetTextErrorKind::IntegerNesting { limit: 64 },
             });
         }
+        let mut graph_map = false;
         let comprehension = self.is_punct(b'[') && {
             let mut lexer = self.lexer.clone();
             matches!(lexer.next()?.kind, TokenKind::Word(_))
@@ -956,15 +1075,83 @@ impl<'a> Parser<'a> {
                 values,
                 guard: None,
             }
-        } else if self.is_word("KEYS")
+        } else if (self.is_word("KEYS") || self.is_word("PROPERTIES"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
-            self.advance()?;
-            self.punct(b'(', "(")?;
-            let map =
-                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
-            self.punct(b')', ")")?;
-            ReadValueTemplate::Keys(Box::new(map))
+            let keys = self.is_word("KEYS");
+            let resolved = if inputs.is_none() && schema.is_empty() {
+                match resolve.as_deref_mut() {
+                    Some(resolve) => resolve(self)?,
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let (map, graph) = if let Some(column) = resolved {
+                (ReadValueTemplate::Column(column), true)
+            } else {
+                self.advance()?;
+                self.punct(b'(', "(")?;
+                let source = match self.current.kind {
+                    TokenKind::Word(word)
+                        if !self.elements.contains(&word)
+                            && matches!(
+                                self.lexer.clone().next()?.kind,
+                                TokenKind::Punct(b')')
+                            ) =>
+                    {
+                        Some(Name {
+                            text: word,
+                            at: self.current.at,
+                        })
+                    }
+                    _ => None,
+                };
+                let column = if let Some(source) = source {
+                    if let Some(columns) = inputs.as_deref_mut()
+                        && (self
+                            .syntax
+                            .variables
+                            .iter()
+                            .any(|name| name.text == source.text)
+                            || self.syntax.visible_edge(source.text).is_some())
+                    {
+                        Some(self.property_map_projection(columns, source)?)
+                    } else {
+                        self.boundary_property_map(schema, source.text)
+                    }
+                } else {
+                    None
+                };
+                let (map, graph) = if let Some(column) = column {
+                    self.advance()?;
+                    (ReadValueTemplate::Column(column), true)
+                } else {
+                    (
+                        self.read_recursive_value(
+                            inputs.as_deref_mut(),
+                            schema,
+                            resolve,
+                            depth + 1,
+                        )?,
+                        false,
+                    )
+                };
+                self.punct(b')', ")")?;
+                (map, graph)
+            };
+            if keys {
+                ReadValueTemplate::Keys(Box::new(map))
+            } else if graph {
+                graph_map = true;
+                map
+            } else {
+                ReadValueTemplate::MapOverlay {
+                    base: Box::new(map),
+                    keys: Box::new([]),
+                    values: Vec::new(),
+                }
+            }
         } else if let Some(function) = self.list_function()? {
             // head/last/tail/range/reduce (fgdb-20foe).
             self.advance()?;
@@ -993,14 +1180,14 @@ impl<'a> Parser<'a> {
                 .resolved_expression(resolve)
                 .map_err(expression_error)?;
             self.read_value_template(operand, at)?
-        } else if let Some(columns) = inputs.as_deref_mut()
-            && matches!(self.current.kind, TokenKind::Word(word)
+        } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
-                        || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())))
+                        || self.syntax.visible_edge(word).is_some_and(|(edge, _)| edge.walk.is_none())
+                        || schema.iter().any(|(name, _)| name.text == word)))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
-            self.map_projection(columns, schema, resolve, depth, at)?
+            self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
@@ -1043,11 +1230,12 @@ impl<'a> Parser<'a> {
                     self.lexer.clone().next()?.kind,
                     TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
                 )
-                && map_capable(
-                    &value,
-                    (inputs.is_none() && resolve.is_none()).then_some(schema),
-                    &self.syntax.parameters,
-                )
+                && (graph_map
+                    || map_capable(
+                        &value,
+                        (inputs.is_none() && resolve.is_none()).then_some(schema),
+                        &self.syntax.parameters,
+                    ))
             {
                 self.advance()?;
                 let key = self.map_key()?;
@@ -1055,6 +1243,7 @@ impl<'a> Parser<'a> {
                     map: Box::new(value),
                     key: key.text.into(),
                 };
+                graph_map = false;
                 continue;
             }
             if !self.take(b'[')? {
@@ -1630,6 +1819,18 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::MapGet { map, key } => GraphSetValue::MapGet {
             map: Box::new(bind_read_value(map, values)?),
             key: key.clone(),
+        },
+        ReadValueTemplate::MapOverlay {
+            base,
+            keys,
+            values: entries,
+        } => GraphSetValue::MapOverlay {
+            base: Box::new(bind_read_value(base, values)?),
+            keys: keys.clone(),
+            values: entries
+                .iter()
+                .map(|value| bind_read_value(value, values))
+                .collect::<Result<_, _>>()?,
         },
         ReadValueTemplate::Keys(map) => {
             GraphSetValue::Keys(Box::new(bind_read_value(map, values)?))

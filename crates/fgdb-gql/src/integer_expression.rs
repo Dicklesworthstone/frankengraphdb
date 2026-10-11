@@ -300,6 +300,10 @@ pub enum GraphIntegerErrorKind {
     NonText,
     NonBoolean,
     NonScalar,
+    /// A bound graph element requires an enumerating property-map source.
+    PropertyMapSourceRequired,
+    /// A property-map source returned a non-map or a noncanonical map.
+    NonMap,
     IncompatibleOperands,
     InvalidSubstring,
     /// openCypher range() with a step of 0 (fgdb-20foe).

@@ -848,6 +848,12 @@ pub enum ReadError {
     /// An edge relation in the admitted snapshot has no reverse name in the
     /// caller's catalog or capability scope.
     UnmappedRelation(RelationId),
+    /// A visible property has no name in the host's reverse catalog. Property
+    /// enumeration never drops an unknown property or invents a name for it.
+    UnmappedProperty(PropertyKeyId),
+    /// Property names or values cannot form one canonical bounded map (for
+    /// example, two property IDs were given the same host name).
+    InvalidPropertyMap,
 }
 
 macro_rules! from_error {
@@ -1127,6 +1133,10 @@ impl core::fmt::Display for ReadError {
             Self::DeltaWindow(error) => write!(f, "delta window: {error}"),
             Self::UnmappedLabel(id) => write!(f, "unmapped vertex label id: {id:?}"),
             Self::UnmappedRelation(id) => write!(f, "unmapped edge relation id: {id:?}"),
+            Self::UnmappedProperty(id) => write!(f, "unmapped property id: {id:?}"),
+            Self::InvalidPropertyMap => {
+                f.write_str("properties do not form a canonical bounded map")
+            }
         }
     }
 }

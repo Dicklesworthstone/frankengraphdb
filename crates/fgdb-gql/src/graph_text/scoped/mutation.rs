@@ -175,6 +175,7 @@ impl<'a> Parser<'a> {
             let variable = match function {
                 GraphPathFunction::Labels => self.vertex_variable()?,
                 GraphPathFunction::Type => self.edge_variable()?,
+                GraphPathFunction::Properties => self.property_variable()?,
                 _ => self.path_variable()?,
             };
             self.punct(b')', ")")?;

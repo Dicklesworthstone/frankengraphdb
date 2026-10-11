@@ -171,6 +171,7 @@ fn fields<E, A, C>(
             | GraphSetValue::Range { .. }
             | GraphSetValue::Reduce { .. }
             | GraphSetValue::MapLiteral { .. }
+            | GraphSetValue::MapOverlay { .. }
             | GraphSetValue::MapGet { .. }
             | GraphSetValue::Keys(_)) => {
                 let value = crate::set_ops::evaluate_value(composite, row, property, control)

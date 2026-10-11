@@ -578,6 +578,14 @@ impl<'a> Parser<'a> {
                 let value = self.read_resolved_value(&mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else { return Ok(None); };
                     let next = parser.lexer.clone().next()?;
+                    if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+                        && let Some(argument) = super::property_map_source(word, parser.current.at, &parser.lexer)?
+                        && parser.visible_graph_bindings().any(|name| name.text == argument.text) {
+                        if optional && incoming.iter().any(|(binding, _)| binding.text == argument.text) {
+                            return Err(error(argument.at, GraphPatternTextErrorKind::Expected("project carried graph maps before OPTIONAL MATCH")));
+                        }
+                        return parser.property_map_function(&mut inputs).map(|column| Some(width + column));
+                    }
                     if matches!(next.kind, TokenKind::Punct(b'(')) {
                         if ["labels", "type", "length", "path_length", "nodes", "edges", "relationships"]
                             .iter().any(|name| word.eq_ignore_ascii_case(name))

@@ -1030,6 +1030,12 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
         ReadValueTemplate::MapGet { map, .. } | ReadValueTemplate::Keys(map) => {
             remap_output_columns(map, columns);
         }
+        ReadValueTemplate::MapOverlay { base, values, .. } => {
+            remap_output_columns(base, columns);
+            for value in values {
+                remap_output_columns(value, columns);
+            }
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
         | ReadValueTemplate::Local(_) => {}
@@ -1122,6 +1128,27 @@ impl<'a> Parser<'a> {
                             expression,
                             function,
                             at: name.at,
+                        })
+                    } else if (parser.is_word("PROPERTIES") || parser.is_word("KEYS"))
+                        && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                        && {
+                            let mut lookahead = parser.lexer.clone();
+                            lookahead.next()?;
+                            matches!(lookahead.next()?.kind, TokenKind::Word(word)
+                                if parser.syntax.variables.iter().any(|name| name.text == word)
+                                    || parser.syntax.visible_edge(word).is_some())
+                                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                        }
+                    {
+                        parser.advance()?;
+                        parser.punct(b'(', "(")?;
+                        let variable = parser.property_variable()?;
+                        parser.punct(b')', ")")?;
+                        OutputLeaf::Group(Expression {
+                            variable,
+                            property: None,
+                            path: Some(GraphPathFunction::Properties),
+                            computed: None,
                         })
                     } else if matches!(parser.current.kind, TokenKind::Word(word)
                 if parser.syntax.variables.iter().any(|variable| variable.text == word))

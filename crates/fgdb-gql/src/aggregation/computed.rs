@@ -186,17 +186,64 @@ impl PreparedGraphAggregate {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        if self.input.plan().projects_property_maps() {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        self.execute_governed_with_element_maps(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Aggregate complete visible property maps through the ordinary row and
+    /// aggregate owners, with one cumulative source/expression/output budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_maps<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a GraphValue>, E>,
+        mut edge_properties: impl FnMut(EId) -> Result<Option<&'a GraphValue>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         let plan = self.input.plan();
-        if !plan.requires_identified_edges() && !plan.projects_labels() && !plan.projects_types() {
+        if !plan.requires_identified_edges()
+            && !plan.projects_labels()
+            && !plan.projects_types()
+            && !plan.projects_property_maps()
+        {
             return self.execute_governed(
                 snapshot_records,
                 vertices,
@@ -218,7 +265,7 @@ impl PreparedGraphAggregate {
                     let (vertices, edges) = admitted
                         .take()
                         .expect("single-source aggregate preparation admits exactly one leaf");
-                    pattern.plan().execute_governed_with_element_accessors(
+                    pattern.plan().execute_governed_with_element_maps(
                         snapshot_records,
                         vertices,
                         edges,
@@ -227,6 +274,8 @@ impl PreparedGraphAggregate {
                         &mut edge_property,
                         &mut vertex_labels,
                         &mut edge_type,
+                        &mut vertex_properties,
+                        &mut edge_properties,
                         remaining,
                         || (*checkpoint.borrow_mut())(),
                     )
@@ -243,7 +292,7 @@ impl PreparedGraphAggregate {
         let source = self
             .input
             .plan()
-            .execute_governed_with_element_accessors(
+            .execute_governed_with_element_maps(
                 snapshot_records,
                 vertices,
                 edges,
@@ -252,6 +301,8 @@ impl PreparedGraphAggregate {
                 edge_property,
                 vertex_labels,
                 edge_type,
+                vertex_properties,
+                edge_properties,
                 source_policy,
                 &mut checkpoint,
             )

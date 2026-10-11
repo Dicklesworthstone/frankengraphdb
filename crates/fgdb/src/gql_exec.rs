@@ -2,6 +2,7 @@
 //! Source lifetimes, history and policy accounting are independent of the
 //! compiler-owned output shape. Tuples do not require a second source scan.
 
+pub(crate) mod property_maps;
 pub(crate) mod source;
 
 use crate::{
@@ -270,6 +271,7 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized, Row = VId> {
     snapshot_records: u64,
     cached_labels: BTreeMap<VId, Vec<GraphValue>>,
     cached_types: BTreeMap<EId, CanonicalScalar>,
+    property_maps: property_maps::PropertyMaps,
 }
 impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
     pub(crate) fn admit(
@@ -325,6 +327,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             snapshot_records: count,
             cached_labels: BTreeMap::new(),
             cached_types: BTreeMap::new(),
+            property_maps: property_maps::PropertyMaps::default(),
         })
     }
     fn materialize<E>(
@@ -504,6 +507,60 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         Ok(())
     }
 
+    fn cache_property_maps<E>(
+        &mut self,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        failure: impl Fn(ReadError) -> E,
+    ) -> Result<(), E> {
+        let catalog = self.logical.reverse_catalog.as_deref();
+        if self.logical.projects_vertex_property_maps() {
+            let rows = self
+                .borrowed
+                .iter()
+                .flat_map(|tables| tables.vertices.iter().copied())
+                .chain(self.vertices.values());
+            for row in rows {
+                let map = property_maps::collect(
+                    row.props.iter().map(|(key, value)| (*key, value)),
+                    catalog,
+                    |_| true,
+                    control,
+                    &failure,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.vertices.insert(row.vid, map);
+            }
+        }
+        if self.logical.projects_edge_property_maps() {
+            let rows = self
+                .borrowed
+                .iter()
+                .flat_map(|tables| {
+                    tables
+                        .edges
+                        .iter()
+                        .map(|(edge, properties)| (edge.0, *properties))
+                })
+                .chain(
+                    self.edges
+                        .iter()
+                        .map(|row| (row.entry.eid, row.props.as_slice())),
+                );
+            for (eid, properties) in rows {
+                let map = property_maps::collect(
+                    properties.iter().map(|(key, value)| (*key, value)),
+                    catalog,
+                    |_| true,
+                    control,
+                    &failure,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.edges.insert(eid, map);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_governed<C>(
         mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -516,7 +573,14 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         })?;
         self.validate_and_cache_catalog_symbols()
             .map_err(fgdb_gql::GqlQueryError::Source)?;
-        let result = self.logical.execute_governed_with_element_accessors(
+        self.cache_property_maps(
+            &mut |event| {
+                checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                usage.observe::<ReadError, C>(policy, event)
+            },
+            fgdb_gql::GqlQueryError::Source,
+        )?;
+        let result = self.logical.execute_governed_with_element_maps(
             self.snapshot_records,
             self.vertex_ids(),
             self.identified_edges(),
@@ -525,6 +589,8 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             |eid, key| Ok(self.edge_property(eid, key)),
             |vid| Ok(self.cached_labels.get(&vid).map(|v| v.as_slice())),
             |eid| Ok(self.cached_types.get(&eid)),
+            |vid| Ok(self.property_maps.vertices.get(&vid)),
+            |eid| Ok(self.property_maps.edges.get(&eid)),
             usage.remaining(policy),
             checkpoint,
         );

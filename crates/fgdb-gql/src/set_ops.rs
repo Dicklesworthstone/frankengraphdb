@@ -25,7 +25,8 @@ pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
 };
 pub(crate) use projection::{
-    ProjectionFailure, evaluate_membership, evaluate_value, map_keys, range_values, slice_bounds,
+    ProjectionFailure, evaluate_membership, evaluate_value, map_keys, overlay_map, range_values,
+    slice_bounds,
 };
 
 use crate::algebra::{
@@ -69,6 +70,9 @@ impl From<&ValueProjection> for GraphSetColumnType {
             | ValueProjection::EdgeProperty { .. }
             | ValueProjection::Type { .. } => Self::Scalar,
             ValueProjection::Labels { .. } => Self::List,
+            ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
+                Self::Any
+            }
             ValueProjection::Path { function, .. } => match function {
                 GraphPathFunction::Value => Self::Path,
                 GraphPathFunction::Length => Self::Scalar,
@@ -77,6 +81,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
                 GraphPathFunction::Edge => Self::Edge,
                 GraphPathFunction::Labels => Self::List,
                 GraphPathFunction::Type => Self::Scalar,
+                GraphPathFunction::Properties => Self::Any,
             },
         }
     }

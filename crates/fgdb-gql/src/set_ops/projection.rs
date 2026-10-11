@@ -1,6 +1,8 @@
 //! Typed relational projection over complete GLA/set rows. Expressions see the
 //! original row, never another output alias. No graph is traversed a second time.
 
+#[cfg(test)]
+mod map_overlay_tests;
 mod membership;
 
 pub(crate) use membership::evaluate as evaluate_membership;
@@ -88,6 +90,14 @@ pub enum GraphSetValue {
         keys: Box<[Box<str>]>,
         values: Vec<GraphSetValue>,
         guard: Option<Box<GraphSetValue>>,
+    },
+    /// A map source followed by explicit overrides. Keys are unique and
+    /// ascending; explicit entries replace matching base keys. A NULL base
+    /// makes the whole result NULL without evaluating the override values.
+    MapOverlay {
+        base: Box<GraphSetValue>,
+        keys: Box<[Box<str>]>,
+        values: Vec<GraphSetValue>,
     },
     /// `m.key`: NULL for a NULL map or an absent key; a non-map is a typed
     /// error.
@@ -244,6 +254,9 @@ pub enum GraphSetProjectionError {
         input: usize,
     },
     ListInput {
+        column: usize,
+    },
+    MapInput {
         column: usize,
     },
     ExpressionBounds {
@@ -564,6 +577,33 @@ fn admit(
             admit(map, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::List
         }
+        GraphSetValue::MapOverlay { base, keys, values } => {
+            if keys.len() != values.len()
+                || keys
+                    .windows(2)
+                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+            {
+                return Err(Error::InvalidValue { column });
+            }
+            let kind = admit(base, types, column, depth + 1, nodes, locals)?;
+            let nonnull_scalar = match base.as_ref() {
+                GraphSetValue::Literal(value) => !matches!(value.value(), CanonicalScalar::Null),
+                GraphSetValue::Value(GraphValue::Scalar(value)) => {
+                    !matches!(value, CanonicalScalar::Null)
+                }
+                _ => false,
+            };
+            if nonnull_scalar
+                || !matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Scalar)
+            {
+                return Err(Error::MapInput { column });
+            }
+            // NULL can skip execution, never binding or type admission.
+            for value in values {
+                admit(value, types, column, depth + 1, nodes, locals)?;
+            }
+            GraphSetColumnType::Any
+        }
     })
 }
 
@@ -721,6 +761,16 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
         GraphSetValue::Keys(map) => {
             bytes.push(16);
             append_value_transcript(map, bytes);
+        }
+        GraphSetValue::MapOverlay { base, keys, values } => {
+            bytes.push(18);
+            append_value_transcript(base, bytes);
+            bytes.extend_from_slice(&(keys.len() as u64).to_be_bytes());
+            for (key, value) in keys.iter().zip(values) {
+                bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+                append_value_transcript(value, bytes);
+            }
         }
     }
 }
@@ -1182,7 +1232,104 @@ fn evaluate_value_at<E>(
                 })?)
             }
         }
+        GraphSetValue::MapOverlay { base, keys, values } => {
+            let base = operand(base, row, column, control, depth + 1, nodes)?;
+            if base.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+            }
+            if base.as_map().is_none() {
+                return Err(failure(GraphIntegerErrorKind::NonMap));
+            }
+            let mut entries = Vec::new();
+            for value in values {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                entries.push(evaluate_value_at(
+                    value,
+                    row,
+                    column,
+                    control,
+                    depth + 1,
+                    nodes,
+                )?);
+            }
+            overlay_map(&base, keys, entries, column, control)?
+        }
     };
+    Ok(result)
+}
+
+/// Merge two canonical key sequences once. The row and exact aggregate
+/// evaluators share this owner after evaluating their explicit values.
+/// Unchanged base values and all key payloads are reserved before copying;
+/// overridden base values are never copied. A refusal drops the private map.
+pub(crate) fn overlay_map<E>(
+    base: &GraphValue,
+    keys: &[Box<str>],
+    values: Vec<GraphValue>,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    use crate::GraphIntegerErrorKind;
+    let failure = |kind| ProjectionFailure::Arithmetic {
+        column,
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
+    };
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    if base.is_null() {
+        return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+    }
+    let (base_keys, base_values) = base
+        .as_map()
+        .ok_or_else(|| failure(GraphIntegerErrorKind::NonMap))?;
+    if base_keys.len() != base_values.len() || keys.len() != values.len() {
+        return Err(failure(GraphIntegerErrorKind::NonMap));
+    }
+    let mut overrides = keys.iter().zip(values).peekable();
+    let mut at = 0;
+    let mut output_keys = Vec::new();
+    let mut output_values = Vec::new();
+    while at < base_keys.len() || overrides.peek().is_some() {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        let explicit = match (base_keys.get(at), overrides.peek()) {
+            (Some(base_key), Some((key, _))) => match base_key.as_bytes().cmp(key.as_bytes()) {
+                core::cmp::Ordering::Less => false,
+                core::cmp::Ordering::Equal => {
+                    at += 1;
+                    true
+                }
+                core::cmp::Ordering::Greater => true,
+            },
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => unreachable!("a remaining map entry was checked"),
+        };
+        let (key, value) = if explicit {
+            overrides.next().expect("an explicit entry was checked")
+        } else {
+            let key = &base_keys[at];
+            let value =
+                copy_value(&base_values[at], control).map_err(ProjectionFailure::Control)?;
+            at += 1;
+            (key, value)
+        };
+        for _ in 0..=key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        }
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        output_keys.push(key.clone());
+        output_values.push(value);
+    }
+    let result = GraphValue::Map {
+        keys: output_keys.into_boxed_slice(),
+        values: output_values.into_boxed_slice(),
+    };
+    if !result.validate_bounds() {
+        return Err(failure(GraphIntegerErrorKind::Overflow));
+    }
     Ok(result)
 }
 

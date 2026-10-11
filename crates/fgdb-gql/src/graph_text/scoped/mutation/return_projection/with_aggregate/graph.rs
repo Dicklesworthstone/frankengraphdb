@@ -108,6 +108,36 @@ impl<'a> Parser<'a> {
                         end = Some(word);
                         break;
                     }
+                    if let Some(source) = pipeline::property_map_source(word, token.at, &lexer)? {
+                        if optional && incoming.iter().any(|(name, _)| name.text == source.text) {
+                            return Err(expected(
+                                source.at,
+                                "project carried element maps before OPTIONAL MATCH",
+                            ));
+                        }
+                        if let Some(&variable) =
+                            bindings.iter().find(|name| name.text == source.text)
+                            && !reads
+                                .iter()
+                                .any(|&(owner, key, _)| owner == source.text && key.text == "*")
+                        {
+                            let column = self.hidden_property_map(
+                                &mut outputs,
+                                &mut inputs,
+                                width,
+                                variable,
+                                source.at,
+                            )?;
+                            reads.push((
+                                source.text,
+                                Name {
+                                    text: "*",
+                                    at: source.at,
+                                },
+                                column,
+                            ));
+                        }
+                    }
                     let mut lookahead = lexer.clone();
                     if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                         let property = lookahead.next()?;
@@ -239,6 +269,32 @@ impl<'a> Parser<'a> {
         Ok(outputs.len() - 1)
     }
 
+    fn hidden_property_map(
+        &mut self,
+        outputs: &mut Vec<(Name<'a>, ReadValueTemplate)>,
+        inputs: &mut Vec<Projection<'a>>,
+        width: usize,
+        variable: Name<'a>,
+        at: usize,
+    ) -> Result<usize, GraphSetTextError> {
+        self.capacity(
+            outputs.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let name = HIDDEN_NAMES
+            .iter()
+            .copied()
+            .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
+            .ok_or_else(|| expected(at, "bounded grouping property-map reads"))?;
+        let column = self.property_map_projection(inputs, variable)?;
+        outputs.push((
+            Name { text: name, at },
+            ReadValueTemplate::Column(width + column),
+        ));
+        Ok(outputs.len() - 1)
+    }
+
     /// `WITH p, count(f) AS c WHERE c > 1 RETURN p.name, c` (fgdb-ezgeq): the
     /// scope after the grouping (its WHERE, pages and the terminal RETURN's
     /// items) may read a property of a binding the WITH keeps as a bare key.
@@ -289,6 +345,32 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         returned |= word.eq_ignore_ascii_case("RETURN");
+                    }
+                    if let Some(source) = pipeline::property_map_source(word, token.at, &lexer)?
+                        && let Some(&(alias, binding)) =
+                            kept.iter().find(|(alias, _)| *alias == source.text)
+                        && !grouped
+                            .iter()
+                            .any(|&(owner, _, key, _)| owner == alias && key.text == "*")
+                        && let Some(&variable) = bindings.iter().find(|name| name.text == binding)
+                    {
+                        let column = match grouped
+                            .iter()
+                            .find(|&&(_, owner, key, _)| owner == binding && key.text == "*")
+                        {
+                            Some(&(_, _, _, column)) => column,
+                            None => self
+                                .hidden_property_map(outputs, inputs, width, variable, source.at)?,
+                        };
+                        grouped.push((
+                            alias,
+                            binding,
+                            Name {
+                                text: "*",
+                                at: source.at,
+                            },
+                            column,
+                        ));
                     }
                     let mut lookahead = lexer.clone();
                     if let Some(&(alias, binding)) = kept.iter().find(|(alias, _)| *alias == word)

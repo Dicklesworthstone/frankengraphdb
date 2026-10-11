@@ -1,6 +1,7 @@
 mod query_source {
     use super::{BoundPlan, Database, PendingRow, TxnGqlError, WriteTxn, WriteTxnError};
     use crate::Snapshot;
+    use crate::gql_exec::property_maps::{self, PropertyMaps};
     use crate::gql_exec::source::{self, SourceEvent};
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
@@ -39,6 +40,17 @@ mod query_source {
                     .ok()
                     .map(|at| &self.props[at].1)
             }
+        }
+        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+            self.props
+                .iter()
+                .filter(move |(key, _)| !self.property_edits.contains_key(key))
+                .map(|(key, value)| (*key, value))
+                .chain(
+                    self.property_edits
+                        .iter()
+                        .filter_map(|(key, value)| value.map(|value| (*key, value))),
+                )
         }
         fn matches(&self, predicate: &VertexPredicate) -> bool {
             let label = if let VertexPredicate::HasLabel(label) = predicate {
@@ -89,6 +101,17 @@ mod query_source {
                     .ok()
                     .map(|at| &self.props[at].1)
             }
+        }
+        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+            self.props
+                .iter()
+                .filter(move |(key, _)| !self.edits.contains_key(key))
+                .map(|(key, value)| (*key, value))
+                .chain(
+                    self.edits
+                        .iter()
+                        .filter_map(|(key, value)| value.map(|value| (*key, value))),
+                )
         }
     }
 
@@ -176,6 +199,41 @@ mod query_source {
                 }
             }
             Ok(CatalogNames { labels, types })
+        }
+        pub(super) fn property_maps<E>(
+            &self,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+            failure: impl Fn(crate::ReadError) -> E,
+        ) -> Result<PropertyMaps, E> {
+            let catalog = self.logical.reverse_catalog.as_deref();
+            let mut maps = PropertyMaps::default();
+            if self.logical.projects_vertex_property_maps() {
+                for (vid, view) in &self.vertices {
+                    let map = property_maps::collect(
+                        view.effective_properties(),
+                        catalog,
+                        |_| true,
+                        control,
+                        &failure,
+                    )?;
+                    control(SourceEvent::ScratchEntry)?;
+                    maps.vertices.insert(*vid, map);
+                }
+            }
+            if self.logical.projects_edge_property_maps() {
+                for ((eid, _, _, _), view) in &self.edges {
+                    let map = property_maps::collect(
+                        view.effective_properties(),
+                        catalog,
+                        |_| true,
+                        control,
+                        &failure,
+                    )?;
+                    control(SourceEvent::ScratchEntry)?;
+                    maps.edges.insert(*eid, map);
+                }
+            }
+            Ok(maps)
         }
         pub(super) fn identified_edges(&self) -> impl Iterator<Item = IdentifiedEdge> + '_ {
             self.edges.iter().map(|(edge, _)| *edge)
@@ -346,7 +404,15 @@ mod query_source {
                 let names = source
                     .catalog_names()
                     .map_err(fgdb_gql::GqlQueryError::Source)?;
-                let result = source.logical.execute_governed_with_element_accessors(
+                let maps = source.property_maps(
+                    &mut |event| {
+                        cx.checkpoint()
+                            .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                        usage.observe(policy, event)
+                    },
+                    |error| fgdb_gql::GqlQueryError::Source(WriteTxnError::Read(error)),
+                )?;
+                let result = source.logical.execute_governed_with_element_maps(
                     source.snapshot_records as u64,
                     source.vertex_ids(),
                     source.identified_edges(),
@@ -355,6 +421,8 @@ mod query_source {
                     |eid, key| Ok(source.edge_property(eid, key)),
                     |vid| Ok(names.labels(vid)),
                     |eid| Ok(names.edge_type(eid)),
+                    |vid| Ok(maps.vertices.get(&vid)),
+                    |eid| Ok(maps.edges.get(&eid)),
                     usage.remaining(policy),
                     || cx.checkpoint(),
                 );
@@ -739,6 +807,69 @@ mod query_source {
                     value: 9
                 }));
             }
+        }
+        #[test]
+        fn complete_property_maps_use_staged_add_update_and_removal_for_both_element_kinds() {
+            use fgdb_gql::algebra::GraphValue;
+            let properties = [
+                (PropertyKeyId(1), CanonicalScalar::Int(7)),
+                // An effective removal must not consult this unmapped key.
+                (PropertyKeyId(2), CanonicalScalar::Int(8)),
+                (PropertyKeyId(4), CanonicalScalar::Int(9)),
+            ];
+            let updated = CanonicalScalar::Bool(false);
+            let added = CanonicalScalar::Null;
+            let mut vertex = VertexView::new(&[], &properties);
+            vertex
+                .property_edits
+                .insert(PropertyKeyId(1), Some(&updated));
+            vertex.property_edits.insert(PropertyKeyId(2), None);
+            vertex.property_edits.insert(PropertyKeyId(3), Some(&added));
+            let mut edge = EdgeView::new(&properties);
+            edge.edits.insert(PropertyKeyId(1), Some(&updated));
+            edge.edits.insert(PropertyKeyId(2), None);
+            edge.edits.insert(PropertyKeyId(3), Some(&added));
+            let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+            catalog.insert_property(PropertyKeyId(1), "updated");
+            catalog.insert_property(PropertyKeyId(3), "added");
+            catalog.insert_property(PropertyKeyId(4), "kept");
+            let expected = GraphValue::map(vec![
+                ("added".into(), GraphValue::Scalar(CanonicalScalar::Null)),
+                ("kept".into(), GraphValue::Scalar(CanonicalScalar::Int(9))),
+                (
+                    "updated".into(),
+                    GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                ),
+            ])
+            .unwrap();
+            let vertex_map = property_maps::collect(
+                vertex.effective_properties(),
+                Some(&catalog),
+                |_| true,
+                &mut |_| Ok::<_, crate::ReadError>(()),
+                &core::convert::identity,
+            )
+            .unwrap();
+            let edge_map = property_maps::collect(
+                edge.effective_properties(),
+                Some(&catalog),
+                |_| true,
+                &mut |_| Ok::<_, crate::ReadError>(()),
+                &core::convert::identity,
+            )
+            .unwrap();
+            assert_eq!(vertex_map, expected);
+            assert_eq!(edge_map, expected);
+            assert_eq!(properties[0].1, CanonicalScalar::Int(7));
+            assert_eq!(properties[1].1, CanonicalScalar::Int(8));
+            assert!(std::ptr::eq(
+                vertex.property(PropertyKeyId(1)).unwrap(),
+                &updated
+            ));
+            assert!(std::ptr::eq(
+                edge.property(PropertyKeyId(3)).unwrap(),
+                &added
+            ));
         }
         #[test]
         fn label_edits_override_membership_without_mutating_the_borrowed_row() {

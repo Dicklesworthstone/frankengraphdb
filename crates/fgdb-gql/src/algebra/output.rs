@@ -296,6 +296,42 @@ mod sealed {
                 operator, bindings, paths, projected, property, control,
             )
         }
+
+        #[allow(clippy::too_many_arguments)]
+        fn collect_element_maps<'a, E: From<crate::GraphIntegerError>>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            edge_property: &mut impl FnMut(
+                fgdb_types::EId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _vertex_properties: &mut impl FnMut(
+                VId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            _edge_properties: &mut impl FnMut(
+                fgdb_types::EId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            Self::collect_element_properties(
+                operator,
+                bindings,
+                paths,
+                projected,
+                property,
+                edge_property,
+                vertex_labels,
+                edge_type,
+                control,
+            )
+        }
     }
 
     impl Projection for VId {
@@ -386,6 +422,48 @@ mod sealed {
                 Some(width) => self.into_prefix(width),
                 None => self,
             }
+        }
+
+        fn collect_element_maps<'a, E: From<crate::GraphIntegerError>>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            edge_property: &mut impl FnMut(
+                fgdb_types::EId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
+            vertex_properties: &mut impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            edge_properties: &mut impl FnMut(
+                fgdb_types::EId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            let GlaOperator::ProjectValues { columns } = operator else {
+                unreachable!("the private value-plan constructor owns its projection shape")
+            };
+            super::super::values::collect_values_with_element_maps(
+                columns,
+                bindings,
+                paths,
+                projected,
+                property,
+                edge_property,
+                vertex_labels,
+                edge_type,
+                &mut |vid| {
+                    super::super::values::property_map_parts(vertex_properties(vid)?)
+                        .map_err(E::from)
+                },
+                &mut |eid| {
+                    super::super::values::property_map_parts(edge_properties(eid)?).map_err(E::from)
+                },
+                control,
+            )
         }
 
         fn collect_element_properties<'a, E>(

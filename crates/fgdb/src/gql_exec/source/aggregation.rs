@@ -130,7 +130,16 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         .map_err(|error| {
             GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
         })?;
-    let result = aggregate.execute_governed_with_element_accessors(
+    admitted
+        .cache_property_maps(
+            &mut |event| {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+            },
+            |error| GqlQueryError::Source(GraphAggregateError::Source(error)),
+        )
+        .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+    let result = aggregate.execute_governed_with_element_maps(
         admitted.snapshot_records,
         admitted.vertex_ids(),
         admitted.identified_edges(),
@@ -139,6 +148,8 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         |eid, key| Ok(admitted.edge_property(eid, key)),
         |vid| Ok(admitted.cached_labels.get(&vid).map(Vec::as_slice)),
         |eid| Ok(admitted.cached_types.get(&eid)),
+        |vid| Ok(admitted.property_maps.vertices.get(&vid)),
+        |eid| Ok(admitted.property_maps.edges.get(&eid)),
         usage.remaining(policy),
         checkpoint,
     );

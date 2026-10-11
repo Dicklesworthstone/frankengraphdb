@@ -272,6 +272,34 @@ fn expression<'g, E, C>(
             }
             OutputValue::Owned(GraphAggregateValue::Value(value))
         }
+        GraphSetValue::MapOverlay { base, keys, values } => {
+            let base = expression(base, input, column, control)?;
+            match base.cell() {
+                cell if cell.is_null() => {
+                    return Ok(OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))));
+                }
+                Cell::Value(ValueRef::Map { .. }) => {}
+                _ => return Err(failure(column, GraphIntegerErrorKind::NonMap)),
+            }
+            let base = graph_value(base.into_owned(control)?, column)?;
+            let mut entries = Vec::new();
+            for value in values {
+                let value = expression(value, input, column, control)?.into_owned(control)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                entries.push(graph_value(value, column)?);
+            }
+            let value = crate::set_ops::overlay_map(&base, keys, entries, column, control)
+                .map_err(|error| match error {
+                    crate::set_ops::ProjectionFailure::Control(error) => error,
+                    crate::set_ops::ProjectionFailure::Arithmetic { column, error } => {
+                        GqlQueryError::Source(GraphAggregateError::OutputExpression {
+                            column,
+                            error,
+                        })
+                    }
+                })?;
+            OutputValue::Owned(GraphAggregateValue::Value(value))
+        }
         GraphSetValue::MapGet { map, key } => {
             let map = expression(map, input, column, control)?;
             match map.cell() {

@@ -107,6 +107,7 @@ impl UnresolvedGraphText<'_> {
             Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
             Some(GraphPathFunction::Labels) => crate::GraphSetColumnType::List,
             Some(GraphPathFunction::Type) => Scalar,
+            Some(GraphPathFunction::Properties) => crate::GraphSetColumnType::Any,
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };
@@ -290,7 +291,11 @@ impl UnresolvedGraphText<'_> {
                 .any(|column| {
                     matches!(
                         column.path,
-                        Some(GraphPathFunction::Labels | GraphPathFunction::Type)
+                        Some(
+                            GraphPathFunction::Labels
+                                | GraphPathFunction::Type
+                                | GraphPathFunction::Properties
+                        )
                     )
                 })
                 .then(|| {

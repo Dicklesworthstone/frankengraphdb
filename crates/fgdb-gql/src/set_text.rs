@@ -132,6 +132,12 @@ pub(crate) enum ReadValueTemplate {
         values: Vec<ReadValueTemplate>,
         guard: Option<Box<ReadValueTemplate>>,
     },
+    /// A map source plus explicit overrides, with NULL short-circuiting values.
+    MapOverlay {
+        base: Box<ReadValueTemplate>,
+        keys: Box<[Box<str>]>,
+        values: Vec<ReadValueTemplate>,
+    },
     MapGet {
         map: Box<ReadValueTemplate>,
         key: Box<str>,
@@ -162,6 +168,9 @@ impl ReadValueTemplate {
                 values.iter().any(Self::binds_elements)
                     || guard.as_deref().is_some_and(Self::binds_elements)
             }
+            Self::MapOverlay { base, values, .. } => {
+                base.binds_elements() || values.iter().any(Self::binds_elements)
+            }
             Self::MapGet { map, .. } | Self::Keys(map) => map.binds_elements(),
             Self::List(items) => items.iter().any(Self::binds_elements),
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
@@ -184,9 +193,10 @@ impl ReadValueTemplate {
             | Self::Comprehension { .. }
             | Self::Slice { .. }
             | Self::Range { .. } => GraphSetColumnType::List,
-            Self::Reduce { .. } | Self::MapLiteral { .. } | Self::MapGet { .. } => {
-                GraphSetColumnType::Any
-            }
+            Self::Reduce { .. }
+            | Self::MapLiteral { .. }
+            | Self::MapOverlay { .. }
+            | Self::MapGet { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
@@ -347,6 +357,16 @@ impl ReadValueTemplate {
             Self::Keys(map) => {
                 bytes.push(16);
                 map.append_template_transcript(bytes);
+            }
+            Self::MapOverlay { base, keys, values } => {
+                bytes.push(18);
+                base.append_template_transcript(bytes);
+                ordinal(bytes, keys.len());
+                for (key, value) in keys.iter().zip(values) {
+                    ordinal(bytes, key.len());
+                    bytes.extend_from_slice(key.as_bytes());
+                    value.append_template_transcript(bytes);
+                }
             }
         }
     }

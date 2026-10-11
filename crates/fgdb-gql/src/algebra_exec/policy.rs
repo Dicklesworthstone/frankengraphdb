@@ -277,11 +277,54 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
+        if self.projects_property_maps() {
+            return governed(snapshot_records, policy, checkpoint, |_| {
+                Err(crate::GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+                }
+                .into())
+            });
+        }
+        self.execute_governed_with_element_maps(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Project complete visible property maps under the same cumulative meter
+    /// as scalar fields, path captures, catalog names and final result rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_maps<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+        mut edge_properties: impl FnMut(EId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
@@ -297,7 +340,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                     &mut |event| meter.observe(event),
                 );
             }
-            self.execute_with_element_properties_control(
+            self.execute_with_element_maps_control(
                 vertices,
                 edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
@@ -305,6 +348,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |eid, key| edge_property(eid, key).map_err(GqlQueryError::Source),
                 |vid| vertex_labels(vid).map_err(GqlQueryError::Source),
                 |eid| edge_type(eid).map_err(GqlQueryError::Source),
+                |vid| vertex_properties(vid).map_err(GqlQueryError::Source),
+                |eid| edge_properties(eid).map_err(GqlQueryError::Source),
                 |event| meter.observe(event),
             )
         })

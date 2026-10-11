@@ -315,6 +315,8 @@ pub enum GraphPathFunction {
     Labels,
     /// Type of an edge, returned as GraphValue::Scalar(CanonicalScalar::Text).
     Type,
+    /// Complete visible properties of a vertex or a fixed relationship.
+    Properties,
 }
 
 /// Preparation-only column declarations. Names are checked before being owned
@@ -425,6 +427,12 @@ pub enum ValueProjection {
         slot: BindingSlot,
     },
     Type {
+        capture: u32,
+    },
+    Properties {
+        slot: BindingSlot,
+    },
+    EdgeProperties {
         capture: u32,
     },
 }
@@ -1116,6 +1124,54 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
     edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
+    collect_values_with_element_maps(
+        columns,
+        bindings,
+        paths,
+        projected,
+        property,
+        edge_property,
+        vertex_labels,
+        edge_type,
+        &mut |_| panic!("property maps require an enumerating vertex source"),
+        &mut |_| panic!("property maps require an enumerating edge source"),
+        control,
+    )
+}
+
+pub(crate) type PropertyMapParts<'a> = (&'a [Box<str>], &'a [GraphValue]);
+
+pub(crate) fn property_map_parts(
+    value: Option<&GraphValue>,
+) -> Result<PropertyMapParts<'_>, crate::GraphIntegerError> {
+    let error = |kind| crate::GraphIntegerError {
+        instruction: 0,
+        kind,
+    };
+    let value =
+        value.ok_or_else(|| error(crate::GraphIntegerErrorKind::PropertyMapSourceRequired))?;
+    if !value.validate_bounds() {
+        return Err(error(crate::GraphIntegerErrorKind::NonMap));
+    }
+    value
+        .as_map()
+        .ok_or_else(|| error(crate::GraphIntegerErrorKind::NonMap))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_values_with_element_maps<'a, E>(
+    columns: &[ValueProjection],
+    bindings: &[Option<VId>],
+    paths: &[Option<GraphPath>],
+    projected: &mut ProjectedRows<GraphValueRow>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+    edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+    vertex_properties: &mut impl FnMut(VId) -> Result<PropertyMapParts<'a>, E>,
+    edge_properties: &mut impl FnMut(EId) -> Result<PropertyMapParts<'a>, E>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
     let null = CanonicalScalar::Null;
     let mut computed: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
     for (at, column) in columns.iter().enumerate() {
@@ -1148,7 +1204,9 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
                 }
                 Some(GraphValue::Edges(path.edges().collect()))
             }
-            GraphPathFunction::Labels | GraphPathFunction::Type => None,
+            GraphPathFunction::Labels | GraphPathFunction::Type | GraphPathFunction::Properties => {
+                None
+            }
         };
     }
     let mut key = [ValueRef::Scalar(&null); MAX_PATTERN_VERTICES];
@@ -1184,6 +1242,26 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
                     Some(labels) => ValueRef::List(labels),
                     None => ValueRef::List(&[]),
                 },
+                None => ValueRef::Scalar(&null),
+            },
+            ValueProjection::Properties { slot } => match bindings[slot.ordinal() as usize] {
+                Some(vid) => {
+                    let (keys, values) = vertex_properties(vid)?;
+                    ValueRef::Map { keys, values }
+                }
+                None => ValueRef::Scalar(&null),
+            },
+            ValueProjection::EdgeProperties { capture } => match paths
+                .get(*capture as usize)
+                .and_then(Option::as_ref)
+            {
+                Some(path) => {
+                    let [(edge, _)] = path.steps() else {
+                        unreachable!("edge property-map captures contain exactly one relationship")
+                    };
+                    let (keys, values) = edge_properties(*edge)?;
+                    ValueRef::Map { keys, values }
+                }
                 None => ValueRef::Scalar(&null),
             },
             ValueProjection::Type { capture } => {

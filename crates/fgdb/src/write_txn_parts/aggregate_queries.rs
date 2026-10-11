@@ -45,7 +45,16 @@ impl WriteTxn {
             let names = source
                 .catalog_names()
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
-            let result = aggregate.execute_governed_with_element_accessors(
+            let maps = source.property_maps(
+                &mut |event| {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe(policy, event)
+                },
+                |error| {
+                    GqlQueryError::Source(GraphAggregateError::Source(WriteTxnError::Read(error)))
+                },
+            )?;
+            let result = aggregate.execute_governed_with_element_maps(
                 source.snapshot_records as u64,
                 source.vertex_ids(),
                 source.identified_edges(),
@@ -54,6 +63,8 @@ impl WriteTxn {
                 |eid, key| Ok(source.edge_property(eid, key)),
                 |vid| Ok(names.labels(vid)),
                 |eid| Ok(names.edge_type(eid)),
+                |vid| Ok(maps.vertices.get(&vid)),
+                |eid| Ok(maps.edges.get(&eid)),
                 usage.remaining(policy),
                 || cx.checkpoint(),
             );

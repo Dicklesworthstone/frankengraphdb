@@ -162,6 +162,7 @@ impl<'a> Parser<'a> {
                         Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
                         Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
                         Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+                        Some(GraphPathFunction::Properties) => GraphSetColumnType::Any,
                         None => GraphSetColumnType::Vertex,
                     }
                 }
@@ -246,6 +247,7 @@ impl<'a> Parser<'a> {
                         | ReadValueTemplate::Slice { .. }
                         | ReadValueTemplate::Range { .. }
                         | ReadValueTemplate::MapLiteral { .. }
+                        | ReadValueTemplate::MapOverlay { .. }
                         | ReadValueTemplate::Keys(_)
                 ) {
                     return Err(expected(at, "scalar CREATE property expression"));
@@ -549,6 +551,7 @@ fn bind_fields(
             | ReadValueTemplate::Slice { .. }
             | ReadValueTemplate::Range { .. }
             | ReadValueTemplate::MapLiteral { .. }
+            | ReadValueTemplate::MapOverlay { .. }
             | ReadValueTemplate::Keys(_) => {
                 // Scalar properties only: list construction is a read-surface
                 // capability, not a stored property encoding.

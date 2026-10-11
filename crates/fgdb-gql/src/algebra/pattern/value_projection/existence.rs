@@ -447,11 +447,23 @@ impl GraphPatternBuilder {
                     capture: variable as u32,
                     key: *key,
                 },
-                GraphColumn::Path { function, .. } => match function {
+                GraphColumn::Path {
+                    function,
+                    variable: name,
+                    ..
+                } => match function {
                     GraphPathFunction::Labels => ValueProjection::Labels {
                         slot: scope_slots[variable],
                     },
                     GraphPathFunction::Type => ValueProjection::Type {
+                        capture: variable as u32,
+                    },
+                    GraphPathFunction::Properties if scope.variable(name).is_ok() => {
+                        ValueProjection::Properties {
+                            slot: scope_slots[variable],
+                        }
+                    }
+                    GraphPathFunction::Properties => ValueProjection::EdgeProperties {
                         capture: variable as u32,
                     },
                     _ => ValueProjection::Path {
@@ -512,7 +524,10 @@ impl GraphPatternBuilder {
                     variable, function, ..
                 } => match function {
                     GraphPathFunction::Labels => self.variable(variable)?,
-                    GraphPathFunction::Type => {
+                    GraphPathFunction::Properties if self.variable(variable).is_ok() => {
+                        self.variable(variable)?
+                    }
+                    GraphPathFunction::Type | GraphPathFunction::Properties => {
                         let capture = self.path_capture(variable)?;
                         if !self.path_captures[capture].edge_identity {
                             return Err(PatternBuildError::InvalidPathCapture);

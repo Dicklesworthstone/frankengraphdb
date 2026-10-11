@@ -1093,6 +1093,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
         if !self.requires_identified_edges() {
             return self.execute_with_properties_control(
                 vertices,
@@ -1143,13 +1150,55 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        self.execute_with_element_maps_control(
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            |_| Ok(None),
+            |_| Ok(None),
+            control,
+        )
+    }
+
+    /// Enumerating map sources must name every visible property of the same
+    /// admitted element. A bound element with no properties supplies an empty
+    /// map; only an absent graph binding produces NULL without a source read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_element_maps_control<'a, E: From<crate::GraphIntegerError>>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+        mut edge_properties: impl FnMut(EId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
-        if !self.requires_identified_edges() && !self.projects_labels() && !self.projects_types() {
+        if !self.requires_identified_edges()
+            && !self.projects_labels()
+            && !self.projects_types()
+            && !self.projects_property_maps()
+        {
             return self.execute_with_properties_control(
                 vertices,
                 edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
@@ -1185,7 +1234,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                             control,
                         );
                     }
-                    Row::collect_element_properties(
+                    Row::collect_element_maps(
                         operator,
                         bindings,
                         paths,
@@ -1194,6 +1243,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         &mut edge_property,
                         &mut vertex_labels,
                         &mut edge_type,
+                        &mut vertex_properties,
+                        &mut edge_properties,
                         control,
                     )?;
                     Ok(false)
@@ -1212,6 +1263,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
         self.execute_projected(
             vertices,
             edges,

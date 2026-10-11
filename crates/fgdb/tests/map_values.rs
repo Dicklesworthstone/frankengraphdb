@@ -713,8 +713,8 @@ fn map_projection_reads_properties_and_is_null_for_a_null_source() {
             ])]]
         );
         for statement in [
-            // `.*` needs the complete property catalog.
-            "MATCH (n:Person) RETURN n{.*} AS m",
+            // A wildcard still requires valid syntax for later selectors.
+            "MATCH (n:Person) RETURN n{.*, .} AS m",
             // Keys are unique, as in a map literal.
             "MATCH (n:Person) RETURN n{.name, .name} AS m",
             // A shorthand entry names a binding.

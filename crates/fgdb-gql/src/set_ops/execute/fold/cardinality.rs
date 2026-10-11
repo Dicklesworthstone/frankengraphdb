@@ -48,6 +48,9 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
             values.iter().all(constant) && guard.as_deref().is_none_or(constant)
         }
         GraphSetValue::MapGet { map, .. } | GraphSetValue::Keys(map) => constant(map),
+        GraphSetValue::MapOverlay { base, values, .. } => {
+            constant(base) && values.iter().all(constant)
+        }
     }
 }
 

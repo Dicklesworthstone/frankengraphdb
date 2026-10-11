@@ -99,6 +99,10 @@ pub const COMMON_GRAPH_SYMBOLS: &[&str] = &[
 pub struct ReverseSymbolCatalog {
     pub labels: BTreeMap<LabelId, String>,
     pub relations: BTreeMap<RelationId, String>,
+    /// Host-declared names for actual property IDs. Enumeration reads the
+    /// source row and refuses any visible ID missing here; this map is never
+    /// treated as evidence that an unlisted property does not exist.
+    pub properties: BTreeMap<PropertyKeyId, String>,
 }
 
 impl ReverseSymbolCatalog {
@@ -113,6 +117,10 @@ impl ReverseSymbolCatalog {
 
     pub fn insert_relation(&mut self, id: RelationId, name: impl Into<String>) {
         self.relations.insert(id, name.into());
+    }
+
+    pub fn insert_property(&mut self, id: PropertyKeyId, name: impl Into<String>) {
+        self.properties.insert(id, name.into());
     }
 
     pub fn from_resolver<R: GraphSymbolResolver + ?Sized>(resolver: &mut R, text: &str) -> Self {
@@ -1215,6 +1223,7 @@ impl<'a> Parser<'a> {
                     let variable = match function {
                         GraphPathFunction::Labels => self.vertex_variable()?,
                         GraphPathFunction::Type => self.edge_variable()?,
+                        GraphPathFunction::Properties => self.property_variable()?,
                         _ => self.path_variable()?,
                     };
                     self.punct(b')', ")")?;
@@ -1328,6 +1337,8 @@ impl<'a> Parser<'a> {
             Ok(GraphPathFunction::Labels)
         } else if name.text.eq_ignore_ascii_case("type") {
             Ok(GraphPathFunction::Type)
+        } else if name.text.eq_ignore_ascii_case("properties") {
+            Ok(GraphPathFunction::Properties)
         } else {
             Err(error(
                 name.at,
@@ -1664,7 +1675,11 @@ impl PreparedGraphText {
         let needs_reverse = columns.iter().any(|c| {
             matches!(
                 c.path,
-                Some(GraphPathFunction::Labels | GraphPathFunction::Type)
+                Some(
+                    GraphPathFunction::Labels
+                        | GraphPathFunction::Type
+                        | GraphPathFunction::Properties
+                )
             )
         });
         let reverse_catalog = if needs_reverse {
@@ -1810,6 +1825,16 @@ impl PreparedGraphText {
         if let Some(width) = self.visible_columns {
             bytes.extend_from_slice(b"visible-prefix\0");
             bytes.extend_from_slice(&(width as u64).to_be_bytes());
+        }
+        if self
+            .columns
+            .iter()
+            .any(|column| column.path == Some(GraphPathFunction::Properties))
+        {
+            crate::algebra::append_property_catalog_transcript(
+                self.reverse_catalog.as_deref(),
+                &mut bytes,
+            );
         }
         bytes
     }

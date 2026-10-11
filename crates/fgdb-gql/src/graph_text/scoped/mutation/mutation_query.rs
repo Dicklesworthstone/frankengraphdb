@@ -409,6 +409,14 @@ impl<'a> ParsedMutationReturn<'a> {
                     Ok(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
                     Ok(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
                     Ok(GraphPathFunction::Labels) => GraphSetColumnType::List,
+                    Ok(GraphPathFunction::Properties) => {
+                        return Err(error(
+                            name.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "explicit post-statement property reads in mutation RETURN",
+                            ),
+                        ));
+                    }
                     Err(_) => return Ok(None),
                 }
             };

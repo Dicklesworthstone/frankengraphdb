@@ -270,7 +270,16 @@ impl crate::graph_text::GraphSymbolResolver for RelationBind {
             .iter()
             .map(|(name, &id)| (id, name.clone()))
             .collect();
-        Some(crate::graph_text::ReverseSymbolCatalog { labels, relations })
+        let properties = self
+            .properties
+            .iter()
+            .map(|(name, &id)| (id, name.clone()))
+            .collect();
+        Some(crate::graph_text::ReverseSymbolCatalog {
+            labels,
+            relations,
+            properties,
+        })
     }
     fn reverse_label(&self, id: LabelId) -> Option<String> {
         self.labels

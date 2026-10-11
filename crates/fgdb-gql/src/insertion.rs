@@ -691,6 +691,7 @@ impl Properties {
                 | GraphSetValue::Range { .. }
                 | GraphSetValue::Reduce { .. }
                 | GraphSetValue::MapLiteral { .. }
+                | GraphSetValue::MapOverlay { .. }
                 | GraphSetValue::MapGet { .. }
                 | GraphSetValue::Keys(_)
                 | GraphSetValue::Value(_) => {

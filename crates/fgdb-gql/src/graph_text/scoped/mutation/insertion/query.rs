@@ -132,6 +132,7 @@ impl<'a> ParsedReturn<'a> {
                 GraphPathFunction::Edges => GraphSetColumnType::Edges,
                 GraphPathFunction::Edge => GraphSetColumnType::Edge,
                 GraphPathFunction::Labels => GraphSetColumnType::List,
+                GraphPathFunction::Properties => GraphSetColumnType::Any,
             };
             // mutation_operand owns function spelling, argument/domain
             // checks, projection deduplication and source-column limits.

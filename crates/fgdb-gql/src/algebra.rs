@@ -731,9 +731,12 @@ impl<Row> GlaPlan<Row> {
     #[must_use]
     pub fn projects_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
-            GlaOperator::ProjectValues { columns } => columns
-                .iter()
-                .any(|column| matches!(column, ValueProjection::Property { .. })),
+            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Property { .. } | ValueProjection::Properties { .. }
+                )
+            }),
             _ => false,
         })
     }
@@ -744,9 +747,12 @@ impl<Row> GlaPlan<Row> {
     #[must_use]
     pub fn projects_edge_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
-            GlaOperator::ProjectValues { columns } => columns
-                .iter()
-                .any(|column| matches!(column, ValueProjection::EdgeProperty { .. })),
+            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
+                matches!(
+                    column,
+                    ValueProjection::EdgeProperty { .. } | ValueProjection::EdgeProperties { .. }
+                )
+            }),
             GlaOperator::SelectBoolean { expression } => expression.contains_captured_edge(),
             _ => false,
         })
@@ -772,6 +778,32 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
+    /// Complete property maps require an enumerating, named property source.
+    #[must_use]
+    pub fn projects_vertex_property_maps(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::Properties { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn projects_edge_property_maps(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::EdgeProperties { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn projects_property_maps(&self) -> bool {
+        self.projects_vertex_property_maps() || self.projects_edge_property_maps()
+    }
+
     /// The binding slots whose vertex rows (labels or properties) this plan
     /// reads, or `None` when that cannot be stated slot by slot (a Boolean
     /// expression or a path projection may read any bound vertex).
@@ -792,12 +824,14 @@ impl<Row> GlaPlan<Row> {
                     for column in columns {
                         match column {
                             ValueProjection::Property { slot, .. }
+                            | ValueProjection::Properties { slot }
                             | ValueProjection::Labels { slot } => {
                                 slots.insert(slot.ordinal());
                             }
                             ValueProjection::Path { .. } => return None,
                             ValueProjection::Vertex { .. }
                             | ValueProjection::EdgeProperty { .. }
+                            | ValueProjection::EdgeProperties { .. }
                             | ValueProjection::Type { .. } => {}
                         }
                     }
@@ -976,6 +1010,14 @@ impl<Row> GlaPlan<Row> {
                                 bytes.push(5);
                                 bytes.extend_from_slice(&capture.to_be_bytes());
                             }
+                            ValueProjection::Properties { slot } => {
+                                bytes.push(6);
+                                bytes.extend_from_slice(&slot.0.to_be_bytes());
+                            }
+                            ValueProjection::EdgeProperties { capture } => {
+                                bytes.push(7);
+                                bytes.extend_from_slice(&capture.to_be_bytes());
+                            }
                             ValueProjection::Path { capture, function } => {
                                 bytes.push(2);
                                 bytes.extend_from_slice(&capture.to_be_bytes());
@@ -1090,7 +1132,28 @@ impl<Row> GlaPlan<Row> {
             bytes.extend_from_slice(b"visible-prefix\0");
             bytes.extend_from_slice(&(width as u64).to_be_bytes());
         }
+        if self.projects_property_maps() {
+            append_property_catalog_transcript(self.reverse_catalog.as_deref(), &mut bytes);
+        }
         bytes
+    }
+}
+
+pub(crate) fn append_property_catalog_transcript(
+    catalog: Option<&crate::graph_text::ReverseSymbolCatalog>,
+    bytes: &mut Vec<u8>,
+) {
+    bytes.extend_from_slice(b"fgdb:property-catalog:v1\0");
+    let Some(catalog) = catalog else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(catalog.properties.len() as u64).to_be_bytes());
+    for (key, name) in &catalog.properties {
+        bytes.extend_from_slice(&key.0.to_be_bytes());
+        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
     }
 }
 

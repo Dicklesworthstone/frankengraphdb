@@ -957,6 +957,14 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
+        if self.input.plan().projects_property_maps() {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
         if self.input.plan().requires_identified_edges() {
             return Err(GqlQueryError::IdentifiedEdgesRequired);
         }
@@ -1041,6 +1049,8 @@ impl PreparedGraphAggregate {
                         }
                         ValueProjection::Path { .. }
                         | ValueProjection::EdgeProperty { .. }
+                        | ValueProjection::Properties { .. }
+                        | ValueProjection::EdgeProperties { .. }
                         | ValueProjection::Labels { .. }
                         | ValueProjection::Type { .. } => {
                             return Err(GqlQueryError::IdentifiedEdgesRequired);

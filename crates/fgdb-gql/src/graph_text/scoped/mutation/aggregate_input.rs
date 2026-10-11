@@ -101,7 +101,12 @@ impl<'a> Parser<'a> {
         // A list or map argument, as in COUNT(DISTINCT [a, b]), reads with the
         // RETURN value grammar over the same input sources. The input binder
         // already lowers every composite template, so no new evaluator exists.
-        let composite = self.is_punct(b'[') || self.is_punct(b'{');
+        let composite = self.is_punct(b'[')
+            || self.is_punct(b'{')
+            || ((self.is_word("KEYS") || self.is_word("PROPERTIES"))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+            || (matches!(self.current.kind, TokenKind::Word(_))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')));
         let operand = if composite {
             None
         } else if bare_variable {
@@ -119,7 +124,7 @@ impl<'a> Parser<'a> {
         };
         // Err carries a plain scalar/vertex input's column.
         let value = match operand {
-            None => Ok(self.read_graph_value(&mut sources, 0).map_err(|source| {
+            None => match self.read_graph_value(&mut sources, 0).map_err(|source| {
                 let kind = match source.kind {
                     crate::GraphSetTextErrorKind::Pattern(kind) => kind,
                     _ => GraphPatternTextErrorKind::Expected(
@@ -127,7 +132,10 @@ impl<'a> Parser<'a> {
                     ),
                 };
                 error(source.offset, kind)
-            })?),
+            })? {
+                ReadValueTemplate::Column(column) => Err(column),
+                value => Ok(value),
+            },
             Some(Operand::Column(column)) => Err(column),
             Some(Operand::Literal(value)) => Ok(ReadValueTemplate::Literal(value)),
             Some(Operand::Number(Number::Literal(value))) => {
@@ -292,6 +300,18 @@ impl PreparedGraphAggregateText {
             ReadValueTemplate::MapGet { map, key } => Ok(GraphSetValue::MapGet {
                 map: Box::new(Self::bind_input_value(map, values)?),
                 key: key.clone(),
+            }),
+            ReadValueTemplate::MapOverlay {
+                base,
+                keys,
+                values: entries,
+            } => Ok(GraphSetValue::MapOverlay {
+                base: Box::new(Self::bind_input_value(base, values)?),
+                keys: keys.clone(),
+                values: entries
+                    .iter()
+                    .map(|value| Self::bind_input_value(value, values))
+                    .collect::<Result<_, _>>()?,
             }),
             ReadValueTemplate::Keys(map) => Ok(GraphSetValue::Keys(Box::new(
                 Self::bind_input_value(map, values)?,
