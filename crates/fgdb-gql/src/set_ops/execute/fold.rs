@@ -299,40 +299,14 @@ where
                     return Ok(());
                 }
                 let result = (|| {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    let column = row.len();
-                    let list = projection::evaluate_value(value, &row, column, &mut |event| {
-                        meter.event(event)
-                    })
-                    .map_err(|error| projected(error, row_at))?;
-                    let values = match list {
-                        GraphValue::List(values) => values,
-                        value if value.is_null() => return Ok(()),
-                        _ => {
-                            return Err(GqlQueryError::Source(
-                                GraphSetExecutionError::Projection {
-                                    row: row_at,
-                                    column,
-                                    error: crate::GraphIntegerError {
-                                        instruction: 0,
-                                        kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-                                    },
-                                },
-                            ));
-                        }
-                    };
-                    for value in values.into_vec() {
-                        meter.event(GlaExecutionEvent::Work)?;
-                        meter.event(GlaExecutionEvent::ScratchEntry)?;
-                        let mut cells = Vec::new();
-                        for cell in row.values() {
-                            cells.push(projection::copy_value(cell, &mut |event| {
-                                meter.event(event)
-                            })?);
-                        }
-                        meter.event(GlaExecutionEvent::ScratchEntry)?;
-                        cells.push(value);
-                        window.push(GraphValueRow::from_owned_values(cells), meter, consume)?;
+                    let mut rows =
+                        projection::UnwindRows::new(row, value, &mut |event| meter.event(event))
+                            .map_err(|error| projected(error, row_at))?;
+                    while let Some((row, next)) =
+                        rows.next_with_control(&mut |event| meter.event(event))?
+                    {
+                        rows = next;
+                        window.push(row, meter, consume)?;
                     }
                     Ok(())
                 })();

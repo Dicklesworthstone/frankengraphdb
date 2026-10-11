@@ -7,7 +7,7 @@ use core::convert::Infallible;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::spill_set::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBuildError, SpillSetRowError,
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBuildError, SpillSetRowError, SpillSetStage,
 };
 use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -49,6 +49,21 @@ fn scalar(value: i64) -> GraphValue {
 }
 fn row(values: Vec<GraphValue>) -> GraphValueRow {
     GraphValueRow::from_owned_values(values)
+}
+
+fn stage_rows<E>(
+    stage: &SpillSetStage,
+    input: GraphValueRow,
+    index: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<GraphValueRow>, SpillSetRowError<E>> {
+    let mut cursor = stage.start(input, index, control)?;
+    let mut rows = Vec::new();
+    while let Some((row, next)) = cursor.next_with_control(control)? {
+        rows.push(row);
+        cursor = next;
+    }
+    Ok(rows)
 }
 
 struct Graph {
@@ -162,12 +177,10 @@ fn staged(
     for stage in plan.stages() {
         let mut output = Vec::new();
         for (index, row) in rows.into_iter().enumerate() {
-            if let Some(row) = stage.evaluate(row, index, &mut |event| {
+            output.extend(stage_rows(stage, row, index, &mut |event| {
                 assert_ne!(event, GlaExecutionEvent::ResultRow);
                 Ok(())
-            })? {
-                output.push(row);
-            }
+            })?);
         }
         if let Some(order) = stage.order() {
             output.sort_by(|a, b| compare(a, b, order));
@@ -215,6 +228,125 @@ fn computed_values_predicates_and_complete_inner_pages_match_native_relations() 
         "MATCH (n) WITH DISTINCT n.p%2 AS bucket ORDER BY bucket DESC SKIP 1 LIMIT 1 RETURN bucket+10 AS value",
     );
     assert_eq!(staged(&graph, &query).unwrap(), vec![row(vec![scalar(10)])]);
+}
+
+#[test]
+fn unwind_preserves_native_bags_nested_values_and_each_relational_boundary() {
+    let graph = Graph::sample();
+    for text in [
+        "MATCH (n) WITH n.p AS p UNWIND [p,p,NULL] AS item RETURN item ORDER BY item",
+        "MATCH (n) WITH [] AS items UNWIND items AS item RETURN item",
+        "MATCH (n) WITH NULL AS items UNWIND items AS item RETURN item",
+        "MATCH (n) WITH n.p AS p UNWIND [[p,p+1],[],NULL,[p]] AS items UNWIND items AS item RETURN item ORDER BY item DESC",
+        "MATCH (n) WITH n.p AS p UNWIND [{value:p,items:[p,p+1]}] AS record UNWIND record.items AS item RETURN record.value AS owner,item ORDER BY owner,item",
+        "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 UNWIND [p,p-1] AS item WITH DISTINCT item ORDER BY item SKIP 1 LIMIT 2 RETURN item+10 AS value ORDER BY value",
+        "MATCH (n) WITH n.p AS p UNWIND [p,p+1] AS item WITH item WHERE item>2 RETURN DISTINCT item ORDER BY item DESC LIMIT 2",
+        "MATCH (a)-[r:R]->(b) WITH r.p AS p UNWIND [p,p] AS item RETURN item ORDER BY item",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p+s.p AS p UNWIND [p,p+1] AS item RETURN item ORDER BY item DESC SKIP 1 LIMIT 3",
+        "MATCH (n) WITH n.p AS p ORDER BY p LIMIT 0 UNWIND [1/(p-p)] AS item RETURN item",
+    ] {
+        let query = prepare(text);
+        assert_eq!(
+            staged(&graph, &query).unwrap_or_else(|error| panic!("{text}: {error:?}")),
+            graph
+                .native(&query)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}")),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn unwind_cursor_keeps_element_order_and_obeys_every_host_refusal() {
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let map = GraphValue::map(vec![("value".into(), scalar(7))]).unwrap();
+    let nested = GraphValue::List(vec![scalar(4), null.clone()].into_boxed_slice());
+    let elements = vec![scalar(3), null, map, nested, scalar(3)];
+    let query = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"))
+        .unwind(
+            "element".to_owned(),
+            GraphSetValue::List(elements.iter().cloned().map(GraphSetValue::Value).collect()),
+        )
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let stage = plan.stages().last().unwrap();
+    assert_eq!(stage.order(), None, "UNWIND preserves list order");
+    let input = row(vec![scalar(11)]);
+    let mut events = Vec::new();
+    let actual = stage_rows(stage, input.clone(), 17, &mut |event| {
+        events.push(event);
+        Ok::<_, &'static str>(())
+    })
+    .unwrap();
+    let expected: Vec<_> = elements
+        .into_iter()
+        .map(|element| row(vec![scalar(11), element]))
+        .collect();
+    assert_eq!(actual, expected);
+    assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
+    assert!(!events.contains(&GlaExecutionEvent::ResultRow));
+    // A refusal at any allocation/work checkpoint stops that owned cursor.
+    // No later callback or output may be produced after the refusal.
+    for refusal in 0..events.len() {
+        let mut observed = Vec::new();
+        let result = stage_rows(stage, input.clone(), 17, &mut |event| {
+            observed.push(event);
+            if observed.len() == refusal + 1 {
+                Err("cancelled or exhausted")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(SpillSetRowError::Control("cancelled or exhausted"))
+        );
+        assert_eq!(observed, events[..=refusal]);
+    }
+}
+
+#[test]
+fn unwind_null_empty_and_type_errors_keep_original_input_locations() {
+    let query = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"))
+        .unwind("element".into(), GraphSetValue::Column(0))
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let stage = plan.stages().last().unwrap();
+    assert_eq!(
+        stage_rows(
+            stage,
+            row(vec![GraphValue::Scalar(CanonicalScalar::Null)]),
+            23,
+            &mut |_| Ok::<_, ()>(()),
+        ),
+        Ok(vec![])
+    );
+    assert!(matches!(
+        stage_rows(stage, row(vec![scalar(2)]), 23, &mut |_| Ok::<_, ()>(())),
+        Err(SpillSetRowError::Native(GraphSetExecutionError::Projection {
+            row: 23,
+            column: 1,
+            error,
+        })) if error.kind == GraphIntegerErrorKind::IncompatibleOperands
+    ));
+    let graph = Graph::sample();
+    for tail in ["LIMIT 0", "LIMIT 1", "SKIP 1000 LIMIT 2"] {
+        let text = format!(
+            "MATCH (n) WITH n.p AS p UNWIND [[p],2] AS items UNWIND items AS item RETURN item {tail}"
+        );
+        let query = prepare(&text);
+        let GqlQueryError::Source(expected) = graph.native(&query).unwrap_err() else {
+            panic!("native UNWIND type error");
+        };
+        assert!(matches!(
+            expected,
+            GraphSetExecutionError::Projection { row: 1, .. }
+        ));
+        assert_eq!(
+            staged(&graph, &query),
+            Err(SpillSetRowError::Native(expected))
+        );
+    }
 }
 
 #[test]
@@ -296,33 +428,31 @@ fn projected_allocations_and_refusals_use_the_host_control_without_final_row_cha
     assert_eq!(stage.count(), Some(0));
     let input = row(vec![scalar(2)]);
     let mut events = Vec::new();
-    let output = stage
-        .evaluate(input.clone(), 17, &mut |event| {
-            events.push(event);
-            Ok::<_, &'static str>(())
-        })
-        .unwrap()
-        .unwrap();
-    assert!(matches!(output.get(0), Some(GraphValue::Map { .. })));
+    let output = stage_rows(stage, input.clone(), 17, &mut |event| {
+        events.push(event);
+        Ok::<_, &'static str>(())
+    })
+    .unwrap();
+    assert_eq!(output.len(), 1);
+    assert!(matches!(output[0].get(0), Some(GraphValue::Map { .. })));
     assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
     assert!(!events.contains(&GlaExecutionEvent::ResultRow));
     for refuse in 0..events.len() {
         let mut observed = Vec::new();
-        let error = stage
-            .evaluate(input.clone(), 17, &mut |event| {
-                observed.push(event);
-                if observed.len() == refuse + 1 {
-                    Err("reservation refused")
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_err();
+        let error = stage_rows(stage, input.clone(), 17, &mut |event| {
+            observed.push(event);
+            if observed.len() == refuse + 1 {
+                Err("reservation refused")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
         assert_eq!(error, SpillSetRowError::Control("reservation refused"));
         assert_eq!(observed, events[..=refuse]);
     }
     assert!(matches!(
-        stage.evaluate(
+        stage.start(
             row(vec![GraphValue::Vertex(VId(2))]),
             0,
             &mut |_| Ok::<_, ()>(())
@@ -353,13 +483,6 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
         PreparedGraphSet::singleton(),
         pattern
             .clone()
-            .unwind(
-                "element".to_owned(),
-                GraphSetValue::List(vec![GraphSetValue::Column(0)]),
-            )
-            .unwrap(),
-        pattern
-            .clone()
             .combine(
                 GraphSetOperation::Union,
                 GraphSetQuantifier::All,
@@ -375,6 +498,19 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
             Err(SpillSetBuildError::Unsupported { depth: 1 })
         ));
     }
+    let singleton = PreparedGraphSet::singleton()
+        .unwind(
+            "element".to_owned(),
+            GraphSetValue::List(vec![GraphSetValue::Value(scalar(1))]),
+        )
+        .unwrap()
+        .nested()
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&singleton),
+        Err(SpillSetBuildError::Unsupported { depth: 2 })
+    ));
 }
 
 #[test]

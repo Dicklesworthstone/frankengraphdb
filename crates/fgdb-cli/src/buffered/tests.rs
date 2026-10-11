@@ -411,6 +411,50 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
                 2,
             ),
             (
+                "MATCH (n) WITH n.p AS p UNWIND [p,NULL,p] AS item RETURN p,item ORDER BY p,item",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [[],NULL,[p,p+1]] AS items UNWIND items AS item RETURN item ORDER BY item DESC",
+                2,
+            ),
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 WITH [{owner:n.p,items:[n.p,n.p+10]}] AS records UNWIND records AS record UNWIND record.items AS item RETURN record.owner AS owner,item ORDER BY owner,item",
+                1,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 UNWIND [p,p-1,p] AS item WITH DISTINCT item ORDER BY item SKIP 1 LIMIT 2 RETURN item+100 AS value ORDER BY value",
+                2,
+            ),
+            (
+                "MATCH (n) WITH NULL AS items UNWIND items AS item RETURN item",
+                2,
+            ),
+            (
+                "MATCH (n) WITH [] AS items UNWIND items AS item RETURN item",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,p,NULL] AS item RETURN COUNT(*) AS rows,SUM(item) AS total",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,p,NULL] AS item RETURN COUNT(DISTINCT item) AS rows,SUM(DISTINCT item) AS total",
+                2,
+            ),
+            (
+                "MATCH (n) WITH [] AS items UNWIND items AS item RETURN COUNT(*) AS rows,SUM(item) AS total",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WITH r.p AS p UNWIND [p,p] AS item RETURN item ORDER BY item",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,p] AS item RETURN item LIMIT 0",
+                2,
+            ),
+            (
                 "MATCH (n) WITH n.p AS value ORDER BY value DESC LIMIT 2 RETURN COUNT(*) AS rows,SUM(value) AS total",
                 2,
             ),
@@ -577,7 +621,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         // Unsupported relational descendants remain visible through an outer
         // computed projection and LIMIT zero, before database/scratch opening.
         for text in [
-            "MATCH (n) WITH n.p AS value UNWIND [value,value] AS item RETURN item+1 AS result LIMIT 0",
+            "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS result LIMIT 0",
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
             "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m) RETURN {value:m.p} AS value LIMIT 0",
         ] {
@@ -592,7 +636,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
             "MATCH (n) WITH n.p AS value RETURN collect(value) LIMIT 0",
-            "MATCH (n) WITH n.p AS value UNWIND [value,value] AS item RETURN sum(item) LIMIT 0",
+            "UNWIND [1,2] AS item RETURN sum(item) LIMIT 0",
             "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
             assert!(
@@ -643,6 +687,26 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             (
                 "MATCH (n) WITH n.p AS value WITH 10/(value-2) AS unused RETURN COUNT(*) AS rows LIMIT 0",
                 None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [[p],2] AS items UNWIND items AS item RETURN 1/(p-p) AS value LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,10/(p-2)] AS item RETURN item LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [[p],2] AS items UNWIND items AS item RETURN COUNT(*) AS rows LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,p,p] AS item RETURN item LIMIT 0",
+                Some(("--max-spill-rows", "8")),
+            ),
+            (
+                "MATCH (n) WITH n.p AS p UNWIND [p,p,p] AS item RETURN COUNT(*) AS rows",
+                Some(("--max-spill-rows", "8")),
             ),
             (
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",

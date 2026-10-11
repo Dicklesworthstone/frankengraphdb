@@ -205,10 +205,11 @@ impl PreparedNativeRead {
     /// or fixed-hop edge source before database opening. Computed inputs, HAVING,
     /// computed visible output, RETURN DISTINCT and exact numeric ordering use
     /// the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT arguments use
-    /// bounded external support passes. Unary WITH projection/filter pipelines
-    /// retain intermediate DISTINCT, ordering and pagination in external stages.
-    /// COLLECT, relational joins/UNWIND, OPTIONAL/variable-length expansion and probes refuse
-    /// at preparation. Join routing and one record per hop use the view pool;
+    /// bounded external support passes. Unary WITH projection/filter/UNWIND
+    /// pipelines retain intermediate expansion, DISTINCT, ordering and
+    /// pagination in external stages. COLLECT, relational joins, source-free
+    /// relations, OPTIONAL/variable-length expansion and probes refuse at
+    /// preparation. Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.
     pub fn prepare_buffered_aggregate(
         &self,

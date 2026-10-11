@@ -298,8 +298,8 @@ where
         }
         .map_err(NativeSpoolError::Decode)?;
         drop(bytes);
-        let output = stage
-            .evaluate(row, row_index, &mut |event| {
+        let cursor = stage
+            .start(row, row_index, &mut |event| {
                 native_event(work.cx, policy, evaluator, event)?;
                 if event == GlaExecutionEvent::ScratchEntry {
                     let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
@@ -311,8 +311,35 @@ where
                 SpillSetRowError::Control(error) => error,
                 SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
             })?;
+        // UNWIND retains one input and its evaluated list. Their reservation
+        // outlives every yielded element, including asynchronous appends; the
+        // cursor's payloads are dropped before its affine charge.
+        let mut state = (cursor, charge);
         row_index = row_index.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-        if let Some(row) = output {
+        loop {
+            // Prefix copies belong to one output occurrence, not to the full
+            // expansion. Refund them before pulling the next row while the
+            // original input/list reservation remains live. Native work and
+            // scratch-entry accounting nevertheless continue cumulatively.
+            let mut charge = pool.reserve(work.cx, 0).map_err(SpillError::Memory)?;
+            let next = state
+                .0
+                .next_with_control(&mut |event| {
+                    native_event(work.cx, policy, evaluator, event)?;
+                    if event == GlaExecutionEvent::ScratchEntry {
+                        let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+                        charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| match error {
+                    SpillSetRowError::Control(error) => error,
+                    SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
+                })?;
+            let Some((row, remaining)) = next else {
+                break;
+            };
+            state.0 = remaining;
             if row.len() != stage.columns().len() {
                 return Err(SpillError::InvalidRun.into());
             }

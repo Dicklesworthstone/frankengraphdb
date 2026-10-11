@@ -6,5 +6,6 @@
 //! row stages use the ordinary native expression and predicate evaluators.
 
 pub use crate::set_ops::spill::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBuildError, SpillSetRowError, SpillSetStage,
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetBuildError, SpillSetRowError, SpillSetRows,
+    SpillSetStage,
 };

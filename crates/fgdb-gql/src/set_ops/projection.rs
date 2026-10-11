@@ -807,6 +807,66 @@ pub(super) fn copy_value<E>(
     value.copy_with_control(control)
 }
 
+/// One evaluated UNWIND input, shared by resident, folded and external rows.
+/// Evaluation owns the list once; each step moves one element and copies only
+/// its original prefix. Consuming a step makes a control refusal terminal.
+pub(super) struct UnwindRows {
+    prefix: GraphValueRow,
+    values: std::vec::IntoIter<GraphValue>,
+}
+
+impl UnwindRows {
+    pub(super) fn new<E>(
+        row: GraphValueRow,
+        value: &GraphSetValue,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, ProjectionFailure<E>> {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        let column = row.len();
+        let list = evaluate_value(value, &row, column, control)?;
+        let values = match list {
+            GraphValue::List(values) => values.into_vec(),
+            value if value.is_null() => Vec::new(),
+            _ => {
+                return Err(ProjectionFailure::Arithmetic {
+                    column,
+                    error: GraphIntegerError {
+                        instruction: 0,
+                        kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                    },
+                });
+            }
+        };
+        Ok(Self {
+            prefix: row,
+            values: values.into_iter(),
+        })
+    }
+
+    /// State allocations remain owned by the caller through the last emitted
+    /// row's use. This control charges only the next output's new allocations;
+    /// the moved element keeps the reservation made during list evaluation.
+    pub(super) fn next_with_control<E>(
+        mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<(GraphValueRow, Self)>, E> {
+        let Some(value) = self.values.next() else {
+            return Ok(None);
+        };
+        control(GlaExecutionEvent::Work)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut cells = Vec::new();
+        for cell in self.prefix.values() {
+            cells.push(copy_value(cell, control)?);
+        }
+        // The evaluated element already owns its metered payload; only its
+        // newly retained output cell needs another reservation.
+        control(GlaExecutionEvent::ScratchEntry)?;
+        cells.push(value);
+        Ok(Some((GraphValueRow::from_owned_values(cells), self)))
+    }
+}
+
 /// The input is a private owned row whose complete schema was admitted by the
 /// enclosing set executor. Every output cell and variable payload is reserved
 /// before growth. A refusal drops the whole private row, never a short result.

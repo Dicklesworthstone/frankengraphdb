@@ -351,49 +351,23 @@ where
             let input = run(input, source, meter, operand)?;
             let mut output = Vec::new();
             for (row_at, row) in input.into_iter().enumerate() {
-                meter.event(GlaExecutionEvent::Work)?;
-                let column = row.len();
-                let list = projection::evaluate_value(value, &row, column, &mut |event| {
-                    meter.event(event)
-                })
-                .map_err(|error| match error {
-                    projection::ProjectionFailure::Control(error) => error,
-                    projection::ProjectionFailure::Arithmetic { column, error } => {
-                        GqlQueryError::Source(GraphSetExecutionError::Projection {
-                            row: row_at,
-                            column,
-                            error,
-                        })
-                    }
-                })?;
-                let values = match list {
-                    GraphValue::List(values) => values,
-                    value if value.is_null() => continue,
-                    _ => {
-                        return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
-                            row: row_at,
-                            column,
-                            error: crate::GraphIntegerError {
-                                instruction: 0,
-                                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-                            },
-                        }));
-                    }
-                };
-                for value in values.into_vec() {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut cells = Vec::new();
-                    for cell in row.values() {
-                        cells.push(projection::copy_value(cell, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    // The evaluated element already owns its metered payload;
-                    // only the newly retained output cell needs reservation.
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    cells.push(value);
-                    output.push(GraphValueRow::from_owned_values(cells));
+                let mut rows =
+                    projection::UnwindRows::new(row, value, &mut |event| meter.event(event))
+                        .map_err(|error| match error {
+                            projection::ProjectionFailure::Control(error) => error,
+                            projection::ProjectionFailure::Arithmetic { column, error } => {
+                                GqlQueryError::Source(GraphSetExecutionError::Projection {
+                                    row: row_at,
+                                    column,
+                                    error,
+                                })
+                            }
+                        })?;
+                while let Some((row, next)) =
+                    rows.next_with_control(&mut |event| meter.event(event))?
+                {
+                    rows = next;
+                    output.push(row);
                 }
             }
             output

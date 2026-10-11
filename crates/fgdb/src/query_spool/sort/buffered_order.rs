@@ -40,10 +40,11 @@ impl PreparedNativeRead {
     /// Bind once and admit a vertex, single-edge or fixed-hop source for external
     /// ordering. Property-only output, local predicates, hidden ordering keys,
     /// edge orientation and row DISTINCT use their existing GLA semantics.
-    /// Native unary Project/Filter/Scope relations preserve every intermediate
-    /// canonicalization, DISTINCT, order and window through external stages.
-    /// Probes, OPTIONAL/variable-length paths, relational joins and UNWIND refuse.
-    /// Numeric aggregate plans have their own preparation.
+    /// Native unary Project/Filter/Scope/UNWIND relations preserve every
+    /// expansion, canonicalization, DISTINCT, order and window through external
+    /// stages. UNWIND retains one input/list and one expanded row at a time.
+    /// Probes, OPTIONAL/variable-length paths, relational joins and source-free
+    /// relations refuse. Numeric aggregate plans have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
         let set = match self {
