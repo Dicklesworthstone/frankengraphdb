@@ -248,6 +248,7 @@ impl UnresolvedGraphText<'_> {
                 Ok(value)
             };
             let (builder, filters) = scoped::resolve_pattern(
+                syntax.match_mode,
                 &syntax.variables[..syntax.root_variables],
                 &syntax.labels,
                 &syntax.edges,

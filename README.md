@@ -94,6 +94,26 @@ EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 
 ---
 
+### Relationship reuse in MATCH
+
+A positive `MATCH` uses each relationship ID at most once across the entire
+clause, including quantified paths and comma-separated patterns. Repeated
+vertices and parallel relationships with different IDs remain valid. Each
+later `MATCH`, `OPTIONAL MATCH`, or existential pattern starts a new domain.
+
+```gql
+// One relationship cannot provide both r and s in this clause.
+MATCH (a)-[r:KNOWS]->(b)<-[s:KNOWS]-(c) RETURN a, b, c
+
+// Explicitly allow relationship reuse when a walk needs it.
+MATCH REPEATABLE ELEMENTS (a)-[:KNOWS*1..4]-(b) RETURN a, b
+```
+
+`DIFFERENT EDGES` and `DIFFERENT RELATIONSHIPS` explicitly name the default.
+Path modes such as `TRAIL` and `ACYCLIC` apply their own restrictions inside
+that match mode. Every quantified path still requires the supported finite
+upper bound.
+
 ## The six bets
 
 No single trick makes this a leapfrog. The **composition** of six bets does, each at or beyond the current frontier, each feasible only because the foundation libraries already exist.

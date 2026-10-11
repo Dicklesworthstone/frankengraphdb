@@ -2,15 +2,15 @@
 
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GlaOperator, GraphColumn, GraphPatternBuilder, GraphValueRow, GraphWalkSearch,
-    IntegerComparison, PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GlaOperator, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueRow,
+    GraphWalkSearch, IntegerComparison, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWalkBounds, GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
@@ -71,6 +71,7 @@ fn native_directions_bind_to_identical_typed_shortest_atoms_without_catalog_reen
             .unwrap();
         let bound = template.bind_parameters(&arguments).unwrap();
         let mut builder = GraphPatternBuilder::new();
+        builder.match_mode(GraphMatchMode::DifferentEdges);
         builder.vertex("a").unwrap().vertex("b").unwrap();
         builder
             .shortest_walk("a", R, direction, "b", GraphWalkBounds::new(0, 3).unwrap())
@@ -103,18 +104,19 @@ fn native_directions_bind_to_identical_typed_shortest_atoms_without_catalog_reen
 
 #[test]
 fn shortest_selector_and_return_quantifier_are_independent() {
-    let edges = [(VId(1), R, VId(1)); 2];
+    let edges = [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))];
     for (head, tail, expected) in [
         ("ALL SHORTEST WALK", "a,b", 2),
         ("ALL SHORTEST WALK", "DISTINCT a,b", 1),
         ("ALL SHORTEST WALK", "ALL a,b SKIP 1 LIMIT 1", 1),
         ("ALL SHORTEST WALK", "ALL a,b LIMIT 0", 0),
-        ("WALK", "ALL a,b", 14),
+        ("WALK", "ALL a,b", 4),
+        ("REPEATABLE ELEMENTS WALK", "ALL a,b", 14),
     ] {
         let query = prepare(&format!("MATCH {head} (a)-[:R*1..3]->(b) RETURN {tail}"));
         let rows = query
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 3,
                 [VId(1)],
                 edges,
@@ -133,7 +135,7 @@ fn zero_hop_isolates_and_positive_lower_bounds_keep_native_semantics() {
     let zero = prepare("MATCH ALL SHORTEST WALK (a)-[:R*0]->(b) RETURN a,b");
     let rows = zero
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             2,
             [VId(7), VId(9)],
             [],
@@ -154,7 +156,8 @@ fn zero_hop_isolates_and_positive_lower_bounds_keep_native_semantics() {
         })
         .collect::<Vec<_>>();
     assert_eq!(pairs, vec![(VId(7), VId(7)), (VId(9), VId(9))]);
-    let positive = prepare("MATCH ALL SHORTEST WALK (a)-[:R*2..3]->(a) RETURN a");
+    let positive =
+        prepare("MATCH REPEATABLE ELEMENTS ALL SHORTEST WALK (a)-[:R*2..3]->(a) RETURN a");
     let rows = positive
         .plan()
         .execute_governed_with_properties(
@@ -191,7 +194,7 @@ fn each_match_scope_retains_its_own_explicit_search_selector() {
         vec![GraphWalkSearch::AllShortest, GraphWalkSearch::All]
     );
     let vertices = [VId(1), VId(2), VId(3)];
-    let edges = [(VId(1), R, VId(2)), (VId(1), R, VId(2))];
+    let edges = [(EId(1), VId(1), R, VId(2)), (EId(2), VId(1), R, VId(2))];
     for (quantifier, expected) in [
         ("EXISTS", vec![VId(1)]),
         ("NOT EXISTS", vec![VId(2), VId(3)]),
@@ -201,7 +204,7 @@ fn each_match_scope_retains_its_own_explicit_search_selector() {
         ));
         let rows = query
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 5,
                 vertices,
                 edges,
@@ -316,10 +319,10 @@ fn aggregation_counts_shortest_occurrences_instead_of_all_walks_or_distinct_endp
         symbols,
     ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
     let rows = query
-        .execute_governed(
+        .execute_governed_with_identified_properties(
             4,
             [VId(1), VId(2)],
-            [(VId(1), R, VId(1)); 2],
+            [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))],
             |_, _| Ok::<_, ()>(true),
             |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
             wide(),

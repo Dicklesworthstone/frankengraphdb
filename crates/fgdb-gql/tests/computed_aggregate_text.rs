@@ -408,7 +408,7 @@ fn computed_keys_work_as_hidden_grouping_and_direct_clause_references() {
 #[test]
 fn constant_and_nullable_arguments_preserve_walk_optional_and_empty_bags() {
     let plan = prepare(
-        "MATCH WALK (a)-[:R*0..2]->(b) RETURN \
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN \
         COUNT(1) AS c,COUNT(NULL) AS absent,SUM(7) AS total,MIN('quoted '' value') AS text",
     );
     let edges = [

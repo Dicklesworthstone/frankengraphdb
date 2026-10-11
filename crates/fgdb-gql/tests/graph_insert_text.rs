@@ -176,7 +176,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         (VId(1), R, VId(2)),
     ];
     let query = prepare(
-        "MATCH WALK (a)-[:R*0..2]->(b) \
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) \
         CREATE (x {p:7}),(y {p:NULL}),(x)-[:R]->(y),(y)-[:R]->(x),(x)-[:R]->(x)",
     );
     let result = run(&query, &vertices, &edges, &Props::new()).unwrap();

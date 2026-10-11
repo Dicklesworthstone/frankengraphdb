@@ -476,7 +476,7 @@ fn bounded_walk_targets_keep_occurrences_but_each_delete_is_proposed_once() {
         (VId(1), R, VId(1)),
         (VId(1), R, VId(2)),
     ];
-    let plan = prepare("MATCH WALK (a)-[:R*0..2]->(b) DETACH DELETE b");
+    let plan = prepare("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) DETACH DELETE b");
     let result = run(&plan, &[VId(1), VId(2)], &edges, &props(), policy()).unwrap();
     assert_eq!(result.stats().selection.result_rows, 11);
     assert_eq!(

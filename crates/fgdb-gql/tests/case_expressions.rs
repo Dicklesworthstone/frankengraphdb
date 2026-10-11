@@ -229,7 +229,7 @@ fn walk_occurrences_and_optional_nulls_survive_conditional_projection() {
     ];
     for (quantifier, count) in [("", 11), ("DISTINCT", 1)] {
         let query = prepare(&format!(
-            "MATCH WALK (a)-[:R*0..2]->(b) RETURN {quantifier} CASE WHEN TRUE THEN 7 ELSE 1/0 END AS value"
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN {quantifier} CASE WHEN TRUE THEN 7 ELSE 1/0 END AS value"
         ));
         let result = run(
             &query,
@@ -273,7 +273,7 @@ fn conditional_mutations_reuse_frozen_assignments_and_conflict_reduction() {
         (VId(1), R, VId(2)),
     ];
     let query = PreparedGraphMutationText::prepare(
-        "MATCH WALK (a)-[:R*0..2]->(b) \
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) \
         SET a.p=CASE WHEN a.p IS NULL THEN 1 ELSE a.p+1 END",
         R,
         symbols,

@@ -30,6 +30,7 @@ impl ScopeKind {
 }
 
 struct PatternSyntax<'a> {
+    match_mode: GraphMatchMode,
     variables: Vec<Name<'a>>,
     captures: Vec<Name<'a>>,
     labels: Vec<(Name<'a>, Name<'a>)>,
@@ -108,6 +109,7 @@ impl<'a> ScopeSyntax<'a> {
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
     ) -> Result<BoundScope, GraphPatternTextError> {
         let (builder, filters) = resolve_pattern_with_captures(
+            self.body.match_mode,
             &self.body.variables,
             &self.body.captures,
             &self.body.labels,
@@ -127,16 +129,18 @@ impl<'a> ScopeSyntax<'a> {
 /// predicates retain operands for rebinding instead of entering a second AST
 /// interpreter or re-resolving a catalog on every execution.
 pub(super) fn resolve_pattern<'a>(
+    match_mode: GraphMatchMode,
     variables: &[Name<'a>],
     labels: &[(Name<'a>, Name<'a>)],
     edges: &[Edge<'a>],
     filters: Vec<Filter<'a>>,
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
-    resolve_pattern_with_captures(variables, &[], labels, edges, filters, symbol)
+    resolve_pattern_with_captures(match_mode, variables, &[], labels, edges, filters, symbol)
 }
 
 fn resolve_pattern_with_captures<'a>(
+    match_mode: GraphMatchMode,
     variables: &[Name<'a>],
     captures: &[Name<'a>],
     labels: &[(Name<'a>, Name<'a>)],
@@ -145,6 +149,7 @@ fn resolve_pattern_with_captures<'a>(
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
     let mut builder = GraphPatternBuilder::new();
+    builder.match_mode(match_mode);
     for name in variables {
         let declared = if captures.iter().any(|capture| capture.text == name.text) {
             builder.outer_vertex(name.text)
@@ -528,6 +533,7 @@ impl<'a> Parser<'a> {
     /// unsupported. A mutation attaches its own typed terminal clause.
     pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
+        self.syntax.match_mode = self.match_mode()?;
         if self.starts_path_binding()? {
             let path = self.name()?;
             self.punct(b'=', "=")?;
@@ -953,6 +959,10 @@ impl<'a> Parser<'a> {
 
     fn take_pattern(&mut self) -> PatternSyntax<'a> {
         PatternSyntax {
+            match_mode: core::mem::replace(
+                &mut self.syntax.match_mode,
+                GraphMatchMode::DifferentEdges,
+            ),
             variables: core::mem::take(&mut self.syntax.variables),
             captures: Vec::new(),
             labels: core::mem::take(&mut self.syntax.labels),
@@ -962,6 +972,7 @@ impl<'a> Parser<'a> {
     }
 
     fn restore_pattern(&mut self, pattern: PatternSyntax<'a>) {
+        self.syntax.match_mode = pattern.match_mode;
         self.syntax.variables = pattern.variables;
         self.syntax.labels = pattern.labels;
         self.syntax.edges = pattern.edges;
@@ -992,6 +1003,7 @@ impl<'a> Parser<'a> {
         let parsed = (|| {
             if clause {
                 self.word("MATCH")?;
+                self.syntax.match_mode = self.match_mode()?;
             }
             if self.starts_path_binding()? {
                 return Err(error(

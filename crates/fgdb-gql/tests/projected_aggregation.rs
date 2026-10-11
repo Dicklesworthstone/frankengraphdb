@@ -207,7 +207,7 @@ fn argument_distinct_operates_on_computed_values_and_averages_remain_exact() {
 
 #[test]
 fn constant_inputs_preserve_walk_occurrences_isolates_and_empty_group_laws() {
-    let source = pattern("MATCH WALK (a)-[:R*0..2]->(b) RETURN b");
+    let source = pattern("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN b");
     let projection = vec![GraphSetProjection::new(
         "value",
         GraphSetValue::Literal(GqlScalarParameter::new(CanonicalScalar::Int(7)).unwrap()),

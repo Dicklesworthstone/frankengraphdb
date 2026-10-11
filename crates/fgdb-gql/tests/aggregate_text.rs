@@ -2,8 +2,8 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GlaOperator, GraphColumn, GraphPatternBuilder, GraphValue, IntegerComparison,
-    VertexPredicate,
+    GlaDirection, GlaOperator, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValue,
+    IntegerComparison, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphAggregateError,
@@ -160,6 +160,7 @@ fn mixed_return_order_group_order_and_shared_arguments_match_typed_preparation()
         .unwrap();
     let actual = template.bind_parameters(&args).unwrap();
     let mut b = GraphPatternBuilder::new();
+    b.match_mode(GraphMatchMode::DifferentEdges);
     for name in ["a", "b", "c"] {
         b.vertex(name).unwrap();
     }

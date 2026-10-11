@@ -6,7 +6,7 @@ use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, Prep
 use fgdb_types::{EId, VId};
 use std::collections::BTreeMap;
 
-type Edge = (VId, RelationId, VId);
+type Edge = (EId, VId, RelationId, VId);
 
 fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
@@ -21,7 +21,7 @@ fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
 fn run(text: &str, edges: &[Edge]) -> Vec<Vec<Option<VId>>> {
     prepare(text)
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             edges.len() as u64 + 4,
             (0..4).map(VId),
             edges.iter().copied(),
@@ -39,11 +39,11 @@ fn run(text: &str, edges: &[Edge]) -> Vec<Vec<Option<VId>>> {
 
 fn fixture() -> Vec<Edge> {
     vec![
-        (VId(0), RelationId(0), VId(1)),
-        (VId(0), RelationId(u64::MAX), VId(1)),
-        (VId(1), RelationId(7), VId(2)),
-        (VId(2), RelationId(0), VId(2)),
-        (VId(2), RelationId(u64::MAX), VId(0)),
+        (EId(1), VId(0), RelationId(0), VId(1)),
+        (EId(2), VId(0), RelationId(u64::MAX), VId(1)),
+        (EId(3), VId(1), RelationId(7), VId(2)),
+        (EId(4), VId(2), RelationId(0), VId(2)),
+        (EId(5), VId(2), RelationId(u64::MAX), VId(0)),
     ]
 }
 
@@ -58,7 +58,7 @@ fn omitted_types_and_brackets_preserve_parallel_edges_and_self_loop_multiplicity
         // Independent occurrence oracle: orient each physical edge exactly
         // once, and add the opposite orientation only for a non-loop.
         let mut expected = Vec::new();
-        for &(left, _, right) in &edges {
+        for &(_, left, _, right) in &edges {
             if direction != 1 {
                 expected.push(vec![Some(left), Some(right)]);
             }
@@ -99,7 +99,7 @@ fn bounded_mixed_walks_and_shortest_selectors_match_an_independent_path_enumerat
                 frontier = frontier
                     .iter()
                     .flat_map(|current| {
-                        edges.iter().filter_map(move |&(source, _, target)| {
+                        edges.iter().filter_map(move |&(_, source, _, target)| {
                             (source == *current).then_some(target)
                         })
                     })
@@ -125,7 +125,9 @@ fn bounded_mixed_walks_and_shortest_selectors_match_an_independent_path_enumerat
             if selector == "ANY SHORTEST WALK" {
                 expected.dedup();
             }
-            let text = format!("MATCH {selector} (a)-[*{minimum}..{maximum}]->(b) RETURN ALL a,b");
+            let text = format!(
+                "MATCH REPEATABLE ELEMENTS {selector} (a)-[*{minimum}..{maximum}]->(b) RETURN ALL a,b"
+            );
             assert_eq!(run(&text, &edges), expected, "{text}");
         }
     }
@@ -136,7 +138,7 @@ fn untyped_optional_and_existence_keep_null_extension_and_isolates() {
     let edges = fixture();
     let mut expected: Vec<_> = edges
         .iter()
-        .map(|&(source, _, target)| vec![Some(source), Some(target)])
+        .map(|&(_, source, _, target)| vec![Some(source), Some(target)])
         .collect();
     expected.push(vec![Some(VId(3)), None]);
     expected.sort();

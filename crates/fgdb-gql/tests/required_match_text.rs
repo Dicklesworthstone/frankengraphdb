@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -56,10 +56,18 @@ fn evaluate(text: &str, vertices: &[VId], edges: &[Edge]) -> Vec<GraphValueRow> 
         .collect::<BTreeMap<_, _>>();
     pattern
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             (vertices.len() + edges.len()) as u64,
             vertices.iter().copied(),
-            edges.iter().copied(),
+            // Each occurrence is a distinct fixture relationship, including
+            // parallel tuples; keep its identity through quantified clauses.
+            edges
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(at, (source, relation, target))| {
+                    (EId(at as u128), source, relation, target)
+                }),
             |vid, predicates| {
                 Ok::<_, ()>(
                     predicates
@@ -286,7 +294,7 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     let maximal = format!("MATCH (a){} RETURN a", " MATCH (a)".repeat(64));
     assert_eq!(evaluate(&maximal, &[VId(1)], &[]).len(), 1);
     // Bounded var-length in a late plain MATCH is valid GQL since bounded
-    // plain MATCH is a WALK: optional re-bind of (a), then one finite
+    // plain MATCH admits a finite edge-distinct path: optional re-bind of (a), then one finite
     // 1..2 occurrence (1->2; length 2 dies at 2), absence eliminated.
     let optional_var = evaluate(
         "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*1..2]->(b) RETURN b",

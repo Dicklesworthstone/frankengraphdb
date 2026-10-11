@@ -223,14 +223,18 @@ fn expected(
 ) -> Vec<Vec<GraphValue>> {
     let inner: Vec<_> = f
         .edges
-        .values()
-        .flat_map(|(a, b, _)| orientations(*a, *b, dirs[1]))
+        .iter()
+        .flat_map(|(&eid, (a, b, _))| {
+            orientations(*a, *b, dirs[1])
+                .into_iter()
+                .map(move |(a, b)| (eid, a, b))
+        })
         .collect();
     let mut rows = Vec::new();
     for (&eid, (from, to, _)) in &f.edges {
         for (a, b) in orientations(*from, *to, dirs[0]) {
             let mut witnesses = 0;
-            for &(start, x) in &inner {
+            for &(first, start, x) in &inner {
                 // All fixture vertex properties are absent. NOT(NULL = 7)
                 // is UNKNOWN, not TRUE and not a witness.
                 if start != b || nullable || x == a {
@@ -240,8 +244,11 @@ fn expected(
                     witnesses += 1;
                     continue;
                 }
-                for &(second, last) in &inner {
-                    if second == (if shape == 1 { x } else { b }) && last == a {
+                for &(second_eid, second, last) in &inner {
+                    if first != second_eid
+                        && second == (if shape == 1 { x } else { b })
+                        && last == a
+                    {
                         witnesses += 1;
                     }
                 }
@@ -257,6 +264,33 @@ fn expected(
     }
     rows.sort();
     rows.into_iter().skip(skip).take(limit).collect()
+}
+
+#[test]
+fn fixed_probe_relationship_identity_is_local_to_each_match_clause() {
+    let input = "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]-(x)-[:R]-(b) } RETURN r,a,b";
+    for (edges, different, repeatable) in
+        [(vec![(1, 1, 2)], 0, 1), (vec![(1, 1, 2), (2, 1, 2)], 2, 2)]
+    {
+        for (text, expected) in [
+            (input.to_owned(), different),
+            (
+                input.replace("{ MATCH ", "{ MATCH REPEATABLE ELEMENTS "),
+                repeatable,
+            ),
+        ] {
+            let prepared = prepare(&text);
+            let rows = EdgeScanCursor::new(
+                Fixture::from_edges(edges.iter().copied()),
+                EdgeScanPlan::compile(prepared.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+            assert_eq!(rows.len(), expected, "{text}: {edges:?}");
+        }
+    }
 }
 
 #[test]

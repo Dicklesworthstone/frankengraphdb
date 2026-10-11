@@ -231,18 +231,18 @@ fn expected(
 ) -> Vec<Vec<GraphValue>> {
     let relation: Vec<_> = f
         .edges
-        .values()
-        .flat_map(|&(a, b)| match d {
-            GlaDirection::Forward => vec![(a, b)],
-            GlaDirection::Reverse => vec![(b, a)],
-            GlaDirection::Undirected if a == b => vec![(a, b)],
-            _ => vec![(a, b), (b, a)],
+        .iter()
+        .flat_map(|(&eid, &(a, b))| match d {
+            GlaDirection::Forward => vec![(eid, a, b)],
+            GlaDirection::Reverse => vec![(eid, b, a)],
+            GlaDirection::Undirected if a == b => vec![(eid, a, b)],
+            _ => vec![(eid, a, b), (eid, b, a)],
         })
         .collect();
     let mut rows = Vec::new();
     for &a in &f.vertices {
         let mut witnesses = 0;
-        for &(start, x) in &relation {
+        for &(first, start, x) in &relation {
             if start != a {
                 continue;
             }
@@ -261,8 +261,8 @@ fn expected(
                 }
                 continue;
             }
-            for &(second, y) in &relation {
-                if second != (if shape == 1 { x } else { a }) {
+            for &(second_eid, second, y) in &relation {
+                if first == second_eid || second != (if shape == 1 { x } else { a }) {
                     continue;
                 }
                 if (shape != 1 || y == a) && allowed(y) {

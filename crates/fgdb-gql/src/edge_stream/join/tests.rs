@@ -219,6 +219,9 @@ fn oracle(
     for (&r, (x, y, rp)) in &f.edges {
         for (a, b) in orientations(*x, *y, d[0]) {
             for (&s, (x, y, sp)) in &f.edges {
+                if r == s {
+                    continue;
+                }
                 for (from, c) in orientations(*x, *y, d[1]) {
                     if from != (if shape == 1 { a } else { b }) || (shape == 2 && c != a) {
                         continue;
@@ -243,6 +246,43 @@ fn oracle(
     }
     rows.sort();
     rows.into_iter().skip(skip).take(limit).collect()
+}
+
+#[test]
+fn different_edges_keeps_parallel_return_paths_and_repeatable_mode_keeps_backtracking() {
+    let query = "MATCH (a)-[r:R]-(b)-[s:R]-(a) RETURN r, a, s";
+    for (edges, different, repeatable) in [
+        (vec![(1, 1, 2)], 0, 2),
+        (vec![(1, 1, 2), (2, 1, 2)], 4, 8),
+        (vec![(1, 1, 1)], 0, 1),
+        (vec![(1, 1, 1), (2, 1, 1)], 2, 4),
+    ] {
+        for (text, expected) in [
+            (query.to_owned(), different),
+            (
+                query.replacen("MATCH ", "MATCH DIFFERENT EDGES ", 1),
+                different,
+            ),
+            (
+                query.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS ", 1),
+                repeatable,
+            ),
+        ] {
+            let prepared = prepare(&text);
+            let rows = EdgeScanCursor::new(
+                Fixture::from_edges(edges.iter().copied()),
+                EdgeScanPlan::compile(prepared.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+            assert_eq!(rows.len(), expected, "{text}: {edges:?}");
+            if !text.contains("REPEATABLE ELEMENTS") {
+                assert!(rows.iter().all(|row| row.values()[0] != row.values()[2]));
+            }
+        }
+    }
 }
 
 #[test]

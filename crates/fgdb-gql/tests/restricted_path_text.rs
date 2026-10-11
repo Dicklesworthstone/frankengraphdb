@@ -1,8 +1,8 @@
 //! Vertex-restricted native paths use the shared GLA, scope and row consumers.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GlaOperator, GraphColumn, GraphPatternBuilder, GraphValue, GraphValueRow,
-    GraphWalkSearch, PreparedGraphPattern,
+    GlaDirection, GlaOperator, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValue,
+    GraphValueRow, GraphWalkSearch, PreparedGraphPattern,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
@@ -42,10 +42,15 @@ fn execute<C>(
         .iter()
         .map(|v| (*v, CanonicalScalar::Int(v.0 as i64)))
         .collect::<BTreeMap<_, _>>();
-    pattern.plan().execute_governed_with_properties(
+    pattern.plan().execute_governed_with_identified_properties(
         (vertices.len() + edges.len()) as u64,
         vertices.iter().copied(),
-        edges.iter().copied(),
+        edges
+            .iter()
+            .enumerate()
+            .map(|(index, &(source, relation, target))| {
+                (EId(index as u128), source, relation, target)
+            }),
         |v, predicates| {
             Ok(predicates
                 .iter()
@@ -75,6 +80,7 @@ fn native_modes_equal_typed_atoms_and_keep_distinct_transcripts() {
     ] {
         let native = prepare(&format!("MATCH {mode} (a)-[:R*0..4]->(b) RETURN ALL a,b"));
         let mut builder = GraphPatternBuilder::new();
+        builder.match_mode(GraphMatchMode::DifferentEdges);
         builder.vertex("a").unwrap();
         builder.vertex("b").unwrap();
         let bounds = GraphWalkBounds::new(0, 4).unwrap();
@@ -127,14 +133,14 @@ fn all_directions_bounds_and_parallel_occurrences_match_full_path_enumeration() 
         GlaDirection::Undirected,
     ] {
         let mut oriented = Vec::new();
-        for &(a, _, b) in &edges {
+        for (edge, &(a, _, b)) in edges.iter().enumerate() {
             match direction {
-                GlaDirection::Forward => oriented.push((a, b)),
-                GlaDirection::Reverse => oriented.push((b, a)),
+                GlaDirection::Forward => oriented.push((edge, a, b)),
+                GlaDirection::Reverse => oriented.push((edge, b, a)),
                 GlaDirection::Undirected => {
-                    oriented.push((a, b));
+                    oriented.push((edge, a, b));
                     if a != b {
-                        oriented.push((b, a));
+                        oriented.push((edge, b, a));
                     }
                 }
             }
@@ -144,10 +150,10 @@ fn all_directions_bounds_and_parallel_occurrences_match_full_path_enumeration() 
                 for mode in ["ACYCLIC", "SIMPLE"] {
                     let mut expected = Vec::new();
                     for &source in &vertices {
-                        let mut layer = vec![vec![source]];
+                        let mut layer = vec![(vec![source], Vec::<usize>::new())];
                         for depth in 0..=maximum {
                             if depth >= minimum {
-                                for path in &layer {
+                                for (path, edges) in &layer {
                                     let checked = if mode == "SIMPLE"
                                         && path.len() > 1
                                         && path.first() == path.last()
@@ -158,19 +164,23 @@ fn all_directions_bounds_and_parallel_occurrences_match_full_path_enumeration() 
                                     };
                                     if checked.iter().collect::<BTreeSet<_>>().len()
                                         == checked.len()
+                                        && edges.iter().collect::<BTreeSet<_>>().len()
+                                            == edges.len()
                                     {
                                         expected.push((source, *path.last().unwrap()));
                                     }
                                 }
                             }
                             let mut next = Vec::new();
-                            for path in layer {
-                                for &(_, destination) in
-                                    oriented.iter().filter(|(a, _)| Some(a) == path.last())
+                            for (path, edges) in layer {
+                                for &(edge, _, destination) in
+                                    oriented.iter().filter(|(_, a, _)| Some(a) == path.last())
                                 {
                                     let mut extended = path.clone();
                                     extended.push(destination);
-                                    next.push(extended);
+                                    let mut identities = edges.clone();
+                                    identities.push(edge);
+                                    next.push((extended, identities));
                                 }
                             }
                             layer = next;
@@ -448,10 +458,10 @@ fn zero_result_limit_does_not_mask_fallible_endpoint_property_reads() {
         let query = prepare(&format!(
             "MATCH {mode} (a)-[:R*1..2]->(b) RETURN b.p LIMIT 0"
         ));
-        let result = query.plan().execute_governed_with_properties(
+        let result = query.plan().execute_governed_with_identified_properties(
             3,
             [VId(1), VId(2)],
-            [(VId(1), R, VId(2))],
+            [(EId(1), VId(1), R, VId(2))],
             |_, _| Ok::<_, &str>(true),
             |_, _| Err::<Option<&CanonicalScalar>, _>("endpoint read"),
             wide(),
@@ -535,7 +545,14 @@ fn captured_restrictions_preserve_real_edges_against_unpruned_walk_filtering() {
                                     } else {
                                         nodes.as_slice()
                                     };
-                                    if check.iter().collect::<BTreeSet<_>>().len() == check.len() {
+                                    if check.iter().collect::<BTreeSet<_>>().len() == check.len()
+                                        && steps
+                                            .iter()
+                                            .map(|step| step.0)
+                                            .collect::<BTreeSet<_>>()
+                                            .len()
+                                            == steps.len()
+                                    {
                                         expected.push((start, steps.clone()));
                                     }
                                 }

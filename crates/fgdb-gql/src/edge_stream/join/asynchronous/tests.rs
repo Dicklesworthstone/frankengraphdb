@@ -391,7 +391,7 @@ fn oracle(
         }
         for (a, b) in orientations(left, directions[0]) {
             for (&s, right) in &source.images {
-                if source.hidden == Some(s) || (!any && right.relation != R) {
+                if r == s || source.hidden == Some(s) || (!any && right.relation != R) {
                     continue;
                 }
                 for (from, c) in orientations(right, directions[1]) {
@@ -421,6 +421,34 @@ fn oracle(
     rows.into_iter().skip(skip).take(count).collect()
 }
 const CHAIN: &str = "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r,a,s,b,c,r.p AS rp,s.p AS sp";
+
+#[test]
+fn async_different_edges_compares_eids_and_preserves_repeatable_occurrences() {
+    let query = "MATCH (a)-[r:R]-(b)-[s:R]-(a) RETURN r,a,s";
+    for (mask, different, repeatable) in [(2, 0, 2), (6, 4, 8), (1, 0, 1)] {
+        for (text, expected) in [
+            (query.to_owned(), different),
+            (
+                query.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS ", 1),
+                repeatable,
+            ),
+        ] {
+            let source = Source::new(mask);
+            let counts = source.counts.clone();
+            let mut cursor = AsyncEdgeJoinCursor::new(source, plan(&text), policy(), ok);
+            let mut rows = Vec::new();
+            while let Some(row) = run(cursor.next()) {
+                rows.push(row.unwrap().values().to_vec());
+            }
+            assert_eq!(rows.len(), expected, "{text}: {mask}");
+            if !text.contains("REPEATABLE ELEMENTS") {
+                assert!(rows.iter().all(|row| row[0] != row[2]));
+            }
+            assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+            assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+        }
+    }
+}
 
 #[test]
 fn indexed_async_chains_branches_and_cycles_match_independent_occurrence_oracles() {

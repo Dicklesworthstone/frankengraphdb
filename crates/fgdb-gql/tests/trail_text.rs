@@ -1,8 +1,8 @@
 //! Native TRAIL stays identity-sensitive through scopes and relational consumers.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValue, GraphValueRow,
-    PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPathFunction, GraphPatternBuilder, GraphValue,
+    GraphValueRow, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWalkBounds,
@@ -66,6 +66,7 @@ fn native_and_typed_trails_have_identical_definitions_in_every_direction() {
     ] {
         for captured in [false, true] {
             let mut builder = GraphPatternBuilder::new();
+            builder.match_mode(GraphMatchMode::DifferentEdges);
             builder.vertex("a").unwrap().vertex("b").unwrap();
             builder
                 .trail_walk("a", R, direction, "b", GraphWalkBounds::new(0, 3).unwrap())

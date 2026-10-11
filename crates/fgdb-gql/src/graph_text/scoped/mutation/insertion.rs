@@ -741,6 +741,7 @@ impl PreparedGraphInsertText {
         };
         let matching = if matched {
             let (builder, filters) = resolve_pattern(
+                syntax.match_mode,
                 &syntax.variables[..syntax.root_variables],
                 &syntax.labels,
                 &syntax.edges,

@@ -13,7 +13,7 @@ mod parameters;
 mod scoped;
 pub use crate::algebra::GraphPathFunction;
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
     IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
     VertexPredicate,
@@ -519,6 +519,7 @@ struct Column<'a> {
     alias: Name<'a>,
 }
 struct Syntax<'a> {
+    match_mode: GraphMatchMode,
     variables: Vec<Name<'a>>,
     path: Option<Name<'a>>,
     root_variables: usize,
@@ -617,6 +618,7 @@ impl<'a> Parser<'a> {
             boundary_reads: None,
             elements: Vec::new(),
             syntax: Syntax {
+                match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
                 path: None,
                 root_variables: 0,
@@ -1536,9 +1538,12 @@ impl PreparedGraphText {
     /// Plain MATCH and explicit MATCH WALK accept bounded `[:R*min..max]`,
     /// `[:R*k]` and `[:R*..max]` atoms. The omitted minimum is one; zero is
     /// explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
-    /// Both use WALK semantics: repeated edges and vertices contribute distinct
-    /// occurrences, including duplicate endpoint rows. MATCH TRAIL forbids edge
-    /// reuse instead; explicit path selectors retain their own semantics.
+    /// The default DIFFERENT EDGES match mode forbids relationship reuse across
+    /// every atom and comma-separated part of one MATCH, in either direction.
+    /// Repeated vertices and parallel relationships remain distinct occurrences.
+    /// MATCH REPEATABLE ELEMENTS permits relationship reuse; MATCH TRAIL still
+    /// forbids reuse within its atom. Each later MATCH, OPTIONAL MATCH and
+    /// existential pattern has its own match mode and relationship inventory.
     /// A root `MATCH p = ...` captures its ordered path, including real edge IDs.
     /// MATCH ALL SHORTEST WALK prefix selects all tied minimum-hop occurrences
     /// within the interval, separately for each endpoint pair. This native
@@ -1600,6 +1605,7 @@ impl PreparedGraphText {
             .filter_map(|(edge, _)| edge.variable.map(|name| name.text))
             .collect();
         let (builder, filters) = scoped::resolve_pattern(
+            syntax.match_mode,
             &syntax.variables[..syntax.root_variables],
             &syntax.labels,
             &syntax.edges,
@@ -1919,7 +1925,7 @@ impl PreparedGraphText {
 mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -2015,6 +2021,7 @@ mod tests {
             .unwrap();
         let actual = template.bind_parameters(&arguments).unwrap();
         let mut expected = GraphPatternBuilder::new();
+        expected.match_mode(GraphMatchMode::DifferentEdges);
         for name in ["a", "b", "c", "d"] {
             expected.vertex(name).unwrap();
         }
@@ -2062,6 +2069,20 @@ mod tests {
     fn text_bags_and_cycles_match_independent_complete_assignment_enumeration() {
         type Atom = (usize, u64, u8, usize);
         type Case<'a> = (&'a str, &'a [Atom], [usize; 2], bool, bool);
+        fn edge_disjoint_assignments(choices: &[Vec<usize>], used: &mut Vec<usize>) -> usize {
+            let Some((first, rest)) = choices.split_first() else {
+                return 1;
+            };
+            let mut count = 0;
+            for &edge in first {
+                if !used.contains(&edge) {
+                    used.push(edge);
+                    count += edge_disjoint_assignments(rest, used);
+                    used.pop();
+                }
+            }
+            count
+        }
         let cases: [Case<'_>; 3] = [
             (
                 "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN a,c",
@@ -2111,12 +2132,13 @@ mod tests {
                     if unequal && assignment[0] == assignment[2] {
                         continue;
                     }
-                    let multiplicity = atoms
+                    let choices: Vec<Vec<usize>> = atoms
                         .iter()
                         .map(|&(left, relation, direction, right)| {
                             edges
                                 .iter()
-                                .filter(|&&(s, r, d)| {
+                                .enumerate()
+                                .filter(|&(_, &(s, r, d))| {
                                     if r != RelationId(relation) {
                                         return false;
                                     }
@@ -2127,9 +2149,11 @@ mod tests {
                                         _ => (s == a && d == b) || (s == b && d == a),
                                     }
                                 })
-                                .count()
+                                .map(|(index, _)| index)
+                                .collect()
                         })
-                        .product::<usize>();
+                        .collect();
+                    let multiplicity = edge_disjoint_assignments(&choices, &mut Vec::new());
                     for _ in 0..multiplicity {
                         expected.push(selected.map(|at| assignment[at]).to_vec());
                     }
@@ -2141,10 +2165,14 @@ mod tests {
                 let pattern = query(text);
                 let actual = pattern
                     .plan()
-                    .execute_governed_with_properties(
+                    .execute_governed_with_identified_properties(
                         edges.len() as u64,
                         [],
-                        edges.iter().copied(),
+                        edges.iter().enumerate().map(
+                            |(index, &(source, relation, destination))| {
+                                (EId(index as u128), source, relation, destination)
+                            },
+                        ),
                         |_, _| Ok::<_, ()>(true),
                         |_, _| Ok(None),
                         policy(),
@@ -2174,10 +2202,15 @@ mod tests {
         let run = |pattern: &PreparedGraphPattern<GraphValueRow>| -> Vec<Vec<VId>> {
             pattern
                 .plan()
-                .execute_governed_with_properties(
+                .execute_governed_with_identified_properties(
                     edges.len() as u64,
                     [],
-                    edges.iter().copied(),
+                    edges
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &(source, relation, destination))| {
+                            (EId(index as u128), source, relation, destination)
+                        }),
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     policy(),
@@ -2217,10 +2250,15 @@ mod tests {
         let anonymous_rows = vertex_rows(
             &anonymous
                 .plan()
-                .execute_governed_with_properties(
+                .execute_governed_with_identified_properties(
                     edges.len() as u64,
                     [],
-                    edges.iter().copied(),
+                    edges
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &(source, relation, destination))| {
+                            (EId(index as u128), source, relation, destination)
+                        }),
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     policy(),
@@ -2635,14 +2673,14 @@ mod tests {
     fn text_queries_share_all_policy_dimensions_and_every_interruption_checkpoint() {
         let pattern = query("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN ALL a,c.n AS score");
         let edges = [
-            (VId(1), RelationId(1), VId(2)),
-            (VId(1), RelationId(1), VId(2)),
-            (VId(2), RelationId(2), VId(3)),
-            (VId(2), RelationId(2), VId(4)),
+            (EId(1), VId(1), RelationId(1), VId(2)),
+            (EId(2), VId(1), RelationId(1), VId(2)),
+            (EId(3), VId(2), RelationId(2), VId(3)),
+            (EId(4), VId(2), RelationId(2), VId(4)),
         ];
         let scalar = CanonicalScalar::Int(7);
         let run = |cap| {
-            pattern.plan().execute_governed_with_properties(
+            pattern.plan().execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,
@@ -2689,7 +2727,7 @@ mod tests {
         let mut calls = 0;
         pattern
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,
@@ -2704,7 +2742,7 @@ mod tests {
             .unwrap();
         for stop in 1..=calls {
             let mut at = 0;
-            let result = pattern.plan().execute_governed_with_properties(
+            let result = pattern.plan().execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,

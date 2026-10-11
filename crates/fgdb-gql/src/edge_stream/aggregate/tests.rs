@@ -205,8 +205,8 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
         for &(from, rel, to) in &atoms[..=shape] {
             choices.push(
                 s.edges
-                    .values()
-                    .filter(|(a, r, b, _)| {
+                    .iter()
+                    .filter(|(_, (a, r, b, _))| {
                         *r == rel
                             && match dir {
                                 GlaDirection::Forward => *a == values[from] && *b == values[to],
@@ -217,27 +217,32 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
                                 }
                             }
                     })
+                    .map(|(&eid, edge)| (eid, edge))
                     .collect::<Vec<_>>(),
             );
         }
-        let count = choices.iter().map(|c| c.len() as u64).product::<u64>();
-        if count == 0 {
-            continue;
-        }
-        n += count;
-        let suffix = choices
-            .iter()
-            .skip(1)
-            .map(|c| c.len() as u64)
-            .product::<u64>();
-        for edge in &choices[0] {
-            if let Some(value) = integer(&edge.3) {
-                present += suffix;
-                edge_sum = Some(edge_sum.unwrap_or(0) + value * i128::from(suffix));
+        let combinations = choices.iter().map(Vec::len).product::<usize>();
+        for mut code in 0..combinations {
+            let first = choices[0][code % choices[0].len()].1;
+            let mut selected = Vec::new();
+            let mut distinct = true;
+            for atom in &choices {
+                let (eid, _) = atom[code % atom.len()];
+                code /= atom.len();
+                distinct &= !selected.contains(&eid);
+                selected.push(eid);
             }
-        }
-        if let Some(value) = integer(&s.vertices[&values[width as usize - 1]]) {
-            vertex_sum = Some(vertex_sum.unwrap_or(0) + value * i128::from(count));
+            if !distinct {
+                continue;
+            }
+            n += 1;
+            if let Some(value) = integer(&first.3) {
+                present += 1;
+                edge_sum = Some(edge_sum.unwrap_or(0) + value);
+            }
+            if let Some(value) = integer(&s.vertices[&values[width as usize - 1]]) {
+                vertex_sum = Some(vertex_sum.unwrap_or(0) + value);
+            }
         }
     }
     vec![

@@ -359,7 +359,11 @@ fn cycles_lower_bounds_closure_and_atom_local_history_do_not_become_vertex_settl
     );
 }
 fn plan(input: &str, mode: GraphWalkSearch) -> GlaPlan<GraphValueRow> {
-    let q = PreparedGraphText::prepare(input, |kind, name: &str| match (kind, name) {
+    // This suite varies each atom's search mode independently and verifies
+    // endpoint-support composition. Declare clause repeatability explicitly;
+    // endpoint-only cursors cannot enforce cross-atom DifferentEdges domains.
+    let input = input.replace("MATCH ", "MATCH REPEATABLE ELEMENTS ");
+    let q = PreparedGraphText::prepare(&input, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
@@ -407,6 +411,46 @@ fn eager(plan: &GlaPlan<GraphValueRow>, s: &Source) -> Vec<GraphValueRow> {
     .unwrap()
     .value
 }
+
+#[test]
+fn different_edges_variable_probes_use_native_trails_and_refuse_cross_atom_intake() {
+    let input = "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R*2..2]-(x) } RETURN r,a,b";
+    let prepared = PreparedGraphText::prepare(input, |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        _ => None,
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    // The genuine identified executor still owns this logical query. A lone
+    // edge cannot form a two-hop trail, whereas two parallel identities can.
+    let single = Source::new([(1, 1, 2)]);
+    assert!(eager(prepared.plan(), &single).is_empty());
+    let parallel = Source::new([(1, 1, 2), (2, 1, 2)]);
+    let expected = eager(prepared.plan(), &parallel);
+    assert_eq!(expected.len(), 2);
+    let streamed = EdgeScanCursor::new(
+        parallel,
+        EdgeScanPlan::compile(prepared.plan()).unwrap(),
+        wide(),
+        || Ok::<_, ()>(()),
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(streamed, expected);
+    let cross_atom = input.replace("[:R*2..2]-(x)", "[:R*1..1]-(x)-[:R*1..1]-(b)");
+    let prepared = PreparedGraphText::prepare(&cross_atom, |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        _ => None,
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert!(EdgeScanPlan::compile(prepared.plan()).is_err());
+    let parallel = Source::new([(1, 1, 2), (2, 1, 2)]);
+    assert_eq!(eager(prepared.plan(), &parallel).len(), 2);
+}
+
 #[test]
 fn variable_atoms_compose_with_fixed_edges_branches_predicates_and_backtracking_in_both_stream_lanes()
  {

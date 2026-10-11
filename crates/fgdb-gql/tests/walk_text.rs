@@ -2,14 +2,14 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueRow, IntegerComparison,
-    PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueRow,
+    IntegerComparison, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWalkBounds, MAX_GRAPH_WALK_HOPS, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -67,6 +67,7 @@ fn quantified_text_has_the_same_plan_as_typed_walks_and_rebinds_without_resolvin
                 .unwrap();
             let actual = template.bind_parameters(&arguments).unwrap();
             let mut b = GraphPatternBuilder::new();
+            b.match_mode(GraphMatchMode::DifferentEdges);
             b.vertex("a").unwrap();
             b.vertex("b").unwrap();
             b.filter("a", VertexPredicate::HasLabel(LabelId(3)))
@@ -176,18 +177,32 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
 }
 
 #[test]
-fn plain_match_bounded_walks_preserve_occurrences_and_zero_hops() {
-    // One self-loop contributes once at each depth; two parallel loops
-    // contribute 2^depth. Plain MATCH must not silently switch to TRAIL.
-    for selector in ["MATCH", "MATCH WALK"] {
-        for (bounds, expected) in [("0", 1), ("2", 4), ("0..2", 7), ("..2", 6)] {
+fn match_modes_keep_parallel_loop_occurrences_and_zero_hops() {
+    // Plain MATCH and MATCH WALK share the clause-level different-edges mode.
+    // Explicit repeatability retains every 2^depth occurrence of two loops.
+    for (selector, repeated) in [
+        ("MATCH", false),
+        ("MATCH WALK", false),
+        ("MATCH REPEATABLE ELEMENTS WALK", true),
+    ] {
+        for (bounds, distinct_count, repeated_count) in
+            [("0", 1, 1), ("2", 2, 4), ("0..2", 5, 7), ("..2", 4, 6)]
+        {
+            let expected = if repeated {
+                repeated_count
+            } else {
+                distinct_count
+            };
             let text = format!("{selector} (a)-[:R*{bounds}]->(b) RETURN a,b");
             let rows = prepare(&text)
                 .plan()
-                .execute_governed_with_properties(
+                .execute_governed_with_identified_properties(
                     1,
                     [VId(1)],
-                    [(VId(1), RelationId(1), VId(1)); 2],
+                    [
+                        (EId(1), VId(1), RelationId(1), VId(1)),
+                        (EId(2), VId(1), RelationId(1), VId(1)),
+                    ],
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     policy(),
@@ -209,7 +224,7 @@ fn plain_match_bounded_walks_preserve_occurrences_and_zero_hops() {
     }
     let rows = prepare("MATCH (a) OPTIONAL MATCH (a)-[:R*0..2]->(b) RETURN a,b")
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             1,
             [VId(7)],
             [],
@@ -237,7 +252,7 @@ fn text_walks_preserve_zero_hop_isolates_and_repeated_edge_occurrences() {
     let zero = prepare("MATCH WALK (a)-[:R*0]->(b) RETURN a,b");
     let actual = zero
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             2,
             [VId(0), VId(u128::MAX)],
             [],
@@ -263,7 +278,9 @@ fn text_walks_preserve_zero_hop_isolates_and_repeated_edge_occurrences() {
     );
     let edges = [(VId(1), RelationId(1), VId(1)); 2];
     for (tail, count) in [("a,b", 14), ("DISTINCT a,b", 1), ("a,b SKIP 2 LIMIT 3", 3)] {
-        let query = prepare(&format!("MATCH WALK (a)-[:R*1..3]->(b) RETURN {tail}"));
+        let query = prepare(&format!(
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*1..3]->(b) RETURN {tail}"
+        ));
         let rows = query
             .plan()
             .execute_governed_with_properties(
@@ -279,7 +296,7 @@ fn text_walks_preserve_zero_hop_isolates_and_repeated_edge_occurrences() {
         assert_eq!(rows.value.len(), count, "{tail}");
     }
     let maximal = prepare(&format!(
-        "MATCH WALK (a)-[:R*{MAX_GRAPH_WALK_HOPS}]->(a) RETURN a"
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*{MAX_GRAPH_WALK_HOPS}]->(a) RETURN a"
     ));
     let rows = maximal
         .plan()
@@ -300,9 +317,9 @@ fn text_walks_preserve_zero_hop_isolates_and_repeated_edge_occurrences() {
 fn scoped_walk_text_feeds_optional_aggregation_and_semijoin_without_multiplying_witnesses() {
     let vertices = [VId(1), VId(2), VId(3), VId(4)];
     let edges = [
-        (VId(1), RelationId(1), VId(2)),
-        (VId(1), RelationId(1), VId(2)),
-        (VId(2), RelationId(1), VId(3)),
+        (EId(1), VId(1), RelationId(1), VId(2)),
+        (EId(2), VId(1), RelationId(1), VId(2)),
+        (EId(3), VId(2), RelationId(1), VId(3)),
     ];
     let template = PreparedGraphAggregateText::prepare(
         "MATCH (a:L) OPTIONAL MATCH WALK (a)-[:R*1..2]->(b) \
@@ -313,7 +330,7 @@ fn scoped_walk_text_feeds_optional_aggregation_and_semijoin_without_multiplying_
     .unwrap();
     let query = template.bind_parameters(&GqlParameters::new()).unwrap();
     let rows = query
-        .execute_governed(
+        .execute_governed_with_identified_properties(
             7,
             vertices,
             edges,
@@ -342,7 +359,7 @@ fn scoped_walk_text_feeds_optional_aggregation_and_semijoin_without_multiplying_
         ));
         let rows = query
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 7,
                 vertices,
                 edges,
@@ -382,12 +399,12 @@ fn parameterized_endpoint_values_preserve_occurrences_across_multiple_walk_lengt
     ];
     let result = query
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             5,
             [VId(1), VId(2), VId(3)],
             [
-                (VId(1), RelationId(1), VId(2)),
-                (VId(2), RelationId(1), VId(3)),
+                (EId(1), VId(1), RelationId(1), VId(2)),
+                (EId(2), VId(2), RelationId(1), VId(3)),
             ],
             |_, _| Ok::<_, ()>(true),
             |vid, _| Ok(Some(&values[vid.0 as usize - 1])),

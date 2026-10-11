@@ -373,7 +373,7 @@ fn closing_endpoints_and_isolated_child_anchors_do_not_alias_later_slots() {
 fn independent_walk_component_keeps_zero_hop_isolates_and_parallel_occurrences() {
     let vertices = fixture();
     let pattern = query(
-        "MATCH WALK (company:Company),(filing:Filing)-[:R*0..1]->(other) \
+        "MATCH REPEATABLE ELEMENTS WALK (company:Company),(filing:Filing)-[:R*0..1]->(other) \
         WHERE company.cik = filing.cik RETURN company,filing,other",
     );
     let edges = [(VId(10), RelationId(1), VId(20)); 2];

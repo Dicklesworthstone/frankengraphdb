@@ -2,15 +2,15 @@
 
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GlaOperator, GraphColumn, GraphPatternBuilder, GraphValueRow, GraphWalkSearch,
-    IntegerComparison, PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GlaOperator, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueRow,
+    GraphWalkSearch, IntegerComparison, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWalkBounds, GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
@@ -70,6 +70,7 @@ fn native_any_directions_and_rebinding_match_the_typed_builder_exactly() {
             .with_uint64("count", 3)
             .unwrap();
         let mut builder = GraphPatternBuilder::new();
+        builder.match_mode(GraphMatchMode::DifferentEdges);
         builder.vertex("a").unwrap().vertex("b").unwrap();
         builder
             .any_shortest_walk("a", R, direction, "b", GraphWalkBounds::new(0, 3).unwrap())
@@ -105,11 +106,12 @@ fn native_any_directions_and_rebinding_match_the_typed_builder_exactly() {
 
 #[test]
 fn native_any_preserves_zero_hops_lower_bounds_and_separate_return_quantifiers() {
-    let edges = [(VId(1), R, VId(1)); 2];
+    let edges = [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))];
     for (selector, interval, tail, expected) in [
         ("ANY SHORTEST WALK", "1..3", "a,b", 1),
         ("ALL SHORTEST WALK", "1..3", "a,b", 2),
-        ("WALK", "1..3", "a,b", 14),
+        ("WALK", "1..3", "a,b", 4),
+        ("REPEATABLE ELEMENTS WALK", "1..3", "a,b", 14),
         ("ANY SHORTEST WALK", "2..3", "a,b", 1),
         ("ANY SHORTEST WALK", "0", "a,b", 2),
         ("ANY SHORTEST WALK", "1..3", "DISTINCT a,b", 1),
@@ -120,7 +122,7 @@ fn native_any_preserves_zero_hops_lower_bounds_and_separate_return_quantifiers()
         ));
         let rows = query
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 4,
                 [VId(1), VId(9)],
                 edges,
@@ -141,10 +143,10 @@ fn scoped_any_aggregation_counts_pairs_and_existence_never_multiplies_outer_rows
         symbols,
     ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
     let rows = query
-        .execute_governed(
+        .execute_governed_with_identified_properties(
             4,
             [VId(1), VId(2)],
-            [(VId(1), R, VId(1)); 2],
+            [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))],
             |_, _| Ok::<_, ()>(true),
             |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
             wide(),
@@ -169,10 +171,10 @@ fn scoped_any_aggregation_counts_pairs_and_existence_never_multiplies_outer_rows
         ));
         let rows = query
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 4,
                 [VId(1), VId(2)],
-                [(VId(1), R, VId(1)); 2],
+                [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))],
                 |_, _| Ok::<_, ()>(true),
                 |_, _| Ok(None),
                 wide(),

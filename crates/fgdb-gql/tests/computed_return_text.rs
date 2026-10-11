@@ -390,7 +390,7 @@ fn constants_and_computed_distinct_preserve_walk_and_optional_bags() {
     ];
     for (quantifier, expected) in [("", 11), ("DISTINCT ", 1)] {
         let query = prepare(&format!(
-            "MATCH WALK (a)-[:R*0..2]->(b) RETURN {quantifier}7 AS value"
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN {quantifier}7 AS value"
         ));
         let rows = run(&query, &[VId(1), VId(2)], &edges, &Props::new())
             .unwrap()

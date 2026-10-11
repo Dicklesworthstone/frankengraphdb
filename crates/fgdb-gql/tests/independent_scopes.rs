@@ -284,7 +284,7 @@ fn independent_optional_ignores_unrelated_nulls_and_exports_real_correlations() 
 #[test]
 fn independent_walk_scopes_keep_zero_hop_isolates_and_mixed_root_multiplicity() {
     let plan = query(
-        "MATCH (a:Root)-[:S]->(b) OPTIONAL MATCH WALK (x:Flag)-[:R*0..2]->(y) RETURN a,b,x,y",
+        "MATCH (a:Root)-[:S]->(b) OPTIONAL MATCH REPEATABLE ELEMENTS WALK (x:Flag)-[:R*0..2]->(y) RETURN a,b,x,y",
     );
     assert!(!plan.plan().scans_edges());
     assert!(plan.plan().reads_edges());

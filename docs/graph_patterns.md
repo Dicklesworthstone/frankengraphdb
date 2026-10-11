@@ -352,12 +352,29 @@ relevant after output or evaluator refusal. Positive-label node patterns retain
 label-scoped insertion witnesses; unlabeled scans retain the table witness.
 An unrelated vertex-only insertion need not conflict with an edge scan.
 
-Fixed-length edge occurrences may be reused by different atoms. Distinct
-variable names may denote the same vertex unless an inequality forbids it.
-No TRAIL, ACYCLIC, SIMPLE, edge-variable identity or complete GQL morphism/bag
-contract is implied. The deterministic connected-edge schedule is not a
-cost-based optimizer or registered FreeJoin. A finite 64-edge definition can
-still have an enormous number of witnesses.
+The generic typed builder defaults to `GraphMatchMode::RepeatableElements`.
+Select `builder.match_mode(GraphMatchMode::DifferentEdges)` to require actual
+relationship IDs to be distinct across all atoms in that builder, including
+quantified segments and comma-separated components. Use value preparation and
+an identified-edge execution entrypoint when this constraint needs identities;
+anonymous topology cannot prove relationship uniqueness. Repeated vertices and
+parallel relationships with different IDs remain legal. Fixed atoms with
+disjoint concrete relationship types need no identity check.
+
+The shared text compiler uses `DIFFERENT EDGES` by default. For example,
+`MATCH (a)-[:R]->(b)<-[:R]-(c) RETURN a,c` cannot backtrack over one relationship.
+`MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)<-[:R]-(c) RETURN a,c` permits that result.
+Each later `MATCH`, `OPTIONAL MATCH` or existential pattern starts an independent
+relationship domain; comma-separated parts inside one clause share a domain.
+`DIFFERENT RELATIONSHIPS` is an equivalent explicit spelling.
+
+Path modes remain separate: `TRAIL` forbids edge reuse within its atom even
+under repeatable matching, `ACYCLIC` forbids repeated vertices, and `SIMPLE`
+permits returning to its starting vertex. The enclosing different-edges rule
+also applies to `SIMPLE` closures and shortest-path selection. This bounded
+profile is not a complete GQL conformance claim. The deterministic connected-edge
+schedule is not a cost-based optimizer or registered FreeJoin. A finite 64-edge
+definition can still have an enormous number of witnesses.
 
 Typed patterns are not squeezed into the legacy BoundPlan certificate format.
 There is still no public pattern artifact/audit API. Logical bytes and schema
