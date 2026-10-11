@@ -150,6 +150,51 @@ pub enum GraphSetValue {
         function: GraphTemporalFunction,
         argument: Box<GraphSetValue>,
     },
+    /// An openCypher value function over lists and text (fgdb-13l85). The
+    /// argument of a one-argument function is that value; of a longer one,
+    /// the list of its arguments, as for a dotted temporal call.
+    Function {
+        function: GraphValueFunction,
+        argument: Box<GraphSetValue>,
+    },
+}
+
+/// The openCypher value functions over lists and text (fgdb-13l85).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphValueFunction {
+    /// `reverse(x)`: a list's elements, or a text's Unicode scalars, in
+    /// reverse order. NULL is NULL.
+    Reverse,
+    /// `split(text, delimiter)`: the text's pieces between delimiters, as a
+    /// list of text; an empty delimiter gives each Unicode scalar. NULL in
+    /// either argument is NULL.
+    Split,
+}
+
+impl GraphValueFunction {
+    /// Its byte in the value transcripts.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::Reverse => 1,
+            Self::Split => 2,
+        }
+    }
+
+    /// How many arguments a call takes.
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Reverse => 1,
+            Self::Split => 2,
+        }
+    }
+
+    /// The function a call named `name` (any case) denotes.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [("REVERSE", Self::Reverse), ("SPLIT", Self::Split)]
+            .into_iter()
+            .find(|(spelling, _)| name.eq_ignore_ascii_case(spelling))
+            .map(|(_, function)| function)
+    }
 }
 
 /// The openCypher temporal constructors in the value language. Each takes a
@@ -679,6 +724,15 @@ fn admit(
             admit(argument, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::Any
         }
+        // reverse() is a list or a text, so dynamically typed; split() is a
+        // list.
+        GraphSetValue::Function { function, argument } => {
+            admit(argument, types, column, depth + 1, nodes, locals)?;
+            match function {
+                GraphValueFunction::Reverse => GraphSetColumnType::Any,
+                GraphValueFunction::Split => GraphSetColumnType::List,
+            }
+        }
         // openCypher size(): a list's length or a text's character count
         // (fgdb-xakp1). A literal that is neither refuses here; any other
         // scalar is a typed failure when evaluated.
@@ -993,6 +1047,10 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
         }
         GraphSetValue::Temporal { function, argument } => {
             bytes.extend_from_slice(&[21, function.tag()]);
+            append_value_transcript(argument, bytes);
+        }
+        GraphSetValue::Function { function, argument } => {
+            bytes.extend_from_slice(&[23, function.tag()]);
             append_value_transcript(argument, bytes);
         }
         GraphSetValue::Ordered {
@@ -1325,6 +1383,10 @@ fn evaluate_value_at<E>(
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(value)
         }
+        GraphSetValue::Function { function, argument } => {
+            let argument = operand(argument, row, column, control, depth + 1, nodes)?;
+            value_function(*function, argument.as_ref(), column, control)?
+        }
         GraphSetValue::Size(list) => {
             let list = operand(list, row, column, control, depth + 1, nodes)?;
             let size = if list.is_null() {
@@ -1626,6 +1688,89 @@ fn evaluate_value_at<E>(
         }
     };
     Ok(result)
+}
+
+/// An openCypher value function (fgdb-13l85) over its evaluated argument:
+/// the value, or the list of a longer call's arguments. Every element copied
+/// and every text built is reserved before it grows the result. The row and
+/// aggregate output evaluators share it.
+pub(crate) fn value_function<E>(
+    function: GraphValueFunction,
+    argument: &GraphValue,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    use crate::GraphIntegerErrorKind;
+    let failure = |kind| ProjectionFailure::Arithmetic {
+        column,
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
+    };
+    let text = |value: &str,
+                control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>|
+     -> Result<GraphValue, ProjectionFailure<E>> {
+        for _ in 0..=value.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        }
+        CanonicalScalar::ucs_basic_text(value)
+            .map(GraphValue::Scalar)
+            .map_err(|_| failure(GraphIntegerErrorKind::TextConstruction))
+    };
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    match function {
+        GraphValueFunction::Reverse => {
+            if argument.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                Ok(null)
+            } else if let Some(values) = argument.as_list() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                let mut reversed = Vec::with_capacity(values.len());
+                for value in values.iter().rev() {
+                    reversed.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
+                }
+                Ok(GraphValue::List(reversed.into_boxed_slice()))
+            } else if let GraphValue::Scalar(CanonicalScalar::Text(value)) = argument {
+                let reversed: String = value.as_str().chars().rev().collect();
+                text(&reversed, control)
+            } else {
+                Err(failure(GraphIntegerErrorKind::IncompatibleOperands))
+            }
+        }
+        GraphValueFunction::Split => {
+            let Some([value, delimiter]) = argument
+                .as_list()
+                .and_then(|arguments| <&[GraphValue; 2]>::try_from(arguments).ok())
+            else {
+                return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            if value.is_null() || delimiter.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                return Ok(null);
+            }
+            let (
+                GraphValue::Scalar(CanonicalScalar::Text(value)),
+                GraphValue::Scalar(CanonicalScalar::Text(delimiter)),
+            ) = (value, delimiter)
+            else {
+                return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            let (value, delimiter) = (value.as_str(), delimiter.as_str());
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            let mut pieces = Vec::new();
+            if delimiter.is_empty() {
+                for (at, scalar) in value.char_indices() {
+                    pieces.push(text(&value[at..at + scalar.len_utf8()], control)?);
+                }
+            } else {
+                for piece in value.split(delimiter) {
+                    pieces.push(text(piece, control)?);
+                }
+            }
+            Ok(GraphValue::List(pieces.into_boxed_slice()))
+        }
+    }
 }
 
 /// Merge two canonical key sequences once. The row and exact aggregate

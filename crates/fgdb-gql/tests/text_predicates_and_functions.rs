@@ -2194,6 +2194,62 @@ fn temporal_arithmetic_follows_the_tck() {
     }
 }
 
+/// openCypher reverse() and split() (fgdb-13l85; TCK String3 [1], String4
+/// [1]): reverse reverses a list's elements or a text's Unicode scalars;
+/// split cuts a text at each delimiter, or at every scalar for an empty one.
+/// NULL in either argument is NULL. Inside a scalar expression each is an
+/// operand read through a let slot.
+#[test]
+fn reverse_and_split_over_lists_and_text() {
+    let value = |expression: &str| {
+        execute(
+            &prepare(&format!("MATCH (n) RETURN {expression} AS value")),
+            &text("ab"),
+            policy(),
+        )
+        .unwrap()
+        .value[0]
+            .values()[0]
+            .clone()
+    };
+    let word = |value: &str| GraphValue::Scalar(text(value));
+    let words =
+        |values: &[&str]| GraphValue::List(values.iter().map(|value| word(value)).collect());
+    let int = |value: i64| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    for (expression, expected) in [
+        ("reverse('raksO')", word("Oskar")),
+        ("reverse('é🦀a')", word("a🦀é")),
+        ("reverse(n.text)", word("ba")),
+        (
+            "reverse([1, 'x', null])",
+            GraphValue::List(vec![null.clone(), word("x"), int(1)].into()),
+        ),
+        ("reverse([])", GraphValue::List(Vec::new().into())),
+        ("reverse(null)", null.clone()),
+        ("split('one1two', '1')", words(&["one", "two"])),
+        ("split('a,b,,c', ',')", words(&["a", "b", "", "c"])),
+        ("split('abc', '')", words(&["a", "b", "c"])),
+        ("split(null, ',')", null.clone()),
+        ("split('a', null)", null.clone()),
+        ("size(split('one1two', '1'))", int(2)),
+        ("size(reverse([1, 2])) + 1", int(3)),
+        (
+            "reverse(n.text) = 'ba'",
+            GraphValue::Scalar(CanonicalScalar::Bool(true)),
+        ),
+    ] {
+        assert_eq!(value(expression), expected, "{expression}");
+    }
+    for expression in ["reverse(1)", "split(1, ',')", "split('a', 1)"] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(
+            execute(&query, &text("ab"), policy()).is_err(),
+            "{expression}"
+        );
+    }
+}
+
 /// openCypher toBoolean (TCK TypeConversion1): a Boolean is itself, the text
 /// `true` or `false` in any case converts, other text is NULL untrimmed, and
 /// NULL stays NULL. An integer is FALSE only at zero. A float is a typed

@@ -715,6 +715,7 @@ impl Properties {
                 | GraphSetValue::Equal { .. }
                 | GraphSetValue::Ordered { .. }
                 | GraphSetValue::Temporal { .. }
+                | GraphSetValue::Function { .. }
                 | GraphSetValue::Local(_)
                 | GraphSetValue::Comprehension { .. }
                 | GraphSetValue::Quantifier { .. }

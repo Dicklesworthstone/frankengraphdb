@@ -170,6 +170,12 @@ pub(crate) enum ReadValueTemplate {
         function: crate::GraphTemporalFunction,
         argument: Box<ReadValueTemplate>,
     },
+    /// reverse() or split() (fgdb-13l85); a longer call's argument is the
+    /// list of its arguments.
+    Function {
+        function: crate::GraphValueFunction,
+        argument: Box<ReadValueTemplate>,
+    },
 }
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
@@ -215,7 +221,9 @@ impl ReadValueTemplate {
             Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
                 left.binds_elements() || right.binds_elements()
             }
-            Self::Temporal { argument, .. } => argument.binds_elements(),
+            Self::Temporal { argument, .. } | Self::Function { argument, .. } => {
+                argument.binds_elements()
+            }
             Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
                 false
             }
@@ -240,6 +248,11 @@ impl ReadValueTemplate {
             | Self::MapGet { .. }
             | Self::Temporal { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
+            // reverse() is a list or a text; split() is a list.
+            Self::Function { function, .. } => match function {
+                crate::GraphValueFunction::Reverse => GraphSetColumnType::Any,
+                crate::GraphValueFunction::Split => GraphSetColumnType::List,
+            },
             Self::Let { body, .. } => body.column_type(input, parameters),
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
@@ -419,6 +432,10 @@ impl ReadValueTemplate {
             }
             Self::Temporal { function, argument } => {
                 bytes.extend_from_slice(&[21, function.tag()]);
+                argument.append_template_transcript(bytes);
+            }
+            Self::Function { function, argument } => {
+                bytes.extend_from_slice(&[23, function.tag()]);
                 argument.append_template_transcript(bytes);
             }
             Self::Ordered {

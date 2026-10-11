@@ -241,6 +241,22 @@ fn expression<'g, E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))
         }
+        // reverse() and split() with the row evaluator's law (fgdb-13l85).
+        GraphSetValue::Function { function, argument } => {
+            let argument = expression(argument, input, column, control)?.into_owned(control)?;
+            let argument = graph_value(argument, column)?;
+            let value = crate::set_ops::value_function(*function, &argument, column, control)
+                .map_err(|error| match error {
+                    crate::set_ops::ProjectionFailure::Control(error) => error,
+                    crate::set_ops::ProjectionFailure::Arithmetic { column, error } => {
+                        GqlQueryError::Source(GraphAggregateError::OutputExpression {
+                            column,
+                            error,
+                        })
+                    }
+                })?;
+            OutputValue::Owned(GraphAggregateValue::Value(value))
+        }
         // Three-valued equality with the row evaluator's law (fgdb-9cawv).
         GraphSetValue::Equal { left, right } => {
             let left = expression(left, input, column, control)?.into_owned(control)?;

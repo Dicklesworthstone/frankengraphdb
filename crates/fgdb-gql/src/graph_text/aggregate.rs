@@ -1002,7 +1002,8 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             remap_output_columns(left, columns);
             remap_output_columns(right, columns);
         }
-        ReadValueTemplate::Temporal { argument, .. } => remap_output_columns(argument, columns),
+        ReadValueTemplate::Temporal { argument, .. }
+        | ReadValueTemplate::Function { argument, .. } => remap_output_columns(argument, columns),
         ReadValueTemplate::Integer { program, .. } => {
             for op in program {
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(

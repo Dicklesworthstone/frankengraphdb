@@ -256,6 +256,10 @@ impl PreparedGraphAggregateText {
                 function: *function,
                 argument: Box::new(Self::bind_input_value(argument, values)?),
             }),
+            ReadValueTemplate::Function { function, argument } => Ok(GraphSetValue::Function {
+                function: *function,
+                argument: Box::new(Self::bind_input_value(argument, values)?),
+            }),
             ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
             ReadValueTemplate::Comprehension { list, filter, map } => {
                 let part = |part: &Option<Box<ReadValueTemplate>>| {

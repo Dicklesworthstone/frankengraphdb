@@ -1313,7 +1313,10 @@ impl<'a> Parser<'a> {
                 && matches!(lexer.next()?.kind,
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")));
         }
-        if self.list_quantifier()?.is_some() || self.list_function()?.is_some() {
+        if self.list_quantifier()?.is_some()
+            || self.list_function()?.is_some()
+            || self.value_function()?.is_some()
+        {
             return Ok(true);
         }
         // A temporal value (fgdb-txbg9) is compared, converted and read in a
@@ -1604,6 +1607,11 @@ impl<'a> Parser<'a> {
             )?;
             self.punct(b')', ")")?;
             value
+        } else if let Some(function) = self.value_function()? {
+            // reverse() and split() (fgdb-13l85).
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.value_function_call(function, inputs.as_deref_mut(), schema, resolve, depth)?
         } else if self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -1809,6 +1817,54 @@ impl<'a> Parser<'a> {
             self.is_punct(b'.')
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')),
         )
+    }
+
+    /// REVERSE or SPLIT directly followed by `(` (fgdb-13l85).
+    fn value_function(&self) -> Result<Option<crate::GraphValueFunction>, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let Some(function) = crate::GraphValueFunction::named(word) else {
+            return Ok(None);
+        };
+        Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
+    }
+
+    /// The arguments and closing parenthesis of a value function call, after
+    /// its `(`: one argument is the value, more are the list of them. Out of
+    /// line, so the value reader's recursive frame stays as narrow as before.
+    #[inline(never)]
+    fn value_function_call(
+        &mut self,
+        function: crate::GraphValueFunction,
+        mut inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let mut arguments = Vec::new();
+        loop {
+            arguments.push(self.read_recursive_value(
+                inputs.as_deref_mut(),
+                schema,
+                resolve,
+                depth + 1,
+            )?);
+            if arguments.len() == function.arity() {
+                break;
+            }
+            self.punct(b',', ", and the next argument")?;
+        }
+        self.punct(b')', ")")?;
+        let argument = if arguments.len() == 1 {
+            arguments.pop().expect("one argument")
+        } else {
+            ReadValueTemplate::List(arguments)
+        };
+        Ok(ReadValueTemplate::Function {
+            function,
+            argument: Box::new(argument),
+        })
     }
 
     /// HEAD, LAST, TAIL, RANGE or REDUCE directly followed by `(`.
@@ -2292,6 +2348,10 @@ pub(in crate::graph_text) fn bind_read_value(
             right: Box::new(bind_read_value(right, values)?),
         },
         ReadValueTemplate::Temporal { function, argument } => GraphSetValue::Temporal {
+            function: *function,
+            argument: Box::new(bind_read_value(argument, values)?),
+        },
+        ReadValueTemplate::Function { function, argument } => GraphSetValue::Function {
             function: *function,
             argument: Box::new(bind_read_value(argument, values)?),
         },

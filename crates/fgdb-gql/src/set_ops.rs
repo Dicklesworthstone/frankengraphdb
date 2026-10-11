@@ -25,12 +25,13 @@ pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
 pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
-    GraphTemporalFunction,
+    GraphTemporalFunction, GraphValueFunction,
 };
 pub(crate) use projection::{
     ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership, evaluate_order,
     evaluate_value, map_keys, overlay_map, range_values, slice_bounds, temporal_arithmetic,
     temporal_field, temporal_field_name, temporal_field_scratch_entries, timestamp_text,
+    value_function,
 };
 
 use crate::algebra::{

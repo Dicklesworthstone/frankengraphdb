@@ -198,8 +198,8 @@ pub use set_ops::{
     GraphListQuantifier, GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError,
     GraphSetFilterError, GraphSetOperand, GraphSetOperation, GraphSetPredicateOp,
     GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
-    GraphTemporalFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
-    PreparedGraphSetAggregate, PreparedProcedureCall, WithProcedures,
+    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

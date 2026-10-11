@@ -26,7 +26,9 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
         GraphSetValue::Equal { left, right } | GraphSetValue::Ordered { left, right, .. } => {
             constant(left) && constant(right)
         }
-        GraphSetValue::Temporal { argument, .. } => constant(argument),
+        GraphSetValue::Temporal { argument, .. } | GraphSetValue::Function { argument, .. } => {
+            constant(argument)
+        }
         // An element is fixed by its comprehension's list (fgdb-20foe).
         GraphSetValue::Local(_) => true,
         GraphSetValue::Comprehension { list, filter, map } => {
