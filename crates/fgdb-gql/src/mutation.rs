@@ -119,6 +119,12 @@ pub enum GraphMutationBinding {
     /// Edge maps with DETACH DELETE are refused at preparation because an
     /// incident edge can disappear through a vertex's cascade.
     Properties { target: usize, current: usize },
+    /// `labels(target)` after the statement: the frozen `labels()` value in
+    /// `current` with this statement's own SET/REMOVE label actions applied,
+    /// in the label-identity order every `labels()` read uses. The selection
+    /// plan's reverse catalog names each label; a NULL OPTIONAL target reads
+    /// NULL and a deleted target refuses.
+    Labels { target: usize, current: usize },
 }
 
 impl core::fmt::Debug for GraphMutationAction {
@@ -210,6 +216,12 @@ pub enum GraphMutationError<E> {
     /// A plain DELETE target vertex keeps at least one live incident
     /// relationship in the exact transaction overlay. IDs remain redacted.
     IncidentRelationships,
+    /// A post-statement `labels()` read met a label the trusted reverse
+    /// catalog does not name, or a frozen name it cannot resolve.
+    UnmappedLabel {
+        row: usize,
+        binding: usize,
+    },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -258,6 +270,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::IncidentRelationships => {
                 f.write_str("DELETE target keeps an incident relationship; use DETACH DELETE")
             }
+            Self::UnmappedLabel { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: unmapped label"
+            ),
         }
     }
 }

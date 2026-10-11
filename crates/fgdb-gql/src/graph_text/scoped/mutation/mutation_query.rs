@@ -26,6 +26,10 @@ enum Binding<'a> {
         target: usize,
         current: usize,
     },
+    Labels {
+        target: usize,
+        current: usize,
+    },
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
@@ -40,6 +44,7 @@ impl Binding<'_> {
                 },
             ) => a == b && ak.text == bk.text,
             (Self::Properties { target: a, .. }, Self::Properties { target: b, .. }) => a == b,
+            (Self::Labels { target: a, .. }, Self::Labels { target: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -451,13 +456,30 @@ impl<'a> ParsedMutationReturn<'a> {
                 GraphSetColumnType::Vertex
             } else {
                 match Parser::path_function(name) {
+                    // A label action or a delete changes labels(): read the
+                    // frozen list and apply this statement's own actions
+                    // (openCypher Set3, Remove2). A deleted vertex refuses.
                     Ok(GraphPathFunction::Labels) if scope.labels_changed => {
-                        return Err(error(
-                            name.at,
-                            GraphPatternTextErrorKind::Expected(
-                                "labels() only in a statement without label actions or DETACH DELETE",
-                            ),
-                        ));
+                        parser.advance()?;
+                        parser.punct(b'(', "(")?;
+                        let variable = parser.vertex_variable()?;
+                        parser.punct(b')', ")")?;
+                        let target = parser.mutation_projection(columns, variable, None)?;
+                        let current = parser.projection_slot(
+                            columns,
+                            Projection {
+                                variable,
+                                property: None,
+                                path: Some(GraphPathFunction::Labels),
+                            },
+                        )?;
+                        return self
+                            .column(
+                                Binding::Labels { target, current },
+                                name,
+                                GraphSetColumnType::List,
+                            )
+                            .map(Some);
                     }
                     Ok(GraphPathFunction::Value) => GraphSetColumnType::Path,
                     Ok(GraphPathFunction::Length | GraphPathFunction::Type) => {
@@ -606,6 +628,9 @@ impl<'a> ParsedMutationReturn<'a> {
                 }
                 Binding::Properties { target, current } => {
                     GraphMutationBinding::Properties { target, current }
+                }
+                Binding::Labels { target, current } => {
+                    GraphMutationBinding::Labels { target, current }
                 }
             });
         }

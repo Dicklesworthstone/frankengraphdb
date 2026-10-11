@@ -22,6 +22,9 @@ pub enum GraphMutationQueryBuildError {
     /// Distinct property IDs must have distinct output names before a
     /// frozen named map can safely merge newly assigned properties.
     PropertyMapCatalog,
+    /// Distinct label IDs must have distinct names before a frozen
+    /// `labels()` list can be resolved back to identities and updated.
+    LabelCatalog,
 }
 impl core::fmt::Display for GraphMutationQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -134,8 +137,26 @@ impl PreparedGraphMutationQuery {
                     && columns.get(target) == Some(&GraphSetColumnType::Edge))
                     && matches!(columns.get(current), Some(GraphSetColumnType::Any)))
                 .then_some(GraphSetColumnType::Any),
+                GraphMutationBinding::Labels { target, current } => (columns.get(target)
+                    == Some(&GraphSetColumnType::Vertex)
+                    && columns.get(current) == Some(&GraphSetColumnType::List))
+                .then_some(GraphSetColumnType::List),
             };
             input_types.push(kind.ok_or(GraphMutationQueryBuildError::Binding { binding: at })?);
+        }
+        if bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphMutationBinding::Labels { .. }))
+        {
+            // The frozen list holds names; resolving them back needs both
+            // the catalog and one name per label identity.
+            let Some(catalog) = &mutation.selection.plan().reverse_catalog else {
+                return Err(GraphMutationQueryBuildError::LabelCatalog);
+            };
+            let mut names = std::collections::BTreeSet::new();
+            if !catalog.labels.values().all(|name| names.insert(name)) {
+                return Err(GraphMutationQueryBuildError::LabelCatalog);
+            }
         }
         if bindings
             .iter()
@@ -307,6 +328,11 @@ impl PreparedGraphMutationQuery {
                     bytes.extend_from_slice(&(target as u64).to_be_bytes());
                     bytes.extend_from_slice(&(current as u64).to_be_bytes());
                 }
+                GraphMutationBinding::Labels { target, current } => {
+                    bytes.push(3);
+                    bytes.extend_from_slice(&(target as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(current as u64).to_be_bytes());
+                }
             }
         }
         bytes.extend_from_slice(&(self.projection.len() as u64).to_be_bytes());
@@ -333,6 +359,16 @@ impl PreparedGraphMutationQuery {
             .any(|binding| matches!(binding, GraphMutationBinding::Properties { .. }))
         {
             crate::algebra::append_property_catalog_transcript(
+                self.mutation.selection.plan().reverse_catalog.as_deref(),
+                &mut bytes,
+            );
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphMutationBinding::Labels { .. }))
+        {
+            crate::algebra::append_label_catalog_transcript(
                 self.mutation.selection.plan().reverse_catalog.as_deref(),
                 &mut bytes,
             );

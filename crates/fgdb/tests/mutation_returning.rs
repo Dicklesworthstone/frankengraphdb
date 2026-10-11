@@ -408,13 +408,61 @@ fn a_leading_optional_match_writes_its_witnesses_or_returns_one_null_row() {
     assert_eq!(calls, 0);
 }
 
+/// `labels(n)` after the statement's own label actions (openCypher Set3,
+/// Remove2): SET adds, REMOVE drops, both in one statement compose, and the
+/// list keeps the identity order every labels() read uses. A vertex the
+/// statement deletes refuses at run time, as its properties do.
+#[test]
+fn post_statement_labels_apply_the_statements_own_label_actions() {
+    let text = |name: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+    let list = |names: &[&str]| GraphValue::List(names.iter().map(|name| text(name)).collect());
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        for (statement, expected) in [
+            (
+                "MATCH (n:Item {p: 1}) SET n:Seen RETURN labels(n) AS l",
+                list(&["Item", "Seen"]),
+            ),
+            (
+                "MATCH (n:Item {p: 2}) REMOVE n:Item RETURN labels(n) AS l",
+                list(&[]),
+            ),
+            (
+                "MATCH (n:Item {p: 3}) SET n:Seen REMOVE n:Item RETURN labels(n) AS l",
+                list(&["Seen"]),
+            ),
+        ] {
+            let (_, result) = txn
+                .execute_graph_mutation_query_governed(&mut db, cx, &prepare(statement), policy())
+                .expect(statement);
+            assert_eq!(result.value, rows(vec![vec![expected]]), "{statement}");
+        }
+        assert!(matches!(
+            txn.execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare("MATCH (n:Item {p: 4}) DETACH DELETE n RETURN labels(n)"),
+                policy(),
+            ),
+            Err(GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::DeletedElementRead { row: 0, binding: 0 }
+            )))
+        ));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Seen) RETURN n.p AS p ORDER BY p"),
+            vec![vec![int(1)], vec![int(3)]]
+        );
+    });
+}
+
 /// Reads whose post-statement value the statement cannot know are refused
 /// at preparation, before any catalog callback runs.
 #[test]
 fn unknowable_post_statement_reads_refuse_at_preparation() {
     for text in [
-        "MATCH (n:Item) SET n:Seen RETURN labels(n)",
-        "MATCH (n:Item) DETACH DELETE n RETURN labels(n)",
         "MATCH (a:Item)-[e:R]->(b) DETACH DELETE a RETURN e.w",
         "MATCH (n:Item) SET n.p = 1 RETURN n.p AS x, n.q AS x",
     ] {

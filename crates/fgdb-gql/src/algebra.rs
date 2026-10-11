@@ -1250,6 +1250,25 @@ pub(crate) fn append_property_catalog_transcript(
     }
 }
 
+/// The label names a post-statement `labels()` read resolves through.
+pub(crate) fn append_label_catalog_transcript(
+    catalog: Option<&crate::graph_text::ReverseSymbolCatalog>,
+    bytes: &mut Vec<u8>,
+) {
+    bytes.extend_from_slice(b"fgdb:label-catalog:v1\0");
+    let Some(catalog) = catalog else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(catalog.labels.len() as u64).to_be_bytes());
+    for (label, name) in &catalog.labels {
+        bytes.extend_from_slice(&label.0.to_be_bytes());
+        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+    }
+}
+
 fn direction_tag(direction: GlaDirection) -> u8 {
     match direction {
         GlaDirection::Forward => 0,

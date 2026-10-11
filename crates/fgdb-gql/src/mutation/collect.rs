@@ -270,6 +270,80 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
     })
 }
 
+/// `labels(target)` after the statement: resolve each frozen name to its
+/// label identity, apply this element's label proposals, and name the result
+/// in identity order, exactly as a `labels()` read orders it. The query
+/// admitted a catalog with one name per identity.
+#[allow(clippy::too_many_arguments)]
+fn returned_labels<E, C, F: FnMut() -> Result<(), C>>(
+    target: ElementId,
+    current: &crate::algebra::GraphValue,
+    row_at: usize,
+    binding_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    meter: &mut Meter<F>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    use crate::algebra::GraphValue;
+    let unmapped = || {
+        GqlQueryError::Source(GraphMutationError::UnmappedLabel {
+            row: row_at,
+            binding: binding_at,
+        })
+    };
+    meter.event(GlaExecutionEvent::Work)?;
+    if proposals.contains_key(&(target, Field::Delete)) {
+        return Err(GqlQueryError::Source(
+            GraphMutationError::DeletedElementRead {
+                row: row_at,
+                binding: binding_at,
+            },
+        ));
+    }
+    let catalog = catalog.ok_or_else(unmapped)?;
+    let frozen = current.as_list().ok_or_else(unmapped)?;
+    let mut labels = std::collections::BTreeSet::new();
+    for name in frozen {
+        let id = catalog
+            .labels
+            .iter()
+            .find(|(_, candidate)| {
+                CanonicalScalar::ucs_basic_text(candidate.as_str())
+                    .is_ok_and(|text| name.as_scalar() == Some(&text))
+            })
+            .map(|(id, _)| *id)
+            .ok_or_else(unmapped)?;
+        for _ in 0..=catalog.labels.len() {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        labels.insert(id);
+    }
+    meter.event(GlaExecutionEvent::Work)?;
+    for ((_, field), proposal) in
+        proposals.range((target, Field::Label(LabelId(0)))..(target, Field::Delete))
+    {
+        meter.event(GlaExecutionEvent::Work)?;
+        let (Field::Label(label), Value::Label(present)) = (field, &proposal.value) else {
+            unreachable!("the label range holds label proposals")
+        };
+        if *present {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            labels.insert(*label);
+        } else {
+            labels.remove(label);
+        }
+    }
+    let mut names = Vec::with_capacity(labels.len());
+    for label in labels {
+        let name = catalog.labels.get(&label).ok_or_else(unmapped)?;
+        let text = CanonicalScalar::ucs_basic_text(name.as_str()).map_err(|_| unmapped())?;
+        reserve_copy(&text, &mut |event| meter.event(event))?;
+        names.push(GraphValue::Scalar(text));
+    }
+    Ok(GraphValue::List(names.into_boxed_slice()))
+}
+
 /// One RETURN input row per selection row, read after every proposal is
 /// known: a property the statement assigns reads its proposal, any other
 /// reads the frozen selection value. Values are copied, never moved, since
@@ -348,6 +422,23 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
                         GraphValue::Scalar(CanonicalScalar::Null)
                     }
                     Some(target) => returned_properties(
+                        target,
+                        &row.values()[current],
+                        row_at,
+                        binding_at,
+                        proposals,
+                        catalog,
+                        meter,
+                    )?,
+                }
+            }
+            GraphMutationBinding::Labels { target, current } => {
+                match element(&row.values()[target]) {
+                    None => {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                    Some(target) => returned_labels(
                         target,
                         &row.values()[current],
                         row_at,
