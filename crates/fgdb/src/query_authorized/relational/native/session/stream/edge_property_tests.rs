@@ -95,9 +95,12 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
     let permit = verified.begin_read_at(BRANCH, 100).unwrap();
-    let samples = Cell::new(0);
+    // An atomic, not a Cell: the clock rides in the production Shared
+    // (Arc<Mutex<..>>), and a closure over a Cell would be neither Send nor
+    // Sync (clippy::arc_with_non_send_sync).
+    let samples = std::sync::atomic::AtomicUsize::new(0);
     let mut clock = || {
-        samples.set(samples.get() + 1);
+        samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         100
     };
     let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
@@ -124,7 +127,7 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
         native_work: work,
         signed_work: used.work,
         nodes: used.nodes,
-        clock_samples: samples.get(),
+        clock_samples: samples.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 fn with_query(test: impl FnOnce(&QueryCx)) {

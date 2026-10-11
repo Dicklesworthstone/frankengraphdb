@@ -316,8 +316,7 @@ mod tests {
                     "retained native allowance exhausted",
                 ))
             })
-            .err()
-            .expect("native refusal");
+            .expect_err("native refusal");
         assert_eq!(error.code, ErrorCode::Budget);
         assert!(!chunks.done());
 
@@ -325,8 +324,7 @@ mod tests {
             .next(128, 1, 128, || {
                 Ok((Some(vec![WireValue::Text("x".repeat(256))]), true))
             })
-            .err()
-            .expect("oversized row refusal");
+            .expect_err("oversized row refusal");
         assert_eq!(error.code, ErrorCode::Execution);
         assert!(!chunks.done());
     }
