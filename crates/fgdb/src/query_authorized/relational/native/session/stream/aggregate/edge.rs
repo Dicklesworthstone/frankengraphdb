@@ -349,10 +349,7 @@ pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Result<
-    impl FnMut() -> Result<(Option<GraphValueRow>, bool), QueryError> + use<'q, C>,
-    QueryError,
-> {
+) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
     let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
     let source = Source {

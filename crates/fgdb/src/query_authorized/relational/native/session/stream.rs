@@ -837,6 +837,10 @@ fn build_send_rows<'q, C: FnMut() -> u64 + Send>(
     Ok((AuthorizedRowCursor::new(driver, columns, at), ()))
 }
 
+/// One step of a native row driver: the row it delivered, if any, and
+/// whether its cursor has finished.
+type DriverStep = Result<(Option<GraphValueRow>, bool), QueryError>;
+
 fn vertex_driver<'q, C: FnMut() -> u64>(
     plan: VertexScanPlan<GraphValueRow>,
     at: CommitSeq,
@@ -844,10 +848,7 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Result<
-    impl FnMut() -> Result<(Option<GraphValueRow>, bool), QueryError> + use<'q, C>,
-    QueryError,
-> {
+) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
     let source = ScopedSource {
         inner,
