@@ -145,6 +145,7 @@ pub use graph_text::{
     GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
+    starts_fnx_graph_projection,
 };
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
@@ -204,7 +205,8 @@ pub use set_ops::{
     GraphSetFilterError, GraphSetOperand, GraphSetOperation, GraphSetPredicateOp,
     GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
     MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
-    PreparedProcedureCall, WithProcedures,
+    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

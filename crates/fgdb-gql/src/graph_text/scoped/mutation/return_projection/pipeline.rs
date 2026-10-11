@@ -703,6 +703,7 @@ impl<'a> Parser<'a> {
             outputs,
             // A following MATCH (written or implied) marks its vertex uses.
             vertices: Vec::new(),
+            graph_projection: None,
         })
     }
 

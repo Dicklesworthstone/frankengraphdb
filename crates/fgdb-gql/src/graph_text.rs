@@ -355,6 +355,51 @@ pub fn reads_element_identity(statement: &str) -> bool {
     }
 }
 
+/// Whether a leading native Prism call selects its graph in the statement.
+/// An inline map or a named argument envelope belongs to the native compiler,
+/// including malformed contents that the compiler must diagnose. This routing
+/// hint reads the shared lexer; it does not parse arguments or inspect a tail.
+#[must_use]
+pub fn starts_fnx_graph_projection(statement: &str) -> bool {
+    if statement.len() > MAX_GRAPH_TEXT_BYTES {
+        return false;
+    }
+    let mut lexer = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    for position in 0..5 {
+        let Ok(token) = lexer.next() else {
+            return false;
+        };
+        let matches = match (position, token.kind) {
+            (0, TokenKind::Word(word)) => word.eq_ignore_ascii_case("CALL"),
+            (1, TokenKind::Word("fnx"))
+            | (2, TokenKind::Punct(b'.'))
+            | (3, TokenKind::Word(_))
+            | (4, TokenKind::Punct(b'(')) => true,
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    match lexer.next().map(|token| token.kind) {
+        Ok(TokenKind::Punct(b'{')) => true,
+        Ok(TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)) => {
+            matches!(
+                lexer.next().map(|token| token.kind),
+                Ok(TokenKind::Punct(b'='))
+            ) && matches!(
+                lexer.next().map(|token| token.kind),
+                Ok(TokenKind::Punct(b'>'))
+            )
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 struct Lexer<'a> {
     text: &'a str,
@@ -1989,6 +2034,35 @@ mod tests {
     }
     fn policy() -> GqlQueryPolicy {
         GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000)
+    }
+
+    #[test]
+    fn native_prism_projection_routing_reads_parser_tokens() {
+        for text in [
+            "CALL fnx.connected_components({}) YIELD vertex RETURN vertex",
+            "/* before */ cAlL /* namespace */ fnx . connected_components ( {",
+            "CALL fnx.degree({unknown: 'invalid'}) YIELD vertex RETURN vertex",
+            "CALL fnx.degree(args => [], label => 'L') YIELD vertex RETURN vertex",
+            "CALL fnx.degree(label /* split */ = /* arrow */ > 'L')",
+            "CALL fnx.degree(unknown => 'invalid')",
+        ] {
+            assert!(starts_fnx_graph_projection(text), "{text}");
+        }
+        for text in [
+            "CALL fnx.connected_components() YIELD vertex RETURN vertex",
+            "CALL fnx.degree($projection) YIELD vertex RETURN vertex",
+            "CALL fnx.degree('literal { args => [] }')",
+            "CALL fnx.degree(args)",
+            "CALL fnx.degree(args = [1])",
+            "CALL fnx.degree($args => [])",
+            "CALL FNX.degree({})",
+            "CALL fnx_other.degree({})",
+            "RETURN 'CALL fnx.degree({})'",
+            "MATCH (n) CALL fnx.degree({})",
+            "CALL fnx.degree",
+        ] {
+            assert!(!starts_fnx_graph_projection(text), "{text}");
+        }
     }
 
     #[test]

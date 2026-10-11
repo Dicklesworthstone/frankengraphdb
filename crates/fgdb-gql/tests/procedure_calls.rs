@@ -2,12 +2,14 @@
 //! pipeline whose rows the host supplies. Every law here drives the real text
 //! grammar, binder and relational executor; only the procedure is a test host.
 
-use fgdb_delta_types::PropertyKeyId;
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
     GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
     PreparedGraphSetText, PreparedProcedureCall,
+    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
 };
 use fgdb_types::{CanonicalScalar, VId};
 use std::cell::RefCell;
@@ -86,6 +88,259 @@ fn call(query: &PreparedGraphSet) -> Result<Vec<GraphValueRow>, Fault> {
 }
 fn column(rows: &[GraphValueRow], at: usize) -> Vec<GraphValue> {
     rows.iter().map(|row| row.values()[at].clone()).collect()
+}
+
+fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(11))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(17))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        _ => None,
+    }
+}
+
+#[test]
+fn inline_projection_is_catalog_bound_and_never_an_algorithm_argument() {
+    let mut resolutions = Vec::new();
+    let template = PreparedGraphSetText::prepare(
+        "CALL fnx.test({labels:['Person'], relations:['R'], weight:'p', \
+         missing:'unit', direction:'reversed', parallel:'max', self_loops:'drop'}, 7, $k) \
+         YIELD value RETURN value",
+        |kind, name| {
+            resolutions.push((kind, name.to_owned()));
+            projection_symbols(kind, name)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resolutions,
+        [
+            (GraphSymbolKind::Label, "Person".to_owned()),
+            (GraphSymbolKind::Relation, "R".to_owned()),
+            (GraphSymbolKind::Property, "p".to_owned()),
+        ]
+    );
+    assert_eq!(template.parameter_schema().len(), 1);
+    let expected = ProcedureGraphProjection {
+        vertex_label: Some(LabelId(11)),
+        relation: Some(RelationId(17)),
+        weight: ProcedureGraphWeight::Property {
+            key: P,
+            missing: ProcedureMissingWeight::Unit,
+        },
+        direction: Some(ProcedureGraphDirection::Reversed),
+        parallel_edges: ProcedureParallelEdges::Maximum,
+        self_loops: ProcedureSelfLoops::Drop,
+    };
+    for k in [19, 42] {
+        let parameters = GqlParameters::new().with_int64("k", k).unwrap();
+        let query = template.bind_parameters(&parameters).unwrap();
+        let result = query
+            .execute_governed_with_procedures(
+                wide(),
+                no_graph,
+                |call, arguments, _| {
+                    assert_eq!(call.graph_projection(), Some(&expected));
+                    assert_eq!(arguments, [int(7), int(k)]);
+                    assert!(call.argument_names().is_empty());
+                    rows(vec![vec![int(k)]])
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(column(&result.value, 0), [int(k)]);
+    }
+}
+
+#[test]
+fn graph_projection_defaults_and_every_option_have_one_typed_meaning() {
+    let base = ProcedureGraphProjection {
+        vertex_label: None,
+        relation: None,
+        weight: ProcedureGraphWeight::Unit,
+        direction: None,
+        parallel_edges: ProcedureParallelEdges::Reject,
+        self_loops: ProcedureSelfLoops::Keep,
+    };
+    let cases = [
+        ("{}", base),
+        ("{labels:[], relations:[]}", base),
+        ("{direction:'directed'}", ProcedureGraphProjection {
+            direction: Some(ProcedureGraphDirection::Directed), ..base
+        }),
+        ("{direction:'undirected'}", ProcedureGraphProjection {
+            direction: Some(ProcedureGraphDirection::Undirected), ..base
+        }),
+        ("{parallel:'collapse'}", ProcedureGraphProjection {
+            parallel_edges: ProcedureParallelEdges::CollapseUnit, ..base
+        }),
+        ("{parallel:'min'}", ProcedureGraphProjection {
+            parallel_edges: ProcedureParallelEdges::Minimum, ..base
+        }),
+        ("{parallel:'sum'}", ProcedureGraphProjection {
+            parallel_edges: ProcedureParallelEdges::Sum, ..base
+        }),
+        ("{self_loops:'reject'}", ProcedureGraphProjection {
+            self_loops: ProcedureSelfLoops::Reject, ..base
+        }),
+        ("{weight:'p'}", ProcedureGraphProjection {
+            weight: ProcedureGraphWeight::Property {
+                key: P, missing: ProcedureMissingWeight::Reject,
+            }, ..base
+        }),
+        ("{weight:'p', missing:'zero'}", ProcedureGraphProjection {
+            weight: ProcedureGraphWeight::Property {
+                key: P, missing: ProcedureMissingWeight::Zero,
+            }, ..base
+        }),
+    ];
+    for (projection, expected) in cases {
+        let text = format!("CALL fnx.test({projection}) YIELD value RETURN value");
+        let query = PreparedGraphSetText::prepare(&text, projection_symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        query
+            .execute_governed_with_procedures(
+                wide(),
+                no_graph,
+                |call, arguments, _| {
+                    assert_eq!(call.graph_projection(), Some(&expected), "{text}");
+                    assert!(arguments.is_empty(), "{text}");
+                    rows(vec![vec![int(1)]])
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn invalid_graph_options_refuse_before_any_schema_lookup() {
+    for projection in [
+        "{labels:['Person'], unknown:'x'}",
+        "{labels:['Person','Other']}",
+        "{relations:['R','R']}",
+        "{labels:'Person'}",
+        "{relations:[17]}",
+        "{labels:[$label]}",
+        "{weight:1}",
+        "{missing:'unit'}",
+        "{weight:'p',missing:'skip'}",
+        "{labels:['Person'],direction:'sideways'}",
+        "{labels:['Person'],parallel:'first'}",
+        "{labels:['Person'],self_loops:'ignore'}",
+        "{labels:['Person'],labels:[]}",
+    ] {
+        let text = format!("CALL fnx.test({projection}) YIELD value RETURN value LIMIT 0");
+        let mut lookups = 0;
+        assert!(
+            PreparedGraphSetText::prepare(&text, |kind, name| {
+                lookups += 1;
+                projection_symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(lookups, 0, "{text}");
+    }
+    for projection in [
+        "{labels:['Absent']}",
+        "{relations:['Absent']}",
+        "{weight:'Absent'}",
+    ] {
+        let text = format!("CALL fnx.test({projection}) YIELD value RETURN value LIMIT 0");
+        assert!(PreparedGraphSetText::prepare(&text, projection_symbols).is_err());
+    }
+    let wrong_kind = PreparedGraphSetText::prepare(
+        "CALL fnx.test({labels:['Person']}) YIELD value RETURN value",
+        |_, _| Some(GraphSymbol::Relation(RelationId(11))),
+    );
+    assert!(matches!(
+        wrong_kind,
+        Err(fgdb_gql::GraphSetTextError {
+            kind: fgdb_gql::GraphSetTextErrorKind::Pattern(
+                fgdb_gql::GraphPatternTextErrorKind::WrongSymbolKind {
+                    expected: GraphSymbolKind::Label,
+                    found: GraphSymbolKind::Relation,
+                }
+            ),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn projection_identity_is_canonical_and_pins_every_answer_affecting_option() {
+    let prepare = |projection: &str| {
+        PreparedGraphSetText::prepare(
+            &format!("CALL fnx.test({projection}, 1) YIELD value RETURN value"),
+            projection_symbols,
+        )
+        .unwrap()
+    };
+    let first = prepare("{labels:['Person'],relations:['R'],weight:'p',missing:'unit'}");
+    let reordered = prepare("{missing:'unit',weight:'p',relations:['R'],labels:['Person']}");
+    assert_eq!(first.canonical_template_bytes(), reordered.canonical_template_bytes());
+    assert_eq!(
+        first.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
+        reordered.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes()
+    );
+    let default = prepare("{}");
+    for projection in [
+        "{labels:['Person']}",
+        "{relations:['R']}",
+        "{weight:'p'}",
+        "{weight:'p',missing:'zero'}",
+        "{direction:'directed'}",
+        "{direction:'reversed'}",
+        "{direction:'undirected'}",
+        "{parallel:'collapse'}",
+        "{parallel:'min'}",
+        "{parallel:'max'}",
+        "{parallel:'sum'}",
+        "{self_loops:'drop'}",
+        "{self_loops:'reject'}",
+    ] {
+        let changed = prepare(projection);
+        assert_ne!(default.canonical_template_bytes(), changed.canonical_template_bytes());
+        assert_ne!(
+            default.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
+            changed.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
+            "{projection}"
+        );
+    }
+    let same_names_other_catalog = PreparedGraphSetText::prepare(
+        "CALL fnx.test({labels:['Person'],relations:['R'],weight:'p',missing:'unit'},1) \
+         YIELD value RETURN value",
+        |kind, name| match kind {
+            GraphSymbolKind::Label => Some(GraphSymbol::Label(LabelId(u64::MAX))),
+            _ => projection_symbols(kind, name),
+        },
+    )
+    .unwrap();
+    assert_ne!(first.canonical_template_bytes(), same_names_other_catalog.canonical_template_bytes());
+}
+
+#[test]
+fn non_prism_map_arguments_keep_their_value_domain() {
+    let query = prepare(
+        "CALL t.echo({labels:['Person'],weight:'p'}) YIELD value RETURN value",
+        &GqlParameters::new(),
+    );
+    let result = query.execute_governed_with_procedures(
+        wide(),
+        no_graph,
+        |call, arguments, _| {
+            assert!(call.graph_projection().is_none());
+            assert_eq!(arguments.len(), 1);
+            assert!(matches!(arguments[0], GraphValue::Map { .. }));
+            host(call, arguments)
+        },
+        || Ok::<_, usize>(()),
+    ).unwrap();
+    assert_eq!(result.value.len(), 1);
+    assert!(matches!(result.value[0].values()[0], GraphValue::Map { .. }));
 }
 
 #[test]

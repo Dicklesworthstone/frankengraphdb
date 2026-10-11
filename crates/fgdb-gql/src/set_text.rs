@@ -440,14 +440,24 @@ impl ReadStageTemplate {
                 names,
                 outputs,
                 vertices,
+                graph_projection,
                 ..
             } => {
                 // A named call has its own tag, so every positional call keeps
                 // its exact template bytes.
-                bytes.push(if names.is_empty() { 5 } else { 6 });
+                bytes.push(if graph_projection.is_some() {
+                    8
+                } else if names.is_empty() {
+                    5
+                } else {
+                    6
+                });
                 for text in [namespace, name] {
                     bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(text.as_bytes());
+                }
+                if let Some(projection) = graph_projection {
+                    projection.append_transcript(bytes);
                 }
                 bytes.extend_from_slice(&(arguments.len() as u64).to_be_bytes());
                 for (index, argument) in arguments.iter().enumerate() {
@@ -655,6 +665,9 @@ pub(crate) enum ReadStageTemplate {
         /// the column, written or implied by `n.p`), ascending. The host
         /// refuses unless each is a vertex-valued output (fgdb-luq0b).
         vertices: Vec<usize>,
+        /// The first positional fnx map after its literal schema names have
+        /// been resolved. It is not an algorithm argument at execution.
+        graph_projection: Option<crate::ProcedureGraphProjection>,
     },
     Unwind {
         at: usize,

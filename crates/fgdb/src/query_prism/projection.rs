@@ -3,6 +3,10 @@
 
 use super::*;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::{
+    ProcedureGraphDirection, ProcedureGraphWeight, ProcedureMissingWeight,
+    ProcedureParallelEdges, ProcedureSelfLoops,
+};
 use fgdb_prism::{FnxExecutionError, FnxGraphKind, FnxWeightSpec, MissingWeightPolicy};
 
 /// A registered kernel and its inseparable input recipe. Existing executors
@@ -65,6 +69,9 @@ pub(crate) fn bind_procedure<C>(
     ];
     let names = call.argument_names();
     let named = !names.is_empty();
+    if named && call.graph_projection().is_some() {
+        return Err(invalid(0, "inline and named projections cannot be combined"));
+    }
     let mut kernel_arguments = if named { &[][..] } else { arguments };
     let mut args_index = None;
     if named {
@@ -153,6 +160,40 @@ pub(crate) fn bind_procedure<C>(
         options.selection.weight = FnxWeightSpec::Property { key, missing };
     } else if let Some(index) = missing_index {
         return Err(invalid(index, "missing requires an explicit weight property"));
+    }
+    if let Some(projection) = call.graph_projection() {
+        options.selection.vertex_label = projection.vertex_label;
+        options.selection.relation = projection.relation;
+        options.selection.weight = match projection.weight {
+            ProcedureGraphWeight::Unit => FnxWeightSpec::Unit,
+            ProcedureGraphWeight::Property { key, missing } => FnxWeightSpec::Property {
+                key,
+                missing: match missing {
+                    ProcedureMissingWeight::Reject => MissingWeightPolicy::Reject,
+                    ProcedureMissingWeight::Unit => MissingWeightPolicy::Unit,
+                    ProcedureMissingWeight::Zero => MissingWeightPolicy::Zero,
+                },
+            },
+        };
+        if let Some(direction) = projection.direction {
+            options.projection.directedness = match direction {
+                ProcedureGraphDirection::Directed => Directedness::Directed,
+                ProcedureGraphDirection::Reversed => Directedness::Reversed,
+                ProcedureGraphDirection::Undirected => Directedness::Undirected,
+            };
+        }
+        options.projection.parallel_edges = match projection.parallel_edges {
+            ProcedureParallelEdges::Reject => ParallelEdgePolicy::Reject,
+            ProcedureParallelEdges::CollapseUnit => ParallelEdgePolicy::CollapseUnit,
+            ProcedureParallelEdges::Minimum => ParallelEdgePolicy::Minimum,
+            ProcedureParallelEdges::Maximum => ParallelEdgePolicy::Maximum,
+            ProcedureParallelEdges::Sum => ParallelEdgePolicy::Sum,
+        };
+        options.projection.self_loops = match projection.self_loops {
+            ProcedureSelfLoops::Keep => SelfLoopPolicy::Keep,
+            ProcedureSelfLoops::Drop => SelfLoopPolicy::Drop,
+            ProcedureSelfLoops::Reject => SelfLoopPolicy::Reject,
+        };
     }
     // Reject incompatible graph laws before any host scans its source.
     // Reversal still supplies a directed graph; only Undirected changes kind.

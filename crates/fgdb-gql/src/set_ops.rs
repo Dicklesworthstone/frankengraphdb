@@ -22,7 +22,11 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
-pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
+pub use procedure::{
+    GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
+    ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
+    WithProcedures,
+};
 pub use projection::{
     GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
 };
@@ -428,6 +432,7 @@ impl PreparedGraphSet {
     /// domain. Arguments are constants: literals or bound parameters.
     /// `vertices` lists, ascending, the YIELD positions the statement matches
     /// as vertices; the host must refuse unless each is vertex-valued.
+    #[allow(clippy::too_many_arguments)]
     pub fn procedure_call(
         self,
         namespace: String,
@@ -436,6 +441,7 @@ impl PreparedGraphSet {
         names: Vec<String>,
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
         if !matches!(self.node, SetNode::Values)
@@ -500,6 +506,7 @@ impl PreparedGraphSet {
                 name,
                 arguments,
                 names,
+                graph_projection,
                 outputs: output_names,
                 vertices,
             })),
