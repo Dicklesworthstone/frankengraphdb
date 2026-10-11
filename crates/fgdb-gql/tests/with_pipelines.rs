@@ -409,6 +409,35 @@ fn list_columns_compare_in_the_value_language() {
 
 /// `+` concatenates list-typed WITH columns (openCypher Unwind1 [3],
 /// fgdb-c4i0d), in a RETURN item and as an UNWIND source.
+/// A NULL slice bound makes the slice NULL (openCypher List2 [9]). A lower
+/// NULL bound is the literal before `..`, not a property read of a variable
+/// named `null`.
+#[test]
+fn a_null_slice_bound_reads_null() {
+    let values = [1].map(CanonicalScalar::Int);
+    for bounds in ["null..null", "1..null", "null..3", "..null", "null.."] {
+        let text = format!("WITH [1, 2, 3] AS list RETURN list[{bounds}] AS r");
+        let rows = run(&prepare(&text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].get(0).unwrap().as_scalar(),
+            Some(&CanonicalScalar::Null),
+            "{text}"
+        );
+    }
+    let rows = run(
+        &prepare("WITH [1, 2, 3] AS list RETURN list[1..] AS r"),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .value;
+    assert_eq!(rows[0].get(0).unwrap().as_list().map(<[_]>::len), Some(2));
+}
+
 #[test]
 fn plus_concatenates_list_columns_after_with() {
     use fgdb_gql::algebra::GraphValue;

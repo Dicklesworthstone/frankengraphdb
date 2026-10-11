@@ -1741,7 +1741,7 @@ impl<'a> Parser<'a> {
             if !(word.eq_ignore_ascii_case("TRUE")
                 || word.eq_ignore_ascii_case("FALSE")
                 || word.eq_ignore_ascii_case("NULL"))
-                || matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+                || self.property_dot_follows()?
             {
                 return Err(error(
                     self.current.at,

@@ -127,15 +127,21 @@ impl<'a> Parser<'a> {
         Ok(at)
     }
 
+    /// A `.` after the current token that opens a property key, not the
+    /// first dot of a slice's `..` (`list[null..3]`, List2 [9]).
+    fn property_dot_follows(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
+            && !matches!(lexer.next()?.kind, TokenKind::Punct(b'.')))
+    }
+
     fn mutation_operand(
         &mut self,
         columns: &mut Vec<Projection<'a>>,
     ) -> Result<Operand, GraphPatternTextError> {
         let at = self.current.at;
         // A bound property wins over literal-looking names such as true/null.
-        if matches!(self.current.kind, TokenKind::Word(_))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
-        {
+        if matches!(self.current.kind, TokenKind::Word(_)) && self.property_dot_follows()? {
             let variable = self.property_variable()?;
             self.punct(b'.', ".")?;
             let key = self.name()?;
