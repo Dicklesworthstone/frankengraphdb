@@ -1242,6 +1242,24 @@ fn evaluate_value_at<E>(
             if list.is_null() || index.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
+            } else if let Some((keys, values)) = list.as_map() {
+                // openCypher dynamic map access, `map[key]`: a text key reads
+                // its entry, case-sensitively, and an absent key is NULL. Any
+                // other key is an error, as for a list.
+                let GraphValue::Scalar(CanonicalScalar::Text(key)) = &index else {
+                    return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+                };
+                let key = key.as_str().as_bytes();
+                match keys.binary_search_by(|probe| probe.as_bytes().cmp(key)) {
+                    Ok(at) => {
+                        copy_value(&values[at], control).map_err(ProjectionFailure::Control)?
+                    }
+                    Err(_) => {
+                        control(GlaExecutionEvent::ScratchEntry)
+                            .map_err(ProjectionFailure::Control)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                }
             } else {
                 let values = list
                     .as_list()

@@ -484,6 +484,18 @@ fn expression<'g, E, C>(
             let index = index.cell();
             if list_cell.is_null() || index.is_null() {
                 OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+            } else if let Cell::Value(ValueRef::Map { keys, values }) = list_cell {
+                // Dynamic map access, as in the row evaluator.
+                let Cell::Value(ValueRef::Scalar(CanonicalScalar::Text(key))) = index else {
+                    return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+                };
+                let key = key.as_str().as_bytes();
+                match keys.binary_search_by(|probe| probe.as_bytes().cmp(key)) {
+                    Ok(at) => OutputValue::Owned(GraphAggregateValue::Value(
+                        values[at].copy_with_control(control)?,
+                    )),
+                    Err(_) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
+                }
             } else {
                 let Cell::Value(ValueRef::List(values)) = list_cell else {
                     return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));

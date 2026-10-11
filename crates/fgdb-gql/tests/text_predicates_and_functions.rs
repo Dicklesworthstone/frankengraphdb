@@ -732,6 +732,35 @@ fn composite_literals_compare_three_valued() {
     );
 }
 
+/// openCypher dynamic map access `map[key]` (TCK Map2): a text key reads its
+/// entry case-sensitively, an absent key or a NULL key is NULL, and a key that
+/// is not text is a typed failure at execution.
+#[test]
+fn a_map_reads_an_entry_by_a_dynamic_text_key() {
+    for (expression, expected) in [
+        ("{name: 'Mats', Name: 'Pontus'}['name']", text("Mats")),
+        ("{name: 'Mats', Name: 'Pontus'}['Name']", text("Pontus")),
+        (
+            "{name: 'Mats', Name: 'Pontus'}['nAMe']",
+            CanonicalScalar::Null,
+        ),
+        ("{null: 'Mats', NULL: 'Pontus'}['NULL']", text("Pontus")),
+        ("{k: 1, x: 2}[n.text]", CanonicalScalar::Int(1)),
+        ("{k: 1}[null]", CanonicalScalar::Null),
+        ("{k: [1, 2]}['k'][1]", CanonicalScalar::Int(2)),
+    ] {
+        assert_eq!(scalar(expression, &text("k")), expected, "{expression}");
+    }
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN {k: 1}[0] AS value"),
+            &text("k"),
+            policy()
+        )
+        .is_err()
+    );
+}
+
 /// A list literal's `<`, `<=`, `>` or `>=` compares in openCypher's
 /// comparability order: the first unequal pair of elements decides, a NULL or
 /// incomparable pair makes the comparison UNKNOWN, and an equal prefix makes
