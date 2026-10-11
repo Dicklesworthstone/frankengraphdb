@@ -504,6 +504,34 @@ fn radix_integers_and_dot_floats_compute_in_projections() {
     }
 }
 
+/// A literal may be the left operand of a WHERE comparison (`1 = n.p`,
+/// `'w' < n.text`), and a comparison of two literals filters every row or
+/// none (TCK ReturnSkipLimit1 `WHERE 1 = 0`).
+#[test]
+fn a_literal_left_operand_compares_like_the_mirrored_comparison() {
+    let count = |statement: &str, input: &CanonicalScalar| {
+        execute(&prepare(statement), input, policy())
+            .unwrap()
+            .value
+            .len()
+    };
+    for (statement, input, rows) in [
+        ("MATCH (n) WHERE 'x' = n.text RETURN n", text("x"), 1),
+        ("MATCH (n) WHERE 'x' = n.text RETURN n", text("y"), 0),
+        ("MATCH (n) WHERE 'w' < n.text RETURN n", text("x"), 1),
+        ("MATCH (n) WHERE 'z' < n.text RETURN n", text("x"), 0),
+        (
+            "MATCH (n) WHERE 'x' = n.text RETURN n",
+            CanonicalScalar::Null,
+            0,
+        ),
+        ("MATCH (n) WHERE 1 = 0 RETURN n", text("x"), 0),
+        ("MATCH (n) WHERE 1 = 1 RETURN n", text("x"), 1),
+    ] {
+        assert_eq!(count(statement, &input), rows, "{statement} over {input:?}");
+    }
+}
+
 /// fgdb-o5o9t: a list quantifier, comprehension, list function or size() is
 /// an operand of the scalar operators around it, read through a let slot.
 /// A let's values read the enclosing row, so an enclosing list element keeps

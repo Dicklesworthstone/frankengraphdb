@@ -381,6 +381,14 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_scalar_predicate(&self) -> Result<bool, GraphPatternTextError> {
+        // A number or text literal on the left (`1 = a.n`, `'b' < a.s`) is a
+        // scalar comparison; the flat lowering reads only `v.p op value`.
+        if matches!(
+            self.current.kind,
+            TokenKind::Digits(_) | TokenKind::Quoted(_)
+        ) {
+            return Ok(true);
+        }
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
         let mut depth = 0_usize;
