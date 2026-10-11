@@ -110,6 +110,9 @@ impl GraphSymbolResolver for Symbols {
         for (name, &id) in &self.relations {
             catalog.insert_relation(RelationId(u64::from(id)), name.clone());
         }
+        for (name, &id) in &self.properties {
+            catalog.insert_property(PropertyKeyId(u64::from(id)), name.clone());
+        }
         Some(catalog)
     }
 

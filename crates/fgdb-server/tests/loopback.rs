@@ -723,6 +723,123 @@ fn fgp_refresh_waits_for_child_quiescence_then_fences_old_headers() {
 }
 
 #[test]
+fn fgp_graph_property_maps_follow_live_prepared_reads_and_refreshed_field_scope() {
+    run(async |cx| {
+        let (addr, shutdown, mut server) = start(cx, "graph-property-maps").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let statement = "MATCH (n:Person) RETURN n.name AS name, properties(n) AS props, \
+                         keys(n) AS keys ORDER BY name NULLS LAST";
+        let handle = client.prepare_read(cx, statement, vec![]).await.unwrap();
+        client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {name:'Ann',age:30}), (b:Person), \
+                 (c:Company {name:'Hidden',age:99}), \
+                 (a)-[:KNOWS {name:'knows',age:7}]->(b), \
+                 (a)-[:KNOWS {age:999}]->(c)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let empty = WireValue::Map(vec![]);
+        let answer = client.execute_prepared(cx, handle, vec![]).await.unwrap();
+        assert_eq!(answer.columns, ["name", "props", "keys"]);
+        assert_eq!(answer.outcome, Outcome::Rows { seq: 1 });
+        assert_eq!(
+            answer.rows,
+            [
+                vec![
+                    text("Ann"),
+                    WireValue::Map(vec![
+                        ("age".into(), WireValue::Int(30)),
+                        ("name".into(), text("Ann")),
+                    ]),
+                    WireValue::List(vec![text("age"), text("name")]),
+                ],
+                vec![WireValue::Null, empty.clone(), WireValue::List(vec![])],
+            ]
+        );
+        let edge = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) \
+                 RETURN r{.*,age:8} AS props, b{.*} AS target",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            edge.rows,
+            [vec![
+                WireValue::Map(vec![
+                    ("age".into(), WireValue::Int(8)),
+                    ("name".into(), text("knows")),
+                ]),
+                empty.clone(),
+            ]]
+        );
+
+        let narrowed = token(&Grant {
+            labels: Scope::only([LabelId(1)]),
+            relations: Scope::only([RelationId(1)]),
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Read)
+        });
+        client.refresh_authority(cx, narrowed).await.unwrap();
+        assert_eq!(
+            server_code(
+                client
+                    .execute_prepared(cx, handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement,
+            "authority refresh invalidates the old prepared template"
+        );
+        let masked_handle = client.prepare_read(cx, statement, vec![]).await.unwrap();
+        let masked = client
+            .execute_prepared(cx, masked_handle, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            masked.rows,
+            [
+                vec![
+                    text("Ann"),
+                    WireValue::Map(vec![("name".into(), text("Ann"))]),
+                    WireValue::List(vec![text("name")]),
+                ],
+                vec![WireValue::Null, empty.clone(), WireValue::List(vec![])],
+            ]
+        );
+        let masked_edge = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (a)-[r]->(b) RETURN properties(r) AS props, b{.*} AS target",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            masked_edge.rows,
+            [vec![
+                WireValue::Map(vec![("name".into(), text("knows"))]),
+                empty,
+            ]]
+        );
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn top_level_map_parameters_round_trip_and_drive_atomic_fgp_writes() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "map-parameters").await;

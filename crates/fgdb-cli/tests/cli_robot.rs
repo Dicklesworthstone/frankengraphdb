@@ -3121,6 +3121,37 @@ fn json_rows_bind_nullable_maps_as_native_create_arguments() {
 }
 
 #[test]
+fn graph_property_maps_use_declared_names_and_render_lossless_robot_cells() {
+    let db = TestDb::new("graph-property-maps");
+    db.create();
+    db.write(&[
+        "CREATE (a:Person {name:'Ann',born:1980}),(b:Person),(a)-[:KNOWS {active:true}]->(b)",
+    ]);
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (n:Person) WHERE n.name='Ann' RETURN properties(n) AS props, keys(n) AS keys"],
+        ),
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"1980"},"name":{"type":"text","value":"Ann"}}},{"type":"list","value":[{"type":"text","value":"born"},{"type":"text","value":"name"}]}]]"#,
+    );
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (a)-[r:KNOWS]->(b) RETURN properties(r) AS props, b{.*} AS empty"],
+        ),
+        r#"[[{"type":"map","value":{"active":{"type":"bool","value":true}}},{"type":"map","value":{}}]]"#,
+    );
+    db.command("compact", &[]).success();
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (n:Person) WHERE n.name='Ann' WITH n RETURN n{.*,born:2000} AS props"],
+        ),
+        r#"[[{"type":"map","value":{"born":{"type":"int","value":"2000"},"name":{"type":"text","value":"Ann"}}}]]"#,
+    );
+}
+
+#[test]
 fn json_map_fields_drive_scalar_predicates_and_write_returning() {
     let db = TestDb::new("json-map-fields");
     db.create();

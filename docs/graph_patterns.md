@@ -268,6 +268,71 @@ This is projection of the existing atomic CanonicalScalar property domain,
 not arbitrary expressions, recursive collection-valued properties, edge/path
 values, a catalog binding service or an authorization grant.
 
+## Complete graph property maps
+
+The 2026-10-11 source implementation adds complete visible property maps to
+the native read compiler and the snapshot, historical, pinned, transaction
+and capability-authorized resident query sources:
+
+```text
+MATCH (person:Person)-[relationship:KNOWS]->(friend)
+RETURN properties(person) AS person,
+       keys(relationship) AS relationship_keys,
+       friend{.*, display_name: 'Friend'} AS friend
+```
+
+`properties(n)` and `properties(r)` return canonical maps with the actual
+property names and scalar values of the admitted vertex or fixed relationship.
+`keys(n)` and `keys(r)` return those names in canonical order. `n{.*}` and
+`r{.*}` select all visible properties; explicit projection entries override a
+matching key, including an explicit NULL value. An element with no visible
+properties produces an empty map. A NULL element from `OPTIONAL MATCH`
+produces NULL. Row-valued maps also support `properties(map)` as an identity
+operation, and `properties(NULL)` returns NULL. Maps can cross `WITH`, become
+grouping keys or aggregate arguments, and use the existing map/list wire cells.
+
+Names come from the host's `GraphSymbolResolver::reverse_catalog()` through
+`ReverseSymbolCatalog::insert_property(PropertyKeyId, name)`. The CLI and
+server populate that catalog from their operator-declared property bindings.
+Enumeration reads actual effective source properties; a list of catalog names
+is never treated as proof that other stored properties do not exist. A visible
+property ID without a name refuses with `ReadError::UnmappedProperty`, even
+under `LIMIT 0`. Two actual property IDs resolving to the same name refuse
+with `ReadError::InvalidPropertyMap`. Catalog property names participate in
+the identity of plans that enumerate maps; map-free plan bytes stay unchanged.
+
+Capability sources remove forbidden fields before looking up their names,
+inspecting their payloads, constructing maps or charging per-field work and
+scratch. Transaction maps merge the pinned basis with staged additions,
+updates and removals. Map cells, names and scalar payload copies consume the
+same cumulative allowance as source admission and query execution. Stored
+properties remain atomic `CanonicalScalar` values; this does not add stored
+recursive maps. Mutation `RETURN` clauses still refuse graph-element maps;
+their post-write projection path has no complete-map accessor yet.
+Nullable imported bindings across multipart `OPTIONAL MATCH` boundaries also
+refuse; project their maps before that boundary. Mixed row/graph multipart
+projections support `properties(n)` and `keys(n)`, while `n{.*}` there remains
+outside this slice.
+Low-level callers need the map-aware element accessor APIs;
+an omitted map source is a typed refusal rather than an empty map.
+
+Regression sources are `crates/fgdb/tests/graph_property_maps.rs`, the native
+GQL projection laws, and the CLI and FGP loopback suites. These additions have
+source review and pinned formatter checks here; compilation and Rust test
+execution remain **unverified** in this workspace.
+
+## UNION column semantics
+
+Text `UNION` operands must expose the same column names. Reordered names are
+aligned by a native projection before set arithmetic, so
+`RETURN 1 AS a, 2 AS b UNION RETURN 2 AS b, 1 AS a` produces one distinct row
+in the left arm's column order. Operand-local ordering and pagination remain
+inside that operand. Incompatible names refuse during preparation before
+catalog access. An unparenthesized UNION chain must use `ALL` throughout or
+`DISTINCT` throughout; omitted quantifiers mean DISTINCT. Parenthesized set
+expressions have independent quantifier scopes. The generic typed positional
+set API and text `INTERSECT`/`EXCEPT` retain their positional behavior.
+
 ## DISTINCT and ALL matching occurrences
 
 All three builder-prepared output shapes default to DISTINCT. Explicitly retain
