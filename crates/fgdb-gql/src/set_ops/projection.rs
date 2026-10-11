@@ -9,7 +9,8 @@ mod temporal;
 pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
 pub(crate) use temporal::{
     arithmetic as temporal_arithmetic, construct as construct_temporal, field as temporal_field,
-    field_scratch_entries as temporal_field_scratch_entries, timestamp_text,
+    field_scratch_entries as temporal_field_scratch_entries, is_field_name as temporal_field_name,
+    timestamp_text,
 };
 
 use super::{

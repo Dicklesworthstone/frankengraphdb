@@ -619,6 +619,58 @@ fn a_plain_with_reads_the_bindings_it_drops_in_its_own_where_and_pages() {
     }
 }
 
+/// openCypher Temporal5: a stored temporal property carried through WITH
+/// keeps its fields. On a scalar column only temporal field names can answer
+/// with a value: NULL on NULL, the field on a temporal value, and an
+/// execution error on any other scalar. Any other key could only be NULL or
+/// an error and stays refused at preparation.
+#[test]
+fn a_scalar_column_reads_the_fields_of_the_temporal_value_it_holds() {
+    let date = CanonicalScalar::Date(fgdb_types::CanonicalDate::from_civil(1984, 10, 11).unwrap());
+    let values = [date, CanonicalScalar::Null];
+    let found = run(
+        &prepare("MATCH (n) WITH n.p AS d RETURN d.year AS y, d.dayOfQuarter AS q"),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .value;
+    let mut cells: Vec<_> = ints(&found, 0).into_iter().zip(ints(&found, 1)).collect();
+    cells.sort();
+    assert_eq!(cells, vec![(None, None), (Some(1984), Some(11))]);
+    // Inside a scalar expression the field is an operand like any other.
+    let found = run(
+        &prepare("MATCH (n) WITH n.p AS d RETURN d.year + 1 AS y"),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .value;
+    let mut years = ints(&found, 0);
+    years.sort();
+    assert_eq!(years, vec![None, Some(1985)]);
+    assert!(
+        run(
+            &prepare("MATCH (n) WITH n.p AS d RETURN d.year AS y"),
+            &[CanonicalScalar::Int(3)],
+            wide(),
+            &mut || Ok(()),
+        )
+        .is_err()
+    );
+    for text in [
+        "MATCH (n) WITH n.p AS d RETURN d.missing",
+        "MATCH (n) WITH n.p AS d RETURN d.p AS v",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog() {
     for text in [

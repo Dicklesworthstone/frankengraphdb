@@ -1246,6 +1246,19 @@ fn fraction_nanos(
 /// and a datetime also `timezone` and `offset` (the offset's spelling, `Z`
 /// for UTC; a zoned datetime's `timezone` is its zone), `offsetMinutes` and
 /// `offsetSeconds`; a datetime also `epochSeconds` and `epochMillis`.
+/// Whether `key` names a field of some temporal value. On a scalar these are
+/// the only keys that can answer with a value: any other key is NULL on NULL
+/// and an error on every other scalar. The accessors themselves answer, so
+/// this set cannot drift from [`field`].
+pub(crate) fn is_field_name(key: &str) -> bool {
+    duration_field(CanonicalDuration::ZERO, key).is_some()
+        || CanonicalDate::from_epoch_day(0).is_ok_and(|day| date_field(day, key).is_some())
+        || time_field(CanonicalLocalTime::MIDNIGHT, key).is_some()
+        || offset_field(0, key).is_some()
+        || CanonicalTimestamp::offset_only(0, 0)
+            .is_ok_and(|value| timestamp_field(&value, key).is_some())
+}
+
 pub(crate) fn field(
     value: &CanonicalScalar,
     key: &str,

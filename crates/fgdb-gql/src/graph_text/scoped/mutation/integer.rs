@@ -353,6 +353,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether `.field` follows the current name and names a temporal field,
+    /// the only read a scalar column can answer with a value.
+    fn temporal_field_follows(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        lexer.next()?;
+        Ok(matches!(
+            lexer.next()?.kind,
+            TokenKind::Word(key) | TokenKind::DelimitedKeyword(key)
+                if crate::set_ops::temporal_field_name(key)
+        ))
+    }
+
     /// `.key` reads after `value`, each one a map entry.
     fn map_entries(
         &mut self,
@@ -958,19 +970,22 @@ impl<'a> Parser<'a> {
             return self.composite_slot(columns, depth, program, at);
         }
         // `m.key` of a dynamically typed row column, such as a map from WITH
-        // or UNWIND, reads the entry through a let slot (fgdb-o5o9t). A
-        // carried vertex's `n.p` is a Vertex column read at the boundary.
+        // or UNWIND, reads the entry through a let slot (fgdb-o5o9t), and so
+        // does a temporal field of a scalar column (a stored date's `.year`).
+        // A carried vertex's `n.p` is a Vertex column read at the boundary.
         if self.lets.is_some()
             && let ExpressionColumns::Row(schema) = columns
             && let TokenKind::Word(word) = self.current.kind
             && !self.elements.contains(&word)
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
-            && let Some(column) =
-                schema[..self.visible_width(schema)]
-                    .iter()
-                    .position(|(name, kind)| {
-                        name.text == word && *kind == crate::GraphSetColumnType::Any
-                    })
+            && let Some(column) = schema[..self.visible_width(schema)]
+                .iter()
+                .position(|(name, _)| name.text == word)
+            && match schema[column].1 {
+                crate::GraphSetColumnType::Any => true,
+                crate::GraphSetColumnType::Scalar => self.temporal_field_follows()?,
+                _ => false,
+            }
         {
             self.advance()?;
             let value = self.map_entries(ReadValueTemplate::Column(column))?;

@@ -157,6 +157,7 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
 /// separately by the parser, without admitting an arbitrary graph identity.
 fn map_capable(
     value: &ReadValueTemplate,
+    key: &str,
     schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
     parameters: &[GqlParameterSpec],
 ) -> bool {
@@ -169,9 +170,18 @@ fn map_capable(
         | ReadValueTemplate::Index { .. }
         | ReadValueTemplate::Reduce { .. }
         | ReadValueTemplate::Temporal { .. } => true,
-        ReadValueTemplate::Column(at) => schema
-            .and_then(|schema| schema.get(*at))
-            .is_some_and(|(_, kind)| *kind == GraphSetColumnType::Any),
+        // A scalar column (a stored property, say) may hold a temporal value,
+        // so it reads that value's fields. Any other key could only be NULL
+        // or an error, and stays refused here.
+        ReadValueTemplate::Column(at) => {
+            schema
+                .and_then(|schema| schema.get(*at))
+                .is_some_and(|(_, kind)| match kind {
+                    GraphSetColumnType::Any => true,
+                    GraphSetColumnType::Scalar => crate::set_ops::temporal_field_name(key),
+                    _ => false,
+                })
+        }
         ReadValueTemplate::Parameter { index, .. } => {
             parameters[*index].parameter_type == GqlParameterType::Map
         }
@@ -1669,18 +1679,18 @@ impl<'a> Parser<'a> {
         }
         loop {
             // `.key` reads a map entry (fgdb-2jw3z), only on a value that can
-            // statically be a map. A graph property read or a WITH-carried
-            // vertex's hidden read never reaches this postfix, and on any
-            // other value the `.` stays unconsumed, so a vertex column's `.p`
-            // past its readable scope still refuses at preparation.
+            // statically be a map, or a temporal field of a scalar column. A
+            // graph property read or a WITH-carried vertex's hidden read never
+            // reaches this postfix, and on any other value the `.` stays
+            // unconsumed, so a vertex column's `.p` past its readable scope
+            // still refuses at preparation.
             if self.is_punct(b'.')
-                && matches!(
-                    self.lexer.clone().next()?.kind,
-                    TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
-                )
+                && let TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) =
+                    self.lexer.clone().next()?.kind
                 && (graph_map
                     || map_capable(
                         &value,
+                        key,
                         (inputs.is_none() && resolve.is_none()).then_some(schema),
                         &self.syntax.parameters,
                     ))
