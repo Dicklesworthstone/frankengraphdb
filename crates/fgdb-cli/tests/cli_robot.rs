@@ -2032,6 +2032,84 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
     }
 }
 
+/// fgdb-txbg9: `--tzdb-file` reaches a named-zone datetime() through the
+/// query facade. Every resolver wrapper between the CLI's catalog and the
+/// parser forwards the pinned tzdb, so the constructed value carries the
+/// zone's offset at that wall time and the artifact's oid. Without the
+/// artifact the named zone refuses.
+#[test]
+fn cli_named_time_zone_constructs_through_every_read_front_end() {
+    const ZONE: &str = "Test/Shift";
+    let db = TestDb::new("named-zone-construct");
+    // +01:00 until 2001-09-09T01:46:40Z, then +02:00.
+    let artifact_bytes = fgdb::PinnedTzdb::new(vec![fgdb::TzdbZone {
+        identifier: ZONE.into(),
+        initial_offset_seconds: 3600,
+        transitions: vec![fgdb::TzdbTransition {
+            instant_utc_seconds: 1_000_000_000,
+            offset_seconds: 7200,
+        }],
+    }])
+    .unwrap()
+    .canonical_bytes()
+    .to_vec();
+    let artifact_path = std::path::Path::new(&db.db)
+        .parent()
+        .unwrap()
+        .join("tzdb-artifact");
+    std::fs::write(&artifact_path, &artifact_bytes).unwrap();
+    let oid_hex = fgdb::PinnedTzdb::decode(&artifact_bytes)
+        .unwrap()
+        .object_id()
+        .0
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    db.create();
+    db.write(&["INSERT (:Person {name:'x'})"]);
+    let cell = |instant: i128, offset: i32| {
+        format!(
+            r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{instant}","utc_offset_seconds":{offset},"zone":{{"identifier":"{ZONE}","tzdb_oid":"{oid_hex}"}}}}}}"#,
+        )
+    };
+    let after = "datetime({year: 2025, month: 1, day: 1, timezone: 'Test/Shift'})";
+    let before = "datetime({year: 1990, month: 1, day: 1, timezone: 'Test/Shift'})";
+    for (query, expected) in [
+        (
+            format!("RETURN {after} AS v"),
+            cell(1_735_682_400_000_000_000, 7200),
+        ),
+        (
+            format!("RETURN {before} AS v"),
+            cell(631_148_400_000_000_000, 3600),
+        ),
+        (
+            format!("UNWIND [1] AS x RETURN {after} AS v"),
+            cell(1_735_682_400_000_000_000, 7200),
+        ),
+        (
+            format!("MATCH (p:Person) RETURN {after} AS v"),
+            cell(1_735_682_400_000_000_000, 7200),
+        ),
+    ] {
+        let output = db.command(
+            "query",
+            &[
+                "--tzdb-file",
+                artifact_path.to_str().unwrap(),
+                query.as_str(),
+            ],
+        );
+        assert_rows(&output, &format!("[[{expected}]]"));
+        let refused = db.command("query", &[query.as_str()]);
+        assert_ne!(
+            refused.code, 0,
+            "{query} without a tzdb: {}",
+            refused.stdout
+        );
+    }
+}
+
 #[test]
 fn labels_and_type_output_in_robot_mode() {
     let db = TestDb::new("labels-and-type");

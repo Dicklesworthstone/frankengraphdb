@@ -267,6 +267,10 @@ impl<R: GraphSymbolResolver> GraphSymbolResolver for Cached<'_, R> {
         Some(symbol)
     }
 
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.inner.time_zones()
+    }
+
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         self.inner.reverse_catalog()
     }

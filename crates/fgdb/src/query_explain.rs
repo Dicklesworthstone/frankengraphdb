@@ -36,6 +36,10 @@ impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for CachingResolver<'_
             .or_insert_with(|| self.resolver.resolve_symbol(kind, name))
     }
 
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.resolver.time_zones()
+    }
+
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         self.resolver.reverse_catalog()
     }
@@ -52,6 +56,10 @@ impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for CachingResolver<'_
 impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for &mut CachingResolver<'_, R> {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (**self).resolve_symbol(kind, name)
+    }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        (**self).time_zones()
     }
 
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {

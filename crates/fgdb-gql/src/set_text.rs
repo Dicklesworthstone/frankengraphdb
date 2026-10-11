@@ -1636,6 +1636,10 @@ where
         Some(value)
     }
 
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.resolve.time_zones()
+    }
+
     fn reverse_catalog(&self) -> Option<crate::graph_text::ReverseSymbolCatalog> {
         self.resolve.reverse_catalog()
     }

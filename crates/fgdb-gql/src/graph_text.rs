@@ -193,6 +193,10 @@ impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for LentResolver<'_, R
         self.0.resolve_symbol(kind, name)
     }
 
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.0.time_zones()
+    }
+
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         self.0.reverse_catalog()
     }

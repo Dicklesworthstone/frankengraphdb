@@ -93,6 +93,9 @@ impl<R: GraphSymbolResolver> GraphSymbolResolver for BorrowedResolver<'_, R> {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         self.0.resolve_symbol(kind, name)
     }
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.0.time_zones()
+    }
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         self.0.reverse_catalog()
     }
