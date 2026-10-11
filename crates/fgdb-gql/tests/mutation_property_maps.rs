@@ -357,7 +357,7 @@ fn deleted_vertex_maps_and_cascaded_edge_maps_never_return_frozen_properties() {
             "edge cascade refusal must precede catalog access"
         );
     }
-    let selection = PreparedGraphText::prepare(
+    let selection = PreparedGraphText::prepare_with_resolver(
         "MATCH (a)-[r:R]->(b) RETURN a,r,properties(r) AS m",
         Catalog(Some("q")),
     )
