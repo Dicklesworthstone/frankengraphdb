@@ -2585,7 +2585,25 @@ impl<V: Vfs + Clone> Database<V> {
     /// published at the recovered chain's frontier, in which case nothing is
     /// left to fold or heal. The coordinator, and with it the writer lease,
     /// drops before this returns, so a fallback open can take it.
-    async fn read_current_generation(
+    ///
+    /// Type-erased like `bind_with_vfs`: a caller's `Send` proof
+    /// stops at `dyn Future + Send` instead of descending through the
+    /// coordinator, block store and checkpoint selection (fgdb-a5y6m). A lab
+    /// test awaiting `open_read_view` over the host filesystem otherwise
+    /// overflows the trait solver.
+    fn read_current_generation<'a>(
+        cx: &'a CommitCx,
+        vfs: &'a V,
+        path: &'a Path,
+        keys: &'a DatabaseKeys,
+    ) -> SendFuture<'a, Result<Option<EmbeddedReadView>, OpenError>>
+    where
+        V: 'a,
+    {
+        Box::pin(Self::read_current_generation_inner(cx, vfs, path, keys))
+    }
+
+    async fn read_current_generation_inner(
         cx: &CommitCx,
         vfs: &V,
         path: &Path,
