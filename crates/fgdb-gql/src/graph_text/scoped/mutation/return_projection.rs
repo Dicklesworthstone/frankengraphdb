@@ -1553,6 +1553,47 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The visible list-typed row column a bare name here reads, when no
+    /// `.`, call or subscript follows it (fgdb-c4i0d). A list sum or CASE
+    /// reads it as a column value directly: the value reader would hand a
+    /// bare name back to the scalar compiler, which re-reads the whole chain.
+    pub(super) fn row_list_column(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let (Some(schema), TokenKind::Word(word)) = (row, self.current.kind) else {
+            return Ok(None);
+        };
+        if self.elements.contains(&word)
+            || matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'.' | b'(' | b'[')
+            )
+        {
+            return Ok(None);
+        }
+        let visible = self.visible_width(schema);
+        Ok(schema[..visible]
+            .iter()
+            .position(|(name, kind)| name.text == word && *kind == GraphSetColumnType::List))
+    }
+
+    /// starts_let_operand, or a list literal read through a subscript or
+    /// slice (`[5, [6, 7], 10][1]`), whose element may be a list or a scalar
+    /// (fgdb-c4i0d). A literal compared with `=` or IN was already taken by
+    /// starts_composite_comparison.
+    pub(super) fn let_operand_here(&self) -> Result<bool, GraphPatternTextError> {
+        if self.starts_let_operand()? {
+            return Ok(true);
+        }
+        if !self.is_punct(b'[') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        skip_group(&mut lexer)?;
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
+    }
+
     /// Whether a list operand of a `+` chain starts here (list_operand_at).
     pub(super) fn list_operand_here(
         &self,

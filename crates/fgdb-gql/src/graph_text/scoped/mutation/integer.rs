@@ -328,8 +328,21 @@ impl<'a> Parser<'a> {
         if !self.list_case_follows(row)? {
             return Ok(false);
         }
-        self.advance()?;
         let nesting = self.let_base + depth + 1;
+        let value = self.list_case_value(columns, nesting, at)?;
+        self.let_slot(program, value, at)?;
+        Ok(true)
+    }
+
+    /// The Case template of a CASE with a list result, from its `CASE` to
+    /// its `END`, read without handing the CASE back to the scalar compiler.
+    fn list_case_value(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        self.advance()?;
         // A simple CASE compares its subject with each WHEN value: equality
         // is three-valued, so a NULL subject or value never selects.
         let subject = if self.is_word("WHEN") {
@@ -358,8 +371,31 @@ impl<'a> Parser<'a> {
             None
         };
         self.word("END")?;
-        self.let_slot(program, ReadValueTemplate::Case { arms, otherwise }, at)?;
-        Ok(true)
+        Ok(ReadValueTemplate::Case { arms, otherwise })
+    }
+
+    /// One list operand of a list sum or CASE, read as a value: a list-typed
+    /// row column or a list CASE directly, since the value reader would hand
+    /// either back to the scalar compiler and re-read the whole chain, and
+    /// any other list operand through the value reader.
+    fn list_operand_value(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        if let Some(column) = self.row_list_column(row)? {
+            self.advance()?;
+            return Ok(ReadValueTemplate::Column(column));
+        }
+        if self.list_case_follows(row)? {
+            return self.list_case_value(columns, nesting, at);
+        }
+        self.composite_value(columns, nesting, at)
     }
 
     /// One condition or result of a list CASE: a lone list operand read as
@@ -375,7 +411,7 @@ impl<'a> Parser<'a> {
             _ => None,
         };
         if self.lone_case_result(row)? {
-            return self.composite_value(columns, nesting, at);
+            return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);
         let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Whole, true);
@@ -441,7 +477,7 @@ impl<'a> Parser<'a> {
             _ => None,
         };
         if self.list_operand_here(row)? {
-            return self.composite_value(columns, nesting, at);
+            return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);
         let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Product, true);
@@ -1374,7 +1410,7 @@ impl<'a> Parser<'a> {
         }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.
-        if self.lets.is_some() && self.starts_let_operand()? {
+        if self.lets.is_some() && self.let_operand_here()? {
             return self.composite_slot(columns, depth, program, at);
         }
         if self.row_entry_slot(columns, program, at)? {

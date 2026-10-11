@@ -1,6 +1,6 @@
 //! Fixed-length edge property binding and identity-domain separation.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GraphValue, VertexPredicate};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, PreparedGraphText,
@@ -99,12 +99,15 @@ fn inline_rows(text: &str) -> Vec<Vec<GraphValue>> {
                 (EId(3), VId(3), RelationId(1), VId(1)),
             ],
             |vid, predicates| {
-                Ok::<_, ()>(predicates.iter().all(|predicate| match predicate {
-                    VertexPredicate::ScalarProperty { predicate, .. } => {
-                        predicate.matches(vertex_p(vid))
-                    }
-                    other => panic!("fixture predicates are scalar: {other:?}"),
-                }))
+                let properties: Vec<_> = vertex_p(vid)
+                    .map(|value| (PropertyKeyId(1), value.clone()))
+                    .into_iter()
+                    .collect();
+                Ok::<_, ()>(
+                    predicates
+                        .iter()
+                        .all(|predicate| predicate.matches(&[], &properties)),
+                )
             },
             |vid, _| Ok(vertex_p(vid)),
             |eid, _| Ok(Some(if eid == EId(2) { &seven } else { &five })),

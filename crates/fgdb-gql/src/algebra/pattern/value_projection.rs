@@ -124,6 +124,18 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
+    /// with_visible_columns under DISTINCT, for hidden cells that are each a
+    /// function of a visible one (a property of a returned element). Rows
+    /// equal on the visible cells are equal on the hidden ones, so DISTINCT
+    /// over the complete row keeps the same survivors. The text compiler
+    /// refuses every other hidden cell under DISTINCT before this.
+    pub(crate) fn with_dependent_visible_columns(mut self, width: usize) -> Self {
+        assert!(width > 0 && width <= self.columns.len());
+        self.logical.visible_columns = Some(width);
+        self.columns.truncate(width);
+        self
+    }
+
     /// Rank by projected column positions before applying the existing page.
     /// Nulls default to last in both directions. Canonical complete-row order
     /// breaks remaining ties; DISTINCT still compares the entire output row.

@@ -2030,6 +2030,9 @@ impl PreparedGraphText {
             pattern.logical.reverse_catalog = Some(std::sync::Arc::clone(catalog));
         }
         Ok(match self.visible_columns {
+            // parse_row_ordering admits a hidden cell under DISTINCT only
+            // when it is a property of an element RETURN projects bare.
+            Some(width) if self.distinct => pattern.with_dependent_visible_columns(width),
             Some(width) => pattern.with_visible_columns(width),
             None => pattern,
         })
