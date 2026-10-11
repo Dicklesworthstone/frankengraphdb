@@ -280,15 +280,8 @@ where
             let right = run(right, source, meter, operand)?;
             for a in &left {
                 for b in &right {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut values = Vec::new();
-                    for value in a.values().iter().chain(b.values()) {
-                        values.push(projection::copy_value(value, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    window.push(GraphValueRow::from_owned_values(values), meter, consume)?;
+                    let row = copy_cross_pair(a, b, &mut |event| meter.event(event))?;
+                    window.push(row, meter, consume)?;
                 }
             }
         }

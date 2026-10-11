@@ -5,7 +5,7 @@
 use super::*;
 use crate::BufferedReadView;
 use crate::query_spool::sort::{Input as MergeInput, Run};
-use fgdb_gql::spill_set::{SpillSetBinaryPlan, SpillSetMergeStep};
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetBinaryPlan, SpillSetMergeStep};
 use fgdb_gql::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetExceeded, GraphSetQuantifier,
 };
@@ -115,9 +115,21 @@ fn rebase_error(
     }
 }
 
+pub(super) struct CompletedChildren {
+    pub(super) left: NativeResultSpool,
+    pub(super) right: NativeResultSpool,
+    pub(super) snapshot_records: u64,
+    pub(super) evaluator: GlaExecutionStats,
+    pub(super) work: u64,
+}
+
+/// Binary operators share complete-child sequencing, original snapshots and
+/// one cumulative allowance. Reading an already completed child again never
+/// spends source records or reexecutes its graph or expressions.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<V, A, B, C>(
-    plan: SpillSetBinaryPlan,
+pub(super) async fn complete_children<V, A, B, C>(
+    left_plan: AsyncSpillSetPlan,
+    right_plan: AsyncSpillSetPlan,
     snapshot: CommitSeq,
     view: &mut BufferedReadView<V>,
     cx: &QueryCx,
@@ -134,7 +146,7 @@ pub(super) async fn execute<V, A, B, C>(
     max_input_rows: u64,
     max_sort_work: u64,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
-) -> Result<(NativeResultSpool, u64)>
+) -> Result<CompletedChildren>
 where
     V: Vfs + Clone,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -144,60 +156,59 @@ where
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
     validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
-    let (left, left_work) =
-        PreparedBufferedOrder::from_relation(plan.left().clone(), Some(snapshot))
-            .spool_in_view_with_resolver(
-                view,
-                cx,
-                policy,
-                scratch,
-                destination,
-                auxiliary,
-                group_capacity,
-                max_partitions,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_row_bytes,
-                max_input_rows,
-                max_sort_work,
-                resolver,
-            )
-            .await?;
+    let left_width = left_plan.columns().len();
+    let right_width = right_plan.columns().len();
+    let (left, left_work) = PreparedBufferedOrder::from_relation(left_plan, Some(snapshot))
+        .spool_in_view_with_resolver(
+            view,
+            cx,
+            policy,
+            scratch,
+            destination,
+            auxiliary,
+            group_capacity,
+            max_partitions,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            max_sort_work,
+            resolver,
+        )
+        .await?;
     let right_policy = remaining_policy(policy, &left)?;
     let right_work_limit = max_sort_work
         .checked_sub(left_work)
         .ok_or(NativeSpoolError::IncompleteCursor)?;
     // Append-only files keep the complete left result alive while the right
     // child runs through the same files. Empty left bags do not skip it.
-    let (right, right_work) =
-        PreparedBufferedOrder::from_relation(plan.right().clone(), Some(snapshot))
-            .spool_in_view_with_resolver(
-                view,
-                cx,
-                right_policy,
-                scratch,
-                destination,
-                auxiliary,
-                group_capacity,
-                max_partitions,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_row_bytes,
-                max_input_rows,
-                right_work_limit,
-                resolver,
-            )
-            .await
-            .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
-    let width = plan.columns().len();
+    let (right, right_work) = PreparedBufferedOrder::from_relation(right_plan, Some(snapshot))
+        .spool_in_view_with_resolver(
+            view,
+            cx,
+            right_policy,
+            scratch,
+            destination,
+            auxiliary,
+            group_capacity,
+            max_partitions,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            right_work_limit,
+            resolver,
+        )
+        .await
+        .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
     if left.snapshot != snapshot
         || right.snapshot != snapshot
-        || left.encoded_columns != width
-        || right.encoded_columns != width
-        || left.columns().len() != width
-        || right.columns().len() != width
+        || left.encoded_columns != left_width
+        || right.encoded_columns != right_width
+        || left.columns().len() != left_width
+        || right.columns().len() != right_width
     {
         return Err(SpillError::InvalidRun.into());
     }
@@ -230,11 +241,75 @@ where
             .ok_or(SpillError::SizeOverflow)?,
     };
     staged::native_event(cx, policy, &mut evaluator, GlaExecutionEvent::Work)?;
+    let work = left_work
+        .checked_add(right_work)
+        .ok_or(SpillError::SizeOverflow)?;
+    Ok(CompletedChildren {
+        left,
+        right,
+        snapshot_records: records,
+        evaluator,
+        work,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute<V, A, B, C>(
+    plan: SpillSetBinaryPlan,
+    snapshot: CommitSeq,
+    view: &mut BufferedReadView<V>,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    auxiliary: &mut SpillFile<C>,
+    group_capacity: usize,
+    max_partitions: usize,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_sort_work: u64,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<(NativeResultSpool, u64)>
+where
+    V: Vfs + Clone,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    let CompletedChildren {
+        left,
+        right,
+        snapshot_records: records,
+        mut evaluator,
+        work: prior_work,
+    } = complete_children(
+        plan.left().clone(),
+        plan.right().clone(),
+        snapshot,
+        view,
+        cx,
+        policy,
+        scratch,
+        destination,
+        auxiliary,
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work,
+        resolver,
+    )
+    .await?;
+    let width = plan.columns().len();
     let mut work = Work {
         cx,
-        used: left_work
-            .checked_add(right_work)
-            .ok_or(SpillError::SizeOverflow)?,
+        used: prior_work,
         limit: max_sort_work,
     };
     // Canonicalize only AFTER both original child windows and expressions

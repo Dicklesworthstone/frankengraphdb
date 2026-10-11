@@ -13,6 +13,18 @@ use crate::{
 };
 use core::cmp::Ordering;
 
+/// The native Cartesian occurrence copy, shared by materialized, folded and
+/// external execution. Both input rows already belong to complete children.
+/// This owns no ordering, filtering, pagination or public result admission.
+pub(super) fn copy_cross_pair<E>(
+    left: &GraphValueRow,
+    right: &GraphValueRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValueRow, E> {
+    control(GlaExecutionEvent::Work)?;
+    selected_cross::copy_pair(left, right, None, control)
+}
+
 struct Meter<Checkpoint> {
     policy: GqlQueryPolicy,
     checkpoint: Checkpoint,
@@ -378,15 +390,9 @@ where
             let mut output = Vec::new();
             for left_row in &left {
                 for right_row in &right {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut cells = Vec::new();
-                    for cell in left_row.values().iter().chain(right_row.values()) {
-                        cells.push(projection::copy_value(cell, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    output.push(GraphValueRow::from_owned_values(cells));
+                    output.push(copy_cross_pair(left_row, right_row, &mut |event| {
+                        meter.event(event)
+                    })?);
                 }
             }
             output

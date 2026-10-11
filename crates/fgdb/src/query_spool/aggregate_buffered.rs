@@ -388,7 +388,9 @@ impl PreparedNativeRead {
     /// arguments use bounded external support passes. Unary WITH
     /// projection/filter/UNWIND/grouping pipelines retain intermediate expansion,
     /// DISTINCT, ordering and pagination in external stages. Binary set inputs
-    /// finish both operands before reduction. COLLECT, relational joins,
+    /// finish both operands before reduction. Leading UNWIND/MATCH inputs
+    /// retain their complete native Cartesian relation and correlation filter.
+    /// COLLECT, keyed/theta joins,
     /// OPTIONAL/variable-length expansion and probes refuse at preparation.
     /// Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.

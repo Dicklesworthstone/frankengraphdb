@@ -8,7 +8,7 @@ use fgdb_gql::edge_stream::{
 };
 use fgdb_gql::spill_set::{
     AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetBinaryPlan,
-    SpillSetValuesPlan,
+    SpillSetCrossPlan, SpillSetValuesPlan,
 };
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
@@ -18,6 +18,7 @@ use fgdb_types::CanonicalScalarResolver;
 enum Input {
     Values(SpillSetValuesPlan),
     Binary(SpillSetBinaryPlan),
+    Cross(SpillSetCrossPlan),
     Aggregate(SpillSetAggregatePlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
@@ -53,11 +54,14 @@ impl PreparedNativeRead {
     /// canonical external merging; every child window and the shared native
     /// occurrence/equality laws survive composition. All child sources share
     /// the same snapshot and cumulative record/evaluator/physical allowances.
+    /// Native Cartesian relations admit leading UNWIND followed by MATCH,
+    /// including correlation through the native following filter. Both inputs
+    /// finish once, then bounded row pairs preserve the left-major sequence.
     /// Intermediate COUNT/SUM/AVG/MIN/MAX grouping completes through the native
     /// partitioned reducer, then converts every group to ordinary row values
     /// before downstream clauses. Exact rational averages and wide integer
     /// overflow retain the native row-domain refusal. COLLECT is unsupported.
-    /// Probes, OPTIONAL/variable-length paths and relational joins refuse.
+    /// Probes, OPTIONAL/variable-length paths and keyed/theta joins refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -295,6 +299,7 @@ impl PreparedBufferedOrder {
                             AsyncSpillSetSourcePlan::Binary(source) => {
                                 Input::Binary(source.clone())
                             }
+                            AsyncSpillSetSourcePlan::Cross(source) => Input::Cross(source.clone()),
                             AsyncSpillSetSourcePlan::Aggregate(source) => {
                                 Input::Aggregate(source.clone())
                             }
@@ -351,6 +356,28 @@ impl PreparedBufferedOrder {
             Input::Binary(plan) => {
                 let plan = plan.clone();
                 Box::pin(super::binary::execute(
+                    plan,
+                    as_of,
+                    view,
+                    cx,
+                    input_policy,
+                    scratch,
+                    destination,
+                    auxiliary,
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                    resolver,
+                ))
+            }
+            Input::Cross(plan) => {
+                let plan = plan.clone();
+                Box::pin(super::cross::execute(
                     plan,
                     as_of,
                     view,

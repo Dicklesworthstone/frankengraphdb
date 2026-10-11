@@ -13,6 +13,8 @@ mod buffered;
 pub use buffered::PreparedBufferedOrder;
 #[path = "binary.rs"]
 mod binary;
+#[path = "cross.rs"]
+mod cross;
 #[path = "staged.rs"]
 mod staged;
 

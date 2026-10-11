@@ -121,7 +121,8 @@ pub use crate::stream::VertexScanState as ScanState;
 /// Actual source provenance carried by native execution and completed spools.
 /// A Values source creates the relational singleton without opening a graph
 /// cursor; its snapshot-record count is zero. Set identifies a completed binary
-/// relation whose graph records, if any, come from all of its actual operands.
+/// set or Cartesian relation whose graph records, if any, come from all of its
+/// actual operands, including when an operand's selected rows are empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanKind {
     Values,

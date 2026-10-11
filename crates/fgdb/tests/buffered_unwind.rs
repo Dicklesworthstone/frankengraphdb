@@ -667,9 +667,22 @@ fn external_binary_allowances_accumulate_across_children_before_the_final_page()
         let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
         let mut view = view(&commit, &vfs, &source_pool).await;
         let baseline = source_pool.used();
-        for text in [
-            "MATCH (n) RETURN n.p AS value UNION ALL MATCH (m) RETURN m.p AS value ORDER BY value DESC LIMIT 1",
-            "MATCH (n) WITH n.p AS value,COUNT(*) AS c WITH value,SUM(c) AS copies RETURN value UNION ALL MATCH (m) WITH m.p AS value,COUNT(*) AS c RETURN value ORDER BY value DESC LIMIT 1",
+        for (text, private_rows, highest) in [
+            (
+                "MATCH (n) RETURN n.p AS value UNION ALL MATCH (m) RETURN m.p AS value ORDER BY value DESC LIMIT 1",
+                6,
+                13,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value,COUNT(*) AS c WITH value,SUM(c) AS copies RETURN value UNION ALL MATCH (m) WITH m.p AS value,COUNT(*) AS c RETURN value ORDER BY value DESC LIMIT 1",
+                6,
+                13,
+            ),
+            (
+                "MATCH (n) RETURN n.p AS value UNION ALL UNWIND [0,1] AS bump MATCH (m) RETURN m.p+bump AS value ORDER BY value DESC LIMIT 1",
+                9,
+                14,
+            ),
         ] {
             let prepared = prepare(text, &GqlParameters::new());
             let mut exact = None;
@@ -698,7 +711,7 @@ fn external_binary_allowances_accumulate_across_children_before_the_final_page()
                         512,
                         1024,
                         32 * 1024,
-                        if trial == 6 { 5 } else { 6 },
+                        private_rows - u64::from(trial == 6),
                         physical,
                     )
                     .await;
@@ -709,7 +722,7 @@ fn external_binary_allowances_accumulate_across_children_before_the_final_page()
                     assert_eq!(spool.row_stats().snapshot_records, 6);
                     assert_eq!(
                         contents(&spool, &mut destination, &cx).await,
-                        vec![vec![scalar(13)]]
+                        vec![vec![scalar(highest)]]
                     );
                     let stats = spool.evaluator_stats();
                     let measured = (stats.work_units, stats.scratch_entries, work);
@@ -738,7 +751,7 @@ fn external_binary_allowances_accumulate_across_children_before_the_final_page()
                         6 => assert!(
                             matches!(error, NativeSpoolError::BufferedExecute(ref inner)
                         if matches!(**inner, GqlQueryError::Rows(ref limit)
-                        if limit.dimension == GqlBudgetDimension::ResultRows && limit.limit == 5 && limit.observed == 6)),
+                        if limit.dimension == GqlBudgetDimension::ResultRows && limit.limit == private_rows - 1 && limit.observed == private_rows)),
                             "{error:?}"
                         ),
                         _ => unreachable!(),
@@ -1115,6 +1128,11 @@ fn expanded_occurrences_feed_external_aggregates_including_empty_and_distinct_in
                 2,
                 GraphAggregateValue::Integer(16),
             ),
+            (
+                "UNWIND [1,1,2] AS wanted MATCH (n {p:wanted}) WITH n.p AS matched RETURN COUNT(*) AS rows,SUM(matched) AS total",
+                3,
+                GraphAggregateValue::Integer(4),
+            ),
         ] {
             let params = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare(text, &params, resolve)
@@ -1321,10 +1339,12 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
         let payload = GraphValue::Scalar(
             CanonicalScalar::ucs_basic_text(&"x".repeat(PAYLOAD_BYTES)).unwrap(),
         );
-        for shape in 0..4 {
+        for shape in 0..5 {
             let graph_backed = shape == 0;
             let binary = shape == 2;
             let grouped = shape == 3;
+            let cross = shape == 4;
+            let has_graph = graph_backed || cross;
             let mut params = GqlParameters::new()
                 .with_list("items", (0..ITEMS as i64).map(scalar).collect())
                 .unwrap();
@@ -1338,6 +1358,8 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
                     "(WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item) UNION ALL (WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item) ORDER BY item DESC"
                 } else if grouped {
                     "WITH $document.payload AS payload UNWIND $items AS item WITH payload,item,COUNT(*) AS copies WHERE copies=1 RETURN payload,item ORDER BY item DESC"
+                } else if cross {
+                    "UNWIND [$document.payload] AS payload UNWIND $items AS item MATCH (n) RETURN payload,item,n.p AS matched ORDER BY item DESC,matched"
                 } else {
                     "WITH $document.payload AS payload UNWIND $items AS item RETURN payload,item ORDER BY item DESC"
                 }
@@ -1348,8 +1370,15 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, _) = file(&cx, &spill_pool).await;
             let (mut auxiliary, _) = file(&cx, &spill_pool).await;
-            let output_rows = ITEMS as u64 * if binary { 2 } else { 1 };
-            let budget = if graph_backed {
+            let copies = if cross {
+                3
+            } else if binary {
+                2
+            } else {
+                1
+            };
+            let output_rows = ITEMS as u64 * copies;
+            let budget = if has_graph {
                 policy(output_rows)
             } else {
                 GqlQueryPolicy::new(0, output_rows, WORK, WORK)
@@ -1380,24 +1409,33 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
                     + auxiliary.stats().reserved_bytes
                     > SCRATCH_BYTES as u64
             );
-            if !graph_backed {
-                assert_eq!(
-                    spool.kind(),
-                    if binary {
-                        ScanKind::Set
-                    } else {
-                        ScanKind::Values
-                    }
-                );
-                assert_eq!(spool.row_stats().snapshot_records, 0);
+            assert_eq!(
+                spool.kind(),
+                if binary || cross {
+                    ScanKind::Set
+                } else if graph_backed {
+                    ScanKind::Vertex
+                } else {
+                    ScanKind::Values
+                }
+            );
+            assert_eq!(
+                spool.row_stats().snapshot_records,
+                if has_graph { 3 } else { 0 }
+            );
+            if !has_graph {
                 assert_eq!(view.buffer_stats(), buffer);
             }
             let mut reader = spool.reader(&mut destination);
             for value in (0..ITEMS as i64).rev() {
-                for _ in 0..if binary { 2 } else { 1 } {
+                for copy in 0..copies {
                     let bytes = reader.next_row(&cx).await.unwrap().unwrap();
                     let row = GraphValueRow::decode_canonical(bytes.as_ref()).unwrap();
-                    assert_eq!(row.values(), &[payload.clone(), scalar(value)]);
+                    let mut expected = vec![payload.clone(), scalar(value)];
+                    if cross {
+                        expected.push(scalar([1, 2, 13][copy as usize]));
+                    }
+                    assert_eq!(row.values(), expected, "{text}");
                 }
             }
             assert!(reader.next_row(&cx).await.unwrap().is_none());
@@ -2067,6 +2105,365 @@ fn dropping_suspended_intermediate_group_conversion_releases_all_three_files() {
         drop(future);
         assert!([&scratch, &destination, &auxiliary][blocked].is_poisoned());
         assert_eq!(view.buffer_stats(), before);
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_leading_unwind_match_preserves_correlations_occurrences_and_composition() {
+    let ((), report) = run_async_under_lab(0xc01d_4601, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for (text, cut, records, identities, expected) in [
+            (
+                "UNWIND [13,1,13,99,NULL] AS wanted MATCH (n {p:wanted}) RETURN wanted,n",
+                2,
+                3,
+                false,
+                vec![
+                    vec![scalar(13), GraphValue::Vertex(VId(3))],
+                    vec![scalar(1), GraphValue::Vertex(VId(1))],
+                    vec![scalar(13), GraphValue::Vertex(VId(3))],
+                ],
+            ),
+            (
+                "UNWIND [2,2,99,NULL] AS wanted MATCH (n) WHERE n.p=wanted RETURN wanted,n.p AS found",
+                2,
+                3,
+                false,
+                vec![vec![scalar(2), scalar(2)], vec![scalar(2), scalar(2)]],
+            ),
+            (
+                "UNWIND [3,1,3] AS wanted MATCH (n {p:wanted}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN wanted,n",
+                1,
+                3,
+                false,
+                vec![
+                    vec![scalar(3), GraphValue::Vertex(VId(3))],
+                    vec![scalar(1), GraphValue::Vertex(VId(1))],
+                    vec![scalar(3), GraphValue::Vertex(VId(3))],
+                ],
+            ),
+            (
+                "UNWIND [1,2] AS factor MATCH (a)-[r:R]->(b) WITH r.p*factor AS value RETURN value ORDER BY value",
+                2,
+                3,
+                false,
+                [7, 8, 9, 14, 16, 18]
+                    .into_iter()
+                    .map(|n| vec![scalar(n)])
+                    .collect(),
+            ),
+            (
+                "UNWIND $ids AS n MATCH (n)-[r:R]->(m) WITH n,r.p AS weight RETURN n,weight ORDER BY weight,n",
+                2,
+                3,
+                true,
+                vec![
+                    vec![GraphValue::Vertex(VId(1)), scalar(7)],
+                    vec![GraphValue::Vertex(VId(1)), scalar(7)],
+                    vec![GraphValue::Vertex(VId(1)), scalar(8)],
+                    vec![GraphValue::Vertex(VId(1)), scalar(8)],
+                    vec![GraphValue::Vertex(VId(2)), scalar(9)],
+                ],
+            ),
+            (
+                "UNWIND [[1,NULL],{nested:[2]}] AS value MATCH (n) WHERE n.p=2 RETURN value,n",
+                2,
+                3,
+                false,
+                vec![
+                    vec![
+                        GraphValue::List(vec![scalar(1), null()].into_boxed_slice()),
+                        GraphValue::Vertex(VId(2)),
+                    ],
+                    vec![
+                        GraphValue::map(vec![(
+                            "nested".into(),
+                            GraphValue::List(vec![scalar(2)].into_boxed_slice()),
+                        )])
+                        .unwrap(),
+                        GraphValue::Vertex(VId(2)),
+                    ],
+                ],
+            ),
+            (
+                "UNWIND [1,1,2] AS wanted MATCH (n {p:wanted}) WITH n.p AS p,COUNT(*) AS copies WHERE copies>1 UNWIND [p,copies] AS value RETURN value ORDER BY value DESC",
+                2,
+                3,
+                false,
+                vec![vec![scalar(2)], vec![scalar(1)]],
+            ),
+            (
+                "(UNWIND [1,1,2] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies RETURN value,copies) UNION ALL (UNWIND [13] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies RETURN copies,value) ORDER BY value",
+                2,
+                6,
+                false,
+                vec![
+                    vec![scalar(1), scalar(2)],
+                    vec![scalar(2), scalar(1)],
+                    vec![scalar(13), scalar(1)],
+                ],
+            ),
+            (
+                "(UNWIND [13,1,13] AS wanted MATCH (n {p:wanted}) RETURN wanted AS value) EXCEPT ALL RETURN 13 AS value",
+                2,
+                3,
+                false,
+                vec![vec![scalar(1)], vec![scalar(13)]],
+            ),
+            (
+                "UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0",
+                2,
+                3,
+                false,
+                vec![],
+            ),
+        ] {
+            let params = if identities {
+                GqlParameters::new()
+                    .with_list(
+                        "ids",
+                        vec![
+                            GraphValue::Vertex(VId(2)),
+                            null(),
+                            GraphValue::Vertex(VId(1)),
+                            GraphValue::Vertex(VId(1)),
+                        ],
+                    )
+                    .unwrap()
+            } else {
+                GqlParameters::new()
+            };
+            let prepared = prepare(text, &params);
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(records, expected.len() as u64, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    32,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), ScanKind::Set, "{text}");
+            assert_eq!(spool.snapshot_seq(), CommitSeq(cut), "{text}");
+            assert_eq!(spool.row_stats().snapshot_records, records, "{text}");
+            assert_eq!(
+                spool.row_stats().result_rows,
+                expected.len() as u64,
+                "{text}"
+            );
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_cross_children_and_full_product_finish_before_empty_parent_pages() {
+    let ((), report) = run_async_under_lab(0xc01d_4602, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for (case, text, records, private_rows) in [
+            (
+                0,
+                "UNWIND [[1],2] AS items UNWIND items AS item MATCH (n) WHERE 10/(n.p-2)>0 RETURN item,n LIMIT 0",
+                3,
+                32,
+            ),
+            (
+                1,
+                "UNWIND [] AS item MATCH (n) WHERE 10/(n.p-2)>0 RETURN item,n LIMIT 0",
+                3,
+                32,
+            ),
+            (
+                2,
+                "UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0",
+                0,
+                32,
+            ),
+            (
+                3,
+                "UNWIND [1,2,13] AS wanted MATCH (n {p:wanted}) RETURN n LIMIT 0",
+                3,
+                8,
+            ),
+        ] {
+            let prepared = prepare(text, &GqlParameters::new());
+            let before = view.buffer_stats();
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(records, 0, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    private_rows,
+                    WORK,
+                )
+                .await
+                .unwrap_err();
+            match case {
+                0 => {
+                    assert!(
+                        matches!(error, NativeSpoolError::SetExecution(
+                        GraphSetExecutionError::Projection { row: 1, error, .. }
+                    ) if error.kind == GraphIntegerErrorKind::IncompatibleOperands),
+                        "{text}: {error:?}"
+                    );
+                    assert_eq!(
+                        view.buffer_stats(),
+                        before,
+                        "the complete left child fails first"
+                    );
+                }
+                1 => assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                    if matches!(**inner, GqlQueryError::Data(error)
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero)),
+                    "{text}: {error:?}"
+                ),
+                2 => assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                    if matches!(**inner, GqlQueryError::Rows(ref error)
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+                    && error.limit == 0 && error.observed == 1)),
+                    "{text}: {error:?}"
+                ),
+                3 => assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                    if matches!(**inner, GqlQueryError::Rows(ref error)
+                    if error.dimension == GqlBudgetDimension::ResultRows
+                    && error.limit == 8 && error.observed == 9)),
+                    "{text}: {error:?}"
+                ),
+                _ => unreachable!(),
+            }
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dropping_suspended_cross_pair_append_releases_both_readers_and_all_row_guards() {
+    let ((), report) = run_async_under_lab(0xc01d_4603, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let prepared = prepare(
+            "UNWIND [101,103] AS marker MATCH (n) RETURN marker,n",
+            &GqlParameters::new(),
+        );
+        // Neither one-column child contains this frame. Its first appearance
+        // is the native product append, with both input cursors and the copied
+        // pair still reserved across the awaited write.
+        let marker =
+            GraphValueRow::from_owned_values(vec![scalar(101), GraphValue::Vertex(VId(1))])
+                .canonical_bytes()
+                .unwrap();
+        // One complete framed row fills a page, so the first pair suspends
+        // inside write_row rather than waiting until writer.finish.
+        let page_bytes = 8 + marker.len();
+        let (mut scratch, a) = file(&cx, &spill_pool).await;
+        let (mut destination, b) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, c) = file(&cx, &spill_pool).await;
+        for backing in [&a, &b, &c] {
+            backing.0.lock().unwrap().suspend_row = Some(marker.clone());
+        }
+        let mut future = prepared.spool_in_view(
+            &mut view,
+            &cx,
+            GqlQueryPolicy::new(3, 6, WORK, WORK),
+            &mut scratch,
+            &mut destination,
+            &mut auxiliary,
+            1,
+            512,
+            1,
+            512,
+            page_bytes,
+            32 * 1024,
+            6,
+            WORK,
+        );
+        let blocked = poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            let suspended = [
+                a.0.lock().unwrap().suspended,
+                b.0.lock().unwrap().suspended,
+                c.0.lock().unwrap().suspended,
+            ];
+            if let Some(index) = suspended.iter().position(|&seen| seen) {
+                assert!(result.is_pending());
+                assert_eq!(suspended.iter().filter(|&&seen| seen).count(), 1);
+                Poll::Ready(index)
+            } else {
+                assert!(result.is_pending(), "the cross pair append must be reached");
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(spill_pool.used() > 0);
+        drop(future);
+        assert!([&scratch, &destination, &auxiliary][blocked].is_poisoned());
+        assert!(view.buffer_stats().bypasses > 0);
         assert_eq!(source_pool.used(), baseline);
         assert_eq!(spill_pool.used(), 0);
         drop(view);

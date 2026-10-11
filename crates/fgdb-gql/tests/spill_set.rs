@@ -1,11 +1,12 @@
-//! Physical stages must preserve the native relation, including every binary
-//! bag, inner page, canonicalization and complete-input failure barrier. This small
+//! Physical stages preserve binary bags, Cartesian occurrence order, inner
+//! pages, canonicalization and complete-input failure barriers. This small
 //! materialized host tests the public semantic seam, not external I/O bounds.
 
 use core::cmp::Ordering;
 use core::convert::Infallible;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::row_join::RowJoinSpec;
 use fgdb_gql::spill_aggregate::SpillAggregateDefinition;
 use fgdb_gql::spill_set::{
     AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregateRowError, SpillSetBuildError,
@@ -301,6 +302,24 @@ fn staged_plan(
                     GraphSetOperation::Except => left.saturating_sub(right),
                 };
                 rows.extend(std::iter::repeat_n(row, count));
+            }
+            rows
+        }
+        AsyncSpillSetSourcePlan::Cross(cross) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), cross.columns());
+            assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
+            let left = staged_plan(graph, cross.left())?;
+            let right = staged_plan(graph, cross.right())?;
+            let mut rows = Vec::new();
+            for left in &left {
+                for right in &right {
+                    rows.push(cross.copy_pair_with_control(left, right, &mut |event| {
+                        assert_ne!(event, GlaExecutionEvent::ResultRow);
+                        Ok(())
+                    })?);
+                }
             }
             rows
         }
@@ -1003,7 +1022,8 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
         );
     }
     let pattern = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"));
-    let unsupported = pattern.clone().cross_join(pattern.clone()).unwrap();
+    let spec = RowJoinSpec::cross(pattern.column_types(), pattern.column_types()).unwrap();
+    let unsupported = pattern.clone().join(pattern.clone(), spec).unwrap();
     let query = unsupported.clone().nested().unwrap().with_page(0, Some(0));
     assert!(matches!(
         AsyncSpillSetPlan::compile(&query),
@@ -1458,9 +1478,10 @@ fn collection_and_unsupported_group_descendants_still_refuse_before_zero_limit()
         AsyncSpillSetPlan::compile(&nested),
         Err(SpillSetBuildError::Unsupported { depth: 1 })
     ));
+    let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
     let unsupported = input
         .clone()
-        .cross_join(input)
+        .join(input, spec)
         .unwrap()
         .group_by(&[], &[GraphAggregate::count_rows("count")])
         .unwrap()
@@ -1469,4 +1490,611 @@ fn collection_and_unsupported_group_descendants_still_refuse_before_zero_limit()
         AsyncSpillSetPlan::compile(&unsupported),
         Err(SpillSetBuildError::Unsupported { depth: 1 })
     ));
+}
+
+#[test]
+fn cartesian_sources_preserve_child_occurrences_pages_and_zero_column_products() {
+    let graph = Graph::sample();
+    let left = prepare("UNWIND [3,1,3,NULL] AS a RETURN a").with_page(0, Some(3));
+    let right = prepare("UNWIND [9,7,9,8] AS b RETURN b").with_page(1, Some(2));
+    let query = left.clone().cross_join(right.clone()).unwrap();
+    let transcript = query.canonical_bytes();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Cross(cross) = plan.source() else {
+        panic!("a Cartesian product owns both complete children");
+    };
+    assert_eq!(cross.columns(), &["a", "b"]);
+    assert_eq!(
+        cross.column_types(),
+        &[GraphSetColumnType::Any, GraphSetColumnType::Any]
+    );
+    assert_eq!(plan.columns(), cross.columns());
+    assert_eq!(plan.column_types(), cross.column_types());
+    assert_eq!(plan.stages().len(), 1);
+    assert_eq!(plan.stages()[0].order(), None);
+    assert!(!plan.stages()[0].distinct());
+    assert_eq!(
+        plan.stage_count(),
+        cross.left().stage_count() + cross.right().stage_count() + 3
+    );
+    assert_eq!(plan.aggregate_count(), 0);
+    let expected: Vec<_> = [3, 1, 3]
+        .into_iter()
+        .flat_map(|a| [7, 9].map(|b| row(vec![scalar(a), scalar(b)])))
+        .collect();
+    assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+    assert_eq!(graph.native(&query).unwrap(), expected);
+    assert_eq!(query.canonical_bytes(), transcript);
+
+    for skip in [0, 1, 4, 6, u64::MAX] {
+        for take in [0, 1, 3, 9] {
+            let paged = query.clone().with_page(skip, Some(take));
+            let expected: Vec<_> = expected
+                .iter()
+                .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+                .take(take as usize)
+                .cloned()
+                .collect();
+            assert_eq!(staged(&graph, &paged).unwrap(), expected);
+            assert_eq!(graph.native(&paged).unwrap(), expected);
+        }
+    }
+    let order = [
+        GraphValueOrder::descending(1),
+        GraphValueOrder::ascending(0),
+    ];
+    let ordered = query
+        .clone()
+        .with_order_by(&order)
+        .unwrap()
+        .with_page(1, Some(3));
+    let mut ranked = expected.clone();
+    ranked.sort_by(|a, b| compare(a, b, &order));
+    assert_eq!(staged(&graph, &ordered).unwrap(), ranked[1..4]);
+    assert_eq!(
+        staged(&graph, &ordered).unwrap(),
+        graph.native(&ordered).unwrap()
+    );
+
+    let unit = PreparedGraphSet::singleton();
+    for identity in [
+        unit.clone().cross_join(left.clone()).unwrap(),
+        left.clone().cross_join(unit.clone()).unwrap(),
+    ] {
+        assert_eq!(
+            staged(&graph, &identity).unwrap(),
+            graph.native(&left).unwrap()
+        );
+    }
+    let twice = unit
+        .clone()
+        .combine(
+            GraphSetOperation::Union,
+            GraphSetQuantifier::All,
+            unit.clone(),
+        )
+        .unwrap();
+    let three = twice
+        .clone()
+        .combine(GraphSetOperation::Union, GraphSetQuantifier::All, unit)
+        .unwrap();
+    let units = twice.cross_join(three).unwrap();
+    let unit_plan = AsyncSpillSetPlan::compile(&units).unwrap();
+    assert!(unit_plan.source_columns().is_empty());
+    assert!(unit_plan.column_types().is_empty());
+    assert_eq!(
+        staged_plan(&graph, &unit_plan).unwrap(),
+        vec![GraphValueRow::unit(); 6]
+    );
+    assert_eq!(
+        graph.native(&units).unwrap(),
+        vec![GraphValueRow::unit(); 6]
+    );
+    assert_eq!(
+        staged(&graph, &units.with_page(4, Some(1))).unwrap(),
+        vec![GraphValueRow::unit()]
+    );
+
+    let nested = left
+        .cross_join(
+            right
+                .cross_join(prepare("UNWIND [6,5] AS c RETURN c"))
+                .unwrap(),
+        )
+        .unwrap();
+    let expected: Vec<_> = expected
+        .iter()
+        .flat_map(|pair| {
+            [6, 5].map(|c| {
+                let mut values = pair.values().to_vec();
+                values.push(scalar(c));
+                row(values)
+            })
+        })
+        .collect();
+    assert_eq!(staged(&graph, &nested).unwrap(), expected);
+    assert_eq!(graph.native(&nested).unwrap(), expected);
+}
+
+#[test]
+fn leading_unwind_match_uses_native_correlations_property_reads_and_edge_bags() {
+    let graph = Graph::sample();
+    for (text, expected) in [
+        (
+            "UNWIND [2,1,2,NULL] AS wanted MATCH (n {p:wanted}) RETURN wanted,wanted AS value",
+            vec![
+                row(vec![scalar(2), scalar(2)]),
+                row(vec![scalar(1), scalar(1)]),
+                row(vec![scalar(1), scalar(1)]),
+                row(vec![scalar(2), scalar(2)]),
+            ],
+        ),
+        (
+            "UNWIND [2,1,2,NULL] AS wanted MATCH (n) WITH wanted,n.p AS value WHERE wanted=value RETURN value,wanted",
+            vec![
+                row(vec![scalar(2), scalar(2)]),
+                row(vec![scalar(1), scalar(1)]),
+                row(vec![scalar(1), scalar(1)]),
+                row(vec![scalar(2), scalar(2)]),
+            ],
+        ),
+        (
+            "UNWIND [1,1] AS wanted MATCH (n {p:wanted}) WITH DISTINCT wanted,n.p AS value RETURN wanted,value",
+            vec![row(vec![scalar(1), scalar(1)])],
+        ),
+        (
+            "UNWIND [3,1] AS wanted MATCH (n {p:wanted}) WITH wanted,n.q AS rank ORDER BY rank DESC LIMIT 2 RETURN wanted,rank",
+            vec![
+                row(vec![scalar(1), scalar(4)]),
+                row(vec![scalar(1), scalar(2)]),
+            ],
+        ),
+        (
+            "UNWIND [3,1,3] AS wanted MATCH (a {p:wanted})-[:R]->(b) WITH wanted,a.q AS source,b.q AS target RETURN wanted,source,target",
+            vec![
+                row(vec![scalar(3), scalar(1), scalar(2)]),
+                row(vec![scalar(3), scalar(1), scalar(2)]),
+                row(vec![scalar(1), scalar(2), scalar(2)]),
+                row(vec![scalar(1), scalar(2), scalar(3)]),
+                row(vec![scalar(3), scalar(1), scalar(2)]),
+                row(vec![scalar(3), scalar(1), scalar(2)]),
+            ],
+        ),
+        (
+            "UNWIND [1,2] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies RETURN value,copies",
+            vec![
+                row(vec![scalar(1), scalar(2)]),
+                row(vec![scalar(2), scalar(1)]),
+            ],
+        ),
+        ("UNWIND [] AS wanted MATCH (n) RETURN wanted,n", vec![]),
+    ] {
+        let query = prepare(text);
+        let transcript = query.canonical_bytes();
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        assert_eq!(
+            plan.source().kind(),
+            fgdb_gql::scan_stream::ScanKind::Set,
+            "{text}"
+        );
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected, "{text}");
+        assert_eq!(graph.native(&query).unwrap(), expected, "{text}");
+        assert_eq!(query.canonical_bytes(), transcript);
+    }
+}
+
+#[test]
+fn cartesian_sources_compose_with_complete_binary_and_numeric_group_relations() {
+    let graph = Graph::sample();
+    let left =
+        prepare("UNWIND [2,2,1] AS key WITH key,COUNT(*) AS left_count RETURN key,left_count");
+    let right = prepare(
+        "UNWIND [5,5,4] AS other WITH other,COUNT(*) AS right_count RETURN other,right_count",
+    );
+    let query = left.cross_join(right).unwrap();
+    let expected = vec![
+        row(vec![scalar(1), scalar(1), scalar(4), scalar(1)]),
+        row(vec![scalar(1), scalar(1), scalar(5), scalar(2)]),
+        row(vec![scalar(2), scalar(2), scalar(4), scalar(1)]),
+        row(vec![scalar(2), scalar(2), scalar(5), scalar(2)]),
+    ];
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    assert_eq!(plan.aggregate_count(), 2);
+    assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+    assert_eq!(graph.native(&query).unwrap(), expected);
+
+    let grouped = query
+        .clone()
+        .group_by(
+            &[0],
+            &[
+                GraphAggregate::count_rows("combinations"),
+                GraphAggregate::sum_int("weight", 3),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        AsyncSpillSetPlan::compile(&grouped)
+            .unwrap()
+            .aggregate_count(),
+        3
+    );
+    assert_eq!(
+        staged(&graph, &grouped).unwrap(),
+        vec![
+            row(vec![scalar(1), scalar(2), scalar(3)]),
+            row(vec![scalar(2), scalar(2), scalar(3)])
+        ]
+    );
+    assert_eq!(
+        staged(&graph, &grouped).unwrap(),
+        graph.native(&grouped).unwrap()
+    );
+
+    let doubled = query
+        .clone()
+        .combine(
+            GraphSetOperation::Union,
+            GraphSetQuantifier::All,
+            query.clone(),
+        )
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&doubled).unwrap();
+    assert_eq!(plan.aggregate_count(), 4);
+    let mut expected: Vec<_> = expected.iter().chain(&expected).cloned().collect();
+    expected.sort();
+    assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+    assert_eq!(graph.native(&doubled).unwrap(), expected);
+
+    let binary = prepare(
+        "(UNWIND [9,7,9] AS item RETURN item ORDER BY item DESC LIMIT 2) EXCEPT ALL RETURN 9 AS item",
+    );
+    let before_binary = prepare("UNWIND [2,1] AS key RETURN key")
+        .cross_join(binary)
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&before_binary).unwrap();
+    let AsyncSpillSetSourcePlan::Cross(cross) = plan.source() else {
+        panic!("the complete set operation is one Cartesian child");
+    };
+    assert!(matches!(
+        cross.right().source(),
+        AsyncSpillSetSourcePlan::Binary(_)
+    ));
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        vec![
+            row(vec![scalar(2), scalar(9)]),
+            row(vec![scalar(1), scalar(9)])
+        ]
+    );
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        graph.native(&before_binary).unwrap()
+    );
+
+    let summary = PreparedGraphSetAggregate::prepare(
+        query,
+        &[],
+        &[
+            GraphAggregate::count_rows("pairs"),
+            GraphAggregate::sum_int("weight", 1),
+        ],
+        0,
+        None,
+    )
+    .unwrap();
+    let fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::Relation { input, definition } =
+        fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan::compile_relation(&summary).unwrap()
+    else {
+        panic!("terminal summary retains the whole Cartesian relation");
+    };
+    assert!(matches!(input.source(), AsyncSpillSetSourcePlan::Cross(_)));
+    let output = reduce_groups(&definition, staged_plan(&graph, &input).unwrap()).unwrap();
+    assert_eq!(
+        output[0].values(),
+        &[
+            GraphAggregateValue::Count(4),
+            GraphAggregateValue::Integer(6)
+        ]
+    );
+    let native = summary
+        .execute_governed(
+            policy(),
+            |pattern, policy| graph.execute(pattern, policy),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(output, native.value);
+}
+
+#[test]
+fn cartesian_children_finish_before_empty_products_and_downstream_zero_pages() {
+    let graph = Graph::sample();
+    let empty = prepare("UNWIND [] AS item RETURN item");
+    for text in [
+        "UNWIND [1,0] AS value RETURN 1/value AS bad",
+        "UNWIND [[1],2] AS values UNWIND values AS item RETURN item AS bad",
+        "UNWIND [9223372036854775807,1] AS value WITH SUM(value) AS bad RETURN bad",
+        "UNWIND [2] AS value WITH AVG(value) AS bad RETURN bad",
+    ] {
+        let bad = prepare(text);
+        for query in [
+            empty.clone().cross_join(bad.clone()).unwrap(),
+            bad.clone().cross_join(empty.clone()).unwrap(),
+            prepare("RETURN 1 AS item").cross_join(bad.clone()).unwrap(),
+        ] {
+            let query = query.with_page(0, Some(0));
+            let GqlQueryError::Source(expected) = graph.native(&query).unwrap_err() else {
+                panic!("{text}: the original native child refusal must survive");
+            };
+            assert_eq!(
+                staged(&graph, &query),
+                Err(SpillSetRowError::Native(expected)),
+                "{text}"
+            );
+        }
+    }
+
+    let product = prepare("UNWIND [1,0] AS left RETURN left")
+        .cross_join(prepare("UNWIND [4,3] AS right RETURN right"))
+        .unwrap();
+    let divide = fgdb_gql::GraphIntegerExpression::prepare(&[
+        fgdb_gql::GraphIntegerOp::Literal(Some(1)),
+        fgdb_gql::GraphIntegerOp::Column(0),
+        fgdb_gql::GraphIntegerOp::Binary(fgdb_gql::GraphIntegerBinary::Divide),
+    ])
+    .unwrap();
+    let invalid = product
+        .project(
+            vec![GraphSetProjection::new(
+                "bad",
+                GraphSetValue::Integer(divide),
+            )],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    let GqlQueryError::Source(expected) = graph.native(&invalid).unwrap_err() else {
+        panic!("downstream projection must inspect the complete left-major product");
+    };
+    assert!(matches!(
+        expected,
+        GraphSetExecutionError::Projection {
+            row: 2,
+            column: 0,
+            ..
+        }
+    ));
+    assert_eq!(
+        staged(&graph, &invalid),
+        Err(SpillSetRowError::Native(expected))
+    );
+
+    // Once a child has genuinely selected no rows, a later expression has no
+    // inputs. This is distinct from skipping that child's own evaluation.
+    let no_rows = empty
+        .cross_join(prepare("RETURN 1 AS value"))
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new(
+                "bad",
+                GraphSetValue::Integer(
+                    fgdb_gql::GraphIntegerExpression::prepare(&[
+                        fgdb_gql::GraphIntegerOp::Literal(Some(1)),
+                        fgdb_gql::GraphIntegerOp::Literal(Some(0)),
+                        fgdb_gql::GraphIntegerOp::Binary(fgdb_gql::GraphIntegerBinary::Divide),
+                    ])
+                    .unwrap(),
+                ),
+            )],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    assert_eq!(
+        staged(&graph, &no_rows).unwrap(),
+        Vec::<GraphValueRow>::new()
+    );
+    assert!(graph.native(&no_rows).unwrap().is_empty());
+}
+
+#[test]
+fn cartesian_pair_copy_preserves_original_domains_and_every_allocation_checkpoint() {
+    let query = prepare("RETURN 1 AS number,[2] AS list,{payload:[3]} AS any")
+        .cross_join(leaf("MATCH (a)-[r:R]->(b) RETURN a,r,b").into())
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Cross(cross) = plan.source() else {
+        panic!("pair admission requires the sealed Cartesian schema");
+    };
+    assert_eq!(
+        cross.column_types(),
+        &[
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::List,
+            GraphSetColumnType::Any,
+            GraphSetColumnType::Vertex,
+            GraphSetColumnType::Edge,
+            GraphSetColumnType::Vertex
+        ]
+    );
+    let left = row(vec![
+        GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(1.25))),
+        GraphValue::List(
+            vec![scalar(2), GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice(),
+        ),
+        GraphValue::map(vec![(
+            "payload".into(),
+            GraphValue::List(
+                vec![
+                    GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text(&"owned payload ".repeat(80)).unwrap(),
+                    ),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]
+                .into_boxed_slice(),
+            ),
+        )])
+        .unwrap(),
+    ]);
+    let right = row(vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Edge(EId(7)),
+        GraphValue::Vertex(VId(2)),
+    ]);
+    let expected = row(left
+        .values()
+        .iter()
+        .chain(right.values())
+        .cloned()
+        .collect());
+    let mut events = Vec::new();
+    let actual = cross
+        .copy_pair_with_control(&left, &right, &mut |event| {
+            events.push(event);
+            Ok::<_, &'static str>(())
+        })
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
+    assert!(!events.contains(&GlaExecutionEvent::ResultRow));
+    for refusal in 0..events.len() {
+        let mut observed = Vec::new();
+        let result = cross.copy_pair_with_control(&left, &right, &mut |event| {
+            observed.push(event);
+            if observed.len() == refusal + 1 {
+                Err("pair allocation or cancellation refused")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(SpillSetRowError::Control(
+                "pair allocation or cancellation refused"
+            ))
+        );
+        assert_eq!(observed, events[..=refusal]);
+    }
+    let nullable = row(vec![GraphValue::Scalar(CanonicalScalar::Null); 3]);
+    assert_eq!(
+        cross
+            .copy_pair_with_control(&nullable, &nullable, &mut |_| Ok::<_, ()>(()))
+            .unwrap(),
+        row(vec![GraphValue::Scalar(CanonicalScalar::Null); 6])
+    );
+    let mut any = left.values().to_vec();
+    any[2] = GraphValue::Vertex(VId(99));
+    assert_eq!(
+        cross
+            .copy_pair_with_control(&row(any.clone()), &right, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .values()[2],
+        any[2]
+    );
+    for (left, right, operand) in [
+        (GraphValueRow::unit(), right.clone(), 0),
+        (left.clone(), GraphValueRow::unit(), 1),
+        (
+            row(vec![
+                GraphValue::List(vec![].into_boxed_slice()),
+                left.values()[1].clone(),
+                left.values()[2].clone(),
+            ]),
+            right.clone(),
+            0,
+        ),
+        (
+            row(vec![scalar(1), scalar(2), left.values()[2].clone()]),
+            right.clone(),
+            0,
+        ),
+        (
+            left.clone(),
+            row(vec![
+                GraphValue::Vertex(VId(1)),
+                scalar(7),
+                GraphValue::Vertex(VId(2)),
+            ]),
+            1,
+        ),
+    ] {
+        let mut scratch = 0;
+        let result = cross.copy_pair_with_control(&left, &right, &mut |event| {
+            scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+            Ok::<_, ()>(())
+        });
+        assert_eq!(
+            result,
+            Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand }
+            ))
+        );
+        assert_eq!(
+            scratch, 0,
+            "both schemas must be admitted before pair allocation"
+        );
+    }
+}
+
+#[test]
+fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages() {
+    let width = fgdb_gql::algebra::MAX_PATTERN_VERTICES;
+    let wide = PreparedGraphSet::singleton()
+        .project(
+            (0..width)
+                .map(|at| {
+                    GraphSetProjection::new(
+                        format!("c{at}"),
+                        GraphSetValue::Value(scalar(at as i64)),
+                    )
+                })
+                .collect(),
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+    let oversized = wide.cross_join(prepare("RETURN 1 AS extra")).unwrap();
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&oversized.clone().with_page(0, Some(0))),
+        Err(SpillSetBuildError::Unsupported { depth: 0 })
+    ));
+    let hidden = oversized
+        .project(
+            vec![GraphSetProjection::new("only", GraphSetValue::Column(0))],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(matches!(
+        AsyncSpillSetPlan::compile(&hidden),
+        Err(SpillSetBuildError::Unsupported { depth: 1 })
+    ));
+
+    let input = prepare("RETURN 1 AS value");
+    let collection = input
+        .clone()
+        .group_by(&[], &[GraphAggregate::collect("items", 0)])
+        .unwrap();
+    let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
+    let relational_join = input.clone().join(input.clone(), spec).unwrap();
+    for unsupported in [collection, relational_join] {
+        for product in [
+            input
+                .clone()
+                .with_page(0, Some(0))
+                .cross_join(unsupported.clone())
+                .unwrap(),
+            unsupported
+                .cross_join(input.clone().with_page(0, Some(0)))
+                .unwrap(),
+        ] {
+            assert!(matches!(
+                AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))),
+                Err(SpillSetBuildError::Unsupported { depth: 1 })
+            ));
+            assert!(matches!(
+                AsyncSpillSetPlan::compile(&product.nested().unwrap().with_page(0, Some(0))),
+                Err(SpillSetBuildError::Unsupported { depth: 2 })
+            ));
+        }
+    }
 }

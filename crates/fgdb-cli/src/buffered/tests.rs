@@ -575,6 +575,31 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
                 "MATCH (n) WITH n.p AS value,COUNT(*) AS copies RETURN value ORDER BY value DESC LIMIT 0",
                 2,
             ),
+            (
+                "UNWIND [11,2,11,NULL] AS wanted MATCH (n {p:wanted}) RETURN wanted,n",
+                2,
+            ),
+            (
+                "UNWIND [1,3,1] AS wanted MATCH (n {p:wanted}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN wanted,n",
+                1,
+            ),
+            (
+                "UNWIND [2,2] AS factor MATCH (a)-[r:R]->(b) WITH factor*r.p AS value RETURN value ORDER BY value",
+                2,
+            ),
+            (
+                "UNWIND [2,2,3] AS wanted MATCH (n {p:wanted}) WITH n.p AS matched RETURN COUNT(*) AS rows,SUM(matched) AS total",
+                2,
+            ),
+            (
+                "UNWIND [2,2,3] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies WHERE copies>1 UNWIND [value,copies] AS result RETURN result ORDER BY result",
+                2,
+            ),
+            (
+                "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS result LIMIT 0",
+                2,
+            ),
+            ("UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0", 2),
             ("MATCH (n) RETURN DISTINCT n.p AS value LIMIT 0", 2),
         ] {
             let mut options = spill_options(&directory, text);
@@ -803,6 +828,18 @@ fn buffered_external_binary_sets_match_native_frames_and_remove_all_scratch() {
                 0,
                 4,
             ),
+            (
+                "(UNWIND [11,2,11] AS wanted MATCH (n {p:wanted}) RETURN wanted AS value) EXCEPT ALL RETURN 11 AS value",
+                2,
+                3,
+                2,
+            ),
+            (
+                "(UNWIND [2,2,3] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies RETURN value,copies) UNION ALL (UNWIND [11] AS wanted MATCH (n {p:wanted}) WITH n.p AS value,COUNT(*) AS copies RETURN copies,value) ORDER BY value",
+                2,
+                6,
+                3,
+            ),
         ] {
             cases.push((text.to_owned(), cut, records, count));
         }
@@ -869,7 +906,7 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         // Unsupported relational descendants remain visible through an outer
         // computed projection and LIMIT zero, before database/scratch opening.
         for text in [
-            "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS result LIMIT 0",
+            "UNWIND [1,2] AS item WITH item MATCH (n {p:item}) RETURN item,n LIMIT 0",
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
             "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m),(z) RETURN {value:m.p} AS value LIMIT 0",
             "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
@@ -1018,6 +1055,26 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
                 None,
             ),
             (
+                "UNWIND [[1],2] AS items UNWIND items AS item MATCH (n) WHERE 10/(n.p-2)>0 RETURN item,n LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [] AS item MATCH (n) WHERE 10/(n.p-2)>0 RETURN item,n LIMIT 0",
+                None,
+            ),
+            (
+                "UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0",
+                Some(("--max-snapshot-records", "0")),
+            ),
+            (
+                "UNWIND [2,3,11] AS wanted MATCH (n {p:wanted}) RETURN n LIMIT 0",
+                Some(("--max-spill-rows", "8")),
+            ),
+            (
+                "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS value ORDER BY value",
+                Some(("--max-result-rows", "1")),
+            ),
+            (
                 "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",
                 None,
             ),
@@ -1039,6 +1096,8 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             if let Some((flag, value)) = limit {
                 if flag == "--max-result-rows" {
                     options.budget.rows = Some(1);
+                } else if flag == "--max-snapshot-records" {
+                    options.budget.records = Some(value.parse().unwrap());
                 } else {
                     okay(options.spill.set(flag, value));
                 }
@@ -1103,6 +1162,7 @@ fn buffered_external_output_failure_retires_all_files_without_a_success_record()
             "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result ORDER BY result DESC",
             "MATCH (n) WITH n.p AS value RETURN value,COUNT(*) AS rows GROUP BY value ORDER BY value DESC",
             "MATCH (n) WITH n.p AS value,COUNT(*) AS copies RETURN value,copies ORDER BY value DESC",
+            "UNWIND [3,2,3] AS wanted MATCH (n {p:wanted}) RETURN wanted,n ORDER BY wanted DESC",
         ] {
             let options = spill_options(&directory, text);
             let prepared = okay(prepare_query(&options));

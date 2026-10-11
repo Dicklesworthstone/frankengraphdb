@@ -9,7 +9,9 @@ use super::{
     GraphSetQuantifier, GraphSetValue, PreparedGraphSet, SetNode, filter::RowPredicate, merge,
     projection,
 };
-use crate::algebra::{GlaOperator, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
+use crate::algebra::{
+    GlaOperator, GraphValueOrder, GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern,
+};
 use crate::edge_stream::{AsyncEdgeJoinPlan, AsyncEdgeScanPlan, EdgeScanBuildError};
 use crate::scan_stream::{ScanKind, ScanSortTail};
 use crate::spill_aggregate::SpillAggregateDefinition;
@@ -20,8 +22,8 @@ use core::convert::Infallible;
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
-    /// Scope, selection, projection, UNWIND, numeric grouping and binary set
-    /// operations over native graph or singleton leaves are admitted. This
+    /// Scope, selection, projection, UNWIND, numeric grouping, Cartesian
+    /// products and binary sets over graph or singleton leaves are admitted. This
     /// ordinal is the depth from the root, including across binary operands.
     Unsupported {
         depth: usize,
@@ -48,6 +50,7 @@ impl core::error::Error for SpillSetBuildError {}
 /// The ordinary async sort-input compiler owns all graph predicates, captures
 /// and projection. Values owns the native singleton and opens no graph source.
 /// Binary owns both complete operand plans and their checked set semantics.
+/// Cross owns both complete children and their native left-major product.
 /// Aggregate owns one complete input and the existing exact numeric reducer.
 /// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
@@ -57,6 +60,7 @@ pub enum AsyncSpillSetSourcePlan {
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
     Binary(SpillSetBinaryPlan),
+    Cross(SpillSetCrossPlan),
     Aggregate(SpillSetAggregatePlan),
 }
 impl AsyncSpillSetSourcePlan {
@@ -65,9 +69,88 @@ impl AsyncSpillSetSourcePlan {
             Self::Values(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
-            Self::Binary(_) => ScanKind::Set,
+            Self::Binary(_) | Self::Cross(_) => ScanKind::Set,
             Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
+    }
+}
+
+/// A compiler-owned Cartesian product of two complete native relations.
+///
+/// Complete the left child, then the right child exactly once, including when
+/// either is empty or an enclosing page is zero. Each child retains its own
+/// order, DISTINCT, grouping and page. Emit every right occurrence for each
+/// left occurrence in that order; neither child nor this product is implicitly
+/// canonicalized. The enclosing Identity stage alone owns this node's explicit
+/// ORDER BY/SKIP/LIMIT. Native correlated predicates remain later row filters.
+///
+/// Output names and domains concatenate the original children unchanged.
+/// There is no comparison, type unification, numeric coercion or null padding.
+/// The complete product must succeed before any enclosing stage consumes it.
+#[derive(Clone)]
+pub struct SpillSetCrossPlan {
+    left: Box<AsyncSpillSetPlan>,
+    right: Box<AsyncSpillSetPlan>,
+    columns: Vec<String>,
+    types: Vec<GraphSetColumnType>,
+}
+
+impl core::fmt::Debug for SpillSetCrossPlan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillSetCrossPlan")
+            .field("columns", &self.columns.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpillSetCrossPlan {
+    pub fn left(&self) -> &AsyncSpillSetPlan {
+        &self.left
+    }
+    pub fn right(&self) -> &AsyncSpillSetPlan {
+        &self.right
+    }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+
+    /// Admit one pair against the original child schemas, then copy it with
+    /// the SAME kernel as native materialized and folded Cartesian execution.
+    /// InputSchema's operand is local to this pair: zero is left, one is right.
+    /// NULL remains valid in each nullable domain, without narrowing Any.
+    ///
+    /// The host reserves both authenticated input rows before this call, then
+    /// charges its cumulative meter and grows a separate output reservation on
+    /// every ScratchEntry BEFORE returning success. Retain all three ownership
+    /// guards through the returned row's awaited encode/append. No ResultRow
+    /// event is charged, and failures never authorize a partial product.
+    pub fn copy_pair_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetRowError<E>> {
+        let mut event = |event| control(event).map_err(SpillSetRowError::Control);
+        for (operand, input, row) in [(0, self.left(), left), (1, self.right(), right)] {
+            event(GlaExecutionEvent::Work)?;
+            if row.len() != input.column_types().len() {
+                return Err(SpillSetRowError::Native(
+                    GraphSetExecutionError::InputSchema { operand },
+                ));
+            }
+            for (kind, value) in input.column_types().iter().zip(row.values()) {
+                event(GlaExecutionEvent::Work)?;
+                if !kind.accepts(value) {
+                    return Err(SpillSetRowError::Native(
+                        GraphSetExecutionError::InputSchema { operand },
+                    ));
+                }
+            }
+        }
+        super::execute::copy_cross_pair(left, right, &mut event)
     }
 }
 
@@ -273,14 +356,15 @@ struct GraphSourceMetadata {
     tail: ScanSortTail,
 }
 
-/// A bound source, binary relation or grouping followed by native row barriers.
+/// A bound source, binary relation, Cartesian product or grouping with row barriers.
 ///
 /// First consume the complete source and apply its source_tail(), when present,
 /// including hidden-column removal. Values emits one zero-column identity tuple
 /// and has no graph pattern or scan tail. Binary executes both complete child
 /// plans and merges them according to its native contract, also without a graph
-/// pattern or scan tail. Aggregate reduces its complete child and converts all
-/// groups through the native row-domain boundary. Then execute stages() in order. The first graph stage
+/// pattern or scan tail. Cross preserves both complete children in a left-major
+/// product. Aggregate reduces its complete child and converts all groups through
+/// the native row-domain boundary. Then execute stages() in order. The first graph stage
 /// canonicalizes visible source tuples as native Set admission does; a graph
 /// leaf's ORDER BY/SKIP/LIMIT runs BEFORE this canonicalization.
 /// No source, expression, clause or unsupported descendant is erased even when
@@ -309,6 +393,13 @@ impl AsyncSpillSetPlan {
             CompiledSource::Binary(binary) => {
                 return Ok(Self {
                     source: AsyncSpillSetSourcePlan::Binary(binary),
+                    graph: None,
+                    stages,
+                });
+            }
+            CompiledSource::Cross(cross) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Cross(cross),
                     graph: None,
                     stages,
                 });
@@ -366,6 +457,7 @@ impl AsyncSpillSetPlan {
     pub fn source_columns(&self) -> &[String] {
         match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
+            AsyncSpillSetSourcePlan::Cross(cross) => cross.columns(),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
             _ => self
                 .graph
@@ -380,8 +472,9 @@ impl AsyncSpillSetPlan {
         &self.stages
     }
     /// Total bounded physical barriers, including both binary descendants and
-    /// their two canonicalization passes plus merge, and every aggregate's
-    /// input, reduction, canonical group order and checked row conversion.
+    /// their two canonicalization passes plus merge, Cartesian descendants and
+    /// product/copy passes, and every aggregate's input, reduction, canonical
+    /// group order and checked row conversion.
     /// Internal aggregate partitions/argument support have their own finite
     /// limits; aggregate_count() gives their number of independent reducers.
     /// This admits append-only metadata, never larger byte or work allowances.
@@ -392,6 +485,11 @@ impl AsyncSpillSetPlan {
                 .stage_count()
                 .saturating_add(binary.right().stage_count())
                 .saturating_add(3),
+            AsyncSpillSetSourcePlan::Cross(cross) => cross
+                .left()
+                .stage_count()
+                .saturating_add(cross.right().stage_count())
+                .saturating_add(2),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
                 aggregate.input().stage_count().saturating_add(3)
             }
@@ -411,6 +509,10 @@ impl AsyncSpillSetPlan {
                 .left()
                 .aggregate_count()
                 .saturating_add(binary.right().aggregate_count()),
+            AsyncSpillSetSourcePlan::Cross(cross) => cross
+                .left()
+                .aggregate_count()
+                .saturating_add(cross.right().aggregate_count()),
             _ => 0,
         }
     }
@@ -419,6 +521,12 @@ impl AsyncSpillSetPlan {
             .last()
             .expect("every admitted source leaf is a stage")
             .columns()
+    }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        self.stages
+            .last()
+            .expect("every admitted source leaf is a stage")
+            .column_types()
     }
 }
 impl core::fmt::Debug for AsyncSpillSetPlan {
@@ -716,6 +824,23 @@ fn compile_stages<'a>(
             false,
             false,
         ),
+        SetNode::CrossJoin { left, right } => {
+            if query.columns.len() > MAX_PATTERN_VERTICES {
+                return Err(SpillSetBuildError::Unsupported { depth });
+            }
+            (
+                CompiledSource::Cross(SpillSetCrossPlan {
+                    left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
+                    right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                    columns: query.columns.clone(),
+                    types: query.types.clone(),
+                }),
+                query.types.clone(),
+                Operation::Identity,
+                false,
+                false,
+            )
+        }
         SetNode::Aggregate(summary) => {
             let input = AsyncSpillSetPlan::compile_at(summary.input(), depth + 1)?;
             let definition = SpillAggregateDefinition::from_relation(summary)
@@ -733,7 +858,7 @@ fn compile_stages<'a>(
                 false,
             )
         }
-        SetNode::ProcedureCall(_) | SetNode::CrossJoin { .. } | SetNode::Join { .. } => {
+        SetNode::ProcedureCall(_) | SetNode::Join { .. } => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };
@@ -759,5 +884,6 @@ enum CompiledSource<'a> {
     Values,
     Pattern(&'a PreparedGraphPattern<GraphValueRow>),
     Binary(SpillSetBinaryPlan),
+    Cross(SpillSetCrossPlan),
     Aggregate(SpillSetAggregatePlan),
 }
