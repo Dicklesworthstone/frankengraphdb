@@ -368,6 +368,14 @@ Each later `MATCH`, `OPTIONAL MATCH` or existential pattern starts an independen
 relationship domain; comma-separated parts inside one clause share a domain.
 `DIFFERENT RELATIONSHIPS` is an equivalent explicit spelling.
 
+The bounded anchored `MATCH p = ANY CHEAPEST ... COST e.weight RETURN p`
+extension uses the same default and explicit match modes. Both single-answer
+and ranked `CHEAPEST k` searches enforce relationship history while refining
+cost-ranked candidates, including negative costs; rejecting a selected answer
+after ranking would miss valid alternatives. The native
+`PreparedGraphCheapestPath` constructor retains repeatable matching; opt into
+the textual default with `.with_match_mode(GraphMatchMode::DifferentEdges)`.
+
 Path modes remain separate: `TRAIL` forbids edge reuse within its atom even
 under repeatable matching, `ACYCLIC` forbids repeated vertices, and `SIMPLE`
 permits returning to its starting vertex. The enclosing different-edges rule

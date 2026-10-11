@@ -19,8 +19,8 @@ mod ranked;
 pub use ranked::GraphCheapestPathCursor;
 
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPath, GraphPathFunction, GraphPatternBuilder, GraphValueRow,
-    PatternBuildError, PreparedGraphPattern,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPath, GraphPathFunction, GraphPatternBuilder,
+    GraphValueRow, PatternBuildError, PreparedGraphPattern,
 };
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
@@ -124,6 +124,8 @@ impl core::fmt::Debug for GraphCostPath {
 /// including across different lengths, not the fewest-hop path. The default
 /// WALK mode permits repeated vertices/edges and finitely bounded negative
 /// cycles. `with_mode` selects path-local TRAIL, ACYCLIC or SIMPLE restrictions.
+/// `with_match_mode(DifferentEdges)` additionally forbids EId reuse under every
+/// path mode. The generic default remains RepeatableElements.
 /// Parallel edges remain distinct and an undirected self-loop appears once.
 ///
 /// The ordinary compiler owns the input pattern. The physical specialization
@@ -138,6 +140,7 @@ pub struct PreparedGraphCheapestPath {
     weight: PropertyKeyId,
     bounds: GraphWalkBounds,
     mode: GraphCheapestPathMode,
+    match_mode: GraphMatchMode,
     input: PreparedGraphPattern<GraphValueRow>,
 }
 impl PreparedGraphCheapestPath {
@@ -173,6 +176,7 @@ impl PreparedGraphCheapestPath {
             weight,
             bounds,
             mode: GraphCheapestPathMode::Walk,
+            match_mode: GraphMatchMode::RepeatableElements,
             input,
         })
     }
@@ -191,6 +195,21 @@ impl PreparedGraphCheapestPath {
     #[must_use]
     pub const fn mode(&self) -> GraphCheapestPathMode {
         self.mode
+    }
+
+    /// Select the enclosing MATCH relationship-identity domain. DIFFERENT
+    /// EDGES participates in the existing history-aware partition refinement,
+    /// including SIMPLE closures and negative costs; it is never an output
+    /// filter over a selected WALK. Source admission remains unchanged.
+    #[must_use]
+    pub fn with_match_mode(mut self, mode: GraphMatchMode) -> Self {
+        self.match_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn match_mode(&self) -> GraphMatchMode {
+        self.match_mode
     }
 
     /// Compiled WALK input before endpoint anchoring, mode and cost selection.
@@ -255,6 +274,9 @@ impl PreparedGraphCheapestPath {
         bytes.extend_from_slice(&self.weight.0.to_be_bytes());
         bytes.extend_from_slice(&self.bounds.minimum().to_be_bytes());
         bytes.extend_from_slice(&self.bounds.maximum().to_be_bytes());
+        if self.match_mode == GraphMatchMode::DifferentEdges {
+            bytes.extend_from_slice(b"fgdb:path-find:different-edges:v1\0");
+        }
         bytes
     }
 
@@ -399,7 +421,9 @@ impl PreparedGraphCheapestPath {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: impl Fn(GraphPathCostError) -> E,
     ) -> Result<Option<GraphCostPath>, E> {
-        if self.mode != GraphCheapestPathMode::Walk {
+        if self.mode != GraphCheapestPathMode::Walk
+            || self.match_mode == GraphMatchMode::DifferentEdges
+        {
             return ranked::collect(self, 1, vertices, edges, property, control, &failure)
                 .map(|mut rows| rows.pop());
         }
@@ -506,6 +530,7 @@ impl core::fmt::Debug for PreparedGraphCheapestPath {
         f.debug_struct("PreparedGraphCheapestPath")
             .field("bounds", &self.bounds)
             .field("mode", &self.mode)
+            .field("match_mode", &self.match_mode)
             .field("definition", &"[REDACTED]")
             .finish()
     }

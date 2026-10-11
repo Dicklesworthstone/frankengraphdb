@@ -5,6 +5,7 @@ use super::*;
 
 pub(super) struct History {
     mode: GraphCheapestPathMode,
+    different_edges: bool,
     source: VId,
     edges: BTreeSet<EId>,
     vertices: BTreeSet<VId>,
@@ -13,11 +14,14 @@ pub(super) struct History {
 impl History {
     pub(super) fn new<E>(
         mode: GraphCheapestPathMode,
+        match_mode: GraphMatchMode,
         source: VId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let mut history = Self {
             mode,
+            different_edges: match_mode == GraphMatchMode::DifferentEdges
+                || mode == GraphCheapestPathMode::Trail,
             source,
             edges: BTreeSet::new(),
             vertices: BTreeSet::new(),
@@ -35,12 +39,12 @@ impl History {
 
     // Callers charge logical work before every membership decision.
     pub(super) fn allows(&self, step: Step) -> bool {
-        if self.closed {
+        if self.closed || (self.different_edges && self.edges.contains(&step.0)) {
             return false;
         }
         match self.mode {
             GraphCheapestPathMode::Walk => true,
-            GraphCheapestPathMode::Trail => !self.edges.contains(&step.0),
+            GraphCheapestPathMode::Trail => true,
             GraphCheapestPathMode::Acyclic => !self.vertices.contains(&step.1),
             GraphCheapestPathMode::Simple => {
                 step.1 == self.source || !self.vertices.contains(&step.1)
@@ -55,19 +59,19 @@ impl History {
         self.closed
     }
 
-    // Only an allowed prefix step may enter this state. WALK does not acquire
-    // history entries or change its original event stream.
+    // Only an allowed prefix step may enter this state. Repeatable WALK does
+    // not acquire history entries or change its original event stream.
     pub(super) fn advance<E>(
         &mut self,
         step: Step,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.different_edges {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            self.edges.insert(step.0);
+        }
         match self.mode {
-            GraphCheapestPathMode::Walk => {}
-            GraphCheapestPathMode::Trail => {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                self.edges.insert(step.0);
-            }
+            GraphCheapestPathMode::Walk | GraphCheapestPathMode::Trail => {}
             GraphCheapestPathMode::Acyclic | GraphCheapestPathMode::Simple => {
                 if self.closes(step) {
                     self.closed = true;
@@ -94,10 +98,12 @@ impl Search {
         entry: &Partition,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        if self.mode == GraphCheapestPathMode::Walk {
+        if self.mode == GraphCheapestPathMode::Walk
+            && self.match_mode == GraphMatchMode::RepeatableElements
+        {
             return Ok(true);
         }
-        let mut history = History::new(self.mode, self.source, control)?;
+        let mut history = History::new(self.mode, self.match_mode, self.source, control)?;
         for &step in &entry.steps {
             control(GlaExecutionEvent::Work)?;
             if !history.allows(step) {

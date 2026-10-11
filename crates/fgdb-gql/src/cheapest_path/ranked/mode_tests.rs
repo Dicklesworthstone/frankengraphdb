@@ -72,7 +72,15 @@ fn oracle(
                 layer
                     .iter()
                     .filter(|(end, _, steps)| {
-                        *end == q.target() && permitted(q.mode(), q.source(), steps)
+                        *end == q.target()
+                            && permitted(q.mode(), q.source(), steps)
+                            && (q.match_mode() == GraphMatchMode::RepeatableElements
+                                || steps
+                                    .iter()
+                                    .map(|step| step.0)
+                                    .collect::<BTreeSet<_>>()
+                                    .len()
+                                    == steps.len())
                     })
                     .map(|(_, cost, steps)| (*cost, steps.clone())),
             );
@@ -110,6 +118,148 @@ fn oracle(
     }
     answers.sort();
     answers
+}
+
+#[test]
+fn combined_match_and_path_modes_rank_signed_routes_before_selecting_any_answer() {
+    let fixture = [(1, 0, 0, -3), (2, 0, 1, 2), (3, 0, 1, -1), (4, 1, 0, 0)];
+    for mask in 0..16 {
+        let selected: Vec<_> = fixture
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, edge)| edge)
+            .collect();
+        let edges: Vec<_> = selected
+            .iter()
+            .map(|&(eid, from, to, _)| (EId(eid), VId(from), R, VId(to)))
+            .collect();
+        let weights: BTreeMap<_, _> = selected
+            .iter()
+            .map(|&(eid, _, _, weight)| (EId(eid), CanonicalScalar::Int(weight)))
+            .collect();
+        for match_mode in [
+            GraphMatchMode::DifferentEdges,
+            GraphMatchMode::RepeatableElements,
+        ] {
+            for mode in MODES {
+                for direction in [
+                    GlaDirection::Forward,
+                    GlaDirection::Reverse,
+                    GlaDirection::Undirected,
+                ] {
+                    for (minimum, maximum) in [(0, 3), (2, 3)] {
+                        for source in 0..2 {
+                            for target in 0..2 {
+                                let q = query(source, target, direction, minimum, maximum)
+                                    .with_mode(mode)
+                                    .with_match_mode(match_mode);
+                                let expected = oracle(&q, &edges, &weights);
+                                let actual = q
+                                    .execute_k_with_control(
+                                        u64::MAX,
+                                        [VId(0), VId(1)],
+                                        edges.iter().copied(),
+                                        |eid, _| Ok::<_, ()>(weights.get(&eid)),
+                                        |_| Ok(()),
+                                    )
+                                    .unwrap();
+                                assert_eq!(
+                                    plain(&actual),
+                                    expected,
+                                    "{match_mode:?} {mode:?} {direction:?} mask={mask}"
+                                );
+                                let any = q
+                                    .execute_with_control(
+                                        [VId(0), VId(1)],
+                                        edges.iter().copied(),
+                                        |eid, _| Ok::<_, ()>(weights.get(&eid)),
+                                        |_| Ok(()),
+                                    )
+                                    .unwrap();
+                                assert_eq!(
+                                    any.as_ref()
+                                        .map(|row| (row.cost(), row.path().steps().to_vec())),
+                                    expected.first().cloned()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn different_edges_rejects_a_cheaper_undirected_simple_backtrack_before_ranking() {
+    let edges = [(EId(1), VId(0), R, VId(1)), (EId(2), VId(0), R, VId(1))];
+    let weights = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-10)),
+        (EId(2), CanonicalScalar::Int(3)),
+    ]);
+    for mode in [GraphCheapestPathMode::Walk, GraphCheapestPathMode::Simple] {
+        let base = query(0, 0, GlaDirection::Undirected, 2, 2).with_mode(mode);
+        let repeated = base
+            .execute_with_control(
+                [VId(0), VId(1)],
+                edges,
+                |eid, _| Ok::<_, ()>(weights.get(&eid)),
+                |_| Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated.cost(), -20);
+        assert_eq!(repeated.path().steps()[0].0, repeated.path().steps()[1].0);
+        let distinct = base.with_match_mode(GraphMatchMode::DifferentEdges);
+        let rows = distinct
+            .execute_k_with_control(
+                4,
+                [VId(0), VId(1)],
+                edges,
+                |eid, _| Ok::<_, ()>(weights.get(&eid)),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.cost() == -7 && row.path().steps()[0].0 != row.path().steps()[1].0)
+        );
+        let one_edge = distinct
+            .execute_with_control(
+                [VId(0), VId(1)],
+                edges[..1].iter().copied(),
+                |eid, _| Ok::<_, ()>(weights.get(&eid)),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(one_edge.is_none());
+    }
+}
+
+#[test]
+fn match_mode_identity_preserves_generic_transcripts_and_source_admission() {
+    for mode in MODES {
+        let base = query(0, 1, GlaDirection::Forward, 0, 3).with_mode(mode);
+        assert_eq!(base.match_mode(), GraphMatchMode::RepeatableElements);
+        let unchanged = base
+            .clone()
+            .with_match_mode(GraphMatchMode::RepeatableElements);
+        assert_eq!(base.canonical_bytes(), unchanged.canonical_bytes());
+        let distinct = base.clone().with_match_mode(GraphMatchMode::DifferentEdges);
+        assert_ne!(base.canonical_bytes(), distinct.canonical_bytes());
+        assert_eq!(
+            base.input_pattern().canonical_bytes(),
+            distinct.input_pattern().canonical_bytes()
+        );
+        assert_eq!(
+            base.canonical_bytes(),
+            distinct
+                .with_match_mode(GraphMatchMode::RepeatableElements)
+                .canonical_bytes()
+        );
+    }
 }
 
 #[test]
@@ -339,8 +489,19 @@ fn every_history_refusal_is_terminal_and_every_retry_returns_the_same_complete_a
         (EId(3), CanonicalScalar::Int(0)),
         (EId(4), CanonicalScalar::Int(-2)),
     ]);
-    for mode in &MODES[1..] {
-        let q = query(0, 0, GlaDirection::Undirected, 0, 4).with_mode(*mode);
+    let profiles = MODES
+        .into_iter()
+        .skip(1)
+        .map(|mode| (mode, GraphMatchMode::RepeatableElements))
+        .chain(
+            MODES
+                .into_iter()
+                .map(|mode| (mode, GraphMatchMode::DifferentEdges)),
+        );
+    for (mode, match_mode) in profiles {
+        let q = query(0, 0, GlaDirection::Undirected, 0, 4)
+            .with_mode(mode)
+            .with_match_mode(match_mode);
         let mut total = 0;
         let baseline = q
             .execute_k_with_control(
@@ -371,7 +532,7 @@ fn every_history_refusal_is_terminal_and_every_retry_returns_the_same_complete_a
                     loop {
                         match cursor.next_with_control(&mut control) {
                             Ok(Some(_)) => {}
-                            Ok(None) => panic!("missed refusal {stop} in {mode:?}"),
+                            Ok(None) => panic!("missed refusal {stop} in {match_mode:?} {mode:?}"),
                             Err(error) => {
                                 assert_eq!(error, GraphCheapestPathError::Source(stop));
                                 break;
@@ -409,8 +570,19 @@ fn every_history_refusal_is_terminal_and_every_retry_returns_the_same_complete_a
 fn mode_budgets_are_cumulative_exact_and_zero_count_still_validates_costs() {
     let edges = [(EId(1), VId(0), R, VId(0)), (EId(2), VId(0), R, VId(1))];
     let weight = CanonicalScalar::Int(-1);
-    for mode in &MODES[1..] {
-        let q = query(0, 1, GlaDirection::Forward, 1, 4).with_mode(*mode);
+    let profiles = MODES
+        .into_iter()
+        .skip(1)
+        .map(|mode| (mode, GraphMatchMode::RepeatableElements))
+        .chain(
+            MODES
+                .into_iter()
+                .map(|mode| (mode, GraphMatchMode::DifferentEdges)),
+        );
+    for (mode, match_mode) in profiles {
+        let q = query(0, 1, GlaDirection::Forward, 1, 4)
+            .with_mode(mode)
+            .with_match_mode(match_mode);
         let run = |policy| {
             q.execute_k_governed_with_edge_properties(
                 10,
