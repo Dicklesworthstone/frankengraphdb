@@ -49,7 +49,7 @@ pub use refs::{
 };
 pub use scalar::{
     CanonicalBytes, CanonicalF64, CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_BYTES,
-    MAX_SCALAR_PAYLOAD, ScalarDecodeError, ScalarEncodeError, ScalarField,
+    MAX_SCALAR_PAYLOAD, ScalarDecodeError, ScalarEncodeError, ScalarField, ScalarProfileVersion,
 };
 pub use temporal::{
     CanonicalDate, CanonicalTimestamp, DateError, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,

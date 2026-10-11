@@ -38,7 +38,7 @@ use fgdb_types::{
     CanonicalScalarProfileIdentityVerifier, CanonicalText, CanonicalTimestamp, CollationResolver,
     CollationResolverError, CommitSeq, EId, GraphId, MAX_DECIMAL_COEFFICIENT, MarkerRef,
     NonBinaryTextBinding, ObjectId, ObligationId, ObligationResolution, ObligationStage,
-    PurposeContexts, TzdbResolver, VId,
+    PurposeContexts, ScalarProfileVersion, TzdbResolver, VId,
 };
 
 const ZONED_FIXTURE_INSTANT: i128 = 1_735_689_600_123_456_789;
@@ -216,6 +216,7 @@ fn run_transcript(root: &asupersync::Cx) {
 
     // 1. First-class profile plus canonical scalar/property values.
     let profile_descriptor = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        ScalarProfileVersion::V1,
         oid(0x31),
         oid(0x32),
         oid(0x33),
@@ -225,6 +226,7 @@ fn run_transcript(root: &asupersync::Cx) {
     .expect("bounded profile descriptor");
     let profile_oid = ObjectId(asupersync::atp::object::compute_hash(&profile_descriptor));
     let scalar_profile = CanonicalScalarProfile::try_new_verified(
+        ScalarProfileVersion::V1,
         profile_oid,
         oid(0x31),
         oid(0x32),
@@ -236,6 +238,7 @@ fn run_transcript(root: &asupersync::Cx) {
     )
     .expect("profile identity and artifacts");
     let missing_profile_artifact = CanonicalScalarProfile::try_new_verified(
+        ScalarProfileVersion::V1,
         profile_oid,
         oid(0x31),
         oid(0x32),

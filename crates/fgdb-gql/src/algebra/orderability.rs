@@ -87,6 +87,11 @@ impl GraphValue {
 }
 
 impl ValueRef<'_> {
+    /// openCypher orderability: map < node < relationship < list < path <
+    /// zoned datetime < local datetime < date < zoned time < local time <
+    /// duration < string < boolean < number < null. The gaps keep the
+    /// temporal kinds not yet in the scalar domain at their places
+    /// (fgdb-txbg9).
     fn orderability_rank(self) -> u8 {
         match self {
             Self::Map { .. } => 0,
@@ -95,13 +100,14 @@ impl ValueRef<'_> {
             Self::List(_) | Self::Vertices(_) | Self::Edges(_) => 3,
             Self::Path(_) => 4,
             Self::Scalar(CanonicalScalar::Timestamp(_)) => 5,
-            Self::Scalar(CanonicalScalar::Bytes(_)) => 6,
-            Self::Scalar(CanonicalScalar::Text(_)) => 7,
-            Self::Scalar(CanonicalScalar::Bool(_)) => 8,
+            Self::Scalar(CanonicalScalar::Date(_)) => 7,
+            Self::Scalar(CanonicalScalar::Bytes(_)) => 11,
+            Self::Scalar(CanonicalScalar::Text(_)) => 12,
+            Self::Scalar(CanonicalScalar::Bool(_)) => 13,
             Self::Scalar(
                 CanonicalScalar::Int(_) | CanonicalScalar::Decimal(_) | CanonicalScalar::Float(_),
-            ) => 9,
-            Self::Scalar(CanonicalScalar::Null) => 10,
+            ) => 14,
+            Self::Scalar(CanonicalScalar::Null) => 15,
         }
     }
 

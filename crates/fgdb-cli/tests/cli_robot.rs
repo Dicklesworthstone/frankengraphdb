@@ -386,6 +386,22 @@ fn check_cell(cell: &Json, schema: &Json) {
             }
         }
         "bytes" => check_hex(value),
+        // ISO 8601 extended calendar form, java.time year spelling.
+        "date" => {
+            let text = value.string();
+            let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+            let (year, month_day) = body.split_once('-').unwrap();
+            assert!(
+                (4..=9).contains(&year.len()) && year.bytes().all(|byte| byte.is_ascii_digit()),
+                "{text}"
+            );
+            assert!(
+                month_day.len() == 5
+                    && month_day.as_bytes()[2] == b'-'
+                    && month_day.bytes().filter(u8::is_ascii_digit).count() == 4,
+                "{text}"
+            );
+        }
         "timestamp" => {
             exact_fields(value, &["instant_utc_nanos", "utc_offset_seconds", "zone"]);
             let instant = value.get("instant_utc_nanos").string();

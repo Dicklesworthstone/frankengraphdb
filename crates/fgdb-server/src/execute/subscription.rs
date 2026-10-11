@@ -166,7 +166,9 @@ impl Work<'_> {
     fn argument(&mut self, value: &WireValue) -> Result<(), Refusal> {
         self.charge(1)?;
         match value {
-            WireValue::Text(text) | WireValue::Decimal(text) => self.bytes(text.len()),
+            WireValue::Text(text) | WireValue::Decimal(text) | WireValue::Date(text) => {
+                self.bytes(text.len())
+            }
             WireValue::Bytes(bytes) => self.bytes(bytes.len()),
             WireValue::List(items) => {
                 for item in items {
@@ -207,6 +209,10 @@ impl Work<'_> {
             // STRICT_PORTABLE decimals have at most 34 coefficient digits,
             // one sign and one decimal point. Reserve before formatting.
             GraphValue::Scalar(CanonicalScalar::Decimal(_)) => self.charge(36),
+            // Canonical date text is at most MAX_DATE_BYTES (16) bytes.
+            GraphValue::Scalar(CanonicalScalar::Date(_)) => {
+                self.charge(fgdb_protocol::body::MAX_DATE_BYTES as u64)
+            }
             GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => match value.zone() {
                 Some(zone) => self.bytes(zone.identifier().len()),
                 None => Ok(()),

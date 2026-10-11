@@ -180,7 +180,9 @@ redacted from `Debug`.
 A value is one tagged node of the engine's value lattice, mirroring the CLI
 robot contract's cell types exactly: null, bool, int (i64), float (binary64
 bits), decimal (canonical text), text, bytes, timestamp (UTC nanoseconds,
-offset seconds, optional zone identifier plus tzdb object id), vertex, edge
+offset seconds, optional zone identifier plus tzdb object id), date (canonical
+ISO 8601 calendar text, at most 16 bytes; an argument must be exactly that
+canonical text), vertex, edge
 (u128 identities), path, vertices, edges, list, map, count, wide integer
 (i128) and exact average. Error codes are the closed set `protocol`,
 `unsupported_version`, `unauthenticated`, `not_found_or_unauthorized`,

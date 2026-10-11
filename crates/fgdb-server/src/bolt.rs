@@ -54,7 +54,7 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
 use fgdb_protocol::body::{ErrorCode, WireTimestamp, WireValue};
 use fgdb_protocol::transport::DuplexIo;
-use fgdb_types::{CommitSeq, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalDate, CommitSeq, EId, PurposeContexts, VId};
 use fgdb_warden::{Authority, CapabilityToken};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1020,6 +1020,14 @@ fn argument(value: &Value) -> Result<WireValue, Failure> {
             }
             _ => return Err(unsupported("malformed date-time")),
         },
+        Value::Struct { tag, fields } if *tag == structure::DATE => match fields.as_slice() {
+            [Value::Int(days)] => WireValue::Date(
+                CanonicalDate::from_epoch_day(*days)
+                    .map_err(|_| unsupported("out-of-range date"))?
+                    .to_string(),
+            ),
+            _ => return Err(unsupported("malformed date")),
+        },
         Value::Struct { .. } => return Err(unsupported("this structure's")),
     })
 }
@@ -1384,6 +1392,11 @@ fn value(cell: WireValue, entities: &Entities) -> Result<Value, Failure> {
         WireValue::Float(value) => Value::Float(value),
         WireValue::Decimal(text) => Value::String(text),
         WireValue::Text(text) => Value::String(text),
+        WireValue::Date(text) => structure::date(
+            CanonicalDate::parse_iso(&text)
+                .map_err(|_| feature_not_supported("A non-canonical date"))?
+                .epoch_day(),
+        ),
         WireValue::Bytes(bytes) => Value::Bytes(bytes),
         WireValue::Timestamp(timestamp) => {
             let seconds = timestamp.instant_utc_nanos.div_euclid(1_000_000_000);

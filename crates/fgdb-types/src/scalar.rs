@@ -7,7 +7,8 @@
 //!   `encode(a) == encode(b)`,
 //! - `Ord` is total and transitive over all scalars (cross-type order is the
 //!   fixed profile type rank: Null < Bool < Int < Decimal < Float < Text <
-//!   Timestamp < Bytes),
+//!   Timestamp < Bytes < Date; Date's tag follows the property-value List
+//!   and Map tags, so it ranks last),
 //! - `a.cmp(b) == encode(a).cmp(encode(b))`, so byte-keyed maps and `LexMin`
 //!   use exactly the semantic scalar order,
 //! - `decode(encode(v)) == v` for every value, and decode rejects malformed
@@ -56,9 +57,9 @@ use crate::{
     decimal::{CanonicalDecimal, DecimalDecodeError},
     ids::ObjectId,
     temporal::{
-        CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
+        CanonicalDate, CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
         MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, TimestampDecodeError, TzdbResolver,
-        validate_zone_identifier,
+        calendar, validate_zone_identifier,
     },
     text::{
         CanonicalText, CanonicalTextError, CollationResolver, MAX_CANONICAL_SORT_KEY_BYTES,
@@ -81,6 +82,8 @@ const TAG_FLOAT: u8 = 0x04;
 const TAG_TEXT: u8 = 0x05;
 const TAG_TIMESTAMP: u8 = 0x06;
 const TAG_BYTES: u8 = 0x07;
+// 0x08 and 0x09 are the property-value List and Map tags.
+const TAG_DATE: u8 = 0x0A;
 
 const BOOL_FALSE_BYTE: u8 = 0;
 const BOOL_TRUE_BYTE: u8 = 1;
@@ -135,24 +138,83 @@ const SCALAR_DESCRIPTOR_RULE_BYTES: &[u8] = &[
     COMPARABLE_TERMINAL_MARKER,
 ];
 
-pub(crate) const STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN: usize =
-    STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN.len()
-        + 2
-        + SCALAR_DESCRIPTOR_RULE_BYTES.len()
-        + 8
-        + 4 * 8
-        + 2 * 16
-        + 4
-        + 8;
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2: &[u8] =
+    b"fgdb:strict-portable-scalar-semantics:v2\0";
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION_V2: u16 = 2;
+const DATE_ORDER_EPOCH_DAY_SIGN_FLIP_BIG_ENDIAN: u8 = 1;
+const DATE_CALENDAR_PROLEPTIC_GREGORIAN: u8 = 1;
+/// The rules version 2 adds after every version 1 rule.
+const SCALAR_DESCRIPTOR_V2_RULE_BYTES: &[u8] = &[
+    TAG_DATE,
+    DATE_ORDER_EPOCH_DAY_SIGN_FLIP_BIG_ENDIAN,
+    DATE_CALENDAR_PROLEPTIC_GREGORIAN,
+];
+
+/// The scalar semantics a profile binds (fgdb-txbg9). Versions are ordered
+/// and closed: each admits every value of the one before it with the same
+/// encoding, so a value needs the lowest version that admits its kind, and a
+/// version 1 descriptor stays byte-identical.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ScalarProfileVersion {
+    /// Null, Bool, Int, Decimal, Float, Text, Timestamp and Bytes.
+    V1 = 1,
+    /// Version 1 plus Date.
+    V2 = 2,
+}
+
+impl ScalarProfileVersion {
+    /// The lowest version that admits `value`.
+    #[must_use]
+    pub const fn required_for(value: &CanonicalScalar) -> Self {
+        match value {
+            CanonicalScalar::Date(_) => Self::V2,
+            _ => Self::V1,
+        }
+    }
+}
+
+/// Byte length of the scalar contract [`append_strict_portable_scalar_descriptor`]
+/// appends for `version`.
+pub(crate) const fn strict_portable_scalar_descriptor_len(version: ScalarProfileVersion) -> usize {
+    let common = 2 + SCALAR_DESCRIPTOR_RULE_BYTES.len() + 8 + 4 * 8 + 2 * 16 + 4 + 8;
+    match version {
+        ScalarProfileVersion::V1 => STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN.len() + common,
+        ScalarProfileVersion::V2 => {
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2.len()
+                + common
+                + SCALAR_DESCRIPTOR_V2_RULE_BYTES.len()
+                + 2 * 8
+        }
+    }
+}
 
 /// Appends the artifact-independent atomic scalar contract bound by a
-/// `CanonicalScalarProfile` descriptor. The caller pre-reserves the exact
-/// [`STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN`] bytes, so this performs no
-/// allocation of its own.
-pub(crate) fn append_strict_portable_scalar_descriptor(out: &mut Vec<u8>) {
-    out.extend_from_slice(STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN);
-    out.extend_from_slice(&STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION.to_le_bytes());
+/// `CanonicalScalarProfile` descriptor of `version`. The caller pre-reserves
+/// the exact [`strict_portable_scalar_descriptor_len`] bytes, so this
+/// performs no allocation of its own. Version 1 bytes never change; version 2
+/// has its own domain, the version 1 rules followed by the Date rules, and
+/// the Date range after every version 1 bound.
+pub(crate) fn append_strict_portable_scalar_descriptor(
+    out: &mut Vec<u8>,
+    version: ScalarProfileVersion,
+) {
+    let (domain, number) = match version {
+        ScalarProfileVersion::V1 => (
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN,
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION,
+        ),
+        ScalarProfileVersion::V2 => (
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2,
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION_V2,
+        ),
+    };
+    out.extend_from_slice(domain);
+    out.extend_from_slice(&number.to_le_bytes());
     out.extend_from_slice(SCALAR_DESCRIPTOR_RULE_BYTES);
+    if version >= ScalarProfileVersion::V2 {
+        out.extend_from_slice(SCALAR_DESCRIPTOR_V2_RULE_BYTES);
+    }
     out.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
     for bound in [
         MAX_SCALAR_PAYLOAD,
@@ -166,6 +228,10 @@ pub(crate) fn append_strict_portable_scalar_descriptor(out: &mut Vec<u8>) {
     out.extend_from_slice(&MAX_TIMESTAMP_UTC_NANOS.to_le_bytes());
     out.extend_from_slice(&MAX_UTC_OFFSET_SECONDS.to_le_bytes());
     out.extend_from_slice(&(MAX_ZONE_IDENTIFIER_BYTES as u64).to_le_bytes());
+    if version >= ScalarProfileVersion::V2 {
+        out.extend_from_slice(&calendar::MIN_EPOCH_DAY.to_le_bytes());
+        out.extend_from_slice(&calendar::MAX_EPOCH_DAY.to_le_bytes());
+    }
 }
 
 /// Maximum complete encoded payload (excluding the scalar tag) accepted by
@@ -261,6 +327,8 @@ pub enum CanonicalScalar {
     Text(CanonicalText),
     Timestamp(CanonicalTimestamp),
     Bytes(CanonicalBytes),
+    /// A calendar date (fgdb-txbg9); admitted by [`ScalarProfileVersion::V2`].
+    Date(CanonicalDate),
 }
 
 impl CanonicalScalar {
@@ -275,8 +343,9 @@ impl CanonicalScalar {
         CanonicalBytes::new(value).map(Self::Bytes)
     }
 
-    /// Fixed cross-type rank of the `STRICT_PORTABLE` profile.
-    fn type_rank(&self) -> u8 {
+    /// Fixed cross-type rank of the `STRICT_PORTABLE` profile, which is also
+    /// the leading byte of the canonical encoding.
+    pub(crate) fn type_rank(&self) -> u8 {
         match self {
             CanonicalScalar::Null => TAG_NULL,
             CanonicalScalar::Bool(_) => TAG_BOOL,
@@ -286,6 +355,7 @@ impl CanonicalScalar {
             CanonicalScalar::Text(_) => TAG_TEXT,
             CanonicalScalar::Timestamp(_) => TAG_TIMESTAMP,
             CanonicalScalar::Bytes(_) => TAG_BYTES,
+            CanonicalScalar::Date(_) => TAG_DATE,
         }
     }
 
@@ -308,7 +378,7 @@ impl CanonicalScalar {
         let payload_len = match self {
             Self::Null => 0,
             Self::Bool(_) => 1,
-            Self::Int(_) | Self::Float(_) => 8,
+            Self::Int(_) | Self::Float(_) | Self::Date(_) => 8,
             Self::Decimal(_) => 16,
             Self::Text(value) => text_scalar_payload_len(value)?,
             Self::Timestamp(value) => timestamp_scalar_payload_len(value)?,
@@ -359,6 +429,10 @@ impl CanonicalScalar {
             CanonicalScalar::Bytes(value) => {
                 out.push(TAG_BYTES);
                 append_comparable(value.as_slice(), out);
+            }
+            CanonicalScalar::Date(value) => {
+                out.push(TAG_DATE);
+                out.extend_from_slice(&ordered_i64(value.epoch_day()).to_be_bytes());
             }
         }
         if out.len() != requested {
@@ -435,9 +509,22 @@ impl CanonicalScalar {
             TAG_TEXT => decode_text_scalar(rest, resolver),
             TAG_TIMESTAMP => decode_timestamp_scalar(rest, resolver),
             TAG_BYTES => decode_bytes_scalar(rest),
+            TAG_DATE => {
+                let raw = array_from_exact::<8>(exact(8)?, tag)?;
+                let epoch_day = decode_ordered_i64(u64::from_be_bytes(raw));
+                CanonicalDate::from_epoch_day(epoch_day)
+                    .map(CanonicalScalar::Date)
+                    .map_err(|_| ScalarDecodeError::DateOutOfRange { epoch_day })
+            }
             other => Err(ScalarDecodeError::UnknownTag(other)),
         }
     }
+}
+
+/// Whether `tag` leads a canonical scalar encoding (the property-value List
+/// and Map tags sit between Bytes and Date).
+pub(crate) const fn is_scalar_tag(tag: u8) -> bool {
+    tag <= TAG_BYTES || tag == TAG_DATE
 }
 
 /// Returns the complete scalar encoding length for a borrowed Map key.
@@ -912,6 +999,7 @@ impl Ord for CanonicalScalar {
             (S::Text(a), S::Text(b)) => a.cmp(b),
             (S::Timestamp(a), S::Timestamp(b)) => a.cmp(b),
             (S::Bytes(a), S::Bytes(b)) => a.cmp(b),
+            (S::Date(a), S::Date(b)) => a.cmp(b),
             _ => self.type_rank().cmp(&other.type_rank()),
         }
     }
@@ -1036,6 +1124,10 @@ pub enum ScalarDecodeError {
     NonCanonicalFloat {
         bits: u64,
     },
+    /// A date tag whose day number lies outside the supported range.
+    DateOutOfRange {
+        epoch_day: i64,
+    },
     Decimal(DecimalDecodeError),
     Bytes(BoundedBytesError),
     Text(CanonicalTextError),
@@ -1098,6 +1190,12 @@ impl std::fmt::Display for ScalarDecodeError {
                 write!(
                     f,
                     "tag {tag:#04x}: canonical scalar has {count} trailing bytes"
+                )
+            }
+            ScalarDecodeError::DateOutOfRange { epoch_day } => {
+                write!(
+                    f,
+                    "date day number {epoch_day} is outside the supported range"
                 )
             }
             ScalarDecodeError::NonCanonicalFloat { bits } => {

@@ -428,7 +428,7 @@ fn check_cell(cell: &Json, schema: &Json) {
         "wideint" => {
             value.string().parse::<i128>().unwrap();
         }
-        "average" | "decimal" | "float" | "bytes" | "vertex" | "edge" => {
+        "average" | "decimal" | "float" | "bytes" | "vertex" | "edge" | "date" => {
             value.string();
         }
         "timestamp" => {

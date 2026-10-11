@@ -12,7 +12,9 @@ use fgdb_gql::{
     GqlListParameter, GqlMapParameter, GqlParameterValue, GqlParameters, GqlScalarParameter,
 };
 use fgdb_protocol::body::{WireTimestamp, WireValue, WireZone};
-use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalTimestamp, ObjectId, TzdbResolver};
+use fgdb_types::{
+    CanonicalDate, CanonicalF64, CanonicalScalar, CanonicalTimestamp, ObjectId, TzdbResolver,
+};
 
 /// One result cell.
 pub(crate) fn cell(value: &QueryValue) -> WireValue {
@@ -71,6 +73,7 @@ fn scalar_value(scalar: &CanonicalScalar) -> WireValue {
             }),
         }),
         CanonicalScalar::Bytes(v) => WireValue::Bytes(v.as_slice().to_vec()),
+        CanonicalScalar::Date(v) => WireValue::Date(v.to_string()),
     }
 }
 
@@ -190,6 +193,12 @@ fn argument_scalar(
                 .map_err(|_| "zoned timestamp does not resolve under the served tz database")?
             }
         }),
+        // Only the canonical text a server emits: parse, then require that
+        // rendering it back gives the same bytes.
+        WireValue::Date(v) => match CanonicalDate::parse_iso(v) {
+            Ok(date) if date.to_string() == *v => CanonicalScalar::Date(date),
+            _ => return Err("a date argument must be canonical ISO 8601 text"),
+        },
         WireValue::Decimal(_) => return Err("decimal arguments are not supported"),
         WireValue::Vertex(_)
         | WireValue::Edge(_)
@@ -229,6 +238,32 @@ mod tests {
             ])
         );
         assert_eq!(cell(&QueryValue::Count(7)), WireValue::Count(7));
+        let date = CanonicalDate::from_civil(10_000, 1, 1).unwrap();
+        assert_eq!(
+            cell(&QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Date(date)
+            ))),
+            WireValue::Date("+10000-01-01".into())
+        );
+    }
+
+    /// fgdb-txbg9: a date argument is exactly the canonical text a server
+    /// emits; another ISO spelling of the same day, or a day that does not
+    /// exist, is refused rather than reinterpreted.
+    #[test]
+    fn date_arguments_are_canonical_text_only() {
+        let parameters_of =
+            |text: &str| parameters(&[("d".into(), WireValue::Date(text.into()))], None);
+        let bound = parameters_of("2015-07-21").unwrap();
+        assert!(matches!(
+            bound.get("d"),
+            Some(GqlParameterValue::Scalar(scalar))
+                if *scalar.value()
+                    == CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).unwrap())
+        ));
+        for text in ["20150721", "2015-W30-2", "+2015-07-21", "2015-02-30", ""] {
+            assert_eq!(parameters_of(text).unwrap_err().parameter, "d", "{text}");
+        }
     }
 
     #[test]

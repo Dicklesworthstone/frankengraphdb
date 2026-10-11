@@ -691,6 +691,9 @@ pub enum WriteError {
     ZonedTimestampRequiresResolver {
         tzdb_oid: ObjectId,
     },
+    /// A Date property value. Dates are query values; storing one waits on
+    /// container format versions that record it (fgdb-txbg9).
+    DateNotStorable,
     /// A delete named an edge this database holds no live version of, at the
     /// point in the batch where the delete sits. Refused before anything
     /// durable happens (fgdb-p3ok).
@@ -1024,6 +1027,7 @@ impl core::fmt::Display for WriteError {
             Self::ZonedTimestampRequiresResolver { .. } => {
                 f.write_str("zoned timestamp writes require a pinned tzdb resolver")
             }
+            Self::DateNotStorable => f.write_str("a date is not yet a storable property value"),
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to delete")
             }
@@ -3144,6 +3148,12 @@ impl<V: Vfs + Clone> Database<V> {
         // Validate before normalization/ensure can erase an unsupported input.
         // Validate against exactly the artifacts retained by recovery.
         let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
+            // A stored Date needs durable containers that record the scalar
+            // profile version their content requires, so an older reader
+            // refuses it precisely instead of misreading it (fgdb-txbg9).
+            if matches!(value, CanonicalScalar::Date(_)) {
+                return Err(WriteError::DateNotStorable);
+            }
             if let CanonicalScalar::Timestamp(timestamp) = value
                 && let Some(zone) = timestamp.zone()
             {

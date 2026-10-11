@@ -589,7 +589,7 @@ fn human(value: &WireValue) -> String {
         WireValue::Bool(v) => v.to_string(),
         WireValue::Int(v) => v.to_string(),
         WireValue::Text(v) => v.chars().flat_map(char::escape_default).collect(),
-        WireValue::Decimal(v) => v.clone(),
+        WireValue::Decimal(v) | WireValue::Date(v) => v.clone(),
         WireValue::Float(v) => float_text(*v),
         WireValue::Timestamp(_) => cell(value),
         WireValue::Bytes(v) => format!("0x{}", hex(v)),

@@ -337,6 +337,7 @@ pub fn cell(value: &WireValue) -> String {
         WireValue::Int(v) => format!(r#"{{"type":"int","value":"{v}"}}"#),
         WireValue::Text(v) => format!(r#"{{"type":"text","value":{}}}"#, quote(v)),
         WireValue::Decimal(v) => format!(r#"{{"type":"decimal","value":"{v}"}}"#),
+        WireValue::Date(v) => format!(r#"{{"type":"date","value":{}}}"#, quote(v)),
         WireValue::Float(v) => format!(r#"{{"type":"float","value":{}}}"#, quote(&float_text(*v))),
         WireValue::Timestamp(v) => format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp(v)),
         WireValue::Bytes(v) => format!(r#"{{"type":"bytes","value":{}}}"#, quote(&hex(v))),
@@ -548,6 +549,11 @@ mod tests {
         assert_eq!(
             cell(&WireValue::Float(f64::NAN)),
             r#"{"type":"float","value":"NaN"}"#
+        );
+        // A date is the CLI's date cell (fgdb-txbg9).
+        assert_eq!(
+            cell(&WireValue::Date("-0001-07-21".into())),
+            r#"{"type":"date","value":"-0001-07-21"}"#
         );
     }
 }

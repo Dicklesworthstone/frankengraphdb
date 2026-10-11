@@ -15,10 +15,10 @@ use crate::{
     },
     ids::ObjectId,
     scalar::{
-        CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_PAYLOAD,
-        STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN, ScalarDecodeError, ScalarEncodeError,
-        append_strict_portable_scalar_descriptor, canonical_text_scalar_encoded_len,
-        encode_canonical_text_into,
+        CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_PAYLOAD, ScalarDecodeError,
+        ScalarEncodeError, ScalarProfileVersion, append_strict_portable_scalar_descriptor,
+        canonical_text_scalar_encoded_len, encode_canonical_text_into, is_scalar_tag,
+        strict_portable_scalar_descriptor_len,
     },
     temporal::TimestampArtifactError,
     text::{CanonicalText, CanonicalTextError, TextBinding},
@@ -26,6 +26,8 @@ use crate::{
 
 const PROFILE_DESCRIPTOR_DOMAIN: &[u8] = b"fgdb:canonical-scalar-profile:strict-portable:v1\0";
 const PROFILE_DESCRIPTOR_VERSION: u16 = 1;
+const PROFILE_DESCRIPTOR_DOMAIN_V2: &[u8] = b"fgdb:canonical-scalar-profile:strict-portable:v2\0";
+const PROFILE_DESCRIPTOR_VERSION_V2: u16 = 2;
 const PROFILE_KIND_STRICT_PORTABLE: u8 = 1;
 const FLOAT_POLICY_CANONICAL_NAN_AND_POSITIVE_ZERO: u8 = 1;
 const DECIMAL_ROUNDING_HALF_EVEN: u8 = 1;
@@ -110,6 +112,7 @@ pub enum ScalarProfileArtifactRole {
 /// profile_oid to every rule and artifact ObjectId in canonical_descriptor.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct CanonicalScalarProfile {
+    version: ScalarProfileVersion,
     profile_oid: ObjectId,
     unicode_data_oid: ObjectId,
     normalization_oid: ObjectId,
@@ -125,8 +128,11 @@ impl CanonicalScalarProfile {
     /// rejects duplicates. Every fixed STRICT_PORTABLE rule is named in the
     /// descriptor, so changing a listed bound, collection tag/framing byte,
     /// rounding rule, or coercion policy necessarily changes the verified
-    /// identity input.
+    /// identity input. Each [`ScalarProfileVersion`] has its own descriptor
+    /// domain; a version 1 descriptor is byte-identical to the one before
+    /// versions existed.
     pub fn try_canonical_descriptor_bytes(
+        version: ScalarProfileVersion,
         unicode_data_oid: ObjectId,
         normalization_oid: ObjectId,
         segmentation_oid: ObjectId,
@@ -135,6 +141,7 @@ impl CanonicalScalarProfile {
     ) -> Result<Vec<u8>, CanonicalScalarProfileError> {
         let collations = canonical_collation_set(non_binary_collation_oids)?;
         descriptor_from_canonical_collations(
+            version,
             unicode_data_oid,
             normalization_oid,
             segmentation_oid,
@@ -146,6 +153,7 @@ impl CanonicalScalarProfile {
     /// Constructs a usable profile only after identity and artifact checks.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_verified<V, R>(
+        version: ScalarProfileVersion,
         profile_oid: ObjectId,
         unicode_data_oid: ObjectId,
         normalization_oid: ObjectId,
@@ -161,6 +169,7 @@ impl CanonicalScalarProfile {
     {
         let collations = canonical_collation_set(non_binary_collation_oids)?;
         let descriptor = descriptor_from_canonical_collations(
+            version,
             unicode_data_oid,
             normalization_oid,
             segmentation_oid,
@@ -173,6 +182,7 @@ impl CanonicalScalarProfile {
             });
         }
         let profile = Self {
+            version,
             profile_oid,
             unicode_data_oid,
             normalization_oid,
@@ -182,6 +192,12 @@ impl CanonicalScalarProfile {
         };
         profile.validate_profile_artifacts(resolver)?;
         Ok(profile)
+    }
+
+    /// The scalar semantics this profile binds.
+    #[must_use]
+    pub const fn version(&self) -> ScalarProfileVersion {
+        self.version
     }
 
     #[must_use]
@@ -414,6 +430,12 @@ impl CanonicalScalarProfile {
         scalar: &CanonicalScalar,
         resolver: &R,
     ) -> Result<(), CanonicalScalarProfileError> {
+        if ScalarProfileVersion::required_for(scalar) > self.version {
+            return Err(CanonicalScalarProfileError::KindNotInProfile {
+                kind: CanonicalScalarKind::of(scalar),
+                version: self.version,
+            });
+        }
         match scalar {
             CanonicalScalar::Text(text) => self.validate_text_binding(text, resolver),
             CanonicalScalar::Timestamp(timestamp) => {
@@ -512,21 +534,26 @@ fn canonical_collation_set(
 }
 
 fn descriptor_from_canonical_collations(
+    version: ScalarProfileVersion,
     unicode_data_oid: ObjectId,
     normalization_oid: ObjectId,
     segmentation_oid: ObjectId,
     tzdb_oid: ObjectId,
     collations: &[ObjectId],
 ) -> Result<Vec<u8>, CanonicalScalarProfileError> {
+    let (domain, number) = match version {
+        ScalarProfileVersion::V1 => (PROFILE_DESCRIPTOR_DOMAIN, PROFILE_DESCRIPTOR_VERSION),
+        ScalarProfileVersion::V2 => (PROFILE_DESCRIPTOR_DOMAIN_V2, PROFILE_DESCRIPTOR_VERSION_V2),
+    };
     let collation_bytes = collations
         .len()
         .checked_mul(32)
         .ok_or(CanonicalScalarProfileError::DescriptorSizeOverflow)?;
-    let requested = PROFILE_DESCRIPTOR_DOMAIN
+    let requested = domain
         .len()
         .checked_add(
             2 + PROFILE_FIXED_RULE_BYTES.len()
-                + STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN
+                + strict_portable_scalar_descriptor_len(version)
                 + PROPERTY_HASH_DOMAIN.len()
                 + 3 * 4
                 + 5 * 8
@@ -538,10 +565,10 @@ fn descriptor_from_canonical_collations(
     let mut out = Vec::new();
     out.try_reserve_exact(requested)
         .map_err(|_| CanonicalScalarProfileError::AllocationFailed { requested })?;
-    out.extend_from_slice(PROFILE_DESCRIPTOR_DOMAIN);
-    out.extend_from_slice(&PROFILE_DESCRIPTOR_VERSION.to_le_bytes());
+    out.extend_from_slice(domain);
+    out.extend_from_slice(&number.to_le_bytes());
     out.extend_from_slice(PROFILE_FIXED_RULE_BYTES);
-    append_strict_portable_scalar_descriptor(&mut out);
+    append_strict_portable_scalar_descriptor(&mut out, version);
     out.extend_from_slice(PROPERTY_HASH_DOMAIN);
     out.extend_from_slice(&STRICT_PORTABLE_DECIMAL_PRECISION.to_le_bytes());
     out.extend_from_slice(&STRICT_PORTABLE_DECIMAL_SCALE.to_le_bytes());
@@ -583,6 +610,7 @@ pub enum CanonicalScalarKind {
     Text = 5,
     Timestamp = 6,
     Bytes = 7,
+    Date = 10,
 }
 
 impl CanonicalScalarKind {
@@ -597,6 +625,7 @@ impl CanonicalScalarKind {
             CanonicalScalar::Text(_) => Self::Text,
             CanonicalScalar::Timestamp(_) => Self::Timestamp,
             CanonicalScalar::Bytes(_) => Self::Bytes,
+            CanonicalScalar::Date(_) => Self::Date,
         }
     }
 }
@@ -607,11 +636,43 @@ impl CanonicalScalarKind {
 /// collections. Durable or replay-visible hashing must use
 /// [`CanonicalScalarProfile::hash_value`], whose feed is the versioned,
 /// domain-separated canonical byte encoding.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// Order is canonical byte order: values of different kinds order by their
+/// leading encoding tag, so the scalar ranks 0x00-0x07 come before List
+/// (0x08) and Map (0x09), and a Date scalar (0x0A) after both.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CanonicalPropertyValue {
     Scalar(CanonicalScalar),
     List(CanonicalList),
     Map(CanonicalMap),
+}
+
+impl CanonicalPropertyValue {
+    /// The leading byte of the canonical encoding.
+    fn leading_tag(&self) -> u8 {
+        match self {
+            Self::Scalar(scalar) => scalar.type_rank(),
+            Self::List(_) => TAG_LIST,
+            Self::Map(_) => TAG_MAP,
+        }
+    }
+}
+
+impl PartialOrd for CanonicalPropertyValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CanonicalPropertyValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Scalar(left), Self::Scalar(right)) => left.cmp(right),
+            (Self::List(left), Self::List(right)) => left.cmp(right),
+            (Self::Map(left), Self::Map(right)) => left.cmp(right),
+            _ => self.leading_tag().cmp(&other.leading_tag()),
+        }
+    }
 }
 
 impl From<CanonicalScalar> for CanonicalPropertyValue {
@@ -1010,7 +1071,7 @@ fn decode_property_value<R: CanonicalScalarResolver>(
         .split_first()
         .ok_or(CanonicalPropertyValueError::EmptyEncoding)?;
     match tag {
-        0x00..=0x07 => CanonicalScalar::decode_with_resolver(bytes, resolver)
+        tag if is_scalar_tag(tag) => CanonicalScalar::decode_with_resolver(bytes, resolver)
             .map(CanonicalPropertyValue::Scalar)
             .map_err(CanonicalPropertyValueError::ScalarDecode),
         TAG_LIST => {
@@ -1203,6 +1264,12 @@ pub enum CanonicalScalarProfileError {
     CollationNotAdmitted {
         actual: ObjectId,
     },
+    /// A scalar kind the profile's version does not admit, such as a Date
+    /// under version 1.
+    KindNotInProfile {
+        kind: CanonicalScalarKind,
+        version: ScalarProfileVersion,
+    },
     Text(CanonicalTextError),
     Timestamp(TimestampArtifactError),
     PropertyValue(CanonicalPropertyValueError),
@@ -1211,6 +1278,10 @@ pub enum CanonicalScalarProfileError {
 impl core::fmt::Display for CanonicalScalarProfileError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::KindNotInProfile { kind, version } => write!(
+                formatter,
+                "scalar kind {kind:?} is not admitted by scalar profile {version:?}"
+            ),
             Self::TooManyCollations { actual, maximum } => write!(
                 formatter,
                 "scalar profile contains {actual} collations, maximum {maximum}"

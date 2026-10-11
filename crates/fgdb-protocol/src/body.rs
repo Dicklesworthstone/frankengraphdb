@@ -256,6 +256,10 @@ pub enum WireValue {
     Text(String),
     Bytes(Vec<u8>),
     Timestamp(WireTimestamp),
+    /// A calendar date as its canonical ISO 8601 extended text with the
+    /// java.time year spelling (`2015-07-21`, `+10000-01-01`, `-0001-07-21`),
+    /// at most [`MAX_DATE_BYTES`] bytes.
+    Date(String),
     Vertex(u128),
     Edge(u128),
     /// A path: its start vertex, then one (edge, vertex) pair per step.
@@ -298,7 +302,11 @@ mod tag {
     pub const COUNT: u8 = 15;
     pub const WIDE_INT: u8 = 16;
     pub const AVERAGE: u8 = 17;
+    pub const DATE: u8 = 18;
 }
+
+/// Longest canonical date text: a sign, nine year digits and `-MM-DD`.
+pub const MAX_DATE_BYTES: usize = 16;
 
 impl WireValue {
     fn check(&self, depth: usize) -> Result<(), BodyError> {
@@ -307,6 +315,7 @@ impl WireValue {
         }
         match self {
             Self::Decimal(v) | Self::Text(v) => check_len(v.len(), MAX_SCALAR_BYTES),
+            Self::Date(v) => check_len(v.len(), MAX_DATE_BYTES),
             Self::Bytes(v) => check_len(v.len(), MAX_SCALAR_BYTES),
             Self::Timestamp(t) => t
                 .zone
@@ -356,6 +365,10 @@ impl WireValue {
             }
             Self::Text(v) => {
                 out.u8(tag::TEXT);
+                out.text(v);
+            }
+            Self::Date(v) => {
+                out.u8(tag::DATE);
                 out.text(v);
             }
             Self::Bytes(v) => {
@@ -449,6 +462,7 @@ impl WireValue {
             tag::FLOAT => Self::Float(f64::from_bits(input.u64()?)),
             tag::DECIMAL => Self::Decimal(input.text(MAX_SCALAR_BYTES)?),
             tag::TEXT => Self::Text(input.text(MAX_SCALAR_BYTES)?),
+            tag::DATE => Self::Date(input.text(MAX_DATE_BYTES)?),
             tag::BYTES => Self::Bytes(input.bytes(MAX_SCALAR_BYTES)?.to_vec()),
             tag::TIMESTAMP => {
                 let instant_utc_nanos = input.i128()?;
@@ -1525,6 +1539,7 @@ mod tests {
             WireValue::Float(-0.0),
             WireValue::Decimal("12.50".into()),
             WireValue::Text("héllo".into()),
+            WireValue::Date("+999999999-12-31".into()),
             WireValue::Bytes(vec![0, 255]),
             WireValue::Timestamp(WireTimestamp {
                 instant_utc_nanos: -5,

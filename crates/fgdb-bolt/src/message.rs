@@ -442,6 +442,16 @@ pub mod structure {
         }
     }
 
+    /// `Date{days}` (tag `D`): days since the Unix epoch.
+    #[must_use]
+    pub fn date(days: i64) -> Value {
+        Value::Struct {
+            tag: DATE,
+            fields: vec![Value::Int(days)],
+        }
+    }
+
+    pub const DATE: u8 = 0x44;
     pub const DATE_TIME: u8 = 0x49;
     pub const DATE_TIME_ZONE_ID: u8 = 0x69;
 }

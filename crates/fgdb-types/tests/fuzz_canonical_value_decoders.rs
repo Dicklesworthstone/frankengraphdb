@@ -11,6 +11,7 @@
 //! key bytes. Elapsed-time assertions detect slow returns, not memory usage,
 //! and cannot preempt a hung decoder. No claim of peak-memory measurement.
 
+use fgdb_types::ScalarProfileVersion;
 use fgdb_types::{
     CanonicalDecimal, CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry,
     CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarProfile,
@@ -103,6 +104,7 @@ fn binding_fixture() -> NonBinaryTextBinding {
 }
 fn profile() -> CanonicalScalarProfile {
     let descriptor = CanonicalScalarProfile::try_canonical_descriptor_bytes(
+        ScalarProfileVersion::V1,
         UNICODE,
         NORMALIZATION,
         SEGMENTATION,
@@ -111,6 +113,7 @@ fn profile() -> CanonicalScalarProfile {
     )
     .expect("fixture descriptor");
     CanonicalScalarProfile::try_new_verified(
+        ScalarProfileVersion::V1,
         PROFILE,
         UNICODE,
         NORMALIZATION,

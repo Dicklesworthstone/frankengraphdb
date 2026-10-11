@@ -42,7 +42,8 @@ fn point_payload_admission<E>(
         | CanonicalScalar::Bool(_)
         | CanonicalScalar::Int(_)
         | CanonicalScalar::Decimal(_)
-        | CanonicalScalar::Float(_) => [0, 0],
+        | CanonicalScalar::Float(_)
+        | CanonicalScalar::Date(_) => [0, 0],
     };
     for bytes in sizes {
         for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
