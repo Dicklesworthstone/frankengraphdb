@@ -269,6 +269,87 @@ fn a_refused_statement_stages_nothing() {
     });
 }
 
+/// Plain DELETE ... RETURN (openCypher Delete4, Delete6, Return2): paging
+/// never limits the deletions, a vertex keeping a live incident edge refuses
+/// the whole statement instead of cascading, a deleted element's property is
+/// the runtime DeletedElementRead refusal, and an undirected match counts
+/// both occurrences of the one edge it deletes.
+#[test]
+fn plain_delete_returns_rows_and_never_cascades() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut execute = |db: &mut Database<fgdb::MemVfs>, text: &str| {
+            txn.execute_graph_mutation_query_governed(db, cx, &prepare(text), policy())
+        };
+        // Edge 13 (w 7) goes; LIMIT 0 shapes only the rows.
+        let (stats, result) = execute(
+            &mut db,
+            "MATCH (:Item {p: 3})-[e:R]->() DELETE e RETURN 42 AS num LIMIT 0",
+        )
+        .unwrap();
+        assert!(result.value.is_empty());
+        assert_eq!((stats.target_vertices, stats.target_edges), (0, 1));
+        // Vertex 4 is now isolated, but its property is gone with it.
+        assert!(matches!(
+            execute(&mut db, "MATCH (n:Item {p: 4}) DELETE n RETURN n.p"),
+            Err(GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::DeletedElementRead { row: 0, binding: 0 }
+            )))
+        ));
+        let (_, result) = execute(
+            &mut db,
+            "MATCH (n:Item {p: 4}) DELETE n RETURN count(*) AS c",
+        )
+        .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(1)]]));
+        // Edge 11 still touches vertex 1: no cascade, nothing staged.
+        assert!(matches!(
+            execute(&mut db, "MATCH (n:Item {p: 1}) DELETE n RETURN n"),
+            Err(GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::IncidentRelationships
+            )))
+        ));
+        let (_, result) = execute(
+            &mut db,
+            "MATCH (a:Item {p: 1})-[e:R]-(b) DELETE e, a RETURN b.p AS b",
+        )
+        .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(2)]]));
+        // 2 -[12]-> 3 is matched in both directions: two rows, one edge.
+        let (stats, result) = execute(
+            &mut db,
+            "MATCH (a:Item)-[r:R]-(b:Item) DELETE r, a, b RETURN count(*) AS c",
+        )
+        .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(2)]]));
+        assert_eq!((stats.target_vertices, stats.target_edges), (2, 1));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert!(read(&db, cx, "MATCH (n) RETURN n.p AS p").is_empty());
+        assert!(read(&db, cx, "MATCH ()-[e]->() RETURN e.w AS w").is_empty());
+    });
+}
+
+/// DELETE and DETACH DELETE do not share a statement, and neither mixes
+/// with an update; both refusals precede any catalog callback.
+#[test]
+fn plain_and_detaching_deletes_do_not_mix() {
+    for text in [
+        "MATCH (a)-[e:R]->(b) DELETE e DETACH DELETE a RETURN b",
+        "MATCH (a) SET a.p = 1 DELETE a RETURN a",
+        "MATCH (a) DELETE a SET a.p = 1 RETURN a",
+    ] {
+        let mut calls = 0;
+        let refused = PreparedGraphMutationQueryText::prepare(text, R, |kind, name: &str| {
+            calls += 1;
+            symbols(kind, name)
+        });
+        assert!(refused.is_err(), "{text}");
+        assert_eq!(calls, 0, "{text}");
+    }
+}
+
 /// Reads whose post-statement value the statement cannot know are refused
 /// at preparation, before any catalog callback runs.
 #[test]

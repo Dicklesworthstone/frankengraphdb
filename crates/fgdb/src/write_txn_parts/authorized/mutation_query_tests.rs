@@ -104,6 +104,8 @@ fn projected_row_limit_and_scope_refusals_never_publish_effects() {
                 "MATCH (a:Visible) WHERE a.p = 10 DETACH DELETE a RETURN a",
                 false,
             ),
+            // A plain DELETE's scope rule precedes its incidence proof.
+            ("MATCH (a:Visible) WHERE a.p = 10 DELETE a RETURN a", false),
             (
                 "MATCH (a:Visible) WHERE a.p = 10 SET a.p = 99 RETURN 1 / 0",
                 false,
@@ -137,7 +139,7 @@ fn projected_row_limit_and_scope_refusals_never_publish_effects() {
                 .unwrap_err();
             if zero_rows {
                 assert_eq!(auth(error), Error::LimitExceeded(LimitDimension::Rows));
-            } else if text.contains("DETACH DELETE") {
+            } else if text.contains("DELETE") {
                 assert_eq!(auth(error), Error::ScopeDenied);
             }
             assert_eq!(
@@ -350,6 +352,91 @@ fn unrestricted_detach_returns_deleted_identity_after_atomic_cascade() {
         assert!(db.edges().unwrap().is_empty());
         assert!(db.vertex(VId(2)).unwrap().is_some());
         assert!(db.vertex(VId(3)).unwrap().is_some());
+    });
+}
+
+/// Plain DELETE ... RETURN under a capability takes the authorized DELETE
+/// completion: a vertex with a live incident edge refuses and publishes
+/// nothing, and a statement naming every incident edge deletes them all and
+/// counts one row per MATCH occurrence.
+#[test]
+fn plain_delete_returning_proves_incidence_and_counts_occurrences() {
+    lab(0xb957, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, false).await;
+        let authority = authority();
+        let token = authority
+            .issue_at(
+                &Grant {
+                    labels: Scope::All,
+                    relations: Scope::All,
+                    properties: Scope::All,
+                    ..grant()
+                },
+                NOW,
+            )
+            .unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let refused = db
+            .execute_graph_mutation_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &prepared("MATCH (a:Visible) WHERE a.p = 10 DELETE a RETURN a"),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                GraphMutationError::IncidentRelationships
+            ))
+        ));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+        // Two parallel edges 1->2: two occurrences, one deletion apiece.
+        let (stats, rows, completion) = db
+            .execute_graph_mutation_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &prepared(
+                    "MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e, a, b RETURN count(*) AS c",
+                ),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(rows.value[0].values(), &[int(2)]);
+        assert_eq!((stats.target_vertices, stats.target_edges), (2, 2));
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
     });
 }
 

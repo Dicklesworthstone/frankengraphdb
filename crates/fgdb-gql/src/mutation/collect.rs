@@ -35,7 +35,8 @@ enum Value<'a> {
     /// Canonical NULL is stored, never a property-removal intention.
     Computed(CanonicalScalar),
     Label(bool),
-    Delete,
+    /// DETACH DELETE when true. Preparation keeps one mode per statement.
+    Delete(bool),
 }
 struct Proposal<'a> {
     value: Value<'a>,
@@ -112,7 +113,7 @@ fn equal<E>(
             Ok(Some(computed) == *scalar)
         }
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
-        (Value::Delete, Value::Delete) => Ok(true),
+        (Value::Delete(left), Value::Delete(right)) => Ok(left == right),
         _ => Ok(false),
     }
 }
@@ -509,7 +510,8 @@ pub(super) fn execute<E, C>(
                 GraphMutationAction::SetLabel { label, present, .. } => {
                     (Field::Label(*label), Value::Label(*present))
                 }
-                GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete),
+                GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete(true)),
+                GraphMutationAction::Delete { .. } => (Field::Delete, Value::Delete(false)),
             };
             if let Some(previous) = proposals.get(&(target, field)) {
                 if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
@@ -587,8 +589,14 @@ pub(super) fn execute<E, C>(
                     present,
                 }
             }
-            (ElementId::Vertex(vertex), Field::Delete, Value::Delete) => {
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete(true)) => {
                 GraphMutationIntent::DetachDelete { vertex }
+            }
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete(false)) => {
+                GraphMutationIntent::Delete { vertex }
+            }
+            (ElementId::Edge(edge), Field::Delete, Value::Delete(false)) => {
+                GraphMutationIntent::DeleteEdge { edge }
             }
             _ => unreachable!("field and proposal are constructed together"),
         };

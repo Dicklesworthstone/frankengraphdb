@@ -64,8 +64,16 @@ pub enum GraphMutationAction {
         present: bool,
     },
     /// Explicit cascade request, subject to the storage engine's write rules.
-    /// A non-detaching DELETE is intentionally not represented by this variant.
+    /// A non-detaching DELETE is never represented by this variant.
     DetachDelete {
+        target: usize,
+    },
+    /// Non-detaching DELETE of a vertex or relationship. The write host must
+    /// prove that no live relationship stays incident to a deleted vertex
+    /// once this statement's own relationship deletions are applied; it never
+    /// turns into a cascade. Plain and detaching deletes do not mix in one
+    /// statement.
+    Delete {
         target: usize,
     },
 }
@@ -75,8 +83,13 @@ impl GraphMutationAction {
             Self::SetProperty { target, .. }
             | Self::RemoveProperty { target, .. }
             | Self::SetLabel { target, .. }
-            | Self::DetachDelete { target } => *target,
+            | Self::DetachDelete { target }
+            | Self::Delete { target } => *target,
         }
+    }
+
+    const fn deletes(&self) -> bool {
+        matches!(self, Self::DetachDelete { .. } | Self::Delete { .. })
     }
 }
 /// One private column of a mutation RETURN input row (`SET ... RETURN`).
@@ -138,6 +151,9 @@ pub enum GraphMutationBuildError {
         kind: Option<crate::GraphSetProjectionError>,
     },
     MixedDeletionAndUpdates,
+    /// DELETE and DETACH DELETE in one statement: a cascade would have to
+    /// be part of the plain delete's incidence proof.
+    MixedDeleteModes,
 }
 impl core::fmt::Display for GraphMutationBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -191,6 +207,9 @@ pub enum GraphMutationError<E> {
         row: usize,
         binding: usize,
     },
+    /// A plain DELETE target vertex keeps at least one live incident
+    /// relationship in the exact transaction overlay. IDs remain redacted.
+    IncidentRelationships,
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -236,6 +255,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
                 f,
                 "mutation RETURN row {row} binding {binding}: unmapped property"
             ),
+            Self::IncidentRelationships => {
+                f.write_str("DELETE target keeps an incident relationship; use DETACH DELETE")
+            }
         }
     }
 }
@@ -296,6 +318,14 @@ pub enum GraphMutationIntent {
     },
     DetachDelete {
         vertex: VId,
+    },
+    /// Non-detaching vertex deletion. The host proves the vertex is isolated
+    /// once this statement's `DeleteEdge` intents apply.
+    Delete {
+        vertex: VId,
+    },
+    DeleteEdge {
+        edge: EId,
     },
 }
 impl core::fmt::Debug for GraphMutationIntent {
@@ -378,12 +408,14 @@ impl PreparedGraphMutation {
                 .map(GraphSetColumnType::from)
                 .collect(),
         };
-        let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
+        let deleting = actions[0].deletes();
+        let detaching = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {
             let target = action.target();
             let valid_target = match action {
                 GraphMutationAction::SetProperty { .. }
-                | GraphMutationAction::RemoveProperty { .. } => matches!(
+                | GraphMutationAction::RemoveProperty { .. }
+                | GraphMutationAction::Delete { .. } => matches!(
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
@@ -424,8 +456,11 @@ impl PreparedGraphMutation {
                     }
                 }
             }
-            if deleting != matches!(action, GraphMutationAction::DetachDelete { .. }) {
+            if deleting != action.deletes() {
                 return Err(GraphMutationBuildError::MixedDeletionAndUpdates);
+            }
+            if deleting && detaching != matches!(action, GraphMutationAction::DetachDelete { .. }) {
+                return Err(GraphMutationBuildError::MixedDeleteModes);
             }
         }
         Ok(Self {
@@ -520,6 +555,7 @@ impl PreparedGraphMutation {
                     bytes.push(u8::from(*present));
                 }
                 GraphMutationAction::DetachDelete { .. } => bytes.push(3),
+                GraphMutationAction::Delete { .. } => bytes.push(4),
             }
         }
         if let Some(relation) = &self.input_relation {

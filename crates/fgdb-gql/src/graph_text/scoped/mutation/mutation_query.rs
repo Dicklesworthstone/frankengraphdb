@@ -787,8 +787,8 @@ pub(super) fn statement_body<'s>(
 
 impl PreparedGraphMutationQueryText {
     /// Classify write text with native token framing: a MATCH-led statement
-    /// with a top-level `SET x.`/`SET x:`/`SET x +=`, `REMOVE x`, or
-    /// `DETACH DELETE x` clause followed by a top-level RETURN. A CREATE,
+    /// with a top-level `SET x.`/`SET x:`/`SET x +=`, `REMOVE x`, `DELETE x`
+    /// or `DETACH DELETE x` clause followed by a top-level RETURN. A CREATE,
     /// INSERT or MERGE clause, or a second statement, is not this shape.
     /// Quoted values, property keys and aliases never become clause words.
     /// This validates nothing and resolves no symbol; prepare owns that.
@@ -840,6 +840,7 @@ impl PreparedGraphMutationQueryText {
                             && matches!(after, TokenKind::Punct(b'.' | b':' | b'+'))
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
+                            || clause("DELETE") && target
                         {
                             mutating = true;
                         }
@@ -916,7 +917,11 @@ mod framing_tests {
             ("MATCH (n) SET n += {p: 1} RETURN n", true),
             ("MATCH (n) REMOVE n.p RETURN n", true),
             ("MATCH (n) DETACH DELETE n RETURN n", true),
+            ("MATCH (n) DELETE n RETURN 42 AS num", true),
+            ("MATCH ()-[r]->() DELETE r RETURN type(r)", true),
             ("OPTIONAL MATCH (n) SET n.p = 1 RETURN n", true),
+            ("MATCH (n) DELETE n", false),
+            ("MATCH (n) WHERE n.delete = 1 RETURN n.p AS delete", false),
             ("MATCH (n) SET n.p = 1", false),
             ("MATCH (n) RETURN n", false),
             ("MATCH (set) WITH set RETURN set", false),

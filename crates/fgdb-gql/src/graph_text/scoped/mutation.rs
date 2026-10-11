@@ -50,7 +50,9 @@ enum ActionKind<'a> {
         label: Name<'a>,
         present: bool,
     },
-    Delete,
+    Delete {
+        detach: bool,
+    },
 }
 struct Action<'a> {
     target: usize,
@@ -230,30 +232,39 @@ impl<'a> Parser<'a> {
         let mut deletion_mode = None;
         loop {
             let at = self.current.at;
-            let (setting, deleting) = if self.take_word("SET")? {
-                (true, false)
+            // (setting, deleting, detach)
+            let (setting, deleting, detach) = if self.take_word("SET")? {
+                (true, false, false)
             } else if self.take_word("REMOVE")? {
-                (false, false)
+                (false, false, false)
             } else if self.take_word("DETACH")? {
                 self.word("DELETE")?;
-                (false, true)
+                (false, true, true)
+            } else if self.take_word("DELETE")? {
+                (false, true, false)
             } else {
                 if actions.is_empty() {
                     return Err(error(
                         at,
-                        GraphPatternTextErrorKind::Expected("SET, REMOVE or DETACH DELETE"),
+                        GraphPatternTextErrorKind::Expected("SET, REMOVE, DELETE or DETACH DELETE"),
                     )
                     .into());
                 }
                 break;
             };
-            if deletion_mode.is_some_and(|previous| previous != deleting) {
-                return Err(build_error(
-                    at,
-                    GraphMutationBuildError::MixedDeletionAndUpdates,
-                ));
+            match deletion_mode {
+                Some((previous, _)) if previous != deleting => {
+                    return Err(build_error(
+                        at,
+                        GraphMutationBuildError::MixedDeletionAndUpdates,
+                    ));
+                }
+                Some((true, previous)) if previous != detach => {
+                    return Err(build_error(at, GraphMutationBuildError::MixedDeleteModes));
+                }
+                _ => {}
             }
-            deletion_mode = Some(deleting);
+            deletion_mode = Some((deleting, detach));
             loop {
                 self.mutation_action_capacity(actions.len())?;
                 let variable = if deleting {
@@ -270,7 +281,7 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 let kind = if deleting {
-                    ActionKind::Delete
+                    ActionKind::Delete { detach }
                 } else if self.take(b':')? {
                     if !self
                         .syntax
@@ -381,10 +392,12 @@ impl<'a> Parser<'a> {
 }
 
 impl PreparedGraphMutationText {
-    /// Prepare simultaneous SET/REMOVE or explicit DETACH DELETE after the
-    /// existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores canonical NULL;
-    /// REMOVE unsets a property. Bare DELETE, CREATE, RETURN and mixed deletion/
-    /// update statements are not silently reinterpreted.
+    /// Prepare simultaneous SET/REMOVE, plain DELETE or explicit DETACH DELETE
+    /// after the existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores
+    /// canonical NULL; REMOVE unsets a property. A plain DELETE stays
+    /// non-detaching: the write host proves its vertices isolated. CREATE,
+    /// RETURN and mixed deletion/update or DELETE/DETACH DELETE statements are
+    /// not silently reinterpreted.
     ///
     /// `SET n += {p: expression, q: $value}` updates the named vertex or edge
     /// properties through the same simultaneous assignments as `SET n.p = ...`.
@@ -438,9 +451,12 @@ impl PreparedGraphMutationText {
                 labels_changed: parsed_actions
                     .iter()
                     .any(|action| !matches!(action.kind, ActionKind::Property { .. })),
+                // Only DETACH DELETE can retire an edge the statement does
+                // not name. A plain DELETE's edges are its own targets, so
+                // reading one is the runtime DeletedElementRead refusal.
                 deleting: parsed_actions
                     .iter()
-                    .any(|action| matches!(action.kind, ActionKind::Delete)),
+                    .any(|action| matches!(action.kind, ActionKind::Delete { detach: true })),
             };
             Some(parser.mutation_return(&mut projections, scope)?)
         } else {
@@ -489,8 +505,11 @@ impl PreparedGraphMutationText {
         for action in parsed_actions {
             let target = action.target;
             actions.push(match action.kind {
-                ActionKind::Delete => {
+                ActionKind::Delete { detach: true } => {
                     MutationActionTemplate::Bound(GraphMutationAction::DetachDelete { target })
+                }
+                ActionKind::Delete { detach: false } => {
+                    MutationActionTemplate::Bound(GraphMutationAction::Delete { target })
                 }
                 ActionKind::Label { label, present } => {
                     let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {

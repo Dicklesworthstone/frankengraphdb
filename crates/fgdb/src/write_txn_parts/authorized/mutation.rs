@@ -182,6 +182,8 @@ impl<V: Vfs + Clone> Database<V> {
                     query_cx,
                     query.mutation(),
                     mutation,
+                    policy,
+                    verified.predicates(),
                     &mut execution,
                     false,
                 )
@@ -387,6 +389,8 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         cx,
         mutation,
         proposal,
+        policy,
+        scope,
         execution,
         returning,
     )
@@ -401,10 +405,71 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     query_cx: &QueryCx,
     mutation: &PreparedGraphMutation,
     proposal: fgdb_gql::GraphMutationBatch,
+    policy: GraphMutationPolicy,
+    scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
-    let stats = proposal.stats();
+    let mut stats = proposal.stats();
+    if proposal.intents().iter().any(|intent| {
+        matches!(
+            intent,
+            GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
+        )
+    }) {
+        // A plain DELETE statement has no other action: the same scope
+        // rules, incidence proof and staging order as authorized DELETE.
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for intent in proposal.into_intents() {
+            match intent {
+                GraphMutationIntent::Delete { vertex } => vertices.push(vertex),
+                GraphMutationIntent::DeleteEdge { edge } => edges.push(edge),
+                _ => {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::InvalidSourceStatistics,
+                    ));
+                }
+            }
+        }
+        vertices.sort_unstable();
+        edges.sort_unstable();
+        let deleted = fgdb_gql::GraphDeleteStats {
+            selection: stats.selection,
+            evaluator: stats.evaluator,
+            target_vertices: stats.target_vertices,
+            target_edges: stats.target_edges,
+        };
+        let (deleted, vertices, edges) = super::deletion::complete(
+            transaction,
+            database,
+            query_cx,
+            mutation.relation(),
+            deleted,
+            (vertices, edges),
+            fgdb_gql::GraphDeletePolicy::new(policy.query, policy.max_effects),
+            scope,
+            execution,
+            returning,
+        )
+        .map_err(|error| {
+            error.map_source(|error| match error {
+                fgdb_gql::GraphDeleteError::Source(error) => GraphMutationError::Source(error),
+                fgdb_gql::GraphDeleteError::IncidentRelationships => {
+                    GraphMutationError::IncidentRelationships
+                }
+                // The completion only counts; it never re-selects.
+                fgdb_gql::GraphDeleteError::InvalidSourceStatistics
+                | fgdb_gql::GraphDeleteError::InputSchema { .. }
+                | fgdb_gql::GraphDeleteError::TargetLimit { .. } => {
+                    GraphMutationError::InvalidSourceStatistics
+                }
+            })
+        })?;
+        stats.selection = deleted.selection;
+        stats.evaluator = deleted.evaluator;
+        return Ok((stats, vertices, edges));
+    }
     let mut targets = BTreeSet::new();
     for intent in proposal.into_intents() {
         query_cx
@@ -433,6 +498,9 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
             GraphMutationIntent::DetachDelete { vertex } => {
                 batch.delete_vertex(vertex);
                 ElementId::Vertex(vertex)
+            }
+            GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. } => {
+                unreachable!("plain DELETE statements complete above")
             }
         };
         if returning {

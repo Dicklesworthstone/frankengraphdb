@@ -104,7 +104,16 @@ fn malformed_delete_refuses_before_catalog_and_detach_keeps_its_old_entrypoint()
         assert_eq!(calls.get(), 0, "malformed DELETE reached catalog: {text}");
     }
     assert!(PreparedGraphMutationText::prepare("MATCH (a) DETACH DELETE a", R, symbols).is_ok());
-    assert!(PreparedGraphMutationText::prepare("MATCH (a) DELETE a", R, symbols).is_err());
+    // The mutation compiler keeps a plain DELETE non-detaching: its action is
+    // Delete, never the DetachDelete cascade.
+    let plain = PreparedGraphMutationText::prepare("MATCH (a) DELETE a", R, symbols)
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap();
+    assert!(matches!(
+        plain.actions(),
+        [fgdb_gql::GraphMutationAction::Delete { target: 0 }]
+    ));
 }
 
 #[test]

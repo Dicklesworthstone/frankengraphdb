@@ -2,10 +2,10 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationBatch,
-    GraphMutationBuildError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
-    GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationAction,
+    GraphMutationBatch, GraphMutationBuildError, GraphMutationError, GraphMutationIntent,
+    GraphMutationPolicy, GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol,
+    GraphSymbolKind, MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText,
 };
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
@@ -534,6 +534,40 @@ fn bounded_walk_targets_keep_occurrences_but_each_delete_is_proposed_once() {
     );
 }
 
+/// A plain DELETE is its own non-detaching action, never DETACH DELETE: one
+/// intent per distinct vertex however many occurrences name it. The write
+/// host, not this reducer, proves that no incident edge survives.
+#[test]
+fn plain_delete_proposes_one_non_detaching_intent_per_element() {
+    let plan = prepare("MATCH (a)-[:R]->(b) DELETE a, b");
+    assert!(
+        plan.actions()
+            .iter()
+            .all(|action| matches!(action, GraphMutationAction::Delete { .. }))
+    );
+    let edges = [(VId(1), R, VId(2)), (VId(1), R, VId(3))];
+    let result = run(&plan, &[VId(1), VId(2), VId(3)], &edges, &props(), policy()).unwrap();
+    assert_eq!(
+        result.intents(),
+        &[
+            GraphMutationIntent::Delete { vertex: VId(1) },
+            GraphMutationIntent::Delete { vertex: VId(2) },
+            GraphMutationIntent::Delete { vertex: VId(3) },
+        ]
+    );
+    assert_eq!(result.stats().target_vertices, 3);
+    let refused = PreparedGraphMutationText::prepare(
+        "MATCH (a)-[e:R]->(b) DELETE e DETACH DELETE a",
+        R,
+        symbols,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refused.kind,
+        GraphMutationTextErrorKind::Build(GraphMutationBuildError::MixedDeleteModes)
+    ));
+}
+
 #[test]
 fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses() {
     let text = "MATCH (a) WHERE a.p >= $n SET a.q=$n,a.text=$t,a:Updated REMOVE a.old";
@@ -605,9 +639,10 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
 #[test]
 fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks() {
     for text in [
-        "MATCH (a) DELETE a",
         "MATCH (a) SET a.p=1 DETACH DELETE a",
         "MATCH (a) DETACH DELETE a SET a.p=1",
+        "MATCH (a) SET a.p=1 DELETE a",
+        "MATCH (a)-[e:R]->(b) DELETE e DETACH DELETE a",
         "MATCH (a) SET a.p=1 RETURN a",
         "MATCH (a) SET a.p=a.p+*1",
         "MATCH (a) SET a.p=1,",
