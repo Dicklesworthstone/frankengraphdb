@@ -2201,6 +2201,8 @@ fn temporal_arithmetic_follows_the_tck() {
 /// operand read through a let slot.
 #[test]
 fn reverse_and_split_over_lists_and_text() {
+    use fgdb_gql::algebra::GraphValue;
+
     let value = |expression: &str| {
         execute(
             &prepare(&format!("MATCH (n) RETURN {expression} AS value")),
