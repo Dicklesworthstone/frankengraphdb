@@ -199,7 +199,8 @@ impl core::fmt::Display for GqlBudgetExceeded {
 impl core::error::Error for GqlBudgetExceeded {}
 
 /// Exact deterministic counters returned by successful budgeted execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The default is zero of each, as for `GlaExecutionStats`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GqlExecutionStats {
     pub snapshot_records: u64,
     pub result_rows: u64,
