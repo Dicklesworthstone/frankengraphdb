@@ -707,7 +707,8 @@ impl Properties {
                 }
                 // Composite projections use the enum's own canonical
                 // transcript; the discriminant byte keeps wire framing.
-                GraphSetValue::List(_)
+                GraphSetValue::TypedNull(_)
+                | GraphSetValue::List(_)
                 | GraphSetValue::Index { .. }
                 | GraphSetValue::Size(_)
                 | GraphSetValue::In { .. }

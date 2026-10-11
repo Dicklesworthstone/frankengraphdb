@@ -269,9 +269,11 @@ impl<'a> Parser<'a> {
                     Operand::Number(Number::Literal(value)) => {
                         ReadValueTemplate::Literal(scalar(value, at)?)
                     }
-                    Operand::Number(Number::Parameter(index)) => {
-                        ReadValueTemplate::Parameter { index, at }
-                    }
+                    Operand::Number(Number::Parameter(index)) => ReadValueTemplate::parameter(
+                        index,
+                        at,
+                        self.syntax.parameters[index].parameter_type,
+                    ),
                     Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
                 }
             };
@@ -505,7 +507,7 @@ fn bind_fields(
         let value = match value {
             ReadValueTemplate::Column(column) => GraphMutationValue::Column(*column),
             ReadValueTemplate::Literal(value) => GraphMutationValue::Literal(value.clone()),
-            ReadValueTemplate::Parameter { index, at } => {
+            ReadValueTemplate::Parameter { index, at, .. } => {
                 let value = match values {
                     Some(values) => scalar(values[*index].clone(), *at)?,
                     None => GqlScalarParameter::new(CanonicalScalar::Null)

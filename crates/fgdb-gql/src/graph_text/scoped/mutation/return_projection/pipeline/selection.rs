@@ -32,7 +32,7 @@ fn scalar_program(
         ReadValueTemplate::Literal(value) => vec![MutationIntegerTemplateOp::Bound(
             GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
         )],
-        ReadValueTemplate::Parameter { index, at } => {
+        ReadValueTemplate::Parameter { index, at, .. } => {
             vec![MutationIntegerTemplateOp::Parameter { index, at }]
         }
         ReadValueTemplate::Integer { program, .. } => program,
@@ -453,7 +453,7 @@ impl<'a> Parser<'a> {
         Ok(match value {
             ReadValueTemplate::Column(column) => ReadFilterOperand::Column(column),
             ReadValueTemplate::Literal(value) => ReadFilterOperand::Literal(value),
-            ReadValueTemplate::Parameter { index, at }
+            ReadValueTemplate::Parameter { index, at, .. }
                 if !matches!(
                     self.syntax.parameters[index].parameter_type,
                     GqlParameterType::List | GqlParameterType::Map

@@ -93,6 +93,9 @@ pub(crate) enum ReadValueTemplate {
     Parameter {
         index: usize,
         at: usize,
+        /// Captured before binding replaces an argument with its value. All
+        /// later scalar-kind refinements preserve this static value domain.
+        null_type: GraphSetColumnType,
     },
     Integer {
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
@@ -145,6 +148,14 @@ pub(crate) enum ReadValueTemplate {
     Keys(Box<ReadValueTemplate>),
 }
 impl ReadValueTemplate {
+    pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
+        Self::Parameter {
+            index,
+            at,
+            null_type: GraphSetColumnType::parameter_domain(kind),
+        }
+    }
+
     /// Whether this value binds a list-comprehension element anywhere.
     pub(crate) fn binds_elements(&self) -> bool {
         match self {
@@ -200,15 +211,8 @@ impl ReadValueTemplate {
             Self::Keys(_) => GraphSetColumnType::List,
             Self::Local(_) => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
-            Self::Parameter { index, .. }
-                if parameters[*index].parameter_type == GqlParameterType::List =>
-            {
-                GraphSetColumnType::List
-            }
-            Self::Parameter { index, .. }
-                if parameters[*index].parameter_type == GqlParameterType::Map =>
-            {
-                GraphSetColumnType::Any
+            Self::Parameter { index, .. } => {
+                GraphSetColumnType::parameter_domain(parameters[*index].parameter_type)
             }
             _ => GraphSetColumnType::Scalar,
         }
@@ -639,16 +643,7 @@ fn parameter_type_tag(kind: GqlParameterType) -> u8 {
 }
 
 fn set_column_type_tag(kind: GraphSetColumnType) -> u8 {
-    match kind {
-        GraphSetColumnType::Vertex => 0,
-        GraphSetColumnType::Scalar => 1,
-        GraphSetColumnType::Path => 2,
-        GraphSetColumnType::Vertices => 3,
-        GraphSetColumnType::Edges => 4,
-        GraphSetColumnType::Edge => 5,
-        GraphSetColumnType::List => 6,
-        GraphSetColumnType::Any => 7,
-    }
+    kind.tag()
 }
 #[derive(Clone)]
 pub(crate) enum ReadFilterOperand {
@@ -832,16 +827,18 @@ impl Node {
             count: None,
         })
     }
-    fn validate(&mut self, schemas: &[Schema]) -> Result<usize, GraphSetTextError> {
-        let first = match &mut self.kind {
+    fn validate(&mut self, schemas: &[Schema]) -> Result<Schema, GraphSetTextError> {
+        // Every subtree returns its derived schema. A leftmost leaf alone is
+        // insufficient once a descendant set widens a concrete column to Any.
+        let mut schema = match &mut self.kind {
             NodeKind::Leaf(at) => {
                 self.depth = schemas[*at].depth;
-                *at
+                schemas[*at].clone()
             }
             NodeKind::Scope(input) => {
-                let first = input.validate(schemas)?;
+                let schema = input.validate(schemas)?;
                 self.depth = input.depth + 1;
-                first
+                schema
             }
             NodeKind::Binary {
                 operation,
@@ -849,9 +846,8 @@ impl Node {
                 right,
                 ..
             } => {
-                let l = left.validate(schemas)?;
-                let r = right.validate(schemas)?;
-                let (left_schema, right_schema) = (&schemas[l], &schemas[r]);
+                let mut left_schema = left.validate(schemas)?;
+                let right_schema = right.validate(schemas)?;
                 let alignment = (*operation == GraphSetOperation::Union)
                     .then(|| union_column_order(&left_schema.columns, &right_schema.columns))
                     .transpose()
@@ -869,21 +865,21 @@ impl Node {
                         }),
                     ));
                 }
-                for (column, &left) in left_schema.types.iter().enumerate() {
+                for (column, left) in left_schema.types.iter_mut().enumerate() {
                     let right = right_schema.types
                         [alignment.as_ref().map_or(column, |columns| columns[column])];
-                    if left != right {
-                        return Err(fail(
+                    *left = left.common_set_domain(right).ok_or_else(|| {
+                        fail(
                             self.at,
                             GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
                                 column,
-                                left,
+                                left: *left,
                                 right,
                             }),
-                        ));
-                    }
+                        )
+                    })?;
                 }
-                l
+                left_schema
             }
         };
         if self.depth > MAX_GRAPH_SET_DEPTH {
@@ -895,7 +891,7 @@ impl Node {
                 }),
             ));
         }
-        let schema = &schemas[first];
+        schema.depth = self.depth;
         let mut used = BTreeSet::new();
         for key in &mut self.order {
             let column = match &key.variable {
@@ -932,7 +928,7 @@ impl Node {
             }
             key.order.column = column;
         }
-        Ok(first)
+        Ok(schema)
     }
     fn bind(
         &self,
@@ -993,6 +989,7 @@ impl Node {
         ))
     }
 }
+#[derive(Clone)]
 struct Schema {
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
@@ -1680,7 +1677,7 @@ impl PreparedGraphSetText {
             }
             pending.push(input);
         }
-        let first = root.validate(&schemas)?;
+        let schema = root.validate(&schemas)?;
         uses.sort_by_key(|(offset, _)| *offset);
         let mut parameters: Vec<GqlParameterSpec> = Vec::new();
         let mut parameter_offsets = Vec::new();
@@ -1733,8 +1730,8 @@ impl PreparedGraphSetText {
             statement: statement.to_owned(),
             root,
             inputs,
-            columns: schemas[first].columns.clone(),
-            types: schemas[first].types.clone(),
+            columns: schema.columns,
+            types: schema.types,
             parameters,
             parameter_offsets,
         })

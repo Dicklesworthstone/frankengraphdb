@@ -1,14 +1,14 @@
 //! Compound text must compile to the same typed set engine, not an interpreter.
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_gql::algebra::{GraphValueOrder, GraphValueRow};
+use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow};
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
-    GraphSetBuildError, GraphSetOperation as Op, GraphSetQuantifier as Quant,
+    GraphSetBuildError, GraphSetColumnType, GraphSetOperation as Op, GraphSetQuantifier as Quant,
     GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_DEPTH,
-    MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, PreparedGraphSet, PreparedGraphSetText,
-    PreparedGraphText,
+    MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, PreparedGraphAggregateText, PreparedGraphSet,
+    PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -198,6 +198,495 @@ fn union_names_bind_corresponding_columns_before_native_set_arithmetic() {
     assert_eq!(bound.canonical_bytes(), expected.canonical_bytes());
     assert_eq!(run(&bound), run(&expected));
     assert_eq!(run(&bound).len(), 6);
+}
+
+#[test]
+fn open_text_operands_compose_with_literals_and_graph_properties() {
+    use CanonicalScalar::{Int, Null};
+    for (text, mut expected) in [
+        (
+            "RETURN 1 AS value UNION ALL UNWIND [2,NULL,1] AS value RETURN value",
+            vec![Null, Int(1), Int(1), Int(2)],
+        ),
+        (
+            "UNWIND [2,NULL,1] AS value RETURN value UNION ALL RETURN 1 AS value",
+            vec![Null, Int(1), Int(1), Int(2)],
+        ),
+        (
+            "RETURN 1 AS value UNION DISTINCT UNWIND [1.0,NULL,1] AS value RETURN value",
+            vec![Null, Int(1), CanonicalScalar::Float(CanonicalF64::new(1.0))],
+        ),
+        (
+            "RETURN 1 AS value INTERSECT DISTINCT UNWIND [1.0,NULL,1] AS value RETURN value",
+            vec![Int(1)],
+        ),
+        (
+            "UNWIND [1.0,NULL,1] AS value RETURN value INTERSECT ALL RETURN 1 AS value",
+            vec![Int(1)],
+        ),
+        (
+            "RETURN NULL AS value INTERSECT ALL UNWIND [NULL,NULL] AS value RETURN value",
+            vec![Null],
+        ),
+        (
+            "RETURN 1 AS value EXCEPT DISTINCT UNWIND [1,1] AS value RETURN value",
+            vec![],
+        ),
+        (
+            "UNWIND [1,1,2] AS value RETURN value EXCEPT ALL RETURN 1 AS value",
+            vec![Int(1), Int(2)],
+        ),
+        (
+            "MATCH (a:A) RETURN a.p AS value UNION DISTINCT UNWIND [1,2,NULL] AS value RETURN value",
+            vec![Null, Int(1), Int(2)],
+        ),
+        (
+            "MATCH (a:A) RETURN a.p AS value INTERSECT ALL UNWIND [1,NULL,NULL,3] AS value RETURN value",
+            vec![Null, Null, Int(1)],
+        ),
+        (
+            "UNWIND [1,NULL,NULL,3] AS value RETURN value INTERSECT ALL MATCH (a:A) RETURN a.p AS value",
+            vec![Null, Null, Int(1)],
+        ),
+    ] {
+        let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(
+            template.column_types(),
+            &[GraphSetColumnType::Any],
+            "{text}"
+        );
+        let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+        assert_eq!(bound.column_types(), template.column_types(), "{text}");
+        let actual: Vec<_> = run(&bound)
+            .iter()
+            .map(|row| row.get(0).unwrap().as_scalar().unwrap().clone())
+            .collect();
+        expected.sort();
+        assert_eq!(actual, expected, "{text}");
+    }
+}
+
+#[test]
+fn every_nested_set_subtree_propagates_its_derived_schema() {
+    let inner_text = "RETURN 1 AS value UNION ALL UNWIND [{n:2}] AS value RETURN value";
+    let inner_template = PreparedGraphSetText::prepare(inner_text, symbols).unwrap();
+    assert_eq!(inner_template.column_types(), &[GraphSetColumnType::Any]);
+    let inner = inner_template
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(inner.column_types(), inner_template.column_types());
+    let list_text = "RETURN [3] AS value";
+    let list = query(list_text);
+    let int_value = GraphValue::Scalar(CanonicalScalar::Int(1));
+    let map_value = GraphValue::map(vec![(
+        "n".into(),
+        GraphValue::Scalar(CanonicalScalar::Int(2)),
+    )])
+    .unwrap();
+    let list_value =
+        GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(3))].into_boxed_slice());
+    for (name, operation, mut expected) in [
+        (
+            "UNION ALL",
+            Op::Union,
+            vec![int_value.clone(), map_value.clone(), list_value.clone()],
+        ),
+        ("INTERSECT ALL", Op::Intersect, vec![]),
+        ("EXCEPT ALL", Op::Except, vec![int_value, map_value]),
+    ] {
+        let text = format!("({inner_text}) {name} {list_text}");
+        let template = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+        let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+        assert_eq!(template.column_types(), &[GraphSetColumnType::Any]);
+        assert_eq!(bound.column_types(), template.column_types());
+        let typed = inner
+            .clone()
+            .nested()
+            .unwrap()
+            .combine(operation, Quant::All, list.clone())
+            .unwrap();
+        assert_eq!(bound.canonical_bytes(), typed.canonical_bytes());
+        let mut actual: Vec<_> = run(&bound)
+            .iter()
+            .map(|row| row.get(0).unwrap().clone())
+            .collect();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{text}");
+    }
+    let text = format!("{list_text} UNION ALL (({inner_text}))");
+    let template = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+    let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(template.column_types(), &[GraphSetColumnType::Any]);
+    assert_eq!(bound.column_types(), template.column_types());
+    let typed = list
+        .combine(
+            Op::Union,
+            Quant::All,
+            inner.nested().unwrap().nested().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(bound.canonical_bytes(), typed.canonical_bytes());
+    assert_eq!(run(&bound).len(), 3);
+}
+
+#[test]
+fn union_unifies_only_corresponding_columns_after_name_permutation() {
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let list = |value| GraphValue::List(vec![int(value)].into_boxed_slice());
+    for (text, mut expected) in [
+        (
+            "RETURN 1 AS a,[2] AS b UNION ALL UNWIND [3] AS x RETURN [4] AS b,x AS a",
+            vec![vec![int(1), list(2)], vec![int(3), list(4)]],
+        ),
+        (
+            "RETURN 1 AS a,[2] AS b UNION ALL (RETURN [4] AS b,3 AS a UNION ALL UNWIND [5] AS x RETURN [6] AS b,x AS a)",
+            vec![
+                vec![int(1), list(2)],
+                vec![int(3), list(4)],
+                vec![int(5), list(6)],
+            ],
+        ),
+    ] {
+        let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(template.columns(), &["a", "b"]);
+        assert_eq!(
+            template.column_types(),
+            &[GraphSetColumnType::Any, GraphSetColumnType::List]
+        );
+        let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+        assert_eq!(bound.column_types(), template.column_types());
+        let mut actual: Vec<_> = run(&bound)
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{text}");
+    }
+    let text = "RETURN 1 AS a,[2] AS b UNION ALL UNWIND [3] AS x RETURN 4 AS b,x AS a LIMIT 0";
+    let error = PreparedGraphSetText::prepare(text, |_, _| {
+        panic!("schema refusal must precede catalog access")
+    })
+    .unwrap_err();
+    assert_eq!(error.offset, text.find("UNION").unwrap());
+    assert_eq!(
+        error.kind,
+        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
+            column: 1,
+            left: GraphSetColumnType::List,
+            right: GraphSetColumnType::Scalar,
+        })
+    );
+}
+
+#[test]
+fn text_keeps_concrete_domain_refusals_before_catalog_access() {
+    for (left, right, left_type, right_type) in [
+        (
+            "MATCH (n:PrivateLabel) RETURN n AS value",
+            "RETURN 1 AS value",
+            GraphSetColumnType::Vertex,
+            GraphSetColumnType::Scalar,
+        ),
+        (
+            "RETURN [1] AS value",
+            "RETURN 1 AS value",
+            GraphSetColumnType::List,
+            GraphSetColumnType::Scalar,
+        ),
+        (
+            "MATCH (n:PrivateLabel) RETURN n AS value",
+            "RETURN NULL AS value",
+            GraphSetColumnType::Vertex,
+            GraphSetColumnType::Scalar,
+        ),
+        (
+            "RETURN [1] AS value",
+            "RETURN NULL AS value",
+            GraphSetColumnType::List,
+            GraphSetColumnType::Scalar,
+        ),
+    ] {
+        for operation in ["UNION", "INTERSECT", "EXCEPT"] {
+            for quantifier in ["ALL", "DISTINCT"] {
+                let text = format!("{left} {operation} {quantifier} {right} LIMIT 0");
+                let error = PreparedGraphSetText::prepare(&text, |_, _| {
+                    panic!("incompatible domains must refuse before resolving symbols")
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error.kind,
+                    GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
+                        column: 0,
+                        left: left_type,
+                        right: right_type,
+                    }),
+                    "{text}"
+                );
+                assert_eq!(error.offset, text.find(operation).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn nullable_collection_parameters_preserve_declared_domains_and_frozen_bindings() {
+    let declarations = [
+        ("items", GqlParameterType::List),
+        ("payload", GqlParameterType::Map),
+    ];
+    let texts = [
+        "RETURN $payload AS value UNION ALL RETURN $items AS value",
+        "RETURN $payload AS a,$items AS b UNION ALL UNWIND [3] AS x RETURN $items AS b,x AS a",
+        "RETURN $items AS items,$payload AS payload,$items[0] AS first,[x IN $items | x] AS copied,size($items) AS size,$payload.field AS field,keys($payload) AS keys",
+    ];
+    let templates: Vec<_> = texts
+        .iter()
+        .map(|text| {
+            PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, symbols)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(templates[0].column_types(), &[GraphSetColumnType::Any]);
+    assert_eq!(
+        templates[1].column_types(),
+        &[GraphSetColumnType::Any, GraphSetColumnType::List]
+    );
+    assert_eq!(
+        templates[2].column_types(),
+        &[
+            GraphSetColumnType::List,
+            GraphSetColumnType::Any,
+            GraphSetColumnType::Any,
+            GraphSetColumnType::List,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Any,
+            GraphSetColumnType::List,
+        ]
+    );
+    let frozen: Vec<_> = templates
+        .iter()
+        .map(PreparedGraphSetText::canonical_template_bytes)
+        .collect();
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    for (items, payload) in [
+        (
+            Some(vec![int(1), null.clone()]),
+            Some(vec![("field".into(), list(vec![int(2)]))]),
+        ),
+        (Some(vec![]), Some(vec![])),
+        (None, None),
+        (None, Some(vec![("field".into(), int(4))])),
+        (Some(vec![int(5)]), None),
+    ] {
+        let args = match &items {
+            Some(values) => GqlParameters::new().with_list("items", values.clone()),
+            None => GqlParameters::new().with_null("items"),
+        }
+        .unwrap();
+        let args = match &payload {
+            Some(entries) => args.with_map("payload", entries.clone()),
+            None => args.with_null("payload"),
+        }
+        .unwrap();
+        let items_value = items.clone().map(&list).unwrap_or_else(|| null.clone());
+        let payload_value = payload
+            .clone()
+            .map(|entries| GraphValue::map(entries).unwrap())
+            .unwrap_or_else(|| null.clone());
+        let first = items
+            .as_ref()
+            .and_then(|values| values.first())
+            .cloned()
+            .unwrap_or_else(|| null.clone());
+        let size = items
+            .as_ref()
+            .map(|values| int(values.len() as i64))
+            .unwrap_or_else(|| null.clone());
+        let field = payload
+            .as_ref()
+            .and_then(|entries| entries.iter().find(|(key, _)| key.as_ref() == "field"))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| null.clone());
+        let keys = payload
+            .as_ref()
+            .map(|entries| {
+                list(
+                    entries
+                        .iter()
+                        .map(|(key, _)| {
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(key).unwrap())
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_else(|| null.clone());
+        let expected = [
+            vec![vec![payload_value.clone()], vec![items_value.clone()]],
+            vec![
+                vec![payload_value.clone(), items_value.clone()],
+                vec![int(3), items_value.clone()],
+            ],
+            vec![vec![
+                items_value.clone(),
+                payload_value,
+                first,
+                items_value,
+                size,
+                field,
+                keys,
+            ]],
+        ];
+        for (index, (template, mut expected)) in templates.iter().zip(expected).enumerate() {
+            let bound = template.bind_parameters(&args).unwrap();
+            assert_eq!(
+                bound.column_types(),
+                template.column_types(),
+                "{}",
+                texts[index]
+            );
+            let mut actual: Vec<_> = run(&bound)
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "{}", texts[index]);
+            assert_eq!(
+                bound.canonical_bytes(),
+                template.bind_parameters(&args).unwrap().canonical_bytes()
+            );
+            assert_eq!(template.canonical_template_bytes(), frozen[index]);
+        }
+    }
+    for (invalid, expected_type) in [
+        (
+            GqlParameters::new()
+                .with_int64("items", 7)
+                .unwrap()
+                .with_null("payload")
+                .unwrap(),
+            GqlParameterType::List,
+        ),
+        (
+            GqlParameters::new()
+                .with_null("items")
+                .unwrap()
+                .with_int64("payload", 7)
+                .unwrap(),
+            GqlParameterType::Map,
+        ),
+    ] {
+        for template in &templates {
+            assert!(matches!(
+                template.bind_parameters(&invalid).unwrap_err().kind,
+                GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::ParameterTypeMismatch {
+                    expected,
+                    found: GqlParameterType::Int64,
+                }) if expected == expected_type
+            ));
+        }
+    }
+    let list_template = PreparedGraphSetText::prepare_with_parameter_types(
+        "RETURN $items AS value UNION ALL RETURN [3] AS value",
+        &[("items", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
+    let bound = list_template
+        .bind_parameters(&GqlParameters::new().with_null("items").unwrap())
+        .unwrap();
+    assert_eq!(list_template.column_types(), &[GraphSetColumnType::List]);
+    assert_eq!(bound.column_types(), list_template.column_types());
+    assert_eq!(
+        run(&bound)
+            .iter()
+            .map(|row| row.get(0).unwrap().clone())
+            .collect::<Vec<_>>(),
+        vec![null, list(vec![int(3)])]
+    );
+    let error = PreparedGraphSetText::prepare_with_parameter_types(
+        "RETURN $items AS value UNION ALL RETURN NULL AS value",
+        &[("items", GqlParameterType::List)],
+        |_, _| panic!("concrete schema refusal precedes catalog access"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.kind,
+        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
+            column: 0,
+            left: GraphSetColumnType::List,
+            right: GraphSetColumnType::Scalar,
+        })
+    );
+}
+
+#[test]
+fn nullable_collection_parameters_share_the_aggregate_input_lowering() {
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        "MATCH (n) RETURN count($items) AS present,collect($payload) AS gathered",
+        &[
+            ("items", GqlParameterType::List),
+            ("payload", GqlParameterType::Map),
+        ],
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    let map = GraphValue::map(vec![(
+        "n".into(),
+        GraphValue::Scalar(CanonicalScalar::Int(1)),
+    )])
+    .unwrap();
+    for null in [false, true] {
+        let args = if null {
+            GqlParameters::new()
+                .with_null("items")
+                .unwrap()
+                .with_null("payload")
+                .unwrap()
+        } else {
+            GqlParameters::new()
+                .with_list("items", vec![])
+                .unwrap()
+                .with_map(
+                    "payload",
+                    vec![("n".into(), GraphValue::Scalar(CanonicalScalar::Int(1)))],
+                )
+                .unwrap()
+        };
+        let bound = template.bind_parameters(&args).unwrap();
+        let result = bound
+            .execute_governed(
+                2,
+                [VId(1), VId(2)],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 2);
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values()[0].as_count(),
+            Some(if null { 0 } else { 2 })
+        );
+        let expected = if null {
+            vec![]
+        } else {
+            vec![map.clone(), map.clone()]
+        };
+        assert_eq!(
+            result.value[0].values()[1].as_value().unwrap().as_list(),
+            Some(expected.as_slice())
+        );
+        assert_eq!(template.canonical_template_bytes(), frozen);
+    }
 }
 
 #[test]

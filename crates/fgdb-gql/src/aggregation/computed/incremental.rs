@@ -39,6 +39,7 @@ impl PreparedGraphAggregate {
             GraphSetValue::Literal(_) | GraphSetValue::Integer(_) => {
                 Some(GraphSetColumnType::Scalar)
             }
+            GraphSetValue::TypedNull(kind) => Some(*kind),
             GraphSetValue::Value(GraphValue::Scalar(_)) => Some(GraphSetColumnType::Scalar),
             GraphSetValue::Value(GraphValue::Vertex(_)) => Some(GraphSetColumnType::Vertex),
             _ => None,

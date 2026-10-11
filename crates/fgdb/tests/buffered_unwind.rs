@@ -1481,3 +1481,170 @@ fn dropping_binary_execution_during_right_child_or_merge_releases_both_sides() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn external_set_any_domains_preserve_literal_graph_and_permuted_nested_values() {
+    let ((), report) = run_async_under_lab(0xc01d_4401, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for (text, records, expected) in [
+            (
+                "RETURN 2 AS value UNION ALL UNWIND [1,2,NULL] AS value RETURN value",
+                0,
+                vec![
+                    vec![null()],
+                    vec![scalar(1)],
+                    vec![scalar(2)],
+                    vec![scalar(2)],
+                ],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS value INTERSECT ALL UNWIND [2,13,13] AS value RETURN value",
+                3,
+                vec![vec![scalar(2)], vec![scalar(13)]],
+            ),
+            (
+                "RETURN 1 AS a,[2] AS b UNION ALL UNWIND [3] AS x RETURN [4] AS b,x AS a",
+                0,
+                vec![
+                    vec![
+                        scalar(1),
+                        GraphValue::List(vec![scalar(2)].into_boxed_slice()),
+                    ],
+                    vec![
+                        scalar(3),
+                        GraphValue::List(vec![scalar(4)].into_boxed_slice()),
+                    ],
+                ],
+            ),
+        ] {
+            // The complete native schema widens only the open column. Neither
+            // operand needs a conversion expression to pass type admission.
+            let prepared = prepare(text, &GqlParameters::new());
+            let before = view.buffer_stats();
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(records, expected.len() as u64, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    100,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), ScanKind::Set, "{text}");
+            assert_eq!(spool.snapshot_seq(), CommitSeq(2));
+            assert_eq!(spool.row_stats().snapshot_records, records, "{text}");
+            assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            if records == 0 {
+                assert_eq!(view.buffer_stats(), before, "{text}: graph-free operands");
+            }
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_nullable_collection_parameters_rebind_without_losing_domains() {
+    let ((), report) = run_async_under_lab(0xc01d_4402, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        for (text, name, initial, kind, expected) in [
+            (
+                "WITH $items AS items UNWIND items AS item RETURN item",
+                "items",
+                GqlParameters::new()
+                    .with_list("items", vec![scalar(7)])
+                    .unwrap(),
+                ScanKind::Values,
+                Vec::new(),
+            ),
+            (
+                "RETURN $payload AS value UNION ALL RETURN [3] AS value",
+                "payload",
+                GqlParameters::new()
+                    .with_map("payload", vec![("n".into(), scalar(7))])
+                    .unwrap(),
+                ScanKind::Set,
+                vec![
+                    vec![null()],
+                    vec![GraphValue::List(vec![scalar(3)].into_boxed_slice())],
+                ],
+            ),
+        ] {
+            // Preparation records the collection contract from a nonnull
+            // argument. Rebinding NULL must preserve that contract through
+            // WITH/UNWIND and when combining Any with a concrete List set column.
+            let template = PreparedNativeRead::prepare(text, &initial, resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            drop(initial);
+            let params = GqlParameters::new().with_null(name).unwrap();
+            let prepared = template
+                .prepare_buffered_order(&params)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let before = view.buffer_stats();
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, expected.len() as u64, WORK, WORK),
+                    &mut scratch,
+                    &mut destination,
+                    1,
+                    512,
+                    1024,
+                    32 * 1024,
+                    100,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(spool.kind(), kind, "{text}");
+            assert_eq!(spool.snapshot_seq(), CommitSeq(2));
+            assert_eq!(spool.row_stats().snapshot_records, 0, "{text}");
+            assert_eq!(spool.row_count(), expected.len() as u64, "{text}");
+            assert_eq!(
+                contents(&spool, &mut destination, &cx).await,
+                expected,
+                "{text}"
+            );
+            assert_eq!(view.buffer_stats(), before, "{text}: graph-free parameters");
+            assert_eq!(source_pool.used(), baseline, "{text}");
+            assert_eq!(spill_pool.used(), 0, "{text}");
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

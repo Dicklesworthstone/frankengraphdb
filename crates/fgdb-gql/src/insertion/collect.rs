@@ -160,7 +160,8 @@ fn fields<E, A, C>(
             // quantifier, reduce()) runs on the shared row evaluator. Only a
             // scalar result is a property field; a list, map or graph element
             // is an input-schema refusal, never a silent truncation.
-            composite @ (GraphSetValue::List(_)
+            composite @ (GraphSetValue::TypedNull(_)
+            | GraphSetValue::List(_)
             | GraphSetValue::Index { .. }
             | GraphSetValue::Size(_)
             | GraphSetValue::In { .. }

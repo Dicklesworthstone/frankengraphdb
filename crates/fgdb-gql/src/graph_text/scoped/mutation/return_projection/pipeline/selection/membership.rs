@@ -22,7 +22,7 @@ impl<'a> Parser<'a> {
                 .or_insert(GqlParameterType::List);
         }
         let list = self.selection_value(schema)?;
-        if let ReadValueTemplate::Parameter { index, at } = &list {
+        if let ReadValueTemplate::Parameter { index, at, .. } = &list {
             let found = self.syntax.parameters[*index].parameter_type;
             if !matches!(
                 found,

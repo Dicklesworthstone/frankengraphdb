@@ -141,9 +141,11 @@ impl<'a> Parser<'a> {
             Some(Operand::Number(Number::Literal(value))) => {
                 Ok(ReadValueTemplate::Literal(scalar(value, at)?))
             }
-            Some(Operand::Number(Number::Parameter(index))) => {
-                Ok(ReadValueTemplate::Parameter { index, at })
-            }
+            Some(Operand::Number(Number::Parameter(index))) => Ok(ReadValueTemplate::parameter(
+                index,
+                at,
+                self.syntax.parameters[index].parameter_type,
+            )),
             Some(Operand::Integer { program, at }) => {
                 Ok(ReadValueTemplate::Integer { program, at })
             }
@@ -212,9 +214,11 @@ impl PreparedGraphAggregateText {
         match template {
             ReadValueTemplate::Column(input) => Ok(GraphSetValue::Column(*input)),
             ReadValueTemplate::Literal(value) => Ok(GraphSetValue::Literal(value.clone())),
-            ReadValueTemplate::Parameter { index, at } => {
-                Ok(GraphSetValue::Literal(scalar(values[*index].clone(), *at)?))
-            }
+            ReadValueTemplate::Parameter {
+                index,
+                at,
+                null_type,
+            } => return_projection::bind_read_parameter(&values[*index], *at, *null_type),
             ReadValueTemplate::Integer { program, at } => Ok(GraphSetValue::Integer(
                 integer::bind_integer(program, values, *at).map_err(scalar_error)?,
             )),

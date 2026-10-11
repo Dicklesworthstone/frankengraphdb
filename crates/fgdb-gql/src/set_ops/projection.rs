@@ -27,6 +27,10 @@ use std::collections::BTreeSet;
 pub enum GraphSetValue {
     Column(usize),
     Literal(GqlScalarParameter),
+    /// Canonical NULL with explicit static domain evidence. Nullable collection
+    /// parameters retain their declared List/Any domain through binding; an
+    /// ordinary literal NULL remains Scalar. No nonnull value can enter here.
+    TypedNull(GraphSetColumnType),
     Integer(GraphIntegerExpression),
     List(Vec<GraphSetValue>),
     Index {
@@ -401,6 +405,7 @@ fn admit(
             input: *input,
         })?,
         GraphSetValue::Literal(_) => GraphSetColumnType::Scalar,
+        GraphSetValue::TypedNull(kind) => *kind,
         GraphSetValue::Integer(expression) => {
             for input in expression.scalar_columns() {
                 let kind = types
@@ -634,7 +639,8 @@ fn admit_list(
     locals: usize,
 ) -> Result<(), GraphSetProjectionError> {
     let kind = admit(value, types, column, depth, nodes, locals)?;
-    let null = matches!(value, GraphSetValue::Literal(v) if matches!(v.value(), CanonicalScalar::Null))
+    let null = matches!(value, GraphSetValue::TypedNull(_))
+        || matches!(value, GraphSetValue::Literal(v) if matches!(v.value(), CanonicalScalar::Null))
         || matches!(value, GraphSetValue::Value(v) if v.is_null());
     if !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any) && !null {
         return Err(GraphSetProjectionError::ListInput { column });
@@ -653,6 +659,7 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
             bytes.extend_from_slice(value.canonical_bytes());
         }
+        GraphSetValue::TypedNull(kind) => bytes.extend_from_slice(&[19, kind.tag()]),
         GraphSetValue::Integer(expression) => {
             bytes.push(2);
             let value = expression.canonical_bytes();
@@ -966,6 +973,10 @@ fn evaluate_value_at<E>(
                 }
             }
             GraphValue::Scalar(scalar.clone())
+        }
+        GraphSetValue::TypedNull(_) => {
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(CanonicalScalar::Null)
         }
         GraphSetValue::Integer(expression) => {
             let value = expression

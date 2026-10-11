@@ -17,7 +17,7 @@ pub(super) use amount::Amount;
 pub(super) fn constant(value: &GraphSetValue) -> bool {
     match value {
         GraphSetValue::Column(_) => false,
-        GraphSetValue::Literal(_) | GraphSetValue::Value(_) => true,
+        GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) | GraphSetValue::Value(_) => true,
         GraphSetValue::Integer(expression) => expression.referenced_columns().next().is_none(),
         GraphSetValue::List(values) => values.iter().all(constant),
         GraphSetValue::Index { list, index } => constant(list) && constant(index),
@@ -58,7 +58,10 @@ pub(super) fn total_projection(projection: &[GraphSetProjection]) -> bool {
     projection.iter().all(|column| {
         matches!(
             column.value(),
-            GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
+            GraphSetValue::Column(_)
+                | GraphSetValue::Literal(_)
+                | GraphSetValue::TypedNull(_)
+                | GraphSetValue::Value(_)
         )
     })
 }

@@ -2,9 +2,11 @@
 //!
 //! Operands keep their own DISTINCT, ordering and page. Set equality is over
 //! the entire canonical row (null equals null here, unlike WHERE). Column
-//! positions and vertex/scalar domains must agree; output names come from the
-//! left operand. This is the bounded materialized implementation, not a spill
-//! engine, incremental derivative, or full GQL conformance claim.
+//! positions must agree, and each column keeps its common domain: equal
+//! concrete domains remain concrete, Any stays open, and different concrete
+//! domains refuse. Output names come from the left operand. This is the bounded
+//! materialized implementation, not a spill engine, incremental derivative,
+//! or full GQL conformance claim.
 
 mod aggregate;
 mod execute;
@@ -59,6 +61,8 @@ pub enum GraphSetColumnType {
     Edges,
     Edge,
     List,
+    /// Every canonical native value, including maps, lists and graph elements.
+    /// Combining this open domain with a concrete one never narrows it.
     Any,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
@@ -87,6 +91,41 @@ impl From<&ValueProjection> for GraphSetColumnType {
     }
 }
 impl GraphSetColumnType {
+    pub(crate) const fn parameter_domain(kind: crate::GqlParameterType) -> Self {
+        match kind {
+            crate::GqlParameterType::List => Self::List,
+            crate::GqlParameterType::Map => Self::Any,
+            _ => Self::Scalar,
+        }
+    }
+
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::Vertex => 0,
+            Self::Scalar => 1,
+            Self::Path => 2,
+            Self::Vertices => 3,
+            Self::Edges => 4,
+            Self::Edge => 5,
+            Self::List => 6,
+            Self::Any => 7,
+        }
+    }
+
+    /// The common checked domain of two set-operand columns. Any already
+    /// admits every native value, so it remains open when paired with a known
+    /// domain. Different concrete domains still refuse; this changes schema
+    /// admission only, never canonical equality, values or numeric coercion.
+    pub(crate) fn common_set_domain(self, other: Self) -> Option<Self> {
+        if self == Self::Any || other == Self::Any {
+            Some(Self::Any)
+        } else if self == other {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn accepts(self, value: &crate::algebra::GraphValue) -> bool {
         use crate::algebra::GraphValue;
         self == Self::Any
@@ -543,8 +582,10 @@ impl PreparedGraphSet {
         check_depth(self.depth.saturating_add(ancestors))
     }
 
-    /// Combine exact, position-compatible relations. Heterogeneous canonical
-    /// scalar kinds remain distinct; there is no implicit numeric coercion.
+    /// Combine exact, position-compatible relations. A column with the open Any
+    /// domain widens the corresponding output column to Any; different concrete
+    /// domains refuse. Heterogeneous canonical scalar kinds remain distinct;
+    /// there is no implicit value conversion or numeric coercion.
     pub fn combine(
         self,
         operation: GraphSetOperation,
@@ -566,18 +607,20 @@ impl PreparedGraphSet {
                 right: right.types.len(),
             });
         }
+        let mut types = Vec::with_capacity(self.types.len());
         for (column, (&left, &right)) in self.types.iter().zip(&right.types).enumerate() {
-            if left != right {
-                return Err(GraphSetBuildError::ColumnType {
-                    column,
-                    left,
-                    right,
-                });
-            }
+            types.push(
+                left.common_set_domain(right)
+                    .ok_or(GraphSetBuildError::ColumnType {
+                        column,
+                        left,
+                        right,
+                    })?,
+            );
         }
         Ok(Self {
             columns: self.columns.clone(),
-            types: self.types.clone(),
+            types,
             operands,
             depth,
             node: SetNode::Binary {

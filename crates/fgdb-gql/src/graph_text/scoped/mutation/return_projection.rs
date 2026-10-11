@@ -841,10 +841,11 @@ impl<'a> Parser<'a> {
             Operand::Number(Number::Literal(value)) => {
                 ReadValueTemplate::Literal(scalar(value, at)?)
             }
-            Operand::Number(Number::Parameter(index)) => ReadValueTemplate::Parameter {
+            Operand::Number(Number::Parameter(index)) => ReadValueTemplate::parameter(
                 index,
-                at: self.syntax.parameter_offsets[index],
-            },
+                self.syntax.parameter_offsets[index],
+                self.syntax.parameters[index].parameter_type,
+            ),
             Operand::Integer { program, at } => {
                 if let [MutationIntegerTemplateOp::ParameterField { index, keys, at }] =
                     program.as_slice()
@@ -852,10 +853,11 @@ impl<'a> Parser<'a> {
                     // A lone field remains a general value in RETURN/CREATE:
                     // `$payload.meta` may itself be a map or list. Composed
                     // scalar expressions retain the native scalar program.
-                    let mut value = ReadValueTemplate::Parameter {
-                        index: *index,
-                        at: *at,
-                    };
+                    let mut value = ReadValueTemplate::parameter(
+                        *index,
+                        *at,
+                        self.syntax.parameters[*index].parameter_type,
+                    );
                     for key in keys {
                         value = ReadValueTemplate::MapGet {
                             map: Box::new(value),
@@ -1818,6 +1820,30 @@ fn bind_projection(
         })
 }
 
+/// Preserve the parameter's declared nullable domain instead of deriving its
+/// schema from a NULL payload. Both row and aggregate projections share this
+/// lowering after their complete argument maps have passed type admission.
+pub(in crate::graph_text) fn bind_read_parameter(
+    value: &GqlParameterValue,
+    at: usize,
+    null_type: GraphSetColumnType,
+) -> Result<GraphSetValue, GraphPatternTextError> {
+    Ok(match value {
+        GqlParameterValue::List(value) => GraphSetValue::Value(value.value().clone()),
+        GqlParameterValue::Map(value) => GraphSetValue::Value(value.value().clone()),
+        value => {
+            let value = scalar(value.clone(), at)?;
+            if null_type != GraphSetColumnType::Scalar
+                && matches!(value.value(), CanonicalScalar::Null)
+            {
+                GraphSetValue::TypedNull(null_type)
+            } else {
+                GraphSetValue::Literal(value)
+            }
+        }
+    })
+}
+
 pub(in crate::graph_text) fn bind_read_value(
     value: &ReadValueTemplate,
     values: &[GqlParameterValue],
@@ -1825,11 +1851,11 @@ pub(in crate::graph_text) fn bind_read_value(
     Ok(match value {
         ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
         ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
-        ReadValueTemplate::Parameter { index, at } => match &values[*index] {
-            GqlParameterValue::List(value) => GraphSetValue::Value(value.value().clone()),
-            GqlParameterValue::Map(value) => GraphSetValue::Value(value.value().clone()),
-            value => GraphSetValue::Literal(scalar(value.clone(), *at)?),
-        },
+        ReadValueTemplate::Parameter {
+            index,
+            at,
+            null_type,
+        } => bind_read_parameter(&values[*index], *at, *null_type)?,
         ReadValueTemplate::Integer { program, at } => GraphSetValue::Integer(
             integer::bind_integer(program, values, *at).map_err(expression_error)?,
         ),

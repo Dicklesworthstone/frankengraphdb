@@ -128,6 +128,12 @@ fn expression<'g, E, C>(
         GraphSetValue::Literal(value) => {
             OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(value.value())))
         }
+        GraphSetValue::TypedNull(_) => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Null,
+            )))
+        }
         GraphSetValue::Value(value) => OutputValue::Borrowed(Cell::Value(value_ref(value))),
         GraphSetValue::Integer(expression) => {
             let value = expression
