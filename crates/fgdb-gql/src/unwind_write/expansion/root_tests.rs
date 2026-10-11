@@ -5,8 +5,7 @@ use super::*;
 use crate::parameters::GqlMapParameter;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 
-const QUERY: &str =
-    "UNWIND $payload.groups[-1].members AS id MERGE (n:Entity {id:id})";
+const QUERY: &str = "UNWIND $payload.groups[-1].members AS id MERGE (n:Entity {id:id})";
 
 fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
@@ -50,13 +49,9 @@ fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn selected<'a>(plan: &GraphUnwindWriteText, value: &'a GqlParameterValue) -> &'a [GraphValue] {
-    parameter_list(
-        value,
-        &plan.source_path,
-        plan.source_offset,
-        0,
-        &mut |_| Ok::<_, ()>(()),
-    )
+    parameter_list(value, &plan.source_path, plan.source_offset, 0, &mut |_| {
+        Ok::<_, ()>(())
+    })
     .unwrap()
 }
 fn integers(values: &[GraphValue]) -> Vec<i64> {
@@ -88,15 +83,26 @@ fn document_root_selects_values_without_copying_and_binds_one_program() {
     let frozen = arguments.canonical_bytes();
     let owner = arguments.get("payload").unwrap();
     let roots = selected(&plan, &owner);
-    assert_eq!(integers(roots), [7, 3, 7], "UNWIND retains occurrence order");
+    assert_eq!(
+        integers(roots),
+        [7, 3, 7],
+        "UNWIND retains occurrence order"
+    );
 
     let GqlParameterValue::Map(document) = &owner else {
         panic!("checked map")
     };
-    let groups = document.entries().find(|(key, _)| *key == "groups").unwrap().1;
+    let groups = document
+        .entries()
+        .find(|(key, _)| *key == "groups")
+        .unwrap()
+        .1;
     let members = &groups.as_list().unwrap()[1];
     let (keys, values) = members.as_map().unwrap();
-    let at = keys.iter().position(|key| key.as_ref() == "members").unwrap();
+    let at = keys
+        .iter()
+        .position(|key| key.as_ref() == "members")
+        .unwrap();
     let expected = values[at].as_list().unwrap();
     assert!(core::ptr::eq(roots.as_ptr(), expected.as_ptr()));
 
@@ -116,9 +122,7 @@ fn root_list_indexes_preserve_signed_selection_and_original_byte_locations() {
         )
         .unwrap();
     for selector in ["[0].AS", "[+0].AS", "[-1].AS"] {
-        let text = format!(
-            "UNWIND /* é; */ $payload {selector} AS id\nMERGE (n:Entity {{id:id}})"
-        );
+        let text = format!("UNWIND /* é; */ $payload {selector} AS id\nMERGE (n:Entity {{id:id}})");
         let plan = GraphUnwindWriteText::parse(&text).unwrap();
         let owner = arguments.get("payload").unwrap();
         assert_eq!(integers(selected(&plan, &owner)), [4, 2]);
@@ -141,10 +145,8 @@ fn one_document_can_supply_both_root_and_independent_product_sources() {
     let roots = selected(&plan, &owner);
     let parameters =
         prepare_parameter_sources(&plan, &arguments, &mut |_| Ok::<_, ()>(())).unwrap();
-    let rows = expand_with_parameters(&plan, roots, &parameters, 4, &mut |_| {
-        Ok::<_, ()>(())
-    })
-    .unwrap();
+    let rows =
+        expand_with_parameters(&plan, roots, &parameters, 4, &mut |_| Ok::<_, ()>(())).unwrap();
     let actual: Vec<_> = (0..rows.len())
         .map(|row| {
             [rows.at(row, 0), rows.at(row, 1)].map(|value| match value {
@@ -162,7 +164,10 @@ fn one_document_can_supply_both_root_and_independent_product_sources() {
     );
     assert!(matches!(
         plan.bind_with_limit(&arguments, RelationId(1), 3, |_, _| panic!("catalog")),
-        Err(GraphUnwindWriteError::TooManyRows { limit: 3, observed: 4 })
+        Err(GraphUnwindWriteError::TooManyRows {
+            limit: 3,
+            observed: 4
+        })
     ));
 }
 
@@ -180,32 +185,43 @@ fn root_shape_errors_have_zero_clause_coordinates_before_catalog_access() {
             GraphUnwindRowError::ExpectedMapField,
         ),
         (
-            GqlParameters::new().with_list("payload", vec![int(1)]).unwrap(),
+            GqlParameters::new()
+                .with_list("payload", vec![int(1)])
+                .unwrap(),
             GraphUnwindRowError::ExpectedMapField,
         ),
     ] {
         let error = plan
             .bind(&arguments, RelationId(1), |_, _| panic!("catalog"))
             .unwrap_err();
-        let GraphUnwindWriteError::Expansion { row, clause, offset, kind } = error else {
+        let GraphUnwindWriteError::Expansion {
+            row,
+            clause,
+            offset,
+            kind,
+        } = error
+        else {
             panic!("wrong root refusal: {error}")
         };
-        assert_eq!((row, clause, offset), (0, 0, text.find("$payload").unwrap()));
+        assert_eq!(
+            (row, clause, offset),
+            (0, 0, text.find("$payload").unwrap())
+        );
         assert_eq!(kind, expected);
     }
 }
 
 #[test]
 fn missing_null_and_out_of_range_selections_do_not_invent_empty_successes() {
-    let plan = GraphUnwindWriteText::parse(
-        "UNWIND $payload.rows AS id MERGE (n:Entity {id:id})",
-    )
-    .unwrap();
+    let plan =
+        GraphUnwindWriteText::parse("UNWIND $payload.rows AS id MERGE (n:Entity {id:id})").unwrap();
     for arguments in [
         document(vec![]),
         document(vec![("rows", GraphValue::Scalar(CanonicalScalar::Null))]),
         document(vec![("rows", list(vec![]))]),
-        GqlParameters::new().with_scalar("payload", CanonicalScalar::Null).unwrap(),
+        GqlParameters::new()
+            .with_scalar("payload", CanonicalScalar::Null)
+            .unwrap(),
     ] {
         assert!(matches!(
             plan.bind(&arguments, RelationId(1), |_, _| panic!("catalog")),
@@ -213,13 +229,17 @@ fn missing_null_and_out_of_range_selections_do_not_invent_empty_successes() {
         ));
     }
     assert!(matches!(
-        plan.bind(&GqlParameters::new(), RelationId(1), |_, _| panic!("catalog")),
+        plan.bind(&GqlParameters::new(), RelationId(1), |_, _| panic!(
+            "catalog"
+        )),
         Err(GraphUnwindWriteError::SourceParameter)
     ));
     for selector in ["[-9223372036854775808]", "[9223372036854775807]"] {
         let text = format!("UNWIND $payload{selector} AS id MERGE (n:Entity {{id:id}})");
         let plan = GraphUnwindWriteText::parse(&text).unwrap();
-        let arguments = GqlParameters::new().with_list("payload", vec![int(1)]).unwrap();
+        let arguments = GqlParameters::new()
+            .with_list("payload", vec![int(1)])
+            .unwrap();
         assert!(matches!(
             plan.bind(&arguments, RelationId(1), |_, _| panic!("catalog")),
             Err(GraphUnwindWriteError::Empty)
@@ -235,11 +255,18 @@ fn selected_root_cardinality_is_bounded_before_empty_deeper_sources() {
     .unwrap();
     let arguments = document(vec![(
         "rows",
-        list((0..3).map(|_| object(vec![("children", list(vec![]))])).collect()),
+        list(
+            (0..3)
+                .map(|_| object(vec![("children", list(vec![]))]))
+                .collect(),
+        ),
     )]);
     assert!(matches!(
         plan.bind_with_limit(&arguments, RelationId(1), 2, |_, _| panic!("catalog")),
-        Err(GraphUnwindWriteError::TooManyRows { limit: 2, observed: 3 })
+        Err(GraphUnwindWriteError::TooManyRows {
+            limit: 2,
+            observed: 3
+        })
     ));
 }
 
@@ -262,7 +289,10 @@ fn root_selector_work_can_be_interrupted_before_each_lookup() {
                 if current == stop { Err("stop") } else { Ok(()) }
             },
         );
-        assert!(matches!(result, Err(GraphUnwindBindError::Interrupted("stop"))));
+        assert!(matches!(
+            result,
+            Err(GraphUnwindBindError::Interrupted("stop"))
+        ));
         assert_eq!(visited, stop + 1);
     }
 }
@@ -300,9 +330,17 @@ fn unselected_document_payload_is_not_replicated_into_argument_transcripts() {
 
 #[test]
 fn complete_static_paths_are_required_only_for_the_additional_write_surface() {
-    for source in ["$payload.rows", "$payload.rows[$index]", "$payload.rows[0..2]"] {
+    for source in [
+        "$payload.rows",
+        "$payload.rows[$index]",
+        "$payload.rows[0..2]",
+    ] {
         let text = format!("UNWIND {source} AS id CREATE (n {{id:id}}) RETURN n");
-        assert!(GraphUnwindWriteText::parse_if_supported(&text).unwrap().is_none());
+        assert!(
+            GraphUnwindWriteText::parse_if_supported(&text)
+                .unwrap()
+                .is_none()
+        );
     }
     for source in [
         "$payload.rows[$index]",
@@ -312,10 +350,13 @@ fn complete_static_paths_are_required_only_for_the_additional_write_surface() {
         "$payload.rows[9223372036854775808]",
     ] {
         let text = format!("UNWIND {source} AS id MERGE (n:Entity {{id:id}})");
-        assert!(matches!(
-            GraphUnwindWriteText::parse_if_supported(&text),
-            Err(GraphUnwindWriteError::Syntax(_))
-        ), "{text}");
+        assert!(
+            matches!(
+                GraphUnwindWriteText::parse_if_supported(&text),
+                Err(GraphUnwindWriteError::Syntax(_))
+            ),
+            "{text}"
+        );
     }
     for steps in [64, 65] {
         let text = format!(
@@ -328,13 +369,15 @@ fn complete_static_paths_are_required_only_for_the_additional_write_surface() {
 
 #[test]
 fn selected_roots_still_require_exact_argument_names_and_one_scalar_kind() {
-    let plan = GraphUnwindWriteText::parse(
-        "UNWIND $payload.rows AS id MERGE (n:Entity {id:id})",
-    )
-    .unwrap();
-    let arguments = document(vec![("rows", list(vec![int(1), GraphValue::Scalar(
-        CanonicalScalar::ucs_basic_text("two").unwrap(),
-    )]))]);
+    let plan =
+        GraphUnwindWriteText::parse("UNWIND $payload.rows AS id MERGE (n:Entity {id:id})").unwrap();
+    let arguments = document(vec![(
+        "rows",
+        list(vec![
+            int(1),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("two").unwrap()),
+        ]),
+    )]);
     assert!(matches!(
         plan.bind(&arguments, RelationId(1), |_, _| panic!("catalog")),
         Err(GraphUnwindWriteError::Row {

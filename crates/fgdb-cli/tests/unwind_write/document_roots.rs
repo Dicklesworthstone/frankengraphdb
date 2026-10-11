@@ -85,7 +85,10 @@ fn document_root_arithmetic_failure_keeps_durable_rows_and_frontier_unchanged() 
     assert!(!refused.status.success(), "{}", output(&refused));
     assert!(!output(&refused).contains("\"kind\":\"written\""));
     let after = fixture.query("MATCH (n:Entity) RETURN n.id,n.score ORDER BY n.id");
-    assert_eq!(before.stdout, after.stdout, "failed document batch changed durable state");
+    assert_eq!(
+        before.stdout, after.stdout,
+        "failed document batch changed durable state"
+    );
 }
 
 #[test]
@@ -93,14 +96,14 @@ fn repeated_document_sources_form_a_product_in_clause_order() {
     let fixture = Fixture::new(true);
     let text = "UNWIND $payload.ids AS id UNWIND $payload.names AS name \
         MERGE (n:Entity {id:id}) SET n.name=name";
-    let written = write_document(
-        &fixture,
-        r#"{"ids":[1,2],"names":["First","Last"]}"#,
-        text,
-    );
+    let written = write_document(&fixture, r#"{"ids":[1,2],"names":["First","Last"]}"#, text);
     success(&written);
     assert!(output(&written).contains("\"statements\":4"));
     let result = fixture.query("MATCH (n:Entity) WHERE n.name='Last' RETURN n.id");
-    assert_eq!(row_count(&result), 2, "product rows must not be zipped or deduplicated");
+    assert_eq!(
+        row_count(&result),
+        2,
+        "product rows must not be zipped or deduplicated"
+    );
     assert_eq!(row_count(&fixture.query("MATCH (n:Entity) RETURN n.id")), 2);
 }
