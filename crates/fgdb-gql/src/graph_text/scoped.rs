@@ -652,6 +652,21 @@ impl<'a> Parser<'a> {
                         None
                     };
                     let walk = self.pattern_walk_bounds()?;
+                    // openCypher `-[r:T {k: v}]->` filters that one captured
+                    // relationship. A walk's map would range over a list.
+                    if self.is_punct(b'{') {
+                        match (variable, walk) {
+                            (Some(variable), None) => self.property_map(variable, true)?,
+                            _ => {
+                                return Err(error(
+                                    self.current.at,
+                                    GraphPatternTextErrorKind::Expected(
+                                        "named fixed-length relationship for a property map",
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     self.punct(b']', "]")?;
                     (variable, relation, walk)
                 } else {

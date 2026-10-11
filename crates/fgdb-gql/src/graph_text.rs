@@ -983,7 +983,8 @@ impl<'a> Parser<'a> {
     fn node(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.punct(b'(', "(")?;
-        let name = if matches!(self.current.kind, TokenKind::Punct(b')' | b':')) {
+        // `()`, `(:L)` and openCypher `({k: v})` are anonymous.
+        let name = if matches!(self.current.kind, TokenKind::Punct(b')' | b':' | b'{')) {
             self.capacity(
                 self.syntax.variables.len(),
                 MAX_PATTERN_VERTICES,
@@ -1042,7 +1043,7 @@ impl<'a> Parser<'a> {
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
-        self.node_property_map(name)?;
+        self.property_map(name, false)?;
         self.punct(b')', ")")?;
         Ok(name)
     }
@@ -1050,7 +1051,13 @@ impl<'a> Parser<'a> {
     /// Inline maps are conjunctions in this positive pattern, not assignments
     /// or a separate evaluator. In particular, OPTIONAL owns these predicates
     /// before null extension, and equality with NULL is not an IS NULL test.
-    fn node_property_map(&mut self, variable: Name<'a>) -> Result<(), GraphPatternTextError> {
+    /// A relationship's map (`edge`) filters its captured edge the same way;
+    /// only a node map correlates with an earlier row binding.
+    fn property_map(
+        &mut self,
+        variable: Name<'a>,
+        edge: bool,
+    ) -> Result<(), GraphPatternTextError> {
         if !self.take(b'{')? || self.take(b'}')? {
             return Ok(());
         }
@@ -1065,12 +1072,16 @@ impl<'a> Parser<'a> {
             if keys.contains(&key.text) {
                 return Err(error(
                     key.at,
-                    GraphPatternTextErrorKind::Expected("distinct property name in node map"),
+                    GraphPatternTextErrorKind::Expected(if edge {
+                        "distinct property name in relationship map"
+                    } else {
+                        "distinct property name in node map"
+                    }),
                 ));
             }
             self.punct(b':', ":")?;
             let row = match self.current.kind {
-                TokenKind::Word(binding) => self
+                TokenKind::Word(binding) if !edge => self
                     .read_row_bindings
                     .iter()
                     .position(|candidate| candidate.text == binding),
@@ -1085,9 +1096,11 @@ impl<'a> Parser<'a> {
                 if matches!(predicate, Filter::Properties { .. }) {
                     return Err(error(
                         at,
-                        GraphPatternTextErrorKind::Expected(
-                            "literal or typed parameter in node map",
-                        ),
+                        GraphPatternTextErrorKind::Expected(if edge {
+                            "literal or typed parameter in relationship map"
+                        } else {
+                            "literal or typed parameter in node map"
+                        }),
                     ));
                 }
                 self.syntax.filters.push(predicate);
