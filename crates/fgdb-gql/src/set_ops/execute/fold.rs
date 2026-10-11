@@ -337,10 +337,13 @@ where
                     return Ok(());
                 }
                 meter.event(GlaExecutionEvent::Work)?;
+                // Numbered like project_rows, so rand() draws the same here.
                 let result =
-                    projection::evaluate(&row, projection, &mut |event| meter.event(event))
-                        .map_err(|error| projected(error, row_at))
-                        .and_then(|row| window.push(row, meter, consume));
+                    projection::evaluate(&row, projection, Some(row_at as u64), &mut |event| {
+                        meter.event(event)
+                    })
+                    .map_err(|error| projected(error, row_at))
+                    .and_then(|row| window.push(row, meter, consume));
                 remember(result, &mut local)?;
                 row_at = row_at.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {
