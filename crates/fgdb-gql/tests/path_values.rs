@@ -49,6 +49,48 @@ fn execute(
         .value
 }
 
+/// openCypher: a named variable-length relationship `[r*m..n]` is the list of
+/// relationships it matched (TCK Match4 [1], [6], Match9 [2] to [4]). When it
+/// is its pattern's only edge, that list is the edge list of the one path the
+/// pattern matches, in traversal order.
+#[test]
+fn a_lone_named_variable_length_relationship_is_its_edge_list() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(1), VId(3)),
+    ];
+    let list = |ids: &[u128]| {
+        GraphValue::Edges(
+            ids.iter()
+                .map(|id| EId(*id))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH (a)-[r:R*1..2]->(b) RETURN r",
+            vec![list(&[91]), list(&[92]), list(&[91, 92])],
+        ),
+        ("MATCH (a)-[r:R*2]->(b) RETURN r", vec![list(&[91, 92])]),
+        (
+            "MATCH (a)-[r:R*2..2]-(b) RETURN r",
+            vec![list(&[91, 92]), list(&[92, 91])],
+        ),
+    ] {
+        let found: Vec<_> = execute(text, &edges)
+            .iter()
+            .map(|row| row.values()[0].clone())
+            .collect();
+        assert_eq!(found.len(), expected.len(), "{text}: {found:?}");
+        for value in &expected {
+            assert!(found.contains(value), "{text}: {found:?}");
+        }
+    }
+}
+
 #[test]
 fn fixed_path_functions_preserve_traversal_order_and_filter_rows() {
     use fgdb_gql::algebra::GraphValue;

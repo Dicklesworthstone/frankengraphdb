@@ -541,6 +541,18 @@ impl<'a> Parser<'a> {
         }
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
+        // openCypher: a named variable-length relationship `[r*m..n]` is the
+        // list of relationships it matched. When it is the pattern's only
+        // edge and no path is named, that list is the edge list of the one
+        // path the pattern matches, so the path is captured under `r`.
+        if self.syntax.path.is_none()
+            && let [edge] = self.syntax.edges.as_mut_slice()
+            && edge.walk.is_some()
+            && let Some(variable) = edge.variable.take()
+        {
+            self.syntax.path = Some(variable);
+            self.syntax.path_edges = true;
+        }
         if let Some(path) = self.syntax.path {
             self.syntax.filters.push(Filter::PathCapture(path));
         }

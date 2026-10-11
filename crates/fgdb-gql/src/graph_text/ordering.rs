@@ -108,25 +108,21 @@ impl Parser<'_> {
                 // Hidden sort key over a bound variable RETURN did not project
                 // (`RETURN n.p AS p ORDER BY n`). The cell holds the value
                 // `RETURN n` would: the path, the edge or the vertex.
-                let path = if self.syntax.path.is_some_and(|path| path.text == name.text) {
-                    Some(GraphPathFunction::Value)
-                } else if self.syntax.visible_edge(name.text).is_some() {
-                    Some(GraphPathFunction::Edge)
-                } else if self
-                    .syntax
-                    .variables
-                    .iter()
-                    .any(|variable| variable.text == name.text)
+                let path = self.syntax.bare_path_function(name.text);
+                if path.is_none()
+                    && !self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|variable| variable.text == name.text)
                 {
-                    None
-                } else {
                     return Err(error(
                         name.at,
                         GraphPatternTextErrorKind::Expected(
                             "projected ORDER BY expression or alias",
                         ),
                     ));
-                };
+                }
                 self.capacity(
                     self.syntax.columns.len(),
                     MAX_PATTERN_VERTICES,

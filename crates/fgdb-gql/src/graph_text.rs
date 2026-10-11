@@ -553,6 +553,10 @@ struct Syntax<'a> {
     match_mode: GraphMatchMode,
     variables: Vec<Name<'a>>,
     path: Option<Name<'a>>,
+    /// Whether `path` names a variable-length relationship rather than a
+    /// path: `MATCH (a)-[r*1..2]->(b)` captures the path of its only edge
+    /// under `r`, and a bare `r` is that path's edge list (openCypher).
+    path_edges: bool,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -570,6 +574,23 @@ struct Syntax<'a> {
 }
 
 impl<'a> Syntax<'a> {
+    /// What a bare name denotes when it names the path or a relationship:
+    /// the path, or the edge list of a captured variable-length relationship
+    /// (`path_edges`), or the identity of a fixed relationship.
+    fn bare_path_function(&self, name: &str) -> Option<GraphPathFunction> {
+        if self.path.is_some_and(|path| path.text == name) {
+            Some(if self.path_edges {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Value
+            })
+        } else if self.visible_edge(name).is_some() {
+            Some(GraphPathFunction::Edge)
+        } else {
+            None
+        }
+    }
+
     /// The root's relationship patterns, then those exported by each required
     /// or OPTIONAL clause, each with whether it can be NULL (OPTIONAL).
     fn visible_edges(&self) -> impl Iterator<Item = (&Edge<'a>, bool)> {
@@ -674,6 +695,7 @@ impl<'a> Parser<'a> {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
                 path: None,
+                path_edges: false,
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
@@ -1219,10 +1241,11 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
+                let path = self.syntax.bare_path_function(name.text);
                 self.syntax.columns.push(Column {
                     variable: name,
                     property: None,
-                    path: Some(GraphPathFunction::Value),
+                    path,
                     alias: name,
                 });
             }
@@ -1277,7 +1300,11 @@ impl<'a> Parser<'a> {
                     .path
                     .is_some_and(|path| path.text == expression.text)
                 {
-                    (expression, None, Some(GraphPathFunction::Value))
+                    (
+                        expression,
+                        None,
+                        self.syntax.bare_path_function(expression.text),
+                    )
                 } else if self.syntax.visible_edge(expression.text).is_some() {
                     let property = if self.take(b'.')? {
                         self.require_property_variable(expression)?;

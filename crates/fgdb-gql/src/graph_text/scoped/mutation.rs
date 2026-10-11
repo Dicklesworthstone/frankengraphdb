@@ -89,17 +89,7 @@ impl<'a> Parser<'a> {
         variable: Name<'a>,
         property: Option<Name<'a>>,
     ) -> Result<usize, GraphPatternTextError> {
-        let path = if self
-            .syntax
-            .path
-            .is_some_and(|path| path.text == variable.text)
-        {
-            Some(GraphPathFunction::Value)
-        } else if self.syntax.visible_edge(variable.text).is_some() {
-            Some(GraphPathFunction::Edge)
-        } else {
-            None
-        };
+        let path = self.syntax.bare_path_function(variable.text);
         self.projection_slot(
             columns,
             Projection {
