@@ -423,6 +423,9 @@ pub(crate) fn symbol_argument(
         }
         ("hybrid", "search", "label") => Some(GraphSymbolKind::Label),
         ("hybrid", "search", "relation") => Some(GraphSymbolKind::Relation),
+        ("fnx", _, "label") => Some(GraphSymbolKind::Label),
+        ("fnx", _, "relation") => Some(GraphSymbolKind::Relation),
+        ("fnx", _, "weight") => Some(GraphSymbolKind::Property),
         _ => None,
     }
 }
@@ -582,5 +585,91 @@ mod projection_schema_tests {
             crate::GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::ColumnType { .. })
         ));
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn fnx_projection_names_resolve_once_and_determine_template_identity() {
+        let statement = "CALL fnx.pagerank(label => 'Person', relation => 'R', \
+                         weight => 'cost') YIELD node RETURN node";
+        let mut calls = Vec::new();
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Person" | "Human") => {
+                Some(GraphSymbol::Label(LabelId(7)))
+            }
+            _ => symbols(kind, name),
+        };
+        let prepared = PreparedGraphSetText::prepare(statement, |kind, name| {
+            calls.push((kind, name.to_owned()));
+            resolve(kind, name)
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                (GraphSymbolKind::Label, "Person".to_owned()),
+                (GraphSymbolKind::Relation, "R".to_owned()),
+                (GraphSymbolKind::Property, "cost".to_owned()),
+            ]
+        );
+        prepared.bind_parameters(&GqlParameters::new()).unwrap();
+        let alias = PreparedGraphSetText::prepare(
+            "CALL fnx.pagerank(label => 'Human', relation => 'R', \
+             weight => 'cost') YIELD node RETURN node",
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(prepared.canonical_template_bytes(), alias.canonical_template_bytes());
+        let changed = PreparedGraphSetText::prepare(statement, |kind, name| {
+            if kind == GraphSymbolKind::Relation {
+                Some(GraphSymbol::Relation(RelationId(2)))
+            } else {
+                resolve(kind, name)
+            }
+        })
+        .unwrap();
+        assert_ne!(prepared.canonical_template_bytes(), changed.canonical_template_bytes());
+    }
+
+    #[test]
+    fn fnx_projection_schema_errors_refuse_even_for_an_empty_page() {
+        for (argument, kind) in [
+            ("label", GraphSymbolKind::Label),
+            ("relation", GraphSymbolKind::Relation),
+            ("weight", GraphSymbolKind::Property),
+        ] {
+            let statement = format!(
+                "CALL fnx.pagerank({argument} => 'Missing') YIELD node RETURN node LIMIT 0"
+            );
+            let error = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(kind))
+            );
+            let found = if kind == GraphSymbolKind::Label {
+                GraphSymbol::Relation(RelationId(1))
+            } else {
+                GraphSymbol::Label(LabelId(1))
+            };
+            let error = PreparedGraphSetText::prepare(&statement, |_, _| Some(found)).unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::WrongSymbolKind {
+                    expected: kind,
+                    found: found.kind(),
+                })
+            );
+            for value in ["1", "NULL", "$dynamic"] {
+                let statement = format!(
+                    "CALL fnx.pagerank({argument} => {value}) YIELD node RETURN node LIMIT 0"
+                );
+                let mut calls = 0;
+                assert!(PreparedGraphSetText::prepare(&statement, |_, _| {
+                    calls += 1;
+                    None
+                })
+                .is_err());
+                assert_eq!(calls, 0, "{statement}");
+            }
+        }
     }
 }
