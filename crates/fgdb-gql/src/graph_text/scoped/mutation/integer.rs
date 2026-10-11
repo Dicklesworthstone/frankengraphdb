@@ -316,6 +316,28 @@ impl<'a> Parser<'a> {
         Ok(!matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
     }
 
+    /// `operand IN value` whose list is not a literal (a name, a parameter,
+    /// keys(n), list[0], list[0..1]) is one membership in the value language,
+    /// as `[..] IN list` is (fgdb-9cawv). Only a lone operand directly before
+    /// IN qualifies, so `1 + x IN l` keeps `1 + x` as its left side; a list
+    /// literal keeps the scalar IN. False when this is not such a membership.
+    /// Out of line: scalar_predicate repeats once per nested parenthesis up to
+    /// MAX_INTEGER_NESTING, and these temporaries would widen every frame.
+    #[inline(never)]
+    fn operand_membership(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<bool, GraphMutationTextError> {
+        if self.lets.is_none() || !self.starts_operand_membership()? {
+            return Ok(false);
+        }
+        let at = self.current.at;
+        self.composite_comparison(columns, depth, program, at, true)?;
+        Ok(true)
+    }
+
     /// The left side of `operand IN value` (starts_operand_membership): one
     /// operand at the concatenation level, with its own let slots, as a value.
     fn membership_operand(
@@ -383,6 +405,42 @@ impl<'a> Parser<'a> {
             emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
         }
         Ok(())
+    }
+
+    /// `m.key` of a dynamically typed row column, such as a map from WITH or
+    /// UNWIND, reads the entry through a let slot (fgdb-o5o9t), and so does a
+    /// temporal field of a scalar column (a stored date's `.year`). A carried
+    /// vertex's `n.p` is a Vertex column read at the boundary. False, with
+    /// nothing consumed, when the operand here is not such a read. Out of line
+    /// so its template and results never widen integer_unary's frame, which
+    /// repeats once per nested parenthesis.
+    #[inline(never)]
+    fn row_entry_slot(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        if self.lets.is_some()
+            && let ExpressionColumns::Row(schema) = columns
+            && let TokenKind::Word(word) = self.current.kind
+            && !self.elements.contains(&word)
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            && let Some(column) = schema[..self.visible_width(schema)]
+                .iter()
+                .position(|(name, _)| name.text == word)
+            && match schema[column].1 {
+                crate::GraphSetColumnType::Any => true,
+                crate::GraphSetColumnType::Scalar => self.temporal_field_follows()?,
+                _ => false,
+            }
+        {
+            self.advance()?;
+            let value = self.map_entries(ReadValueTemplate::Column(column))?;
+            self.let_slot(program, value, at)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Whether `.field` follows the current name and names a temporal field,
@@ -768,15 +826,7 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
-        // `operand IN value` whose list is not a literal (a name, a
-        // parameter, keys(n), list[0], list[0..1]) is one membership in the
-        // value language, as `[..] IN list` is (fgdb-9cawv). Only a lone
-        // operand directly before IN qualifies, so `1 + x IN l` keeps
-        // `1 + x` as its left side; a list literal keeps the scalar IN.
-        if self.lets.is_some() && self.starts_operand_membership()? {
-            let at = self.current.at;
-            self.composite_comparison(columns, depth, program, at, true)?;
-        } else {
+        if !self.operand_membership(columns, depth, program)? {
             self.scalar_concat(columns, depth, program)?;
         }
         loop {
@@ -1001,27 +1051,8 @@ impl<'a> Parser<'a> {
         if self.lets.is_some() && self.starts_let_operand()? {
             return self.composite_slot(columns, depth, program, at);
         }
-        // `m.key` of a dynamically typed row column, such as a map from WITH
-        // or UNWIND, reads the entry through a let slot (fgdb-o5o9t), and so
-        // does a temporal field of a scalar column (a stored date's `.year`).
-        // A carried vertex's `n.p` is a Vertex column read at the boundary.
-        if self.lets.is_some()
-            && let ExpressionColumns::Row(schema) = columns
-            && let TokenKind::Word(word) = self.current.kind
-            && !self.elements.contains(&word)
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
-            && let Some(column) = schema[..self.visible_width(schema)]
-                .iter()
-                .position(|(name, _)| name.text == word)
-            && match schema[column].1 {
-                crate::GraphSetColumnType::Any => true,
-                crate::GraphSetColumnType::Scalar => self.temporal_field_follows()?,
-                _ => false,
-            }
-        {
-            self.advance()?;
-            let value = self.map_entries(ReadValueTemplate::Column(column))?;
-            return self.let_slot(program, value, at);
+        if self.row_entry_slot(columns, program, at)? {
+            return Ok(());
         }
         let function = if crate::graph_text::SCALAR_FUNCTIONS
             .iter()
