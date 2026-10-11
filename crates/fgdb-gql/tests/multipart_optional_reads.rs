@@ -521,3 +521,42 @@ fn optional_match_directly_after_unwind_null_extends_each_unwound_value() {
         vec![scalar_vertex(Some(10), Some(1))]
     );
 }
+
+/// A leading OPTIONAL MATCH is a Left continuation of the unit relation: its
+/// witnesses, or exactly one NULL-extended row (openCypher, TCK Match7).
+#[test]
+fn a_leading_optional_match_is_a_left_join_of_the_unit_row() {
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 70}) RETURN a"),
+        vec![vertices(&[None])]
+    );
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 20})-[:R]->(b) RETURN b"),
+        vec![vertices(&[Some(3)])]
+    );
+    assert_eq!(
+        rows("OPTIONAL MATCH (a) WHERE a.score > 20 RETURN a ORDER BY a"),
+        vec![vertices(&[Some(3)]), vertices(&[Some(4)])]
+    );
+    // The NULL row flows through WITH into a later required part.
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 70}) WITH a MATCH (c {score: 10}) RETURN a, c"),
+        vec![vertices(&[None, Some(1)])]
+    );
+    // A later required part that expands from the NULL vertex matches nothing
+    // (TCK Match3 [27]); from a matched root it expands as usual.
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 70}) WITH a MATCH (a)-[:R]->(b) RETURN b"),
+        Vec::<GraphValueRow>::new()
+    );
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 20}) WITH a MATCH (a)-[:R]->(b) RETURN b"),
+        vec![vertices(&[Some(3)])]
+    );
+    // A set operand may open with OPTIONAL MATCH too.
+    let union =
+        rows("MATCH (a {score: 10}) RETURN a UNION ALL OPTIONAL MATCH (a {score: 70}) RETURN a");
+    assert_eq!(union.len(), 2, "{union:?}");
+    assert!(union.contains(&vertices(&[Some(1)])), "{union:?}");
+    assert!(union.contains(&vertices(&[None])), "{union:?}");
+}

@@ -1029,6 +1029,19 @@ fn union_column_order(left: &[String], right: &[String]) -> Result<Vec<usize>, (
         .collect()
 }
 
+/// Whether the token at `at` opens a read pipeline: MATCH, OPTIONAL MATCH,
+/// UNWIND, CALL, RETURN or WITH.
+fn opens_pipeline(tokens: &[TextToken<'_>], at: usize) -> bool {
+    tokens.get(at).is_some_and(|token| {
+        token.word("MATCH")
+            || token.word("UNWIND")
+            || token.word("CALL")
+            || token.word("RETURN")
+            || token.word("WITH")
+            || (token.word("OPTIONAL") && tokens.get(at + 1).is_some_and(|next| next.word("MATCH")))
+    })
+}
+
 /// The terminal RETURN's plain property items, one entry per output column:
 /// `(var, name)` for an item that is exactly `var.name`, with or without an
 /// alias. An entry is kept only when the item's position names the column it
@@ -1301,12 +1314,7 @@ impl<'a> Composition<'a> {
             let height = input.depth + 1;
             return Node::new(NodeKind::Scope(Box::new(input)), at, height);
         }
-        if !(self.current().word("MATCH")
-            || self.current().word("UNWIND")
-            || self.current().word("CALL")
-            || self.current().word("RETURN")
-            || self.current().word("WITH"))
-        {
+        if !opens_pipeline(&self.tokens, self.at) {
             return Err(expected(
                 at,
                 "read pipeline or parenthesized set expression",
@@ -1399,14 +1407,8 @@ impl<'a> Composition<'a> {
         {
             next += 1;
         }
-        self.tokens.get(next).is_some_and(|token| {
-            token.word("MATCH")
-                || token.word("UNWIND")
-                || token.word("CALL")
-                || token.word("RETURN")
-                || token.word("WITH")
-                || token.punct(b'(')
-        })
+        opens_pipeline(&self.tokens, next)
+            || self.tokens.get(next).is_some_and(|token| token.punct(b'('))
     }
     fn tail(&mut self, node: &mut Node) -> Result<(), GraphSetTextError> {
         if self.take_word("ORDER") {

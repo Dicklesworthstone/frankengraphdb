@@ -28,6 +28,13 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     // only. OPTIONAL MATCH directly after the unwound rows is instead a Left
     // continuation of them: one NULL-extended row per unmatched value.
     let leading_unwind = tokens.first().is_some_and(|token| token.word("UNWIND"));
+    // A leading OPTIONAL MATCH is a Left continuation of the unit relation:
+    // its witnesses, or exactly one NULL-extended row.
+    if tokens.first().is_some_and(|token| token.word("OPTIONAL"))
+        && tokens.get(1).is_some_and(|token| token.word("MATCH"))
+    {
+        return true;
+    }
     let mut matched = false;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
