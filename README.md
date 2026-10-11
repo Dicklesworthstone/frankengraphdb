@@ -316,6 +316,14 @@ fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
 
+# Weighted analytics as part of a query, with a query-local induced graph
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys \
+  --label Person=1 --relation KNOWS=1 --property name=1 --property weight=2 \
+  "CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'weight',
+      missing:'reject', direction:'directed', parallel:'sum', self_loops:'drop'},
+      0.85, 100, 1e-9, true) YIELD node, score
+   RETURN node.name, score ORDER BY score DESC LIMIT 10"
+
 # Beacon retrieval: BM25 text, exact/ANN vector, or exact-RRF hybrid over one sequence
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property x=2 \
   --text "graph memory" --text-property title --vector 0.5 --vector-property x --k 5
@@ -361,6 +369,10 @@ python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
 ```
+
+**Query-local Prism projections.** A composed `CALL fnx.*` can take a literal projection map as its first positional argument, followed by the ordinary algorithm arguments. `labels` and `relations` each accept `[]` (all admitted elements) or one literal schema name. Both endpoints of an edge must belong to the selected vertex set; selected isolated vertices remain in the graph. `weight` names an edge property; `missing` is `reject`, `unit`, or `zero` and requires `weight`. `direction` is `directed`, `reversed`, or `undirected`; `parallel` is `reject`, `collapse`, `min`, `max`, or `sum`; `self_loops` is `keep`, `drop`, or `reject`. `collapse` uses unit weights without inspecting weight values, and dropped loops or excluded edges do not require valid weights. Weighted algorithms retain their ordinary weighted/unweighted argument, as the final `true` in the PageRank example shows.
+
+The map's schema names resolve when the statement is prepared; algorithm parameters can be rebound for each execution. Omitted options retain the procedure's direction, unit weights, rejected parallel edges and retained self-loops. The same projection applies to ordinary reads, capability-scoped reads, pinned historical reads and effective transaction overlays. It narrows the graph available to the query and grants no additional authority. Composed calls use ordinary query parameters and can participate in certified read/replay; transaction results remain uncommitted data. Projection flags still belong to standalone CLI analytics. Named graph catalogs (`GRAPH social`), dynamic projection maps and multi-name selector lists remain outside this slice.
 
 `query --buffered` opens the authenticated checkpoint through the extent cache and feeds the native asynchronous query cursor. On its own, it supports single-vertex and single-edge scans with leading identities, local filters, canonical ordering, `SKIP`/`LIMIT`, parameters, and historical cuts. Preparation and physical-plan admission finish before storage opens. Unsupported joins, probes, aggregation and alternate ordering refuse at that point. Each row keeps its graph-memory reservation until its output is flushed; an error or missing terminal result means incomplete delivery. This flag cannot be combined with `--stream`, `--certify-to`, or a standalone `CALL fnx`.
 

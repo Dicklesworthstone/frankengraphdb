@@ -1734,7 +1734,7 @@ fn bind_stages(
                     bound.push(bind_read_value(argument, values)?);
                 }
                 input
-                    .procedure_call(
+                    .procedure_call_with_projection(
                         namespace.clone(),
                         name.clone(),
                         bound,

@@ -432,8 +432,31 @@ impl PreparedGraphSet {
     /// domain. Arguments are constants: literals or bound parameters.
     /// `vertices` lists, ascending, the YIELD positions the statement matches
     /// as vertices; the host must refuse unless each is vertex-valued.
-    #[allow(clippy::too_many_arguments)]
     pub fn procedure_call(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_with_projection(
+            namespace,
+            name,
+            arguments,
+            names,
+            outputs,
+            vertices,
+            None,
+        )
+    }
+
+    /// A procedure call with a catalog-bound graph projection. The projection
+    /// narrows the host's authorized snapshot; source, output and argument
+    /// checks are the same as [`Self::procedure_call`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn procedure_call_with_projection(
         self,
         namespace: String,
         name: String,

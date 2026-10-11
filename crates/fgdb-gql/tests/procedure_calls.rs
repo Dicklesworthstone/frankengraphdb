@@ -344,6 +344,33 @@ fn non_prism_map_arguments_keep_their_value_domain() {
 }
 
 #[test]
+fn the_original_procedure_builder_signature_keeps_its_unprojected_behavior() {
+    let query = PreparedGraphSet::singleton()
+        .procedure_call(
+            "t".to_owned(),
+            "scores".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            vec![("score".to_owned(), "s".to_owned())],
+            Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(query.columns(), ["s"]);
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                assert!(call.graph_projection().is_none());
+                host(call, arguments)
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    assert_eq!(column(&result.value, 0), [int(1), int(3), int(2), int(5)]);
+}
+
+#[test]
 fn procedure_rows_flow_through_filter_projection_order_and_page() {
     let query = prepare(
         "CALL t.scores() YIELD vertex, score WHERE score > 1 \

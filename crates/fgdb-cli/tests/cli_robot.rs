@@ -3668,3 +3668,50 @@ fn buffered_spill_dispatch_orders_and_groups_without_a_resident_view() {
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
     }
 }
+
+
+#[test]
+fn inline_prism_projection_matches_explicit_flags_and_replays_after_reopen() {
+    let db = TestDb::new("prism-inline-projection");
+    db.create();
+    let certified_seq = db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS {born:7}]->(b),(a)-[:KNOWS {born:2}]->(b),\
+         (b)-[:KNOWS {born:3}]->(c),(c)-[:KNOWS {born:4}]->(a),\
+         (c)-[:KNOWS {born:true}]->(c)",
+    ]);
+    let expected = analytics(&db, &[
+        "--graph-label", "Person", "--graph-relation", "KNOWS",
+        "--weight", "born", "--missing-weight", "reject", "--direction", "directed",
+        "--parallel-edges", "min", "--self-loops", "drop",
+        "CALL fnx.pagerank(0.85,100,1e-9,true) YIELD vertex,score",
+    ]);
+    let query = "CALL fnx.pagerank(\
+        {labels:['Person'], relations:['KNOWS'], weight:'born', missing:'reject', \
+         direction:'directed', parallel:'min', self_loops:'drop'}, \
+        0.85,100,1e-9,true) YIELD vertex,score RETURN vertex,score ORDER BY vertex";
+    assert_eq!(analytics(&db, &[query]), expected);
+    let named = "CALL fnx.pagerank(\
+        label=>'Person', relation=>'KNOWS', weight=>'born', missing=>'reject', \
+        direction=>'directed', parallel=>'min', self_loops=>'drop', \
+        args=>[0.85,100,1e-9,true]) YIELD vertex,score RETURN vertex,score ORDER BY vertex";
+    assert_eq!(analytics(&db, &[named]), expected);
+    let certificate = PathBuf::from(&db.key).with_file_name("projected-call.certificate");
+    let certificate_path = certificate.to_str().unwrap();
+    let certified = db.command("query", &["--certify-to", certificate_path, query]);
+    assert_eq!(certified.sequence("rows"), certified_seq);
+    db.write(&[
+        "MATCH (a:Person {name:'A'}),(c:Person {name:'C'}) \
+         INSERT (a)-[:KNOWS {born:20}]->(c)",
+    ]);
+    assert_ne!(analytics(&db, &[query]), expected, "control: the live ranking moved");
+    let replayed = db.command("replay", &["--certificate", certificate_path]);
+    assert_eq!(replayed.sequence("replayed"), certified_seq);
+    assert_eq!(
+        &replayed.events[..replayed.events.len() - 1],
+        &certified.events[..certified.events.len() - 1],
+    );
+    db.command("query", &[
+        "CALL fnx.pagerank({relations:['Unbound']}) YIELD vertex RETURN vertex",
+    ]).failure(3, "query");
+}
