@@ -62,7 +62,15 @@ impl<V: Vfs + Clone> Database<V> {
         UpsertFault,
     > {
         self.execute_graph_vertex_upsert_query_authorized_checked(
-            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
             |_, _| Ok(()),
         )
         .await

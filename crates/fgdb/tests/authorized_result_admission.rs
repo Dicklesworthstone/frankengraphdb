@@ -13,8 +13,8 @@ use fgdb_gql::{
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
-    PurposeContexts, QueryCx, TxnCx, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
+    QueryCx, TxnCx, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken, Grant, QueryLimits, Rights, Scope};
 
@@ -55,8 +55,14 @@ async fn fixture(commit: &CommitCx) -> (Database<MemVfs>, Authority, CapabilityT
         vec![(K, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))],
     );
     db.write(commit, batch).await.unwrap();
-    let authority = Authority::new(AuthKey::from_seed(0x391), namespace, "test", SchemaEpoch(0), 1)
-        .unwrap();
+    let authority = Authority::new(
+        AuthKey::from_seed(0x391),
+        namespace,
+        "test",
+        SchemaEpoch(0),
+        1,
+    )
+    .unwrap();
     let token = authority
         .issue_at(
             &Grant {
@@ -110,33 +116,75 @@ async fn checked(
         &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
     ) -> Result<(), WriteTxnError>,
 ) -> Result<(Vec<GraphValueRow>, EmbeddedTxnCompletion), String> {
-    let text = format!("{}{}", kind.statement(), if limit_zero { " LIMIT 0" } else { "" });
+    let text = format!(
+        "{}{}",
+        kind.statement(),
+        if limit_zero { " LIMIT 0" } else { "" }
+    );
     let parameters = GqlParameters::new();
     match kind {
         Kind::Create => {
             let prepared = PreparedGraphInsertQueryText::prepare(&text, R, symbols)
-                .unwrap().bind_parameters(&parameters).unwrap();
+                .unwrap()
+                .bind_parameters(&parameters)
+                .unwrap();
             db.execute_graph_insert_query_authorized_checked(
-                txn, query, commit, authority, token, "main", &prepared,
-                GraphInsertPolicy::new(policy(), 100, 100), || NOW, admit,
-            ).await.map(|(_, rows, completion)| (rows.value, completion)).map_err(|e| e.to_string())
+                txn,
+                query,
+                commit,
+                authority,
+                token,
+                "main",
+                &prepared,
+                GraphInsertPolicy::new(policy(), 100, 100),
+                || NOW,
+                admit,
+            )
+            .await
+            .map(|(_, rows, completion)| (rows.value, completion))
+            .map_err(|e| e.to_string())
         }
         Kind::Mutation => {
             let prepared = PreparedGraphMutationQueryText::prepare(&text, R, symbols)
-                .unwrap().bind_parameters(&parameters).unwrap();
+                .unwrap()
+                .bind_parameters(&parameters)
+                .unwrap();
             db.execute_graph_mutation_query_authorized_checked(
-                txn, query, commit, authority, token, "main", &prepared,
-                GraphMutationPolicy::new(policy(), 100), || NOW, admit,
-            ).await.map(|(_, rows, completion)| (rows.value, completion)).map_err(|e| e.to_string())
+                txn,
+                query,
+                commit,
+                authority,
+                token,
+                "main",
+                &prepared,
+                GraphMutationPolicy::new(policy(), 100),
+                || NOW,
+                admit,
+            )
+            .await
+            .map(|(_, rows, completion)| (rows.value, completion))
+            .map_err(|e| e.to_string())
         }
         Kind::Merge => {
             let prepared = PreparedGraphVertexUpsertQueryText::prepare(&text, R, symbols)
-                .unwrap().bind_parameters(&parameters).unwrap();
+                .unwrap()
+                .bind_parameters(&parameters)
+                .unwrap();
             db.execute_graph_vertex_upsert_query_authorized_checked(
-                txn, query, commit, authority, token, "main", &prepared,
+                txn,
+                query,
+                commit,
+                authority,
+                token,
+                "main",
+                &prepared,
                 GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(policy()), 100),
-                || NOW, admit,
-            ).await.map(|(_, _, rows, completion)| (rows.value, completion)).map_err(|e| e.to_string())
+                || NOW,
+                admit,
+            )
+            .await
+            .map(|(_, _, rows, completion)| (rows.value, completion))
+            .map_err(|e| e.to_string())
         }
     }
 }
@@ -149,15 +197,26 @@ fn refusing_any_native_result_discards_all_private_effects_and_pins() {
             let before = (db.frontier().unwrap(), db.vertices().unwrap());
             let mut calls = 0;
             let result = checked(
-                &mut db, commit, query, txn, &authority, &token, kind, false,
+                &mut db,
+                commit,
+                query,
+                txn,
+                &authority,
+                &token,
+                kind,
+                false,
                 |rows, work| {
                     calls += 1;
                     assert_eq!(rows.len(), 1);
-                    assert_eq!(rows[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(20))]);
+                    assert_eq!(
+                        rows[0].values(),
+                        &[GraphValue::Scalar(CanonicalScalar::Int(20))]
+                    );
                     work(7)?;
                     Err(WriteTxnError::AuthorizedMutationRefused)
                 },
-            ).await;
+            )
+            .await;
             assert!(result.is_err(), "{kind:?}");
             assert_eq!(calls, 1);
             assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
@@ -175,17 +234,29 @@ fn successful_admission_preserves_exact_rows_and_limit_zero_still_checks() {
                 let before = db.frontier().unwrap();
                 let mut admitted = None;
                 let (rows, completion) = checked(
-                    &mut db, commit, query, txn, &authority, &token, kind, empty,
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    kind,
+                    empty,
                     |rows, work| {
                         assert!(admitted.is_none());
                         work(1)?;
                         admitted = Some(rows.to_vec());
                         Ok(())
                     },
-                ).await.unwrap();
+                )
+                .await
+                .unwrap();
                 assert_eq!(Some(rows.clone()), admitted);
                 assert_eq!(rows.is_empty(), empty);
-                assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+                assert!(matches!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted { .. }
+                ));
                 assert_eq!(db.frontier().unwrap().0, before.0 + 1);
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
@@ -200,14 +271,25 @@ fn admission_uses_the_same_live_work_budget_even_for_an_empty_result() {
             let (mut db, authority, token) = fixture(commit).await;
             let before = (db.frontier().unwrap(), db.vertices().unwrap());
             let mut entered = false;
-            assert!(checked(
-                &mut db, commit, query, txn, &authority, &token, kind, true,
-                |rows, work| {
-                    entered = true;
-                    assert!(rows.is_empty());
-                    work(u64::MAX)
-                },
-            ).await.is_err());
+            assert!(
+                checked(
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    kind,
+                    true,
+                    |rows, work| {
+                        entered = true;
+                        assert!(rows.is_empty());
+                        work(u64::MAX)
+                    },
+                )
+                .await
+                .is_err()
+            );
             assert!(entered);
             assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -221,13 +303,24 @@ fn issuer_retirement_inside_result_admission_is_not_followed_by_commit() {
         for kind in [Kind::Create, Kind::Mutation, Kind::Merge] {
             let (mut db, authority, token) = fixture(commit).await;
             let before = (db.frontier().unwrap(), db.vertices().unwrap());
-            assert!(checked(
-                &mut db, commit, query, txn, &authority, &token, kind, false,
-                |_, work| {
-                    authority.retire();
-                    work(0)
-                },
-            ).await.is_err());
+            assert!(
+                checked(
+                    &mut db,
+                    commit,
+                    query,
+                    txn,
+                    &authority,
+                    &token,
+                    kind,
+                    false,
+                    |_, work| {
+                        authority.retire();
+                        work(0)
+                    },
+                )
+                .await
+                .is_err()
+            );
             assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
             assert_eq!(txn.outstanding_obligations(), 0);
         }

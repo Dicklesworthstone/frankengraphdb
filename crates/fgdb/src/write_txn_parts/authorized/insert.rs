@@ -158,7 +158,15 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<QueryReceipt, QueryFault> {
         self.execute_graph_insert_query_authorized_checked(
-            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
             |_, _| Ok(()),
         )
         .await
