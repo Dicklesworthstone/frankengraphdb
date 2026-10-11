@@ -45,6 +45,8 @@ pub(super) struct ParsedReturn<'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    /// The row stages after a WITH head, when the head is a WITH.
+    tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 struct InsertLeaves<'r, 'a> {
@@ -410,6 +412,7 @@ impl<'a> ParsedReturn<'a> {
             count: self.count,
             at: self.at,
             property_catalog: None,
+            tail: self.tail,
         })
     }
 }
@@ -421,7 +424,12 @@ impl<'a> Parser<'a> {
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ParsedReturn<'a>, GraphInsertTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        // A WITH after the CREATE heads a row pipeline over the created
+        // occurrences (openCypher Create6 "... WITH n WHERE ... RETURN").
+        let head = self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -437,6 +445,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
@@ -530,7 +539,74 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            let tail = self.insertion_tail(&mut returning, syntax, source, output)?;
+            returning.tail = Some(tail);
+        }
         Ok(returning)
+    }
+
+    /// The stages after a CREATE's WITH head. A carried element's property
+    /// read in the WITH's own WHERE, its pages or the terminal RETURN is a
+    /// hidden head column holding the frozen created or matched value.
+    fn insertion_tail(
+        &mut self,
+        returning: &mut ParsedReturn<'a>,
+        syntax: &mut InsertionSyntax<'a>,
+        source: &[(Name<'a>, GraphSetColumnType)],
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<crate::set_text::ReadStageTemplate>, GraphInsertTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        // An aggregating WITH carries no element to read later.
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                    returning.bindings[binding]
+                else {
+                    continue;
+                };
+                // The element's own variable, never an output spelling such
+                // as `startNode`: a created slot or a bare MATCH projection.
+                let variable = match binding {
+                    Binding::Vertex(vertex) => syntax.vertices[vertex].name,
+                    Binding::Edge(edge) => syntax.edges[edge].name,
+                    Binding::Input(input) => input
+                        .checked_sub(source.len())
+                        .map(|column| &syntax.projections[column])
+                        .filter(|column| column.property.is_none() && column.path.is_none())
+                        .map(|column| column.variable),
+                    _ => None,
+                };
+                let Some(variable) = variable else {
+                    continue;
+                };
+                let column = returning.map_input(
+                    self,
+                    syntax,
+                    source,
+                    variable,
+                    ReturnMapInput::Property(key),
+                )?;
+                mutation_query::push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
+            }
+        }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
     }
 }
 
@@ -570,12 +646,20 @@ impl InsertReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        // The tail reads the head's own output columns, hidden reads included.
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 

@@ -125,6 +125,9 @@ pub struct PreparedGraphInsertQuery {
     offset: u64,
     count: Option<u64>,
     property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// A WITH after the CREATE (`CREATE (n ...) WITH n WHERE ... RETURN`):
+    /// row stages over the head's owned rows, whose schema is the output.
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphInsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -267,6 +270,7 @@ impl PreparedGraphInsertQuery {
             offset: 0,
             count: None,
             property_catalog,
+            tail: None,
         })
     }
 
@@ -308,6 +312,15 @@ impl PreparedGraphInsertQuery {
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
         self.offset = offset;
         self.count = count;
+        self
+    }
+
+    /// Continue the head (now a WITH) with row stages over its owned rows.
+    /// The statement's output schema becomes the tail's.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
         self
     }
 
@@ -360,16 +373,29 @@ impl PreparedGraphInsertQuery {
             )
             .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
         }
+        // A WITH head's rows are private input to its tail.
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy.query)
+        } else {
+            policy.query
+        };
         let returning = crate::set_ops::finish_owned_projection(
             returning,
-            policy.query,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
-            checkpoint,
+            &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+        let returning = match &self.tail {
+            None => returning,
+            Some(tail) => {
+                crate::set_ops::finish_owned_tail(returning, tail, policy.query, checkpoint)
+                    .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?
+            }
+        };
         Ok(GraphInsertQueryBatch {
             insertion,
             returning,
@@ -429,6 +455,12 @@ impl PreparedGraphInsertQuery {
                 self.property_catalog.as_deref(),
                 &mut bytes,
             );
+        }
+        if let Some(tail) = &self.tail {
+            bytes.extend_from_slice(b"fgdb:write-tail:v1\0");
+            let tail = tail.canonical_bytes();
+            bytes.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&tail);
         }
         bytes
     }

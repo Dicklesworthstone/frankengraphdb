@@ -296,15 +296,9 @@ impl PreparedGraphMutationQuery {
             )
             .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
         }
-        // A WITH head's rows are private input to its tail: only the tail's
-        // final rows spend the result-row allowance.
+        // A WITH head's rows are private input to its tail.
         let head = if self.tail.is_some() {
-            GqlQueryPolicy::new(
-                policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
-                u64::MAX,
-                policy.query.evaluator.max_work_units,
-                policy.query.evaluator.max_scratch_entries,
-            )
+            crate::set_ops::owned_head_policy(policy.query)
         } else {
             policy.query
         };
@@ -318,55 +312,16 @@ impl PreparedGraphMutationQuery {
             &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
-        let Some(tail) = &self.tail else {
-            return Ok(GraphMutationQueryBatch {
-                mutation,
-                returning,
-            });
-        };
-        // The tail continues the same allowance: what the write and its head
-        // spent is gone, and the result-row limit is the statement's.
-        let remaining = |limit: u64, spent: u64| limit.saturating_sub(spent);
-        let budget = GqlQueryPolicy::new(
-            remaining(
-                policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
-                returning.rows.snapshot_records,
-            ),
-            policy.query.rows.max_result_rows().unwrap_or(u64::MAX),
-            remaining(
-                policy.query.evaluator.max_work_units,
-                returning.evaluator.work_units,
-            ),
-            remaining(
-                policy.query.evaluator.max_scratch_entries,
-                returning.evaluator.scratch_entries,
-            ),
-        );
-        let output = tail
-            .execute_over_owned(returning.value, budget, checkpoint)
-            .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
-        // The tail ran inside what the head left, so each sum stays within
-        // the statement's own limit; saturation only guards an unbounded one.
-        let evaluator = crate::GlaExecutionStats {
-            work_units: returning
-                .evaluator
-                .work_units
-                .saturating_add(output.evaluator.work_units),
-            scratch_entries: returning
-                .evaluator
-                .scratch_entries
-                .saturating_add(output.evaluator.scratch_entries),
+        let returning = match &self.tail {
+            None => returning,
+            Some(tail) => {
+                crate::set_ops::finish_owned_tail(returning, tail, policy.query, checkpoint)
+                    .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?
+            }
         };
         Ok(GraphMutationQueryBatch {
             mutation,
-            returning: GqlQueryExecution {
-                value: output.value,
-                rows: crate::GqlExecutionStats {
-                    snapshot_records: returning.rows.snapshot_records,
-                    result_rows: output.rows.result_rows,
-                },
-                evaluator,
-            },
+            returning,
         })
     }
 

@@ -787,32 +787,26 @@ impl<'a> Parser<'a> {
                     variable,
                     ReturnMapInput::Property(key),
                 )?;
-                let name = return_projection::pipeline::BOUNDARY_READ_NAMES
-                    .iter()
-                    .copied()
-                    .find(|name| schema.iter().all(|(output, _)| output.text != *name))
-                    .ok_or_else(|| {
-                        error(
-                            key.at,
-                            GraphPatternTextErrorKind::Expected(
-                                "at most 16 carried-element property reads after a WITH",
-                            ),
-                        )
-                    })?;
-                returning.projection.push(ReadProjectionTemplate {
-                    name: name.to_owned(),
-                    value: ReadValueTemplate::Column(column),
-                });
-                schema.push((
-                    Name {
-                        text: name,
-                        at: key.at,
-                    },
-                    GraphSetColumnType::Scalar,
-                ));
-                reads.push((alias.text, key, schema.len() - 1));
+                push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
             }
         }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
+    }
+
+    /// Resolve a write tail's hidden reads through the read pipeline's own
+    /// boundary columns, then parse its remaining stages.
+    pub(super) fn finish_write_tail(
+        &mut self,
+        schema: Vec<(Name<'a>, GraphSetColumnType)>,
+        visible: usize,
+        reads: Vec<(&'a str, Name<'a>, usize)>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
         if !reads.is_empty() {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
@@ -822,13 +816,13 @@ impl<'a> Parser<'a> {
                 scoped: Vec::new(),
             });
         }
-        Ok(self.row_pipeline(schema)?)
+        self.row_pipeline(schema)
     }
 
     /// `alias.key` reads of a carried vertex or edge from the current token
     /// to the next WITH, UNWIND, MATCH or CALL: the WITH's WHERE, its pages
     /// and the terminal RETURN. Chained keys and other names are not reads.
-    fn write_tail_reads(
+    pub(super) fn write_tail_reads(
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
@@ -950,6 +944,43 @@ impl MutationReturnTemplate {
         let tail = return_projection::bind_stages(owned, stages, values)?;
         Ok(query.with_tail(tail))
     }
+}
+
+/// One hoisted write-tail read: a hidden head column holding `column`, the
+/// write's binding for `alias.key` after the statement, under a reserved
+/// boundary name no user output takes.
+pub(super) fn push_tail_read<'a>(
+    projection: &mut Vec<ReadProjectionTemplate>,
+    schema: &mut Vec<(Name<'a>, GraphSetColumnType)>,
+    reads: &mut Vec<(&'a str, Name<'a>, usize)>,
+    (alias, key): (Name<'a>, Name<'a>),
+    column: usize,
+) -> Result<(), GraphPatternTextError> {
+    let name = return_projection::pipeline::BOUNDARY_READ_NAMES
+        .iter()
+        .copied()
+        .find(|name| schema.iter().all(|(output, _)| output.text != *name))
+        .ok_or_else(|| {
+            error(
+                key.at,
+                GraphPatternTextErrorKind::Expected(
+                    "at most 16 carried-element property reads after a WITH",
+                ),
+            )
+        })?;
+    projection.push(ReadProjectionTemplate {
+        name: name.to_owned(),
+        value: ReadValueTemplate::Column(column),
+    });
+    schema.push((
+        Name {
+            text: name,
+            at: key.at,
+        },
+        GraphSetColumnType::Scalar,
+    ));
+    reads.push((alias.text, key, schema.len() - 1));
+    Ok(())
 }
 
 /// Single-statement framing on the script lexer: one terminal semicolon is

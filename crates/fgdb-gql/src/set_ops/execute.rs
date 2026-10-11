@@ -628,6 +628,62 @@ pub(crate) fn finish_owned_projection<E, C>(
     })
 }
 
+/// The policy a write's WITH head finishes under. Its rows are private input
+/// to the tail, so only the tail's final rows spend the result-row allowance.
+pub(crate) fn owned_head_policy(policy: GqlQueryPolicy) -> GqlQueryPolicy {
+    GqlQueryPolicy::new(
+        policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+        u64::MAX,
+        policy.evaluator.max_work_units,
+        policy.evaluator.max_scratch_entries,
+    )
+}
+
+/// Run a write tail over its finished head under what the write and head
+/// left of the statement's allowance, with the statement's own result-row
+/// limit. Counters continue the head's: work and scratch add, snapshot
+/// records are the write's, and result rows are the tail's alone.
+pub(crate) fn finish_owned_tail<E, C>(
+    head: GqlQueryExecution<GraphValueRow>,
+    tail: &PreparedGraphSet,
+    policy: GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    let remaining = |limit: u64, spent: u64| limit.saturating_sub(spent);
+    let budget = GqlQueryPolicy::new(
+        remaining(
+            policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+            head.rows.snapshot_records,
+        ),
+        policy.rows.max_result_rows().unwrap_or(u64::MAX),
+        remaining(policy.evaluator.max_work_units, head.evaluator.work_units),
+        remaining(
+            policy.evaluator.max_scratch_entries,
+            head.evaluator.scratch_entries,
+        ),
+    );
+    let output = tail.execute_over_owned(head.value, budget, checkpoint)?;
+    // The tail ran inside what the head left, so each sum stays within the
+    // statement's own limit; saturation only guards an unbounded policy.
+    Ok(GqlQueryExecution {
+        value: output.value,
+        rows: GqlExecutionStats {
+            snapshot_records: head.rows.snapshot_records,
+            result_rows: output.rows.result_rows,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: head
+                .evaluator
+                .work_units
+                .saturating_add(output.evaluator.work_units),
+            scratch_entries: head
+                .evaluator
+                .scratch_entries
+                .saturating_add(output.evaluator.scratch_entries),
+        },
+    })
+}
+
 fn compare_value<E>(
     a: &GraphValue,
     b: &GraphValue,

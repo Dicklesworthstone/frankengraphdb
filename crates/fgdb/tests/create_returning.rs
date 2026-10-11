@@ -259,6 +259,82 @@ fn distinct_and_zero_result_pages_bound_returned_rows_without_suppressing_writes
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A WITH after CREATE (openCypher Create6 "... WITH n WHERE ... RETURN"):
+/// its WHERE, its pages and the RETURN read a carried created element's
+/// frozen properties, an aggregating WITH sums them, and neither the WHERE
+/// nor the WITH's LIMIT limits which rows create.
+#[test]
+fn a_with_after_create_filters_pages_and_aggregates_the_created_rows() {
+    let ((), report) = run_async_under_lab(0xc8e7_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut created = 0;
+        for (statement, expected, vertices, edges) in [
+            (
+                "UNWIND [1,2,3,4,5] AS x CREATE (n:Copy {p:x}) \
+                 WITH n WHERE n.p % 2 = 0 RETURN n.p AS p ORDER BY p",
+                vec![vec![int(2)], vec![int(4)]],
+                5,
+                0,
+            ),
+            (
+                "UNWIND [1,2,3,4,5] AS x CREATE (n:Copy {p:x}) WITH sum(n.p) AS s RETURN s",
+                vec![vec![int(15)]],
+                5,
+                0,
+            ),
+            (
+                "UNWIND [1,2,3] AS x CREATE (a:Copy {p:x})-[e:R {p:x*10}]->(b:Copy) \
+                 WITH e, a.p AS p WHERE e.p > 10 RETURN e.p AS ep, p ORDER BY ep",
+                vec![vec![int(20), int(2)], vec![int(30), int(3)]],
+                6,
+                3,
+            ),
+            (
+                "UNWIND [1,2,3,4] AS x CREATE (n:Copy {p:x}) \
+                 WITH n, n.p AS p ORDER BY p DESC LIMIT 2 RETURN n.p AS q ORDER BY q",
+                vec![vec![int(3)], vec![int(4)]],
+                4,
+                0,
+            ),
+        ] {
+            let (stats, rows, completion) = db
+                .execute_graph_insert_query_autocommit_engine_governed(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &query(statement),
+                    policy(2, 6, 3),
+                )
+                .await
+                .expect(statement);
+            assert_eq!(
+                (stats.created_vertices, stats.created_edges),
+                (vertices, edges),
+                "{statement}"
+            );
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(GraphValueRow::from_owned_values)
+                .collect();
+            assert_eq!(rows.value, expected, "{statement}");
+            assert_eq!(rows.rows.result_rows, expected.len() as u64, "{statement}");
+            assert_eq!(rows.rows.snapshot_records, 0, "{statement}");
+            assert!(
+                matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }),
+                "{statement}"
+            );
+            created += vertices;
+        }
+        assert_eq!(db.vertices().unwrap().len() as u64, created);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn return_expression_and_final_row_budget_failures_preserve_the_outer_prefix() {
     let ((), report) = run_async_under_lab(0xc8e7_0003, |root| async move {

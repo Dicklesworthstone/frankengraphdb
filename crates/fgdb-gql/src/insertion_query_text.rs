@@ -19,6 +19,8 @@ pub(crate) struct InsertReturnTemplate {
     pub count: Option<ReadPageNumber>,
     pub at: usize,
     pub property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// The row stages after a WITH head, over the head's own output columns.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 /// One standalone, MATCH-selected or leading-UNWIND CREATE/INSERT with RETURN.
