@@ -10,7 +10,7 @@ use fgdb_beacon::expansion::{ExpansionGraph, ExpansionSpec};
 use fgdb_beacon::read::{ReadError as Error, Search};
 use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CommitSeq, QueryCx};
+use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::{Cell, RefCell};
 
 /// Private common path for privileged and capability-governed consumers. No
@@ -51,10 +51,45 @@ pub(crate) fn evaluate(
 /// The same execution body with an admitted-edge event for a host's combined
 /// vertex/edge allowance. The callback runs AFTER historical winner selection,
 /// relation scope and BOTH selected endpoint checks, before retaining an arc.
-/// It sees no hidden candidate, raw row, identity or property. Existing native
-/// readers use the no-op callback above and retain their exact charge trace.
+/// It sees no hidden candidate, raw row, identity or property.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_with_edge_admission(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    relation_allowed: impl FnMut(RelationId) -> bool,
+    admit_edge: impl FnMut() -> Result<(), BeaconError>,
+) -> Result<Vec<GraphHybridHit>, BeaconError> {
+    evaluate_filtered(
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        work,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        relation_allowed,
+        admit_edge,
+        |_| true,
+    )
+}
+
+/// Filter result endpoints, never the admitted corpus or graph transit nodes.
+/// The same stable predicate participates in graph candidate selection and in
+/// text/vector candidate selection before any rank or final top-k is assigned.
+/// Security callbacks still run before corpus construction and edge admission.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_filtered(
     snapshot: &Snapshot,
     at: CommitSeq,
     options: &Options,
@@ -67,6 +102,7 @@ pub(crate) fn evaluate_with_edge_admission(
     property_allowed: impl FnMut(PropertyKeyId) -> bool,
     mut relation_allowed: impl FnMut(RelationId) -> bool,
     mut admit_edge: impl FnMut() -> Result<(), BeaconError>,
+    eligible: impl Fn(VId) -> bool,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
     work.borrow_mut().charge(1)?;
     let config = options.config_for_graph(query)?;
@@ -165,21 +201,26 @@ pub(crate) fn evaluate_with_edge_admission(
                 Ok(())
             })?;
         }
-        graph.expand(
+        graph.expand_filtered(
             expansion.seeds,
             expansion.max_hops,
             expansion.include_seeds,
             query.graph_candidates,
+            |id, _| Ok(eligible(id)),
             &mut SharedWork(work),
         )?
     } else {
         Vec::new()
     };
-    // Keep the COMPLETE bounded modality candidates until the graph ranks are
-    // available. Early two-lane top-k would discard possible final winners.
-    let rows = index
-        .snapshot()
-        .hybrid_search_graph(query, &graph_hits, &mut SharedWork(work))?;
+    // Graph truncation already counted eligible endpoints, not rejected
+    // transit nodes. Text and vector lanes now apply the SAME predicate before
+    // their own candidate limits. No truncated population is post-filtered.
+    let rows = index.snapshot().hybrid_search_graph_filtered(
+        query,
+        &graph_hits,
+        eligible,
+        &mut SharedWork(work),
+    )?;
     // No partial rows escape, even on empty/zero-k paths or final refusal.
     work.borrow_mut().charge(1)?;
     Ok(rows)
@@ -201,11 +242,29 @@ impl<V: Vfs + Clone> Database<V> {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
+        self.beacon_search_graph_filtered(cx, options, query, expansion, |_| true)
+    }
+
+    /// Select result endpoints before all three modality limits and final
+    /// fusion. A rejected result vertex remains a valid transit vertex; only
+    /// source selection determines which vertices can be traversed. The host
+    /// predicate must be stable, bounded computation over IDs, not I/O or an
+    /// authorization check. Derive data-dependent filters from a pinned view.
+    /// This is a privileged resident API, with the same approximation bounds
+    /// as `beacon_search_graph`, not a secure-view or exhaustive-search claim.
+    pub fn beacon_search_graph_filtered(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             self.read_session()
                 .map_err(Error::Read)?
-                .beacon_search_graph(cx, options, query, expansion)
+                .beacon_search_graph_filtered(cx, options, query, expansion, eligible)
         })
     }
 }
@@ -221,6 +280,22 @@ impl EmbeddedReadView {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
+        self.beacon_search_graph_filtered(cx, options, query, expansion, |_| true)
+    }
+
+    /// Endpoint filtering at this pinned generation and selected history.
+    /// Derive any graph-dependent predicate from this same view/as_of cut.
+    /// Rejected endpoints retain their transit role, and all existing work,
+    /// staging, graph and final-delivery checks remain effective. Reject-all
+    /// cannot bypass a late source failure or a visited-vertex limit.
+    pub fn beacon_search_graph_filtered(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let at = options.as_of.unwrap_or(self.frontier());
@@ -228,7 +303,7 @@ impl EmbeddedReadView {
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
                 cx.checkpoint()
             }));
-            let result = evaluate(
+            let result = evaluate_filtered(
                 &self.snapshot,
                 at,
                 options,
@@ -240,6 +315,8 @@ impl EmbeddedReadView {
                 |_| true,
                 |_| true,
                 |_| true,
+                || Ok(()),
+                eligible,
             );
             work.into_inner().finish(result)
         })
@@ -670,6 +747,134 @@ mod tests {
             }
             assert_eq!(db.frontier().unwrap(), at);
             assert_eq!(db.manifest().unwrap(), manifest);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn endpoint_filter_refills_all_lanes_without_removing_transit_vertices() {
+        let ((), report) = run_async_under_lab(0xbeac_3201, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.write(&commit, initial()).await.unwrap();
+            let mut q = query();
+            q.retrieval.vector_candidates = 1;
+            q.retrieval.text_candidates = 1;
+            q.retrieval.profile = ExactRrfProfile::default();
+            q.graph_candidates = 1;
+            let spec = expansion(&[VId(1)]);
+            let hits = db
+                .beacon_search_graph_filtered(&cx, &options(), q, spec, |id| id == HIGH)
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].id, HIGH);
+            assert_eq!(hits[0].graph_hops, Some(2));
+            assert_eq!(hits[0].graph_rank.unwrap().get(), 1);
+            assert_eq!(hits[0].vector_rank.unwrap().get(), 1);
+            assert_eq!(hits[0].text_rank.unwrap().get(), 1);
+            assert_eq!(hits[0].score.numerator(), 102);
+            assert_eq!(hits[0].score.denominator(), 61);
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &options(), q, spec, |_| true).unwrap(),
+                db.beacon_search_graph(&cx, &options(), q, spec).unwrap()
+            );
+            assert!(db
+                .beacon_search_graph_filtered(&cx, &options(), q, spec, |_| false)
+                .unwrap()
+                .is_empty());
+            let mut denied = spec;
+            denied.limits.max_visited_vertices = 2;
+            assert!(matches!(
+                db.beacon_search_graph_filtered(&cx, &options(), q, denied, |_| false),
+                Err(Error::Index(BeaconError::ResourceLimit {
+                    resource: "expansion visited vertices", limit: 2,
+                }))
+            ));
+            q.graph_weight = 0;
+            denied.limits.max_vertices = 0;
+            let hits = db
+                .beacon_search_graph_filtered(&cx, &options(), q, denied, |id| id == HIGH)
+                .unwrap();
+            assert_eq!(hits[0].id, HIGH);
+            assert_eq!(hits[0].graph_rank, None);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn endpoint_filter_uses_one_historical_cut_through_transit_deletion_and_compaction() {
+        let ((), report) = run_async_under_lab(0xbeac_3202, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let at = db.write(&commit, initial()).await.unwrap();
+            let pinned = db.read_session().unwrap();
+            let spec = expansion(&[VId(1)]);
+            let before = pinned
+                .beacon_search_graph_filtered(&cx, &options(), query(), spec, |id| id == HIGH)
+                .unwrap();
+            assert_eq!(before[0].graph_hops, Some(2));
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.delete_vertex(VId(2));
+            db.write(&commit, changes).await.unwrap();
+            let live = db
+                .beacon_search_graph_filtered(&cx, &options(), query(), spec, |id| id == HIGH)
+                .unwrap();
+            assert_eq!(live[0].id, HIGH);
+            assert_eq!(live[0].graph_rank, None);
+            db.compact(&commit).await.unwrap();
+            let mut historical = options();
+            historical.as_of = Some(at);
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &historical, query(), spec, |id| id == HIGH).unwrap(),
+                before
+            );
+            drop(db);
+            assert_eq!(
+                pinned.beacon_search_graph_filtered(&cx, &options(), query(), spec, |id| id == HIGH).unwrap(),
+                before
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn filtered_graph_refuses_every_interruption_without_publishing_a_prefix() {
+        struct Cut { calls: usize, stop: usize }
+        impl WorkControl for Cut {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+            }
+        }
+        let ((), report) = run_async_under_lab(0xbeac_3203, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let at = db.write(&commit, initial()).await.unwrap();
+            for accept in [false, true] {
+                let run = |stop| {
+                    let work = RefCell::new(Cut { calls: 0, stop });
+                    let result = evaluate_filtered(
+                        &db.snapshot, at, &options(), query(), expansion(&[VId(1)]),
+                        &work, Scan::Metered, |_| Ok(true), |_| true, |_| true,
+                        |_| true, || Ok(()), |id| accept && id == HIGH,
+                    );
+                    (result, work.into_inner().calls)
+                };
+                let (rows, calls) = run(usize::MAX);
+                assert_eq!(rows.unwrap().len(), usize::from(accept));
+                assert!(calls > 2);
+                for stop in 1..=calls {
+                    let (result, seen) = run(stop);
+                    assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}");
+                    assert_eq!(seen, stop);
+                }
+            }
+            assert_eq!(db.frontier().unwrap(), at);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
