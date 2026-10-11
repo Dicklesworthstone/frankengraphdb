@@ -35,13 +35,11 @@ impl ExpressionPage {
                     }
                 }
             };
+            // A later key on a column already sorted on cannot change the
+            // order: rows equal there tie on both. openCypher keeps the first
+            // direction (TCK WithOrderBy3 [7], `a + 2 ASC, a + 2 DESC`).
             if order.iter().any(|previous| previous.column == key.column) {
-                return Err(GraphSetTextError {
-                    offset: self.at,
-                    kind: GraphSetTextErrorKind::OrderBuild(
-                        crate::algebra::GraphOrderError::DuplicateColumn { column: key.column },
-                    ),
-                });
+                continue;
             }
             order.push(key);
         }

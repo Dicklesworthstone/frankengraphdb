@@ -1448,6 +1448,16 @@ fn a_with_page_sorts_by_computed_keys_and_hides_them() {
                 "MATCH (n) WITH n.p AS p WHERE p > 1 ORDER BY 0 - p LIMIT 2 RETURN p",
                 vec![3, 4],
             ),
+            // A repeated key cannot overwrite the first one's direction
+            // (TCK WithOrderBy3 [7]), for a column and a computed key.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC, p ASC LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p + 2 ASC, p + 2 DESC LIMIT 1 RETURN p",
+                vec![1],
+            ),
         ] {
             assert_eq!(kept(statement), expected, "{statement}");
         }

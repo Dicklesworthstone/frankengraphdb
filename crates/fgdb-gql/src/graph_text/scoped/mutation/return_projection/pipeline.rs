@@ -812,31 +812,25 @@ impl<'a> Parser<'a> {
             loop {
                 // `alias.property` of a carried MATCH vertex orders by its
                 // hidden boundary read; every other key is a visible column.
-                let key_start = self.current.at;
-                let (column, key_at) = if let Some(column) = self.boundary_read(schema.len())? {
-                    (column, key_start)
+                let column = if let Some(column) = self.boundary_read(schema.len())? {
+                    column
                 } else if let Some(column) = self.sourced_key(sources)? {
-                    (column, key_start)
+                    column
                 } else {
                     let visible = self.visible_width(schema);
                     let name = self.name()?;
-                    let column = schema[..visible]
+                    schema[..visible]
                         .iter()
                         .position(|(alias, _)| alias.text == name.text)
-                        .ok_or_else(|| expected(name.at, "projected WITH column"))?;
-                    (column, name.at)
+                        .ok_or_else(|| expected(name.at, "projected WITH column"))?
                 };
-                if order
+                // A later key on a column already sorted on cannot change the
+                // order: rows equal there tie on both. openCypher keeps the
+                // first direction (TCK WithOrderBy3 [7], `a ASC, a DESC`); the
+                // repeat's own direction is still read.
+                let repeated = order
                     .iter()
-                    .any(|key: &GraphValueOrder| key.column == column)
-                {
-                    return Err(GraphSetTextError {
-                        offset: key_at,
-                        kind: GraphSetTextErrorKind::OrderBuild(
-                            crate::algebra::GraphOrderError::DuplicateColumn { column },
-                        ),
-                    });
-                }
+                    .any(|key: &GraphValueOrder| key.column == column);
                 let descending = self.take_word("DESC")? || self.take_word("DESCENDING")?;
                 if !descending && !self.take_word("ASC")? {
                     self.take_word("ASCENDING")?;
@@ -852,11 +846,13 @@ impl<'a> Parser<'a> {
                 } else {
                     false
                 };
-                order.push(GraphValueOrder {
-                    column,
-                    descending,
-                    nulls_first,
-                });
+                if !repeated {
+                    order.push(GraphValueOrder {
+                        column,
+                        descending,
+                        nulls_first,
+                    });
+                }
                 if !self.take(b',')? {
                     break;
                 }
