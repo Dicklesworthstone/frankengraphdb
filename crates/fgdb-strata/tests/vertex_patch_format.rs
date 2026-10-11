@@ -8,11 +8,12 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_strata::vertex::{
-    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_MAGIC, VertexPatchError,
-    VertexPatchVersion, VertexRow, decode_patch, encode_patch, read_patch, vertex_patch_id,
+    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_FORMAT_V3, VERTEX_PATCH_MAGIC,
+    VertexPatchError, VertexPatchVersion, VertexRow, decode_patch, encode_patch, read_patch,
+    vertex_patch_id,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalDate, CanonicalDuration, CanonicalScalar, CommitSeq, VId};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -76,6 +77,47 @@ fn same_rows_encode_to_the_same_bytes_and_identity() {
     assert_eq!(
         vertex_patch_id(&K_OID, namespace(), &first),
         vertex_patch_id(&K_OID, namespace(), &second),
+    );
+}
+
+/// fgdb-hbi8s: a patch is V3 exactly when a row holds a value of scalar
+/// profile version 2, so profile-1 patches keep their V2 bytes. Either
+/// header over the other's content is refused, in both directions.
+#[test]
+fn a_profile_2_value_and_only_one_makes_the_patch_v3() {
+    let plain = encode_patch(&distinct_rows()).expect("encodes");
+    assert_eq!(plain[4..6], VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+
+    let mut rows = distinct_rows();
+    rows[1].props.push((
+        PropertyKeyId(71),
+        CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).expect("a date")),
+    ));
+    rows[2].props.push((
+        PropertyKeyId(73),
+        CanonicalScalar::Duration(CanonicalDuration::new(14, -3, 5).expect("a duration")),
+    ));
+    let temporal = encode_patch(&rows).expect("encodes");
+    assert_eq!(temporal[4..6], VERTEX_PATCH_FORMAT_V3.to_le_bytes());
+    assert_eq!(&*decode_patch(&temporal).expect("decodes"), rows.as_slice());
+
+    let mut understated = temporal;
+    understated[4..6].copy_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+    assert_eq!(
+        decode_patch(&understated),
+        Err(VertexPatchError::FormatMismatch {
+            format: VERTEX_PATCH_FORMAT_V2,
+            required: VERTEX_PATCH_FORMAT_V3,
+        })
+    );
+    let mut overstated = plain;
+    overstated[4..6].copy_from_slice(&VERTEX_PATCH_FORMAT_V3.to_le_bytes());
+    assert_eq!(
+        decode_patch(&overstated),
+        Err(VertexPatchError::FormatMismatch {
+            format: VERTEX_PATCH_FORMAT_V3,
+            required: VERTEX_PATCH_FORMAT_V2,
+        })
     );
 }
 
@@ -158,11 +200,11 @@ fn wrong_magic_and_future_format_are_distinct_refusals() {
     );
 
     let mut future = bytes;
-    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V2 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V3 + 1).to_le_bytes());
     assert_eq!(
         decode_patch(&future),
         Err(VertexPatchError::UnsupportedFormat {
-            format: VERTEX_PATCH_FORMAT_V2 + 1
+            format: VERTEX_PATCH_FORMAT_V3 + 1
         }),
         "a newer version of our file is not \"not our file\""
     );

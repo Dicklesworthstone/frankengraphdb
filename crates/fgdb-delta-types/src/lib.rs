@@ -36,7 +36,10 @@ mod zweight;
 
 use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
-pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
+pub use canonical::{
+    CanonicalError, DELTA_FORMAT_V1, DELTA_FORMAT_V2, canonicalize, delta_format_for,
+    is_supported_delta_format,
+};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use fold::fold_target_disjoint;
 pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
@@ -288,7 +291,7 @@ impl LogicalDeltaTemplate {
     ) -> Result<Self, CanonicalError> {
         canonicalize(&mut coordinate_entries)?;
         let template = LogicalDeltaTemplate {
-            format: DELTA_FORMAT_V1,
+            format: delta_format_for(&coordinate_entries),
             intent_semantics_oid,
             source_intent_root_digest,
             coordinate_entries,
@@ -446,7 +449,7 @@ impl LogicalDeltaBatch {
     ) -> Self {
         let commit_seq = marker.marker().commit_seq;
         LogicalDeltaBatch {
-            format: DELTA_FORMAT_V1,
+            format: template.format(),
             coordinate_entries: template.coordinate_entries().to_vec(),
             source_template_digest,
             commit_marker_identity: marker.marker(),
@@ -475,7 +478,7 @@ impl LogicalDeltaBatch {
         frontier: fgdb_types::CommitSeq,
     ) -> Self {
         LogicalDeltaBatch {
-            format: DELTA_FORMAT_V1,
+            format: delta_format_for(&coordinate_entries),
             coordinate_entries,
             source_template_digest,
             commit_marker_identity,

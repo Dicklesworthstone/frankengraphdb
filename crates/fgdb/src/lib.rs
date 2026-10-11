@@ -691,13 +691,6 @@ pub enum WriteError {
     ZonedTimestampRequiresResolver {
         tzdb_oid: ObjectId,
     },
-    /// A property value of a kind only scalar profile version 2 admits: a
-    /// Date, LocalTime, Time, LocalDateTime or Duration. These are query values;
-    /// storing one waits on container format versions that record the
-    /// profile version (fgdb-txbg9).
-    ScalarKindNotStorable {
-        kind: fgdb_types::CanonicalScalarKind,
-    },
     /// A delete named an edge this database holds no live version of, at the
     /// point in the batch where the delete sits. Refused before anything
     /// durable happens (fgdb-p3ok).
@@ -1030,9 +1023,6 @@ impl core::fmt::Display for WriteError {
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::ZonedTimestampRequiresResolver { .. } => {
                 f.write_str("zoned timestamp writes require a pinned tzdb resolver")
-            }
-            Self::ScalarKindNotStorable { kind } => {
-                write!(f, "a {kind:?} is not yet a storable property value")
             }
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to delete")
@@ -3171,18 +3161,11 @@ impl<V: Vfs + Clone> Database<V> {
         }
         // Validate before normalization/ensure can erase an unsupported input.
         // Validate against exactly the artifacts retained by recovery.
+        // A version-2 kind (Date, LocalTime, Time, LocalDateTime, Duration)
+        // needs no check: every durable container stamps the format its
+        // content requires, so an older reader refuses it by name
+        // (fgdb-hbi8s).
         let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
-            // A stored version-2 kind needs durable containers that record
-            // the scalar profile version their content requires, so an older
-            // reader refuses it precisely instead of misreading it
-            // (fgdb-txbg9).
-            if fgdb_types::ScalarProfileVersion::required_for(value)
-                > fgdb_types::ScalarProfileVersion::V1
-            {
-                return Err(WriteError::ScalarKindNotStorable {
-                    kind: fgdb_types::CanonicalScalarKind::of(value),
-                });
-            }
             if let CanonicalScalar::Timestamp(timestamp) = value
                 && let Some(zone) = timestamp.zone()
             {

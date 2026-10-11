@@ -27,8 +27,8 @@ pub mod snapshot;
 
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{
-    DELTA_FORMAT_V1, DeltaRow, INDEX_FORMAT_V1, IndexError, LimbLimit, LocalDeltaBatchIndex,
-    LogicalDeltaBatch, RelationId, SchemaEpoch, ZWeight,
+    DeltaRow, INDEX_FORMAT_V1, IndexError, LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch,
+    RelationId, SchemaEpoch, ZWeight, is_supported_delta_format,
 };
 use fgdb_types::{BranchId, CommitCx, CommitSeq, EId, GraphId, MarkerRef, VId};
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -376,7 +376,7 @@ fn checked_anchor<E>(
     if at == index.retained_after_commit_seq()
         && let Some((format, marker, template)) = index.retired_boundary_identity()
     {
-        if format != DELTA_FORMAT_V1 {
+        if !is_supported_delta_format(format) {
             return Err(EdgeInputError::UnsupportedBatchFormat { found: format });
         }
         if marker.commit_seq != at {
@@ -401,7 +401,7 @@ fn checked_batch<E>(
 }
 
 fn validate_batch<E>(batch: &LogicalDeltaBatch, at: CommitSeq) -> Result<(), EdgeInputError<E>> {
-    if batch.format() != DELTA_FORMAT_V1 {
+    if !is_supported_delta_format(batch.format()) {
         return Err(EdgeInputError::UnsupportedBatchFormat {
             found: batch.format(),
         });

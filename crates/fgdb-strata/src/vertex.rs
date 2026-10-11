@@ -33,7 +33,8 @@ use std::sync::Arc;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
-    CanonicalScalar, CanonicalScalarResolver, CommitSeq, ScalarDecodeError, ScalarEncodeError, VId,
+    CanonicalScalar, CanonicalScalarResolver, CommitSeq, ScalarDecodeError, ScalarEncodeError,
+    ScalarProfileVersion, VId,
 };
 
 /// `FGSV` — FrankenGraph Strata Vertex patch.
@@ -51,6 +52,24 @@ pub const VERTEX_PATCH_FORMAT_V1: u16 = 1;
 /// Format version. Durable formats are versioned from day one (§16.6):
 /// additive-minor, breaking-major.
 pub const VERTEX_PATCH_FORMAT_V2: u16 = 2;
+/// V2 plus property values of scalar profile version 2 (fgdb-hbi8s). An
+/// exact additive minor: a patch is V3 if and only if a row holds such a
+/// value ([`vertex_patch_format_for`]), so every other patch keeps its V2
+/// bytes and identity, and an older reader refuses V3 by name.
+pub const VERTEX_PATCH_FORMAT_V3: u16 = 3;
+
+/// The one format `rows` may be written in.
+pub fn vertex_patch_format_for(rows: &[VertexRow]) -> u16 {
+    let profile = ScalarProfileVersion::required_for_all(
+        rows.iter()
+            .flat_map(|row| row.props.iter().map(|(_, value)| value)),
+    );
+    if profile > ScalarProfileVersion::V1 {
+        VERTEX_PATCH_FORMAT_V3
+    } else {
+        VERTEX_PATCH_FORMAT_V2
+    }
+}
 
 /// Durable object kind for a Tier-D vertex row patch — part of the §5.1
 /// logical-identity header, separate from the payload framing for the same
@@ -163,6 +182,10 @@ pub enum VertexPatchError {
     NotAVertexPatch,
     /// A format version this build does not implement.
     UnsupportedFormat { format: u16 },
+    /// A supported format that is not the one the rows require
+    /// ([`vertex_patch_format_for`]): V2 over a profile-2 value, or V3 over
+    /// rows V2 encodes.
+    FormatMismatch { format: u16, required: u16 },
     /// The bytes end before the declared rows do.
     Truncated { at: usize },
     /// Bytes remain after the declared rows — a concatenation or damage,
@@ -218,6 +241,10 @@ impl core::fmt::Display for VertexPatchError {
             Self::UnsupportedFormat { format } => {
                 write!(f, "vertex patch format {format} is not implemented")
             }
+            Self::FormatMismatch { format, required } => write!(
+                f,
+                "vertex patch format {format} declared over rows that require format {required}"
+            ),
             Self::Truncated { at } => {
                 write!(
                     f,
@@ -407,7 +434,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
     }
     let mut out = Vec::new();
     out.extend_from_slice(&VERTEX_PATCH_MAGIC);
-    out.extend_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+    out.extend_from_slice(&vertex_patch_format_for(rows).to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for (at, row) in rows.iter().enumerate() {
         validate_succession(at, rows[..at].last(), row)?;
@@ -533,7 +560,7 @@ pub(crate) fn decode_patch_inner(
         return Err(VertexPatchError::NotAVertexPatch);
     }
     let format = cursor.u16()?;
-    if format != VERTEX_PATCH_FORMAT_V2 {
+    if !matches!(format, VERTEX_PATCH_FORMAT_V2 | VERTEX_PATCH_FORMAT_V3) {
         return Err(VertexPatchError::UnsupportedFormat { format });
     }
     let declared = cursor.u32()?;
@@ -583,6 +610,12 @@ pub(crate) fn decode_patch_inner(
         return Err(VertexPatchError::TrailingBytes {
             extra: bytes.len() - cursor.at,
         });
+    }
+    // The scalar decoder admits every tag this build knows under either
+    // header, so the header is checked against what the rows hold.
+    let required = vertex_patch_format_for(&rows);
+    if format != required {
+        return Err(VertexPatchError::FormatMismatch { format, required });
     }
     Ok(VertexPatchRows(Arc::new(rows)))
 }

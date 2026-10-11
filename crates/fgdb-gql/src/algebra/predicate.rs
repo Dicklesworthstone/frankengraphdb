@@ -172,6 +172,14 @@ impl IntegerComparison {
             (CanonicalScalar::Float(left), CanonicalScalar::Int(right)) => {
                 compare_integer_float(*right, left.get()).reverse()
             }
+            // openCypher orders no duration against another (P1M against
+            // P30D has no answer): only = and <> compare them, and the rest
+            // are UNKNOWN. The canonical order exists for storage only.
+            (CanonicalScalar::Duration(_), CanonicalScalar::Duration(_))
+                if !matches!(self, Self::Equal | Self::NotEqual) =>
+            {
+                return None;
+            }
             _ if core::mem::discriminant(left) == core::mem::discriminant(right) => left.cmp(right),
             _ => return None,
         };

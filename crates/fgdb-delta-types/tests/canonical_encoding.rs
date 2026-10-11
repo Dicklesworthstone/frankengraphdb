@@ -17,12 +17,13 @@
 //!     all refusals, and truncation is swept at every length.
 
 use fgdb_delta_types::{
-    CanonicalError, CoordinateEntry, DELTA_FORMAT_V1, DeltaRow, ElementId, EscrowDomainId, LabelId,
-    LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
-    canonicalize,
+    CanonicalError, CoordinateEntry, DELTA_FORMAT_V1, DELTA_FORMAT_V2, DeltaRow, ElementId,
+    EscrowDomainId, LabelId, LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId,
+    SchemaEpoch, ValidTimePeriod, canonicalize,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CanonicalTimestamp, EId, GraphId, ObjectId, TzdbResolver, VId,
+    BranchId, CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime,
+    CanonicalScalar, CanonicalTimestamp, EId, GraphId, ObjectId, TzdbResolver, VId,
 };
 
 fn oid(seed: u8) -> ObjectId {
@@ -868,6 +869,90 @@ fn an_unsupported_format_version_is_refused() {
     assert_eq!(
         LogicalDeltaTemplate::decode_canonical(&bytes),
         Err(CanonicalError::UnsupportedFormat { format: 99 })
+    );
+}
+
+/// fgdb-hbi8s: a template is V2 exactly when a value needs scalar profile
+/// version 2 — in each position a row carries a value — so every other
+/// template keeps its V1 bytes and digest. Either header over the other's
+/// content is refused, in both directions.
+#[test]
+fn a_profile_2_value_in_any_position_and_only_one_makes_the_template_v2() {
+    let build = |rows: Vec<DeltaRow>| {
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![entry(1, 1, 3, rows)])
+            .expect("builds")
+    };
+    let plain = build(every_family_populated());
+    assert_eq!(plain.format(), DELTA_FORMAT_V1);
+    let plain = plain.canonical_bytes().expect("encodes");
+    assert_eq!(plain[0..2], DELTA_FORMAT_V1.to_be_bytes());
+
+    let date = CanonicalDate::from_civil(2015, 7, 21).expect("a date");
+    let time = CanonicalLocalTime::from_hms_nano(21, 40, 32, 142_000_000).expect("a time");
+    let positions = [
+        DeltaRow::CreateVertex {
+            vid: VId(40),
+            birth_ordinal: 1,
+            labels: vec![],
+            props: vec![(PropertyKeyId(2), CanonicalScalar::Date(date))],
+            valid_time: None,
+        },
+        DeltaRow::CreateEdge {
+            eid: EId(41),
+            birth_ordinal: 1,
+            src: VId(7),
+            relation: RelationId(3),
+            dst: VId(8),
+            canonical_key: Some(CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(
+                date, time,
+            ))),
+            props: vec![],
+            valid_time: None,
+        },
+        DeltaRow::Property {
+            elem: ElementId::Vertex(VId(42)),
+            property: PropertyKeyId(2),
+            before: None,
+            after: Some(CanonicalScalar::Duration(
+                CanonicalDuration::new(1, 2, 3).expect("a duration"),
+            )),
+        },
+        DeltaRow::Property {
+            elem: ElementId::Vertex(VId(43)),
+            property: PropertyKeyId(2),
+            before: Some(CanonicalScalar::LocalTime(time)),
+            after: None,
+        },
+    ];
+    for row in positions {
+        let mut rows = every_family_populated();
+        rows.push(row);
+        let template = build(rows);
+        assert_eq!(template.format(), DELTA_FORMAT_V2);
+        let bytes = template.canonical_bytes().expect("encodes");
+        assert_eq!(bytes[0..2], DELTA_FORMAT_V2.to_be_bytes());
+        assert_eq!(
+            LogicalDeltaTemplate::decode_canonical(&bytes).expect("decodes"),
+            template
+        );
+        let mut understated = bytes;
+        understated[0..2].copy_from_slice(&DELTA_FORMAT_V1.to_be_bytes());
+        assert_eq!(
+            LogicalDeltaTemplate::decode_canonical(&understated),
+            Err(CanonicalError::FormatMismatch {
+                format: DELTA_FORMAT_V1,
+                required: DELTA_FORMAT_V2,
+            })
+        );
+    }
+    let mut overstated = plain;
+    overstated[0..2].copy_from_slice(&DELTA_FORMAT_V2.to_be_bytes());
+    assert_eq!(
+        LogicalDeltaTemplate::decode_canonical(&overstated),
+        Err(CanonicalError::FormatMismatch {
+            format: DELTA_FORMAT_V2,
+            required: DELTA_FORMAT_V1,
+        })
     );
 }
 

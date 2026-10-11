@@ -196,6 +196,17 @@ impl ScalarProfileVersion {
             _ => Self::V1,
         }
     }
+
+    /// The lowest version that admits every value in `values`: what a
+    /// durable container holding exactly these values must declare.
+    #[must_use]
+    pub fn required_for_all<'a>(values: impl IntoIterator<Item = &'a CanonicalScalar>) -> Self {
+        values
+            .into_iter()
+            .map(Self::required_for)
+            .max()
+            .unwrap_or(Self::V1)
+    }
 }
 
 /// Byte length of the scalar contract [`append_strict_portable_scalar_descriptor`]

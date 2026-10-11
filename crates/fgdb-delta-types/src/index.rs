@@ -264,6 +264,9 @@ impl LocalDeltaBatchIndex {
             return Err(IndexError::OriginAnchor);
         }
         let mut index = Self::empty_at(marker.commit_seq);
+        // The capsule is not read, so the anchor's own format is unknown; the
+        // boundary names the base format, which every reader accepts as an
+        // anchor (the format only ever gates the reading of rows).
         index.retired_boundary = Some((crate::DELTA_FORMAT_V1, marker, source_template_digest));
         Ok(index)
     }

@@ -24,13 +24,29 @@
 
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
+use fgdb_types::{CanonicalScalar, CanonicalScalarResolver, ScalarProfileVersion};
 
 /// `FGSP` — FrankenGraph Strata Property patch.
 pub const PROPERTY_PATCH_MAGIC: [u8; 4] = *b"FGSP";
 
 /// Format version. Durable formats are versioned from day one (§16.6).
 pub const PROPERTY_PATCH_FORMAT_V1: u16 = 1;
+/// V1 plus property values of scalar profile version 2 (fgdb-hbi8s). An
+/// exact additive minor: a patch is V2 if and only if a row holds such a
+/// value ([`property_patch_format_for`]), so every other patch keeps its V1
+/// bytes and identity, and an older reader refuses V2 by name.
+pub const PROPERTY_PATCH_FORMAT_V2: u16 = 2;
+
+/// The one format `rows` may be written in.
+pub fn property_patch_format_for(rows: &[EdgePropertyRow]) -> u16 {
+    let profile =
+        ScalarProfileVersion::required_for_all(rows.iter().flatten().map(|(_, value)| value));
+    if profile > ScalarProfileVersion::V1 {
+        PROPERTY_PATCH_FORMAT_V2
+    } else {
+        PROPERTY_PATCH_FORMAT_V1
+    }
+}
 
 /// Durable object kind for a block-hosted edge property patch — §5.1
 /// logical-identity header, with the same interim-numbering caveat as
@@ -90,6 +106,10 @@ pub enum EdgePropertyPatchError {
     NotAPropertyPatch,
     /// A format version this build does not implement.
     UnsupportedFormat { format: u16 },
+    /// A supported format that is not the one the rows require
+    /// ([`property_patch_format_for`]): V1 over a profile-2 value, or V2
+    /// over rows V1 encodes.
+    FormatMismatch { format: u16, required: u16 },
     /// The bytes end before the declared rows do.
     Truncated { at: usize },
     /// Bytes remain after the declared rows.
@@ -141,6 +161,11 @@ impl core::fmt::Display for EdgePropertyPatchError {
             Self::UnsupportedFormat { format } => {
                 write!(f, "edge property patch format {format} is not implemented")
             }
+            Self::FormatMismatch { format, required } => write!(
+                f,
+                "edge property patch format {format} declared over rows that require format \
+                 {required}"
+            ),
             Self::Truncated { at } => {
                 write!(
                     f,
@@ -234,7 +259,7 @@ pub fn encode_property_patch(rows: &[EdgePropertyRow]) -> Result<Vec<u8>, EdgePr
     }
     let mut out = Vec::new();
     out.extend_from_slice(&PROPERTY_PATCH_MAGIC);
-    out.extend_from_slice(&PROPERTY_PATCH_FORMAT_V1.to_le_bytes());
+    out.extend_from_slice(&property_patch_format_for(rows).to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for (at, row) in rows.iter().enumerate() {
         validate_row(at, row)?;
@@ -286,7 +311,7 @@ fn decode_property_patch_inner(
     }
     let start = take(&mut at, 2)?;
     let format = u16::from_le_bytes(bytes[start..start + 2].try_into().expect("two bytes"));
-    if format != PROPERTY_PATCH_FORMAT_V1 {
+    if !matches!(format, PROPERTY_PATCH_FORMAT_V1 | PROPERTY_PATCH_FORMAT_V2) {
         return Err(EdgePropertyPatchError::UnsupportedFormat { format });
     }
     let start = take(&mut at, 4)?;
@@ -326,6 +351,12 @@ fn decode_property_patch_inner(
         return Err(EdgePropertyPatchError::TrailingBytes {
             extra: bytes.len() - at,
         });
+    }
+    // The scalar decoder admits every tag this build knows under either
+    // header, so the header is checked against what the rows hold.
+    let required = property_patch_format_for(&rows);
+    if format != required {
+        return Err(EdgePropertyPatchError::FormatMismatch { format, required });
     }
     Ok(rows)
 }

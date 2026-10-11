@@ -1522,16 +1522,6 @@ fn compare_scalars<E>(
             kind: GraphIntegerErrorKind::IncompatibleOperands,
         }));
     }
-    // openCypher orders no duration against another (P1M against P30D has
-    // no answer): only = and <> compare them; the rest are NULL.
-    if matches!(left, CanonicalScalar::Duration(_))
-        && !matches!(
-            comparison,
-            IntegerComparison::Equal | IntegerComparison::NotEqual
-        )
-    {
-        return Ok(None);
-    }
     // Reserve variable-size scans before invoking the shared comparator.
     charge_payload(scalar_payload_bytes(left), false, control)?;
     charge_payload(scalar_payload_bytes(right), false, control)?;

@@ -9,16 +9,16 @@
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::edge_props::{
     EdgePropertyPatchError, EdgePropertyPatchVersion, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS,
-    PROPERTY_PATCH_FORMAT_V1, PROPERTY_PATCH_MAGIC, decode_property_patch, encode_property_patch,
-    property_patch_id, read_property_patch, validate_block_patch_consistency,
-    validate_locator_sequence,
+    PROPERTY_PATCH_FORMAT_V1, PROPERTY_PATCH_FORMAT_V2, PROPERTY_PATCH_MAGIC,
+    decode_property_patch, encode_property_patch, property_patch_id, read_property_patch,
+    validate_block_patch_consistency, validate_locator_sequence,
 };
 use fgdb_strata::{
     AdjacencyEntry, BLOCK_FORMAT_V4, BlockError, decode_block, decode_block_with_properties,
     encode_block, encode_block_with_properties,
 };
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalLocalTime, CanonicalScalar, CanonicalTime, CommitSeq, EId, VId};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -112,11 +112,11 @@ fn wrong_magic_future_format_and_identity_are_distinct_refusals() {
     );
 
     let mut future = bytes.clone();
-    future[4..6].copy_from_slice(&(PROPERTY_PATCH_FORMAT_V1 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(PROPERTY_PATCH_FORMAT_V2 + 1).to_le_bytes());
     assert_eq!(
         decode_property_patch(&future),
         Err(EdgePropertyPatchError::UnsupportedFormat {
-            format: PROPERTY_PATCH_FORMAT_V1 + 1
+            format: PROPERTY_PATCH_FORMAT_V2 + 1
         })
     );
 
@@ -138,6 +138,44 @@ fn wrong_magic_future_format_and_identity_are_distinct_refusals() {
         read_property_patch(&other_key, namespace(), &bytes, id),
         Err(EdgePropertyPatchError::IdentityMismatch { .. })
     ));
+}
+
+/// fgdb-hbi8s: a patch is V2 exactly when a row holds a value of scalar
+/// profile version 2, so profile-1 patches keep their V1 bytes. Either
+/// header over the other's content is refused, in both directions.
+#[test]
+fn a_profile_2_value_and_only_one_makes_the_patch_v2() {
+    let plain = encode_property_patch(&distinct_rows()).expect("encodes");
+    assert_eq!(plain[4..6], PROPERTY_PATCH_FORMAT_V1.to_le_bytes());
+
+    let mut rows = distinct_rows();
+    let time = CanonicalLocalTime::from_hms_nano(21, 40, 32, 142_000_000).expect("a time");
+    rows[1].push((
+        PropertyKeyId(71),
+        CanonicalScalar::Time(CanonicalTime::new(time, 3_600).expect("an offset time")),
+    ));
+    let temporal = encode_property_patch(&rows).expect("encodes");
+    assert_eq!(temporal[4..6], PROPERTY_PATCH_FORMAT_V2.to_le_bytes());
+    assert_eq!(decode_property_patch(&temporal).expect("decodes"), rows);
+
+    let mut understated = temporal;
+    understated[4..6].copy_from_slice(&PROPERTY_PATCH_FORMAT_V1.to_le_bytes());
+    assert_eq!(
+        decode_property_patch(&understated),
+        Err(EdgePropertyPatchError::FormatMismatch {
+            format: PROPERTY_PATCH_FORMAT_V1,
+            required: PROPERTY_PATCH_FORMAT_V2,
+        })
+    );
+    let mut overstated = plain;
+    overstated[4..6].copy_from_slice(&PROPERTY_PATCH_FORMAT_V2.to_le_bytes());
+    assert_eq!(
+        decode_property_patch(&overstated),
+        Err(EdgePropertyPatchError::FormatMismatch {
+            format: PROPERTY_PATCH_FORMAT_V2,
+            required: PROPERTY_PATCH_FORMAT_V1,
+        })
+    );
 }
 
 #[test]

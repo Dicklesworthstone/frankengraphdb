@@ -33,7 +33,10 @@ use crate::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CanonicalScalarResolver, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CanonicalScalarResolver, EId, GraphId, ObjectId,
+    ScalarProfileVersion, VId,
+};
 
 /// Format version of the canonical delta encoding.
 ///
@@ -41,6 +44,37 @@ use fgdb_types::{BranchId, CanonicalScalar, CanonicalScalarResolver, EId, GraphI
 /// it is has no migration path: additive-minor and breaking-major (§16.6) both
 /// need a reader that can tell what it is holding.
 pub const DELTA_FORMAT_V1: u16 = 1;
+
+/// Version 1 plus property values of scalar profile version 2: Date,
+/// LocalTime, Time, LocalDateTime and Duration (fgdb-hbi8s).
+///
+/// An additive minor (§16.6) that is also exact: a template is written in V2
+/// if and only if one of its values needs profile version 2
+/// ([`delta_format_for`]). Every template without such a value keeps its V1
+/// bytes and digest, and a reader that predates V2 refuses a V2 template as
+/// `UnsupportedFormat` instead of misreading a value it has no tag for.
+pub const DELTA_FORMAT_V2: u16 = 2;
+
+/// The one format `entries` may be written in. One encoding per value: a V2
+/// header over profile-1 content would give the same rows a second digest.
+pub fn delta_format_for(entries: &[CoordinateEntry]) -> u16 {
+    let profile = entries
+        .iter()
+        .flat_map(|entry| &entry.rows)
+        .map(DeltaRow::scalar_profile)
+        .max()
+        .unwrap_or(ScalarProfileVersion::V1);
+    if profile > ScalarProfileVersion::V1 {
+        DELTA_FORMAT_V2
+    } else {
+        DELTA_FORMAT_V1
+    }
+}
+
+/// Whether this build reads delta `format` at all.
+pub fn is_supported_delta_format(format: u16) -> bool {
+    matches!(format, DELTA_FORMAT_V1 | DELTA_FORMAT_V2)
+}
 
 /// Arm tags. Stable across versions — a tag is a durable value, so these are
 /// assigned once and never renumbered. A gap is preferable to a reuse.
@@ -82,6 +116,10 @@ pub enum CanonicalError {
     UnknownTag { tag: u8 },
     /// A format version this reader does not implement.
     UnsupportedFormat { format: u16 },
+    /// A supported format that is not the one the content requires
+    /// ([`delta_format_for`]): a V1 header over a profile-2 value, or a V2
+    /// header over content that V1 encodes.
+    FormatMismatch { format: u16, required: u16 },
     /// Bytes remained after a complete value was decoded.
     TrailingBytes { remaining: usize },
     /// A count field declared more elements than the input can hold. Checked
@@ -118,6 +156,10 @@ impl core::fmt::Display for CanonicalError {
             Self::UnsupportedFormat { format } => {
                 write!(f, "unsupported delta format version {format}")
             }
+            Self::FormatMismatch { format, required } => write!(
+                f,
+                "delta format {format} declared over content that requires format {required}"
+            ),
             Self::TrailingBytes { remaining } => {
                 write!(f, "{remaining} trailing bytes after a complete value")
             }
@@ -561,6 +603,38 @@ impl DeltaRow {
         Ok(())
     }
 
+    /// The lowest scalar profile version that admits every value this row
+    /// carries. Listed per arm, so a new arm that carries a value cannot be
+    /// left out silently.
+    pub fn scalar_profile(&self) -> ScalarProfileVersion {
+        match self {
+            DeltaRow::CreateVertex { props, .. } => {
+                ScalarProfileVersion::required_for_all(props.iter().map(|(_, value)| value))
+            }
+            DeltaRow::CreateEdge {
+                canonical_key,
+                props,
+                ..
+            } => ScalarProfileVersion::required_for_all(
+                canonical_key
+                    .iter()
+                    .chain(props.iter().map(|(_, value)| value)),
+            ),
+            DeltaRow::Property { before, after, .. } => {
+                ScalarProfileVersion::required_for_all(before.iter().chain(after))
+            }
+            DeltaRow::DeleteVertex { .. }
+            | DeltaRow::DeleteEdge { .. }
+            | DeltaRow::LabelMembership { .. }
+            | DeltaRow::ValidTime { .. }
+            | DeltaRow::Counter { .. }
+            | DeltaRow::Escrow { .. }
+            | DeltaRow::Sketch { .. }
+            | DeltaRow::Schema { .. }
+            | DeltaRow::Constraint { .. } => ScalarProfileVersion::V1,
+        }
+    }
+
     /// This row's canonical bytes.
     ///
     /// Also its sort key: [`validate`] orders rows by these bytes, so the
@@ -986,7 +1060,7 @@ impl LogicalDeltaTemplate {
     ) -> Result<Self, CanonicalError> {
         let mut r = Reader::new(bytes, resolver);
         let format = r.u16()?;
-        if format != DELTA_FORMAT_V1 {
+        if !is_supported_delta_format(format) {
             return Err(CanonicalError::UnsupportedFormat { format });
         }
         let intent_semantics_oid = r.oid()?;
@@ -1016,9 +1090,18 @@ impl LogicalDeltaTemplate {
     /// builder that wants to fail before it produces a digest nobody can
     /// reproduce.
     pub fn validate(&self) -> Result<(), CanonicalError> {
-        if self.format != DELTA_FORMAT_V1 {
+        if !is_supported_delta_format(self.format) {
             return Err(CanonicalError::UnsupportedFormat {
                 format: self.format,
+            });
+        }
+        // The decoder admits every tag this build knows in either format, so
+        // this is where a V1 template holding a profile-2 value is refused.
+        let required = delta_format_for(&self.coordinate_entries);
+        if self.format != required {
+            return Err(CanonicalError::FormatMismatch {
+                format: self.format,
+                required,
             });
         }
         for index in 1..self.coordinate_entries.len() {
