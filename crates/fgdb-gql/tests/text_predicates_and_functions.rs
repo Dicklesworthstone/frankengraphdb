@@ -2384,6 +2384,84 @@ fn plus_concatenates_lists_and_appends_or_prepends_values() {
     }
 }
 
+/// A scalar CASE takes whole expressions everywhere, as openCypher does: a
+/// searched condition is any Boolean (TCK Quantifier9-12 select with
+/// `CASE WHEN input.fixed THEN ...`), and a result or a simple-CASE operand
+/// may itself compare. A NULL or FALSE condition does not select; a
+/// condition that is not a Boolean is a typed failure, never a guessed truth.
+#[test]
+fn scalar_case_positions_are_whole_expressions() {
+    use CanonicalScalar::{Bool, Int, Null};
+    for (case, (expression, input, expected)) in [
+        (
+            "CASE WHEN n.text STARTS WITH 'a' THEN 1 ELSE 2 END",
+            text("ab"),
+            Int(1),
+        ),
+        (
+            "CASE WHEN NOT n.text STARTS WITH 'a' THEN 1 ELSE 2 END",
+            text("ab"),
+            Int(2),
+        ),
+        (
+            "CASE WHEN n.text IN ['x', 'ab'] THEN 'in' END",
+            text("ab"),
+            text("in"),
+        ),
+        (
+            "CASE WHEN n.text IS NULL OR n.text = 'q' THEN 1 ELSE 2 END",
+            Null,
+            Int(1),
+        ),
+        ("CASE WHEN n.text THEN 1 ELSE 2 END", Bool(true), Int(1)),
+        ("CASE WHEN n.text THEN 1 ELSE 2 END", Bool(false), Int(2)),
+        ("CASE WHEN n.text THEN 1 ELSE 2 END", Null, Int(2)),
+        (
+            "CASE WHEN NOT n.text THEN 1 ELSE 2 END",
+            Bool(false),
+            Int(1),
+        ),
+        (
+            "CASE WHEN n.text XOR true THEN 1 ELSE 2 END",
+            Bool(true),
+            Int(2),
+        ),
+        (
+            "CASE WHEN toBoolean(n.text) THEN 1 ELSE 2 END",
+            text("TRUE"),
+            Int(1),
+        ),
+        (
+            "CASE WHEN (n.text > 'a') = true THEN 1 END",
+            text("b"),
+            Int(1),
+        ),
+        (
+            "CASE WHEN true THEN n.text = 'ab' END",
+            text("ab"),
+            Bool(true),
+        ),
+        (
+            "CASE n.text = 'ab' WHEN true THEN 'yes' ELSE 'no' END",
+            text("ab"),
+            text("yes"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(scalar(expression, &input), expected, "case {case}");
+    }
+    assert!(
+        execute(
+            &prepare("MATCH (n) RETURN CASE WHEN n.text THEN 1 END AS value"),
+            &Int(1),
+            policy()
+        )
+        .is_err()
+    );
+}
+
 /// openCypher toBoolean (TCK TypeConversion1): a Boolean is itself, the text
 /// `true` or `false` in any case converts, other text is NULL untrimmed, and
 /// NULL stays NULL. An integer is FALSE only at zero. A float is a typed
