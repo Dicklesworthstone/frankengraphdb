@@ -582,9 +582,11 @@ fn hidden_aggregation_uses_all_resource_limits_and_every_checkpoint() {
 
 #[test]
 fn hidden_topology_counts_still_refuse_overflow_before_having_or_limit() {
+    // 64 parallel atoms over two parallel edges: 2^64 homomorphisms, which
+    // REPEATABLE ELEMENTS counts (DIFFERENT EDGES would admit none; fgdb-vexfr).
     let atoms = vec!["(a)-[:R]->(b)"; 64].join(",");
     let query = prepare(&format!(
-        "MATCH {atoms} RETURN a GROUP BY a HAVING TRUE OR COUNT(*) >= 0 LIMIT 0"
+        "MATCH REPEATABLE ELEMENTS {atoms} RETURN a GROUP BY a HAVING TRUE OR COUNT(*) >= 0 LIMIT 0"
     ));
     let result = query.execute_governed(
         2,

@@ -87,9 +87,13 @@ fn oracle(edges: &[Edge], atoms: &[Atom], variables: usize, unequal: bool) -> Ve
 #[test]
 fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enumeration() {
     type Case<'a> = (&'a str, &'a [Atom], usize, bool);
+    // The oracle multiplies per-atom edge counts: it counts homomorphisms,
+    // which is what the factorized chain engine computes. Repeated -[:S]->
+    // atoms may share an edge, so each law asks for REPEATABLE ELEMENTS; the
+    // DIFFERENT EDGES default would need edge identities (fgdb-vexfr).
     let cases: [Case<'_>; 6] = [
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -100,7 +104,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)<-[:R]-(b)<-[:S]-(h)<-[:S]-(k)<-[:S]-(c)",
+            "MATCH REPEATABLE ELEMENTS (a)<-[:R]-(b)<-[:S]-(h)<-[:S]-(k)<-[:S]-(c)",
             &[
                 (0, 0, 1, 1),
                 (1, u64::MAX, 1, 2),
@@ -111,7 +115,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]-(b)-[:S]-(h)-[:S]-(k)-[:S]-(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]-(b)-[:S]-(h)-[:S]-(k)-[:S]-(c)",
             &[
                 (0, 0, 2, 1),
                 (1, u64::MAX, 2, 2),
@@ -122,7 +126,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c), (c)-[:T]->(a)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c), (c)-[:T]->(a)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -134,7 +138,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h), (h)-[:T]->(side), (h)-[:S]->(k)-[:S]->(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h), (h)-[:T]->(side), (h)-[:S]->(k)-[:S]->(c)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -146,7 +150,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c) WHERE h<>a",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c) WHERE h<>a",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -212,8 +216,10 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
     }
 }
 
+/// A chain of repeated -[:S]-> atoms, counted as homomorphisms (REPEATABLE
+/// ELEMENTS), as the factorized engine counts them (fgdb-vexfr).
 fn path(length: usize, tail: &str) -> String {
-    let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+    let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
     for at in 1..=length {
         statement.push_str(&format!("-[:S]->(x{at})"));
     }
@@ -414,7 +420,9 @@ fn contraction_reuses_one_source_and_one_policy_and_propagates_every_interruptio
 
 #[test]
 fn property_bearing_connectors_keep_the_uncompressed_fallible_read_contract() {
-    let query = prepare("MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(c) RETURN COUNT(c.n) AS n");
+    let query = prepare(
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(c) RETURN COUNT(c.n) AS n",
+    );
     let edges = [
         (VId(0), R, VId(1)),
         (VId(0), R, VId(1)),

@@ -584,7 +584,9 @@ fn decisive_having_never_masks_input_errors_or_numeric_domain_refusals() {
 
 #[test]
 fn full_width_counts_and_sums_reach_having_without_narrowing_or_child_bags() {
-    let mut text = "MATCH (a)".to_owned();
+    // 63 self-loop atoms over two parallel edges: 2^63 homomorphisms, which
+    // REPEATABLE ELEMENTS counts (DIFFERENT EDGES would admit none; fgdb-vexfr).
+    let mut text = "MATCH REPEATABLE ELEMENTS (a)".to_owned();
     for _ in 0..63 {
         text.push_str("-[:R]->(a)");
     }

@@ -163,8 +163,12 @@ fn forest_counts_and_projected_support_match_complete_assignment_enumeration() {
             2,
         ),
     ];
+    // Each case repeats a relation type, and the oracle counts homomorphisms
+    // as the factorized forest engine does: every head is read under
+    // REPEATABLE ELEMENTS, not the DIFFERENT EDGES default (fgdb-vexfr).
     let prepared: Vec<_> = cases.iter().map(|(head, _, _, selected, _)| prepare(&format!(
-        "{head} RETURN a,COUNT(*) AS n,COUNT({selected}) AS m,COUNT(DISTINCT {selected}) AS d,MIN({selected}) AS lo,MAX({selected}) AS hi GROUP BY a"))).collect();
+        "{} RETURN a,COUNT(*) AS n,COUNT({selected}) AS m,COUNT(DISTINCT {selected}) AS d,MIN({selected}) AS lo,MAX({selected}) AS hi GROUP BY a",
+        head.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1)))).collect();
     let universe: Vec<_> = [RelationId(1), RelationId(2)]
         .into_iter()
         .flat_map(|r| {
@@ -193,8 +197,10 @@ fn forest_counts_and_projected_support_match_complete_assignment_enumeration() {
     }
 }
 
+/// A star of repeated -[:S]-> leaves, counted as homomorphisms (REPEATABLE
+/// ELEMENTS), as the factorized engine counts them (fgdb-vexfr).
 fn star(leaves: usize, extra: &str) -> String {
-    let mut head = format!("MATCH (a)-[:R]->(b){extra}");
+    let mut head = format!("MATCH REPEATABLE ELEMENTS (a)-[:R]->(b){extra}");
     for at in 0..leaves {
         head.push_str(&format!(",(b)-[:S]->(x{at})"));
     }

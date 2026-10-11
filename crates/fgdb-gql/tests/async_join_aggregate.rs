@@ -328,9 +328,15 @@ fn joined_aggregate_occurrences_match_108_independent_relation_summaries() {
                         // Independent cartesian relation join, not the cursor's DFS or GLA.
                         let mut expected_count = 0_u64;
                         let mut expected_sum = 0_i128;
-                        for r in source.edges.values() {
-                            for s in source.edges.values() {
+                        for (r_id, r) in &source.edges {
+                            for (s_id, s) in &source.edges {
                                 if !any && (r.relation != R || s.relation != R) {
+                                    continue;
+                                }
+                                // DIFFERENT EDGES, the textual MATCH default:
+                                // r and s overlap (both :R, or both untyped),
+                                // so they never bind one edge (fgdb-vexfr).
+                                if r_id == s_id {
                                     continue;
                                 }
                                 let (CanonicalScalar::Int(rp), CanonicalScalar::Int(sp)) =
@@ -610,10 +616,13 @@ fn distinct_cells_receive_external_support_without_erasing_ordinary_multiplicity
             cursor.charge::<Infallible, ()>(event)
         })
         .unwrap();
+    // Nine homomorphisms less the one that binds the self-loop e2 as both r
+    // and s, which DIFFERENT EDGES excludes (fgdb-vexfr). e2 still serves as
+    // s after e0 and e1, so the distinct support keeps all five values.
     assert_eq!(
         result.values(),
         &[
-            GraphAggregateValue::Count(9),
+            GraphAggregateValue::Count(8),
             GraphAggregateValue::Count(5),
             GraphAggregateValue::Integer(28)
         ]
@@ -632,7 +641,24 @@ fn exact_source_work_and_scratch_limits_apply_across_all_private_occurrences() {
     {
         count += 1;
     }
-    assert_eq!(count, 9);
+    // Nine homomorphisms; DIFFERENT EDGES excludes the self-loop e2 as both
+    // r and s (fgdb-vexfr).
+    assert_eq!(count, 8);
+    // REPEATABLE ELEMENTS keeps all nine, the self-loop pair included.
+    let mut repeatable = AsyncEdgeJoinSpillAggregateCursor::new(
+        Source::new(),
+        plan(&QUERY.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1)),
+        policy(0),
+        ok,
+    );
+    let mut repeated = 0;
+    while run(repeatable.next_input(&mut |_, _| Ok(())))
+        .unwrap()
+        .is_some()
+    {
+        repeated += 1;
+    }
+    assert_eq!(repeated, 9);
     let rows = cursor.row_stats();
     let stats = cursor.evaluator_stats();
     assert_eq!(rows.result_rows, 0);
